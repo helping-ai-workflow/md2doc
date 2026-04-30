@@ -1,0 +1,12 @@
+node_modules/
+package-lock.json
+*.log
+.DS_Store
+
+# Render outputs from local smoke tests
+*.html
+*.pdf
+
+# Local viewer / inspect helpers
+.cache/
+.tmp/

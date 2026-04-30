@@ -1,0 +1,38 @@
+{
+  "name": "@helping-ai-workflow/md2doc",
+  "version": "1.0.0",
+  "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support",
+  "keywords": ["markdown", "html", "pdf", "renderer", "wavedrom", "mermaid", "graphviz"],
+  "main": "lib/md2doc.js",
+  "bin": {
+    "md2html": "bin/md2html.js",
+    "md2pdf":  "bin/md2pdf.js"
+  },
+  "files": [
+    "lib/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "marked": "^14.1.0",
+    "puppeteer": "^23.0.0"
+  },
+  "scripts": {
+    "test": "node test/md2doc.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/helping-ai-workflow/md2doc.git"
+  },
+  "homepage": "https://github.com/helping-ai-workflow/md2doc#readme",
+  "bugs": "https://github.com/helping-ai-workflow/md2doc/issues",
+  "author": "helping-ai-workflow",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

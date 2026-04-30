@@ -1,0 +1,6 @@
+test/
+.github/
+.gitignore
+.npmignore
+*.log
+.DS_Store
