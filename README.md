@@ -6,11 +6,31 @@ Two global CLIs (`md2html`, `md2pdf`) you can call from any directory.
 
 ## Install
 
+Requires Node.js 18 or higher. The first install pulls puppeteer (≈ 170 MB Chromium download); subsequent installs reuse it.
+
+### Recommended: install via nvm
+
+If you do not yet have Node.js — or your system Node lives under `/usr/local` and `npm install -g` fails with `EACCES` — install Node through [nvm](https://github.com/nvm-sh/nvm) first. nvm puts Node under `~/.nvm`, so global packages never need `sudo`.
+
+```bash
+sudo apt install -y curl     # Debian / Ubuntu only; skip if curl is already installed
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+source ~/.zshrc              # or: source ~/.bashrc
+nvm install 22
+nvm use 22
+npm install -g @helping-ai-workflow/md2doc
+```
+
+### Already have Node.js
+
 ```bash
 npm install -g @helping-ai-workflow/md2doc
 ```
 
-Requires Node.js 18 or higher. The first install pulls puppeteer (≈ 170 MB Chromium download); subsequent installs reuse it.
+### Troubleshooting
+
+**`EACCES: permission denied, mkdir '/usr/local/lib/node_modules'`**
+Your system Node is owned by root. Do **not** run `sudo npm install -g` — puppeteer's postinstall would download Chromium as root and break later runs. Instead, switch to nvm using the steps above.
 
 ## Usage
 
