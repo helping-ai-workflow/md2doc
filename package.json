@@ -1,6 +1,6 @@
 {
   "name": "@helping-ai-workflow/md2doc",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support",
   "keywords": ["markdown", "html", "pdf", "renderer", "wavedrom", "mermaid", "graphviz"],
   "main": "lib/md2doc.js",
@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "marked": "^14.1.0",
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^24.15.0"
   },
   "scripts": {
     "test": "node test/md2doc.test.js"
