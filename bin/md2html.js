@@ -14,7 +14,7 @@ function printHelp() {
         `md2${FORMAT} — render Markdown to ${FORMAT.toUpperCase()} (WaveDrom / Mermaid / Graphviz supported)`,
         '',
         'Usage:',
-        `  md2${FORMAT} <input.md> [<input2.md> ...]      # render each to <stem>.${FORMAT} next to source`,
+        `  md2${FORMAT} <input.md> [<input2.md> ...]      # render each to <stem>_gen.${FORMAT} next to source`,
         `  md2${FORMAT} <input.md> --out <path.${FORMAT}>    # explicit output (single-file mode)`,
         `  md2${FORMAT} <input.md> --open                # render then open viewer`,
         `  md2${FORMAT} <input.md> --quiet               # suppress progress output`,
@@ -79,12 +79,23 @@ function parseArgs(argv) {
 }
 
 function deriveOutput(input, format) {
+    // Default suffix matches the workspace Makefile convention: <stem>_gen.<format>.
     const stem = input.replace(/\.md$/i, '');
     if (stem === input) {
-        // No .md extension — append .<format>.
-        return input + '.' + format;
+        // No .md extension — append _gen.<format>.
+        return input + '_gen.' + format;
     }
-    return stem + '.' + format;
+    return stem + '_gen.' + format;
+}
+
+function isWSL() {
+    if (process.platform !== 'linux') return false;
+    if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+    try {
+        return fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop');
+    } catch (_) {
+        return false;
+    }
 }
 
 function openViewer(filePath) {
@@ -94,12 +105,23 @@ function openViewer(filePath) {
         cmd = 'open'; args = [filePath];
     } else if (platform === 'win32') {
         cmd = 'cmd'; args = ['/c', 'start', '""', filePath];
+    } else if (isWSL()) {
+        // Convert the WSL Linux path to a Windows-side path then launch via explorer.exe,
+        // which uses Windows file associations (.html → default browser, .pdf → default reader).
+        const r = spawnSync('wslpath', ['-w', filePath], { encoding: 'utf8' });
+        if (r.status === 0 && r.stdout) {
+            cmd = 'explorer.exe'; args = [r.stdout.trim()];
+        } else {
+            cmd = 'xdg-open'; args = [filePath];
+        }
     } else {
         cmd = 'xdg-open'; args = [filePath];
     }
     const r = spawnSync(cmd, args, { stdio: 'ignore' });
-    if (r.error || r.status !== 0) {
-        process.stderr.write(`warning: could not launch viewer for ${filePath}\n`);
+    // explorer.exe returns exit code 1 on success (Windows quirk via WSL interop),
+    // so a non-zero exit is not necessarily a failure when launching via explorer.
+    if (r.error) {
+        process.stderr.write(`warning: could not launch viewer for ${filePath}: ${r.error.message}\n`);
     }
 }
 
@@ -113,10 +135,10 @@ function main() {
             process.exit(1);
         }
         const output = (args.out !== null) ? args.out : deriveOutput(input, FORMAT);
-        if (!args.quiet) {
-            process.stdout.write(`[${FORMAT.toUpperCase()}] ${input} → ${output}\n`);
-        }
-        const r = spawnSync(process.execPath, [LIB, input, output], { stdio: 'inherit' });
+        // lib/md2doc.js prints its own "[FORMAT] input → output" line; redirect its stdout
+        // when --quiet so neither layer emits progress.
+        const stdio = args.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit';
+        const r = spawnSync(process.execPath, [LIB, input, output], { stdio });
         if (r.status !== 0) {
             process.stderr.write(`error: render failed for ${input} (exit ${r.status})\n`);
             process.exit(r.status || 1);
