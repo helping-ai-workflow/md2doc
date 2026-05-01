@@ -16,8 +16,8 @@ If you do not yet have Node.js — or your system Node lives under `/usr/local` 
 sudo apt install -y curl     # Debian / Ubuntu only; skip if curl is already installed
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
 source ~/.zshrc              # or: source ~/.bashrc
-nvm install 22
-nvm use 22
+nvm install --lts
+nvm use --lts
 npm install -g @helping-ai-workflow/md2doc
 ```
 
