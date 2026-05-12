@@ -32,6 +32,14 @@ npm install -g @helping-ai-workflow/md2doc
 **`EACCES: permission denied, mkdir '/usr/local/lib/node_modules'`**
 Your system Node is owned by root. Do **not** run `sudo npm install -g` — puppeteer's postinstall would download Chromium as root and break later runs. Instead, switch to nvm using the steps above.
 
+**`Failed to set up chrome ...! Set "PUPPETEER_SKIP_DOWNLOAD" env variable to skip download.`**
+An earlier install left a half-finished Chromium download in `~/.cache/puppeteer`. md2doc ≥ 1.0.3 cleans this automatically; on older versions, clear the cache and retry:
+
+```bash
+rm -rf ~/.cache/puppeteer
+npm install -g @helping-ai-workflow/md2doc
+```
+
 ## Usage
 
 ```bash
