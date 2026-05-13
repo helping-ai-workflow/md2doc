@@ -87,4 +87,21 @@ assert.match(html, /function renderSearchResults\(/, 'expected result renderer')
 assert.match(html, /function selectResult\(/, 'expected result selector');
 assert.match(html, /mark\.search-hit\.is-selected/, 'expected selected-hit CSS');
 
+// Task 1 (layout) — B1: narrow overflow-wrap to prose only
+assert.match(
+  html,
+  /\.content p,\s*\.content li,\s*\.content blockquote \{\s*overflow-wrap: anywhere;\s*word-break: break-word;\s*\}/,
+  'expected prose-only overflow-wrap rule'
+);
+assert.doesNotMatch(
+  html,
+  /\.content \{[^}]*overflow-wrap: anywhere/,
+  '.content should no longer carry overflow-wrap: anywhere'
+);
+assert.doesNotMatch(
+  html,
+  /\.content \{[^}]*word-break: break-word/,
+  '.content should no longer carry word-break: break-word'
+);
+
 console.log('md2doc heading rendering test passed');
