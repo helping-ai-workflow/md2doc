@@ -103,6 +103,11 @@ assert.doesNotMatch(
   /\.content \{[^}]*word-break: break-word/,
   '.content should no longer carry word-break: break-word'
 );
+assert.match(
+  html,
+  /\.content \{\s*min-width: 0;\s*flex: 1 1 auto;\s*\}/,
+  '.content base flex rule (min-width: 0; flex: 1 1 auto) still present'
+);
 
 // Task 2 (layout) — B2: atomic token nowrap inside table cells
 assert.match(
@@ -151,8 +156,11 @@ const tablesHtml = fs.readFileSync(tableHtmlPath, 'utf8');
 
 assert.match(tablesHtml, /<colgroup>/, 'expected colgroup emitted');
 // Signal column: all-`<code>`, short tokens, no whitespace → narrow
-assert.match(tablesHtml, /<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-prose">/,
-  'expected 4 narrow cols + 1 prose col in this fixture');
+assert.match(
+  tablesHtml,
+  /<colgroup><col class="col-narrow"><col class="col-narrow"><col class="col-narrow"><col class="col-narrow"><col class="col-prose"><\/colgroup>/,
+  'expected exact 4 narrow + 1 prose colgroup'
+);
 assert.match(tablesHtml, /<th class="cell-narrow">Signal<\/th>/, 'expected Signal header tagged narrow');
 assert.match(tablesHtml, /<th class="cell-prose">Description<\/th>/, 'expected Description header tagged prose');
 assert.match(tablesHtml, /<td class="cell-narrow"><code>pmac_tx_tvalidchk<\/code><\/td>/,
