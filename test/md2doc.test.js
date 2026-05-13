@@ -104,4 +104,21 @@ assert.doesNotMatch(
   '.content should no longer carry word-break: break-word'
 );
 
+// Task 2 (layout) — B2: atomic token nowrap inside table cells
+assert.match(
+  html,
+  /\.content table th,\s*\.content table td \{\s*overflow-wrap: normal;\s*word-break: normal;\s*\}/,
+  'expected td/th wrap reset'
+);
+assert.match(
+  html,
+  /\.content table th \{\s*white-space: nowrap;\s*\}/,
+  'expected th nowrap'
+);
+assert.match(
+  html,
+  /\.content table td code,\s*\.content table th code \{\s*white-space: nowrap;\s*\}/,
+  'expected td/th code nowrap'
+);
+
 console.log('md2doc heading rendering test passed');
