@@ -193,4 +193,21 @@ assert.match(
   'expected sticky zebra-stripe override'
 );
 
+// Task 5 (layout) — A1: TOC adaptive width
+assert.match(
+  html,
+  /\.reader-sidebar \{[^}]*flex: 0 1 300px;[^}]*\}/,
+  'expected sidebar flex 0 1 300px'
+);
+assert.match(
+  html,
+  /\.reader-sidebar \{[^}]*width: clamp\(220px, 22vw, 300px\);[^}]*\}/,
+  'expected sidebar width clamp'
+);
+assert.match(
+  html,
+  /\.reader-sidebar \{[^}]*min-width: 220px;[^}]*\}/,
+  'expected sidebar min-width'
+);
+
 console.log('md2doc heading rendering test passed');
