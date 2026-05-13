@@ -121,4 +121,59 @@ assert.match(
   'expected td/th code nowrap'
 );
 
+// Task 3 (layout) — B3 fixture: classify and emit colgroup + cell classes
+const tableMdPath  = path.join(tmpDir, 'tables.md');
+const tableHtmlPath = path.join(tmpDir, 'tables.html');
+fs.writeFileSync(
+  tableMdPath,
+  [
+    '# Tables',
+    '',
+    '| Signal | Dir | Width | Clock Domain | Description |',
+    '|---|---|---|---|---|',
+    '| `pmac_tx_tvalidchk` | In | 1 | `clk_tx` | TVALIDCHK：`pmac_tx_tvalid` parity，由上游 pMAC TX Core 產生，本模組驗證。 |',
+    '| `pmac_tx_tready`    | Out | 1 | `clk_tx` | backpressure |',
+    '',
+  ].join('\n'),
+  'utf8'
+);
+
+const runTables = spawnSync('node', ['lib/md2doc.js', tableMdPath, tableHtmlPath], {
+  cwd: path.resolve(__dirname, '..'),
+  encoding: 'utf8',
+});
+if (runTables.status !== 0) {
+  process.stderr.write(runTables.stdout || '');
+  process.stderr.write(runTables.stderr || '');
+  process.exit(runTables.status || 1);
+}
+const tablesHtml = fs.readFileSync(tableHtmlPath, 'utf8');
+
+assert.match(tablesHtml, /<colgroup>/, 'expected colgroup emitted');
+// Signal column: all-`<code>`, short tokens, no whitespace → narrow
+assert.match(tablesHtml, /<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-narrow">[\s\S]*?<col class="col-prose">/,
+  'expected 4 narrow cols + 1 prose col in this fixture');
+assert.match(tablesHtml, /<th class="cell-narrow">Signal<\/th>/, 'expected Signal header tagged narrow');
+assert.match(tablesHtml, /<th class="cell-prose">Description<\/th>/, 'expected Description header tagged prose');
+assert.match(tablesHtml, /<td class="cell-narrow"><code>pmac_tx_tvalidchk<\/code><\/td>/,
+  'expected Signal data cell tagged narrow with intact code span');
+assert.match(tablesHtml, /<td class="cell-prose">TVALIDCHK/, 'expected Description data cell tagged prose');
+
+// Task 3 (layout) — B3 CSS support
+assert.match(
+  tablesHtml,
+  /\.content table col\.col-narrow \{\s*width: 1%;\s*\}/,
+  'expected col-narrow width:1% rule'
+);
+assert.match(
+  tablesHtml,
+  /\.content table col\.col-prose \{\s*width: auto;\s*\}/,
+  'expected col-prose width:auto rule'
+);
+assert.match(
+  tablesHtml,
+  /\.content table th\.cell-narrow,\s*\.content table td\.cell-narrow \{\s*white-space: nowrap;\s*\}/,
+  'expected cell-narrow nowrap rule'
+);
+
 console.log('md2doc heading rendering test passed');
