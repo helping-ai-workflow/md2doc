@@ -176,4 +176,21 @@ assert.match(
   'expected cell-narrow nowrap rule'
 );
 
+// Task 4 (layout) — B4: sticky first column
+assert.match(
+  tablesHtml,
+  /\.content table tbody td:first-child,\s*\.content table thead th:first-child \{\s*position: sticky;\s*left: 0;\s*z-index: 1;\s*background: #ffffff;\s*\}/,
+  'expected sticky first-column rule'
+);
+assert.match(
+  tablesHtml,
+  /\.content table thead th:first-child \{\s*background: #f6f8fa;\s*\}/,
+  'expected sticky header first-column background override'
+);
+assert.match(
+  tablesHtml,
+  /\.content table tbody tr:nth-child\(even\) td:first-child \{\s*background: #fafbfc;\s*\}/,
+  'expected sticky zebra-stripe override'
+);
+
 console.log('md2doc heading rendering test passed');
