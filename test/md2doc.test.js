@@ -210,4 +210,21 @@ assert.match(
   'expected sidebar min-width'
 );
 
+// Task 6 (layout) — A2: TOC collapse toggle + persistence
+assert.match(html, /<button[^>]+id="toc-collapse-toggle"[^>]*>/, 'expected collapse toggle button');
+assert.match(html, /aria-label="Collapse table of contents"/, 'expected accessible label');
+assert.match(
+  html,
+  /body\[data-toc-collapsed\] \.reader-sidebar \{[^}]*flex-basis: 36px;[^}]*width: 36px;[^}]*\}/,
+  'expected collapsed sidebar CSS'
+);
+assert.match(
+  html,
+  /body\[data-toc-collapsed\] \.reader-tools,\s*body\[data-toc-collapsed\] \.search-results,\s*body\[data-toc-collapsed\] \.toc \> \.toc-list,\s*body\[data-toc-collapsed\] \.toc-title \{\s*display: none;\s*\}/,
+  'expected collapsed inner-element hide rules'
+);
+assert.match(html, /localStorage\.getItem\('md2doc\.toc\.collapsed'\)/, 'expected localStorage read');
+assert.match(html, /localStorage\.setItem\('md2doc\.toc\.collapsed'/, 'expected localStorage write');
+assert.match(html, /toggleAttribute\('data-toc-collapsed'\)/, 'expected toggle handler');
+
 console.log('md2doc heading rendering test passed');
