@@ -10,3 +10,6 @@ package-lock.json
 # Local viewer / inspect helpers
 .cache/
 .tmp/
+
+# Brainstorming / planning spec drafts — local working state, never committed
+docs/superpowers/
