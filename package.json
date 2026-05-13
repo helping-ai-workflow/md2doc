@@ -1,12 +1,20 @@
 {
   "name": "@helping-ai-workflow/md2doc",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support",
-  "keywords": ["markdown", "html", "pdf", "renderer", "wavedrom", "mermaid", "graphviz"],
+  "keywords": [
+    "markdown",
+    "html",
+    "pdf",
+    "renderer",
+    "wavedrom",
+    "mermaid",
+    "graphviz"
+  ],
   "main": "lib/md2doc.js",
   "bin": {
     "md2html": "bin/md2html.js",
-    "md2pdf":  "bin/md2pdf.js"
+    "md2pdf": "bin/md2pdf.js"
   },
   "files": [
     "lib/",
