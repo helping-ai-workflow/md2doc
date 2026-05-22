@@ -13,8 +13,7 @@
   ],
   "main": "lib/md2doc.js",
   "bin": {
-    "md2html": "bin/md2html.js",
-    "md2pdf": "bin/md2pdf.js"
+    "md2doc": "bin/md2doc.js"
   },
   "files": [
     "lib/",
@@ -32,7 +31,7 @@
   },
   "scripts": {
     "preinstall": "node scripts/preinstall.js",
-    "test": "node test/md2doc.test.js"
+    "test": "node test/md2doc.test.js && node test/cli.test.js"
   },
   "repository": {
     "type": "git",

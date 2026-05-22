@@ -2,7 +2,7 @@
 
 > Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support.
 
-Two global CLIs (`md2html`, `md2pdf`) you can call from any directory.
+A single global CLI (`md2doc`) you can call from any directory.
 
 ## Install
 
@@ -43,24 +43,43 @@ npm install -g @helping-ai-workflow/md2doc
 ## Usage
 
 ```bash
-md2html foo.md                     # → foo.html (next to source)
-md2html foo.md bar.md              # batch render
-md2html foo.md --out custom.html   # explicit output (single-file mode)
-md2html foo.md --open              # render then launch viewer
-md2html foo.md --quiet             # suppress progress output
+md2doc foo.md                              # render HTML to OS temp dir, open viewer
+md2doc --pdf foo.md                        # render PDF instead
+md2doc --html --pdf foo.md                 # render both formats
+md2doc *.md                                # batch: each file → temp + open
+
+md2doc foo.md --out bar.html               # write to a specific file (no auto-open)
+md2doc foo.md --out ./build/               # write to ./build/foo.html (no auto-open)
+md2doc *.md --out ./build/                 # batch into ./build/
+md2doc foo.md --out ./build/ --open        # explicit open with --out
 ```
 
-`md2pdf` accepts the same four flags with PDF-output semantics.
+By default, `md2doc` writes to your OS temp directory and launches the platform viewer.
+Pass `--out <path>` to write somewhere specific; doing so disables auto-open unless you
+also pass `--open`.
 
 ### Flags
 
 | Flag | Meaning |
 |---|---|
-| `--out <path>` | Explicit output path. Only valid with exactly one input. |
-| `--open` | Launch the platform viewer (`xdg-open` / `open` / `start`) after render. |
+| `--html` | Render HTML (default if neither `--html` nor `--pdf` is given). |
+| `--pdf` | Render PDF. Combine with `--html` to render both. |
+| `--out <path>` | Output path. Ends with `/` or an existing directory → directory mode. Ends with `.html` / `.pdf` → file mode (single input only). Implies `--no-open` unless `--open` is also passed. |
+| `--open` | Launch the platform viewer (`xdg-open` / `open` / `start`) after render. Default when `--out` is absent. |
+| `--no-open` | Skip the viewer launch. |
 | `--quiet` | Suppress per-file progress messages. |
 | `--version`, `-v` | Print version. |
 | `--help`, `-h` | Print help. |
+
+### Migration from md2html / md2pdf (v1.x → v2.0.0)
+
+| Old | New |
+|---|---|
+| `md2html foo.md` | `md2doc foo.md` |
+| `md2pdf foo.md` | `md2doc --pdf foo.md` |
+| `md2html foo.md --out f.html` | `md2doc foo.md --out f.html` |
+| `md2html foo.md --open` | `md2doc foo.md` (open is default) |
+| `md2html *.md` (output next to source) | `md2doc *.md --out ./build/` (or accept temp output) |
 
 ## Supported diagram types
 
