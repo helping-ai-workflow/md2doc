@@ -31,7 +31,7 @@
   },
   "scripts": {
     "preinstall": "node scripts/preinstall.js",
-    "test": "node test/md2doc.test.js"
+    "test": "node test/md2doc.test.js && node test/cli.test.js"
   },
   "repository": {
     "type": "git",
