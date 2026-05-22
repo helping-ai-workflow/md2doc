@@ -77,3 +77,24 @@ fs.writeFileSync(mdA, '# Hello\n\nBody.\n', 'utf8');
 }
 
 console.log('Task 2 — default temp render OK');
+
+// --- Task 3: --pdf and --html --pdf produce the right files ---
+{
+    const r = run([mdA, '--pdf', '--no-open']);
+    assert.strictEqual(r.status, 0, '--pdf exits 0');
+    const expected = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.pdf');
+    assert.ok(fs.existsSync(expected), 'PDF output exists at ' + expected);
+    fs.unlinkSync(expected);
+}
+{
+    const r = run([mdA, '--html', '--pdf', '--no-open']);
+    assert.strictEqual(r.status, 0, '--html --pdf exits 0');
+    const h = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.html');
+    const p = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.pdf');
+    assert.ok(fs.existsSync(h), 'HTML output exists');
+    assert.ok(fs.existsSync(p), 'PDF output exists');
+    fs.unlinkSync(h);
+    fs.unlinkSync(p);
+}
+
+console.log('Task 3 — format selection OK');
