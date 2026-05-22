@@ -113,15 +113,64 @@ function defaultOutputPath(input, format) {
     return path.join(dir, stem + '-' + shortHash(abs) + '.' + format);
 }
 
-function resolveOutputs(args) {
-    // (input × format) → output path
-    const pairs = [];
-    for (const input of args.inputs) {
-        for (const format of args.formats) {
-            pairs.push({ input, format, output: defaultOutputPath(input, format) });
-        }
+function classifyOut(outValue) {
+    // Returns { kind: 'dir' | 'file', ext: 'html'|'pdf'|null }
+    if (outValue.endsWith('/') || outValue.endsWith(path.sep)) {
+        return { kind: 'dir', ext: null };
     }
-    return pairs;
+    try {
+        if (fs.existsSync(outValue) && fs.statSync(outValue).isDirectory()) {
+            return { kind: 'dir', ext: null };
+        }
+    } catch (_) { /* fall through */ }
+    if (/\.html$/i.test(outValue)) return { kind: 'file', ext: 'html' };
+    if (/\.pdf$/i.test(outValue))  return { kind: 'file', ext: 'pdf' };
+    return { kind: 'ambiguous', ext: null };
+}
+
+function resolveOutputs(args) {
+    const pairs = [];
+    if (args.out === null) {
+        for (const input of args.inputs) {
+            for (const format of args.formats) {
+                pairs.push({ input, format, output: defaultOutputPath(input, format) });
+            }
+        }
+        return pairs;
+    }
+
+    const cls = classifyOut(args.out);
+
+    if (cls.kind === 'ambiguous') {
+        process.stderr.write(
+            'error: --out \'' + args.out + '\' must end with \'/\' to mean a directory ' +
+            'or \'.html\'/\'.pdf\' to mean a file\n'
+        );
+        process.exit(2);
+    }
+
+    if (cls.kind === 'file') {
+        if (args.inputs.length > 1) {
+            process.stderr.write('error: --out file path is only valid with one input\n');
+            process.exit(2);
+        }
+        if (args.formats.length > 1) {
+            process.stderr.write('error: --out file path is not valid when producing both formats\n');
+            process.exit(2);
+        }
+        if (cls.ext !== args.formats[0]) {
+            process.stderr.write(
+                'error: --out \'' + args.out + '\' extension does not match selected format\n'
+            );
+            process.exit(2);
+        }
+        pairs.push({ input: args.inputs[0], format: args.formats[0], output: args.out });
+        return pairs;
+    }
+
+    // cls.kind === 'dir' — implemented in Task 5
+    process.stderr.write('error: --out directory mode not yet implemented\n');
+    process.exit(2);
 }
 
 function isWSL() {

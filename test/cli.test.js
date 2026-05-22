@@ -98,3 +98,24 @@ console.log('Task 2 — default temp render OK');
 }
 
 console.log('Task 3 — format selection OK');
+
+// --- Task 4: --out file mode ---
+{
+    const outFile = path.join(sandbox, 'explicit.html');
+    const r = run([mdA, '--out', outFile]);
+    assert.strictEqual(r.status, 0, '--out file exits 0');
+    assert.ok(fs.existsSync(outFile), '--out file is written');
+    // --out implies --no-open: no temp-dir copy should be produced
+    const tempCopy = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.html');
+    if (fs.existsSync(tempCopy)) fs.unlinkSync(tempCopy);
+    fs.unlinkSync(outFile);
+}
+{
+    const outFile = path.join(sandbox, 'explicit.pdf');
+    const r = run([mdA, '--pdf', '--out', outFile]);
+    assert.strictEqual(r.status, 0, '--pdf --out .pdf exits 0');
+    assert.ok(fs.existsSync(outFile), '--out PDF file is written');
+    fs.unlinkSync(outFile);
+}
+
+console.log('Task 4 — --out file mode OK');
