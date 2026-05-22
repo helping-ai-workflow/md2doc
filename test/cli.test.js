@@ -168,3 +168,46 @@ console.log('Task 4 — --out file mode OK');
 }
 
 console.log('Task 5 — --out directory mode OK');
+
+// --- Task 6: error cases ---
+{
+    const r = run([mdA, '--out', 'bar']);
+    assert.strictEqual(r.status, 2, 'ambiguous --out exits 2');
+    assert.match(r.stderr, /must end with/, 'ambiguous --out explains rule');
+}
+{
+    const r = run([mdA, '--pdf', '--out', path.join(sandbox, 'x.html')]);
+    assert.strictEqual(r.status, 2, 'extension mismatch exits 2');
+    assert.match(r.stderr, /extension does not match/, 'extension mismatch is explained');
+}
+{
+    const r = run([mdA, '--html', '--pdf', '--out', path.join(sandbox, 'x.html')]);
+    assert.strictEqual(r.status, 2, 'two formats into one file exits 2');
+    assert.match(r.stderr, /both formats|two formats|not valid when producing both/i,
+        'two-formats-one-file is explained');
+}
+{
+    const mdB = path.join(sandbox, 'extra.md');
+    fs.writeFileSync(mdB, '# Extra\n', 'utf8');
+    const r = run([mdA, mdB, '--out', path.join(sandbox, 'x.html')]);
+    assert.strictEqual(r.status, 2, 'multi-input file --out exits 2');
+    assert.match(r.stderr, /only valid with one input/, 'multi-input file is explained');
+    fs.unlinkSync(mdB);
+}
+{
+    const r = run([path.join(sandbox, 'nope.md'), '--no-open']);
+    assert.strictEqual(r.status, 1, 'missing input exits 1');
+    assert.match(r.stderr, /input not found/, 'missing input is explained');
+}
+{
+    const r = run([mdA, '--bogus']);
+    assert.strictEqual(r.status, 2, 'unknown flag exits 2');
+    assert.match(r.stderr, /unknown flag/, 'unknown flag is named');
+}
+{
+    const r = run([mdA, '--out']);
+    assert.strictEqual(r.status, 2, '--out without value exits 2');
+    assert.match(r.stderr, /--out requires a value/, '--out missing value is explained');
+}
+
+console.log('Task 6 — error cases OK');
