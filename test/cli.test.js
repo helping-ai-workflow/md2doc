@@ -52,3 +52,28 @@ function run(args, opts = {}) {
 }
 
 console.log('Task 1 — help / version OK');
+
+// --- Task 2: default invocation writes HTML to temp + prints path ---
+function shortHash(absPath) {
+    return crypto.createHash('sha1').update(absPath).digest('hex').slice(0, 6);
+}
+
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-cli-test-'));
+const mdA = path.join(sandbox, 'sample.md');
+fs.writeFileSync(mdA, '# Hello\n\nBody.\n', 'utf8');
+
+{
+    // Default: --no-open used to avoid launching a real browser; behavior is otherwise identical
+    // to the user's default invocation, and the test still proves the temp path + render dispatch.
+    const r = run([mdA, '--no-open']);
+    assert.strictEqual(r.status, 0, 'default render exits 0');
+    const expectedOut = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.html');
+    assert.ok(fs.existsSync(expectedOut), 'temp HTML output exists at ' + expectedOut);
+    const html = fs.readFileSync(expectedOut, 'utf8');
+    assert.match(html, /<nav class="toc"/, 'rendered HTML contains TOC markup');
+    assert.match(r.stdout, new RegExp(expectedOut.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+        'stdout reports the temp output path');
+    fs.unlinkSync(expectedOut);
+}
+
+console.log('Task 2 — default temp render OK');
