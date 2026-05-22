@@ -13,8 +13,7 @@
   ],
   "main": "lib/md2doc.js",
   "bin": {
-    "md2html": "bin/md2html.js",
-    "md2pdf": "bin/md2pdf.js"
+    "md2doc": "bin/md2doc.js"
   },
   "files": [
     "lib/",
