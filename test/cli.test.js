@@ -211,3 +211,25 @@ console.log('Task 5 — --out directory mode OK');
 }
 
 console.log('Task 6 — error cases OK');
+
+// --- Task 7: --quiet, --no-open behavior pinning ---
+{
+    const r = run([mdA, '--quiet', '--no-open']);
+    assert.strictEqual(r.status, 0, '--quiet exits 0');
+    assert.strictEqual(r.stdout, '', '--quiet suppresses stdout');
+    const temp = path.join(os.tmpdir(), 'md2doc', 'sample-' + shortHash(mdA) + '.html');
+    assert.ok(fs.existsSync(temp), '--quiet still renders');
+    fs.unlinkSync(temp);
+}
+{
+    // --out + --open: should still complete successfully even though the viewer launch
+    // is platform-specific. We can't easily assert "viewer launched" without mocking,
+    // so we assert exit 0 + file written and rely on manual smoke-test for the launch itself.
+    const outFile = path.join(sandbox, 'opened.html');
+    const r = run([mdA, '--out', outFile, '--no-open']); // use --no-open in CI to avoid launch
+    assert.strictEqual(r.status, 0, '--out --no-open exits 0');
+    assert.ok(fs.existsSync(outFile), '--out file written');
+    fs.unlinkSync(outFile);
+}
+
+console.log('Task 7 — open/quiet matrix OK');
