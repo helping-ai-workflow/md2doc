@@ -168,9 +168,19 @@ function resolveOutputs(args) {
         return pairs;
     }
 
-    // cls.kind === 'dir' — implemented in Task 5
-    process.stderr.write('error: --out directory mode not yet implemented\n');
-    process.exit(2);
+    // cls.kind === 'dir'
+    fs.mkdirSync(args.out, { recursive: true });
+    for (const input of args.inputs) {
+        const stem = path.basename(input).replace(/\.md$/i, '');
+        for (const format of args.formats) {
+            pairs.push({
+                input,
+                format,
+                output: path.join(args.out, stem + '.' + format),
+            });
+        }
+    }
+    return pairs;
 }
 
 function isWSL() {

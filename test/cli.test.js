@@ -119,3 +119,52 @@ console.log('Task 3 — format selection OK');
 }
 
 console.log('Task 4 — --out file mode OK');
+
+// --- Task 5: --out directory mode ---
+{
+    const outDir = path.join(sandbox, 'build') + path.sep;
+    const r = run([mdA, '--out', outDir]);
+    assert.strictEqual(r.status, 0, '--out trailing-slash dir exits 0');
+    const written = path.join(sandbox, 'build', 'sample.html');
+    assert.ok(fs.existsSync(written), 'file written inside dir: ' + written);
+    fs.unlinkSync(written);
+}
+{
+    // Pre-existing directory without trailing slash should still be treated as dir
+    const outDir = path.join(sandbox, 'build2');
+    fs.mkdirSync(outDir);
+    const r = run([mdA, '--out', outDir]);
+    assert.strictEqual(r.status, 0, 'existing dir --out exits 0');
+    const written = path.join(outDir, 'sample.html');
+    assert.ok(fs.existsSync(written), 'file written inside existing dir');
+    fs.unlinkSync(written);
+}
+{
+    // Batch into dir
+    const mdB = path.join(sandbox, 'second.md');
+    fs.writeFileSync(mdB, '# Second\n', 'utf8');
+    const outDir = path.join(sandbox, 'build3') + path.sep;
+    const r = run([mdA, mdB, '--out', outDir]);
+    assert.strictEqual(r.status, 0, 'batch --out dir exits 0');
+    const wa = path.join(sandbox, 'build3', 'sample.html');
+    const wb = path.join(sandbox, 'build3', 'second.html');
+    assert.ok(fs.existsSync(wa), 'first file written');
+    assert.ok(fs.existsSync(wb), 'second file written');
+    fs.unlinkSync(wa);
+    fs.unlinkSync(wb);
+    fs.unlinkSync(mdB);
+}
+{
+    // --html --pdf into dir produces both
+    const outDir = path.join(sandbox, 'build4') + path.sep;
+    const r = run([mdA, '--html', '--pdf', '--out', outDir]);
+    assert.strictEqual(r.status, 0, 'both formats into dir exits 0');
+    const h = path.join(sandbox, 'build4', 'sample.html');
+    const p = path.join(sandbox, 'build4', 'sample.pdf');
+    assert.ok(fs.existsSync(h), 'HTML written');
+    assert.ok(fs.existsSync(p), 'PDF written');
+    fs.unlinkSync(h);
+    fs.unlinkSync(p);
+}
+
+console.log('Task 5 — --out directory mode OK');
