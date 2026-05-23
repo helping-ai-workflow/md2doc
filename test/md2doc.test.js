@@ -90,8 +90,8 @@ assert.match(html, /mark\.search-hit\.is-selected/, 'expected selected-hit CSS')
 // Task 1 (layout) — B1: narrow overflow-wrap to prose only
 assert.match(
   html,
-  /\.content p,\s*\.content li,\s*\.content blockquote \{\s*overflow-wrap: anywhere;\s*word-break: break-word;\s*\}/,
-  'expected prose-only overflow-wrap rule'
+  /\.content p,\s*\.content li,\s*\.content blockquote,\s*\.content h1,\s*\.content h2,\s*\.content h3,\s*\.content h4,\s*\.content h5,\s*\.content h6,\s*\.content dt,\s*\.content dd \{\s*overflow-wrap: anywhere;\s*word-break: break-word;\s*\}/,
+  'expected prose-only overflow-wrap rule (incl. headings + dl)'
 );
 assert.doesNotMatch(
   html,
