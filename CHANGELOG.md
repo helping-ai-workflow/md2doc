@@ -3,6 +3,15 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.0.1 — 2026-05-23
+
+### Fixed
+
+- Long snake_case identifiers in headings (h1–h6) and `<dt>`/`<dd>` no longer
+  overflow the viewport. The prose-only `overflow-wrap` rule introduced in
+  v1.1.0 left headings uncovered; this extends it to headings and definition
+  lists while preserving the table-cell `overflow-wrap: normal` override.
+
 ## v2.0.0 — 2026-05-22
 
 ### Breaking changes
