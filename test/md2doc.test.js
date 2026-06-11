@@ -274,3 +274,23 @@ console.log('md2doc heading rendering test passed');
 }
 
 console.log('md2doc mermaid escaping test passed');
+
+// ── dot/graphviz renders in-process via WASM (no system 'dot' binary) ──
+const dotMd = path.join(tmpDir, 'dot.md');
+const dotHtml = path.join(tmpDir, 'dot.html');
+fs.writeFileSync(dotMd, ['# Dot', '', '```dot', 'digraph { a -> b; }', '```', ''].join('\n'), 'utf8');
+
+const drun = spawnSync(process.execPath, ['lib/md2doc.js', dotMd, dotHtml], {
+  cwd: path.resolve(__dirname, '..'),
+  encoding: 'utf8',
+  // Strip any system 'dot' from PATH to prove we do NOT shell out to it.
+  // Use process.execPath (absolute node binary path) so the spawn itself
+  // succeeds even with PATH scrubbed to /nonexistent.
+  env: { ...process.env, PATH: '/nonexistent' },
+});
+assert.strictEqual(drun.status, 0, 'dot fixture renders with no system dot on PATH');
+const dhtml = fs.readFileSync(dotHtml, 'utf8');
+assert.match(dhtml, /<div class="graphviz"><svg/, 'dot block rendered to inline SVG via WASM');
+assert.doesNotMatch(dhtml, /data-graphviz-src=/, 'placeholder fully replaced by SVG');
+assert.doesNotMatch(dhtml, /dot render failed/, 'no spawnSync ENOENT warning');
+console.log('md2doc dot WASM test passed');
