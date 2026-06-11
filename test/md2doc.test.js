@@ -307,3 +307,26 @@ assert.match(dhtml, /<div class="graphviz"><svg/, 'dot block rendered to inline 
 assert.doesNotMatch(dhtml, /data-graphviz-src=/, 'placeholder fully replaced by SVG');
 assert.doesNotMatch(dhtml, /dot render failed/, 'no spawnSync ENOENT warning');
 console.log('md2doc dot WASM test passed');
+
+// ── --bake-svg produces inert SVG with no diagram-engine runtime ──
+// Capability-gated: needs a usable Chromium. Logs a visible skip if absent —
+// this gates on environment capability, it does not silence a correctness failure.
+(function bakeSvgTest() {
+  let chromiumOk = true;
+  try { require('puppeteer').executablePath(); }
+  catch (_) { chromiumOk = false; }
+  if (!chromiumOk) { console.log('[SKIP] bake-svg test: Chromium unavailable in this environment'); return; }
+
+  const bMd = path.join(tmpDir, 'bake.md');
+  const bHtml = path.join(tmpDir, 'bake.html');
+  fs.writeFileSync(bMd, ['# Bake', '', '```mermaid', 'graph TD; A-->B;', '```', ''].join('\n'), 'utf8');
+  const br = spawnSync('node', ['lib/md2doc.js', bMd, bHtml, '--bake-svg'], {
+    cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
+  });
+  assert.strictEqual(br.status, 0, 'bake-svg render succeeds');
+  const bh = fs.readFileSync(bHtml, 'utf8');
+  assert.match(bh, /<svg/, 'baked output contains inline SVG');
+  assert.doesNotMatch(bh, /data-md2doc-diagram-engine/, 'diagram-engine runtime scripts stripped from baked output');
+  assert.doesNotMatch(bh, /<div class="mermaid">\s*graph TD/, 'unrendered mermaid placeholder replaced');
+  console.log('md2doc bake-svg test passed');
+})();
