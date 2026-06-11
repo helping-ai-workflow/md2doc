@@ -8,6 +8,8 @@ A single global CLI (`md2doc`) you can call from any directory.
 
 Requires Node.js 18 or higher. The first install pulls puppeteer (≈ 170 MB Chromium download); subsequent installs reuse it.
 
+Chromium is only needed for **PDF export** and the optional `--bake-svg` flag. HTML diagram rendering needs nothing extra — Graphviz runs in-process via WebAssembly, and Mermaid / WaveDrom are bundled and inlined, so diagrams render **offline with no system Graphviz and no CDN**.
+
 ### Recommended: install via nvm
 
 If you do not yet have Node.js — or your system Node lives under `/usr/local` and `npm install -g` fails with `EACCES` — install Node through [nvm](https://github.com/nvm-sh/nvm) first. nvm puts Node under `~/.nvm`, so global packages never need `sudo`.
@@ -69,6 +71,7 @@ also pass `--open`.
 | `--open` | Launch the platform viewer (`xdg-open` / `open` / `start`) after render. Default when `--out` is absent. |
 | `--no-open` | Skip the viewer launch. |
 | `--quiet` | Suppress per-file progress messages. |
+| `--bake-svg` | Pre-render Mermaid / WaveDrom to inert SVG at generation time (HTML output only; needs Chromium). The output then contains no diagram JavaScript. |
 | `--version`, `-v` | Print version. |
 | `--help`, `-h` | Print help. |
 
@@ -101,7 +104,9 @@ digraph G { A -> B }
 ```
 ````
 
-Diagrams render directly in the output (HTML or PDF).
+All three render directly in the output (HTML or PDF), **offline and with no system dependencies**: Graphviz `dot` runs in-process via WebAssembly (no system `dot` binary required), and Mermaid / WaveDrom are bundled and inlined (no CDN). Each engine's runtime is embedded only when the document actually uses that diagram type.
+
+By default, Mermaid and WaveDrom render in the browser when the HTML is opened; pass `--bake-svg` to pre-render them to inert SVG at generation time instead (Graphviz is always pre-rendered to SVG).
 
 ## Why a global CLI
 
