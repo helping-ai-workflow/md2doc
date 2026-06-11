@@ -3,6 +3,19 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.1.1 — 2026-06-11
+
+### Fixed
+
+- Mermaid source is now HTML-escaped inside the `.mermaid` div. Raw injection
+  let the HTML parser consume entities and tags before mermaid ran — an
+  author's `&lt;IP&gt;` became an `<IP>` element that mermaid sanitized away,
+  silently dropping label text. Escaping restores GitHub-equivalent semantics
+  (`&lt;IP&gt;` displays as `<IP>`, literal `<br/>` still line-breaks).
+- CDN fallback bumped from `mermaid@10` to `mermaid@11`. v10 scrambles
+  `flowchart` layout when a subgraph with `direction` has edges crossing its
+  boundary; v11 lays the same source out top-down like GitHub.
+
 ## v2.1.0 — 2026-06-11
 
 ### Added

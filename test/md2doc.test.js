@@ -236,3 +236,41 @@ assert.match(html, /localStorage\.setItem\('md2doc\.toc\.collapsed'/, 'expected 
 assert.match(html, /toggleAttribute\('data-toc-collapsed'\)/, 'expected toggle handler');
 
 console.log('md2doc heading rendering test passed');
+
+// --- Mermaid block: escaped source + CDN v11 ---
+{
+    const mermaidMd = path.join(tmpDir, 'mermaid.md');
+    const mermaidHtml = path.join(tmpDir, 'mermaid.html');
+    fs.writeFileSync(mermaidMd, [
+        '# Diagram',
+        '',
+        '```mermaid',
+        'flowchart TD',
+        '    A["make IP=&lt;IP&gt; run"] --> B["x<br/>y"]',
+        '```',
+        '',
+    ].join('\n'), 'utf8');
+
+    const mrun = spawnSync('node', ['lib/md2doc.js', mermaidMd, mermaidHtml], {
+        cwd: path.resolve(__dirname, '..'),
+        encoding: 'utf8',
+    });
+    assert.strictEqual(mrun.status, 0, 'mermaid fixture renders');
+    const mhtml = fs.readFileSync(mermaidHtml, 'utf8');
+
+    // Source must be HTML-escaped inside the .mermaid div so the browser hands
+    // mermaid the literal source text (GitHub-equivalent semantics): the
+    // author's `&lt;IP&gt;` must arrive escaped once more, and a raw `<br/>`
+    // must arrive as text, not be parsed into an element the HTML parser eats.
+    assert.match(mhtml, /<div class="mermaid">[\s\S]*?&amp;lt;IP&amp;gt;[\s\S]*?<\/div>/,
+        'entity-written labels survive HTML parsing');
+    assert.match(mhtml, /<div class="mermaid">[\s\S]*?&lt;br\/&gt;[\s\S]*?<\/div>/,
+        'raw <br/> in mermaid source is escaped, not element-ified');
+
+    // CDN fallback must pin mermaid v11 — v10 scrambles flowchart layout when a
+    // subgraph with `direction` has edges crossing its boundary. (This assert
+    // relies on no local mermaid being resolvable, true in CI and dev here.)
+    assert.match(mhtml, /mermaid@11/, 'CDN fallback uses mermaid v11');
+}
+
+console.log('md2doc mermaid escaping test passed');
