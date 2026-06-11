@@ -267,13 +267,26 @@ console.log('md2doc heading rendering test passed');
     assert.match(mhtml, /<div class="mermaid">[\s\S]*?&lt;br\/&gt;[\s\S]*?<\/div>/,
         'raw <br/> in mermaid source is escaped, not element-ified');
 
-    // CDN fallback must pin mermaid v11 — v10 scrambles flowchart layout when a
-    // subgraph with `direction` has edges crossing its boundary. (This assert
-    // relies on no local mermaid being resolvable, true in CI and dev here.)
-    assert.match(mhtml, /mermaid@11/, 'CDN fallback uses mermaid v11');
+    // mermaid is now a bundled dep: the local inline-embed path always fires.
+    // No CDN reference, and the local-only init guard must be present.
+    assert.doesNotMatch(mhtml, /cdn\.jsdelivr\.net/, 'mermaid bundled — no CDN fallback');
+    assert.match(mhtml, /if \(typeof mermaid !== 'undefined'\)/, 'local mermaid init guard present (bundled path taken)');
 }
 
 console.log('md2doc mermaid escaping test passed');
+
+// ── text-only doc must NOT embed the mermaid/wavedrom runtimes ──
+const plainMd = path.join(tmpDir, 'plain.md');
+const plainHtml = path.join(tmpDir, 'plain.html');
+fs.writeFileSync(plainMd, ['# Plain', '', 'Just text, no diagrams.', ''].join('\n'), 'utf8');
+const prun = spawnSync('node', ['lib/md2doc.js', plainMd, plainHtml], {
+  cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
+});
+assert.strictEqual(prun.status, 0, 'plain fixture renders');
+const phtml = fs.readFileSync(plainHtml, 'utf8');
+assert.doesNotMatch(phtml, /if \(typeof mermaid !== 'undefined'\)/, 'no mermaid runtime embedded in a diagram-free doc');
+assert.doesNotMatch(phtml, /WaveDrom\.ProcessAll|WaveDromSkin/, 'no wavedrom runtime embedded in a diagram-free doc');
+console.log('md2doc conditional-injection test passed');
 
 // ── dot/graphviz renders in-process via WASM (no system 'dot' binary) ──
 const dotMd = path.join(tmpDir, 'dot.md');
