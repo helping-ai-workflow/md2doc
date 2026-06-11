@@ -26,6 +26,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@hpcc-js/wasm-graphviz": "1.22.0",
     "marked": "^14.1.0",
     "puppeteer": "^24.15.0"
   },
