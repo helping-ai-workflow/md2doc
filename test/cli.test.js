@@ -345,3 +345,11 @@ console.log('Task 8 — --out format inference OK');
 }
 
 console.log('Task 9 — inference guardrails OK');
+
+// --- Task 10: --bake-svg flag ---
+{
+    const r = run(['--bake-svg', '--help']);
+    assert.strictEqual(r.status, 0, '--bake-svg is a recognized flag (no unknown-flag exit 2)');
+    assert.match(r.stdout, /--bake-svg/, '--bake-svg documented in help');
+    console.log('Task 10 — cli --bake-svg flag test passed');
+}

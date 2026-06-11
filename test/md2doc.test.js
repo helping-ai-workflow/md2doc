@@ -267,10 +267,66 @@ console.log('md2doc heading rendering test passed');
     assert.match(mhtml, /<div class="mermaid">[\s\S]*?&lt;br\/&gt;[\s\S]*?<\/div>/,
         'raw <br/> in mermaid source is escaped, not element-ified');
 
-    // CDN fallback must pin mermaid v11 — v10 scrambles flowchart layout when a
-    // subgraph with `direction` has edges crossing its boundary. (This assert
-    // relies on no local mermaid being resolvable, true in CI and dev here.)
-    assert.match(mhtml, /mermaid@11/, 'CDN fallback uses mermaid v11');
+    // mermaid is now a bundled dep: the local inline-embed path always fires.
+    // No CDN reference, and the local-only init guard must be present.
+    assert.doesNotMatch(mhtml, /cdn\.jsdelivr\.net/, 'mermaid bundled — no CDN fallback');
+    assert.match(mhtml, /if \(typeof mermaid !== 'undefined'\)/, 'local mermaid init guard present (bundled path taken)');
 }
 
 console.log('md2doc mermaid escaping test passed');
+
+// ── text-only doc must NOT embed the mermaid/wavedrom runtimes ──
+const plainMd = path.join(tmpDir, 'plain.md');
+const plainHtml = path.join(tmpDir, 'plain.html');
+fs.writeFileSync(plainMd, ['# Plain', '', 'Just text, no diagrams.', ''].join('\n'), 'utf8');
+const prun = spawnSync('node', ['lib/md2doc.js', plainMd, plainHtml], {
+  cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
+});
+assert.strictEqual(prun.status, 0, 'plain fixture renders');
+const phtml = fs.readFileSync(plainHtml, 'utf8');
+assert.doesNotMatch(phtml, /if \(typeof mermaid !== 'undefined'\)/, 'no mermaid runtime embedded in a diagram-free doc');
+assert.doesNotMatch(phtml, /WaveDrom\.ProcessAll|WaveSkin/, 'no wavedrom runtime embedded in a diagram-free doc');
+console.log('md2doc conditional-injection test passed');
+
+// ── dot/graphviz renders in-process via WASM (no system 'dot' binary) ──
+const dotMd = path.join(tmpDir, 'dot.md');
+const dotHtml = path.join(tmpDir, 'dot.html');
+fs.writeFileSync(dotMd, ['# Dot', '', '```dot', 'digraph { a -> b; }', '```', ''].join('\n'), 'utf8');
+
+const drun = spawnSync(process.execPath, ['lib/md2doc.js', dotMd, dotHtml], {
+  cwd: path.resolve(__dirname, '..'),
+  encoding: 'utf8',
+  // Strip any system 'dot' from PATH to prove we do NOT shell out to it.
+  // Use process.execPath (absolute node binary path) so the spawn itself
+  // succeeds even with PATH scrubbed to /nonexistent.
+  env: { ...process.env, PATH: '/nonexistent' },
+});
+assert.strictEqual(drun.status, 0, 'dot fixture renders with no system dot on PATH');
+const dhtml = fs.readFileSync(dotHtml, 'utf8');
+assert.match(dhtml, /<div class="graphviz"><svg/, 'dot block rendered to inline SVG via WASM');
+assert.doesNotMatch(dhtml, /data-graphviz-src=/, 'placeholder fully replaced by SVG');
+assert.doesNotMatch(dhtml, /dot render failed/, 'no spawnSync ENOENT warning');
+console.log('md2doc dot WASM test passed');
+
+// ── --bake-svg produces inert SVG with no diagram-engine runtime ──
+// Capability-gated: needs a usable Chromium. Logs a visible skip if absent —
+// this gates on environment capability, it does not silence a correctness failure.
+(function bakeSvgTest() {
+  let chromiumOk = true;
+  try { require('puppeteer').executablePath(); }
+  catch (_) { chromiumOk = false; }
+  if (!chromiumOk) { console.log('[SKIP] bake-svg test: Chromium unavailable in this environment'); return; }
+
+  const bMd = path.join(tmpDir, 'bake.md');
+  const bHtml = path.join(tmpDir, 'bake.html');
+  fs.writeFileSync(bMd, ['# Bake', '', '```mermaid', 'graph TD; A-->B;', '```', ''].join('\n'), 'utf8');
+  const br = spawnSync('node', ['lib/md2doc.js', bMd, bHtml, '--bake-svg'], {
+    cwd: path.resolve(__dirname, '..'), encoding: 'utf8',
+  });
+  assert.strictEqual(br.status, 0, 'bake-svg render succeeds');
+  const bh = fs.readFileSync(bHtml, 'utf8');
+  assert.match(bh, /<svg/, 'baked output contains inline SVG');
+  assert.doesNotMatch(bh, /data-md2doc-diagram-engine/, 'diagram-engine runtime scripts stripped from baked output');
+  assert.doesNotMatch(bh, /<div class="mermaid">\s*graph TD/, 'unrendered mermaid placeholder replaced');
+  console.log('md2doc bake-svg test passed');
+})();

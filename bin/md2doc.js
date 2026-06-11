@@ -32,6 +32,7 @@ function printHelp() {
         '  --open              Launch the platform viewer after render (default when --out is absent).',
         '  --no-open           Skip the viewer launch.',
         '  --quiet             Suppress per-file progress messages.',
+        '  --bake-svg          Pre-render mermaid/wavedrom to inert SVG (HTML output only; needs Chromium).',
         '  --version, -v       Print version.',
         '  --help, -h          Print this help.',
         ''
@@ -45,6 +46,7 @@ function parseArgs(argv) {
     let out = null;
     let openExplicit = null; // null = unset; true/false = user-specified
     let quiet = false;
+    let bakeSvg = false;
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -61,6 +63,7 @@ function parseArgs(argv) {
         if (a === '--open') { openExplicit = true; continue; }
         if (a === '--no-open') { openExplicit = false; continue; }
         if (a === '--quiet') { quiet = true; continue; }
+        if (a === '--bake-svg') { bakeSvg = true; continue; }
         if (a === '--out') {
             if (out !== null) {
                 process.stderr.write('error: --out specified more than once\n');
@@ -102,7 +105,7 @@ function parseArgs(argv) {
         open = (out === null);
     }
 
-    return { inputs, formats, formatsExplicit, out, open, quiet };
+    return { inputs, formats, formatsExplicit, out, open, quiet, bakeSvg };
 }
 
 function shortHash(absPath) {
@@ -244,7 +247,9 @@ function main() {
     const outputs = [];
     for (const { input, output } of pairs) {
         const stdio = args.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit';
-        const r = spawnSync(process.execPath, [LIB, input, output], { stdio });
+        const childArgs = [LIB, input, output];
+        if (args.bakeSvg) childArgs.push('--bake-svg');
+        const r = spawnSync(process.execPath, childArgs, { stdio });
         if (r.status !== 0) {
             process.stderr.write('error: render failed for ' + input + ' (exit ' + r.status + ')\n');
             process.exit(r.status || 1);

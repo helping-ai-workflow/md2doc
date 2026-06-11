@@ -26,8 +26,11 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@hpcc-js/wasm-graphviz": "1.22.0",
     "marked": "^14.1.0",
-    "puppeteer": "^24.15.0"
+    "mermaid": "11.15.0",
+    "puppeteer": "^24.15.0",
+    "wavedrom": "3.5.0"
   },
   "scripts": {
     "preinstall": "node scripts/preinstall.js",
