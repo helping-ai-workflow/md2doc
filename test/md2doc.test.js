@@ -330,3 +330,57 @@ console.log('md2doc dot WASM test passed');
   assert.doesNotMatch(bh, /<div class="mermaid">\s*graph TD/, 'unrendered mermaid placeholder replaced');
   console.log('md2doc bake-svg test passed');
 })();
+
+// ── Collapsing the TOC leaves a usable restore control (regression) ──
+// Bug: clicking #toc-collapse-toggle shrank the sidebar to a 36px rail but the
+// header's expand-all/collapse-all buttons pushed the restore toggle past the
+// rail's right edge, where overflow:hidden clipped it — collapse with no way back.
+// Capability-gated on Chromium (like the bake test); logs a visible [SKIP] if absent.
+(async function tocCollapseRestoreTest() {
+  let puppeteer;
+  try { puppeteer = require('puppeteer'); puppeteer.executablePath(); }
+  catch (_) { console.log('[SKIP] toc-collapse restore test: Chromium unavailable'); return; }
+
+  const tocMd = path.join(tmpDir, 'toc-collapse.md');
+  const tocHtmlOut = path.join(tmpDir, 'toc-collapse.html');
+  fs.writeFileSync(tocMd, ['# One', '', '## Two', '', '### Three', '', 'Body text.', ''].join('\n'), 'utf8');
+  const tr = spawnSync('node', ['lib/md2doc.js', tocMd, tocHtmlOut], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+  assert.strictEqual(tr.status, 0, 'toc fixture renders');
+
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+  try {
+    const page = await browser.newPage();
+    // Desktop width: the rail-collapse path (#toc-collapse-toggle), not the
+    // mobile hamburger (which is the ≤1080px path).
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.goto('file://' + path.resolve(tocHtmlOut), { waitUntil: 'load' });
+
+    await page.click('#toc-collapse-toggle');
+    const collapsed = await page.evaluate(() => document.body.hasAttribute('data-toc-collapsed'));
+    assert.strictEqual(collapsed, true, 'sidebar collapses on toggle click');
+
+    // The restore toggle must stay fully inside the collapsed rail (not clipped
+    // away by overflow:hidden), or the user can never click it back.
+    const fits = await page.evaluate(() => {
+      const tog = document.getElementById('toc-collapse-toggle');
+      const bar = document.querySelector('.reader-sidebar');
+      if (!tog || !bar) return false;
+      const t = tog.getBoundingClientRect();
+      const b = bar.getBoundingClientRect();
+      const s = getComputedStyle(tog);
+      const visible = s.display !== 'none' && s.visibility !== 'hidden' && t.width > 0 && t.height > 0;
+      return visible && t.right <= b.right + 1 && t.left >= b.left - 1;
+    });
+    assert.strictEqual(fits, true, 'restore toggle stays within the collapsed rail (clickable, not clipped)');
+
+    await page.click('#toc-collapse-toggle');
+    const restored = await page.evaluate(() => !document.body.hasAttribute('data-toc-collapsed'));
+    assert.strictEqual(restored, true, 'clicking the toggle restores the sidebar');
+    console.log('md2doc toc-collapse restore test passed');
+  } finally {
+    await browser.close();
+  }
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
