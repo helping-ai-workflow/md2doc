@@ -285,7 +285,7 @@ const prun = spawnSync('node', ['lib/md2doc.js', plainMd, plainHtml], {
 assert.strictEqual(prun.status, 0, 'plain fixture renders');
 const phtml = fs.readFileSync(plainHtml, 'utf8');
 assert.doesNotMatch(phtml, /if \(typeof mermaid !== 'undefined'\)/, 'no mermaid runtime embedded in a diagram-free doc');
-assert.doesNotMatch(phtml, /WaveDrom\.ProcessAll|WaveDromSkin/, 'no wavedrom runtime embedded in a diagram-free doc');
+assert.doesNotMatch(phtml, /WaveDrom\.ProcessAll|WaveSkin/, 'no wavedrom runtime embedded in a diagram-free doc');
 console.log('md2doc conditional-injection test passed');
 
 // ── dot/graphviz renders in-process via WASM (no system 'dot' binary) ──
