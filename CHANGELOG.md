@@ -3,6 +3,26 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.2.0 — 2026-06-11
+
+### Fixed
+
+- `~` / `^` operators inside code are no longer mangled into `<sub>` / `<sup>`.
+  Subscript (`~x~`) and superscript (`^x^`) were applied by a raw-text pre-pass
+  that ran before the markdown was tokenised, so `~NOT` / `^XOR` operators in
+  fenced, indented and inline code got rewritten — e.g. a `PAD = ~abort & ~fcs`
+  code block rendered as `<sub>abort & </sub>fcs` (96 such mangles in one RTL
+  spec). Subscript / superscript are now code-aware `marked` inline extensions:
+  they never fire inside code, and the tokenizer requires a single
+  whitespace-free token (`~x~` / `^x^`), so spaced operator expressions
+  (`~a & ~b`, `a ^ b`) and lone operators (`2^24`, `~rst`) stay literal even in
+  prose. Genuine subscripts such as `SMD-S~0..3~` still render.
+
+### Tests
+
+- Added `test/code-operator.test.js` (operators-in-code regression) to the
+  `npm test` suite.
+
 ## v2.1.1 — 2026-06-11
 
 ### Fixed
