@@ -49,6 +49,7 @@ md2doc --html --pdf foo.md                 # render both formats
 md2doc *.md                                # batch: each file → temp + open
 
 md2doc foo.md --out bar.html               # write to a specific file (no auto-open)
+md2doc foo.md --out report.pdf             # --pdf inferred from the extension
 md2doc foo.md --out ./build/               # write to ./build/foo.html (no auto-open)
 md2doc *.md --out ./build/                 # batch into ./build/
 md2doc foo.md --out ./build/ --open        # explicit open with --out
@@ -62,9 +63,9 @@ also pass `--open`.
 
 | Flag | Meaning |
 |---|---|
-| `--html` | Render HTML (default if neither `--html` nor `--pdf` is given). |
+| `--html` | Render HTML (default when neither `--html`/`--pdf` nor a `.pdf` file `--out` is given; directory targets always default to HTML). |
 | `--pdf` | Render PDF. Combine with `--html` to render both. |
-| `--out <path>` | Output path. Ends with `/` or an existing directory → directory mode. Ends with `.html` / `.pdf` → file mode (single input only). Implies `--no-open` unless `--open` is also passed. |
+| `--out <path>` | Output path. Ends with `/` or an existing directory → directory mode. Ends with `.html` / `.pdf` → file mode (single input only). Without `--html`/`--pdf`, the extension selects the format. Implies `--no-open` unless `--open` is also passed. |
 | `--open` | Launch the platform viewer (`xdg-open` / `open` / `start`) after render. Default when `--out` is absent. |
 | `--no-open` | Skip the viewer launch. |
 | `--quiet` | Suppress per-file progress messages. |

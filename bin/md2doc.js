@@ -19,13 +19,15 @@ function printHelp() {
         '  md2doc --pdf <input.md>...                 Render to PDF instead',
         '  md2doc --html --pdf <input.md>             Render both formats',
         '  md2doc <input.md> --out <file.html>        Write to a specific file (no auto-open)',
+        '  md2doc <input.md> --out <file.pdf>         Write a PDF (format inferred from extension)',
         '  md2doc <input.md>... --out <dir>/          Write each to <dir>/<stem>.html (no auto-open)',
         '',
         'Flags:',
-        '  --html              Render HTML (default if neither --html nor --pdf is given).',
+        '  --html              Render HTML (default when neither --html/--pdf nor a .pdf file --out is given).',
         '  --pdf               Render PDF.',
         '  --out <path>        Output path. Ends with \'/\' or existing dir → directory mode.',
         '                      Ends with .html/.pdf → file mode (single input only).',
+        '                      Without --html/--pdf, the .html/.pdf extension selects the format.',
         '                      Implies --no-open unless --open is also passed.',
         '  --open              Launch the platform viewer after render (default when --out is absent).',
         '  --no-open           Skip the viewer launch.',
@@ -85,7 +87,9 @@ function parseArgs(argv) {
         process.exit(2);
     }
 
-    // Format defaults: neither flag → HTML only.
+    // Format defaults: neither flag → HTML only. formatsExplicit lets
+    // resolveOutputs infer the format from the --out extension instead.
+    const formatsExplicit = html || pdf;
     const formats = [];
     if (html || (!html && !pdf)) formats.push('html');
     if (pdf) formats.push('pdf');
@@ -98,7 +102,7 @@ function parseArgs(argv) {
         open = (out === null);
     }
 
-    return { inputs, formats, out, open, quiet };
+    return { inputs, formats, formatsExplicit, out, open, quiet };
 }
 
 function shortHash(absPath) {
@@ -123,8 +127,11 @@ function classifyOut(outValue) {
             return { kind: 'dir', ext: null };
         }
     } catch (_) { /* fall through */ }
-    if (/\.html$/i.test(outValue)) return { kind: 'file', ext: 'html' };
-    if (/\.pdf$/i.test(outValue))  return { kind: 'file', ext: 'pdf' };
+    // Require a stem character before the extension: a basename that is just
+    // '.pdf'/'.html' is extensionless to path.extname() in the renderer, so
+    // treat it as ambiguous here instead of failing late in the child.
+    if (/[^/\\]\.html$/i.test(outValue)) return { kind: 'file', ext: 'html' };
+    if (/[^/\\]\.pdf$/i.test(outValue))  return { kind: 'file', ext: 'pdf' };
     return { kind: 'ambiguous', ext: null };
 }
 
@@ -144,27 +151,34 @@ function resolveOutputs(args) {
     if (cls.kind === 'ambiguous') {
         process.stderr.write(
             'error: --out \'' + args.out + '\' must end with \'/\' to mean a directory ' +
-            'or \'.html\'/\'.pdf\' to mean a file\n'
+            'or \'.html\'/\'.pdf\' to mean a file ' +
+            '(the extension also selects the format when no --html/--pdf is given)\n'
         );
         process.exit(2);
     }
+
+    // No --html/--pdf given: the --out extension selects the format. classifyOut
+    // is the single authority for dir/file/ext — never re-derive from args.out here
+    // (an existing directory named e.g. foo.pdf must stay in dir mode).
+    const formats = (!args.formatsExplicit && cls.kind === 'file') ? [cls.ext] : args.formats;
 
     if (cls.kind === 'file') {
         if (args.inputs.length > 1) {
             process.stderr.write('error: --out file path is only valid with one input\n');
             process.exit(2);
         }
-        if (args.formats.length > 1) {
-            process.stderr.write('error: --out file path is not valid when producing both formats\n');
+        if (formats.length > 1) {
+            process.stderr.write('error: --out file path is not valid when producing both formats; use --out <dir>/ to write both\n');
             process.exit(2);
         }
-        if (cls.ext !== args.formats[0]) {
+        if (cls.ext !== formats[0]) {
             process.stderr.write(
-                'error: --out \'' + args.out + '\' extension does not match selected format\n'
+                'error: --out \'' + args.out + '\' extension does not match the --html/--pdf flag; ' +
+                'drop the flag to infer the format from --out, or make them agree\n'
             );
             process.exit(2);
         }
-        pairs.push({ input: args.inputs[0], format: args.formats[0], output: args.out });
+        pairs.push({ input: args.inputs[0], format: formats[0], output: args.out });
         return pairs;
     }
 
@@ -172,7 +186,7 @@ function resolveOutputs(args) {
     fs.mkdirSync(args.out, { recursive: true });
     for (const input of args.inputs) {
         const stem = path.basename(input).replace(/\.md$/i, '');
-        for (const format of args.formats) {
+        for (const format of formats) {
             pairs.push({
                 input,
                 format,

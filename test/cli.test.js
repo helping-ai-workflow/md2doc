@@ -233,3 +233,115 @@ console.log('Task 6 — error cases OK');
 }
 
 console.log('Task 7 — open/quiet matrix OK');
+
+// --- Task 8: --out format inference + uppercase .PDF tmp-path fix ---
+{
+    // Bare inference: no format flag, --out *.pdf selects PDF
+    const outFile = path.join(sandbox, 'inferred.pdf');
+    const r = run([mdA, '--out', outFile]);
+    assert.strictEqual(r.status, 0, 'flag-less --out .pdf exits 0 (format inferred)');
+    assert.ok(fs.existsSync(outFile), 'inferred PDF is written');
+    assert.strictEqual(fs.readFileSync(outFile).slice(0, 5).toString(), '%PDF-',
+        'inferred output is a real PDF');
+    fs.unlinkSync(outFile);
+}
+{
+    // Uppercase .PDF destination must survive tmp-file cleanup (lib tmp-path derivation
+    // was case-sensitive and deleted the freshly written PDF)
+    const outFile = path.join(sandbox, 'UPPER.PDF');
+    const r = run([mdA, '--pdf', '--out', outFile]);
+    assert.strictEqual(r.status, 0, '--pdf --out UPPER.PDF exits 0');
+    assert.ok(fs.existsSync(outFile), 'uppercase .PDF output still exists after tmp cleanup');
+    assert.strictEqual(fs.readFileSync(outFile).slice(0, 5).toString(), '%PDF-',
+        'uppercase .PDF output is a real PDF');
+    fs.unlinkSync(outFile);
+}
+{
+    // Inference + uppercase combined; original casing preserved in output name
+    const outFile = path.join(sandbox, 'INFER.PDF');
+    const r = run([mdA, '--out', outFile]);
+    assert.strictEqual(r.status, 0, 'flag-less --out INFER.PDF exits 0');
+    assert.ok(fs.existsSync(outFile), 'uppercase inferred PDF exists with original casing');
+    assert.strictEqual(fs.readFileSync(outFile).slice(0, 5).toString(), '%PDF-',
+        'uppercase inferred output is a real PDF');
+    fs.unlinkSync(outFile);
+}
+{
+    // Inference composes with --quiet
+    const outFile = path.join(sandbox, 'quiet-inferred.pdf');
+    const r = run([mdA, '--out', outFile, '--quiet']);
+    assert.strictEqual(r.status, 0, 'inferred PDF with --quiet exits 0');
+    assert.strictEqual(r.stdout, '', '--quiet suppresses stdout on inferred render');
+    assert.ok(fs.existsSync(outFile), 'quiet inferred PDF exists');
+    fs.unlinkSync(outFile);
+}
+{
+    // Help documents the inference (exit 0 already pinned by Task 1)
+    const r = run(['--help']);
+    assert.match(r.stdout, /extension selects the format/,
+        '--help documents --out extension inference');
+}
+
+console.log('Task 8 — --out format inference OK');
+
+// --- Task 9: inference guardrails (regression pins — green before and after) ---
+{
+    // Explicit flag still wins: --html + .pdf out stays an error
+    const r = run([mdA, '--html', '--out', path.join(sandbox, 'y.pdf')]);
+    assert.strictEqual(r.status, 2, '--html --out .pdf still exits 2');
+    assert.match(r.stderr, /extension does not match/, 'explicit-flag mismatch is explained');
+}
+{
+    // Error precedence: both-formats beats mismatch
+    const r = run([mdA, '--html', '--pdf', '--out', path.join(sandbox, 'z.pdf')]);
+    assert.strictEqual(r.status, 2, '--html --pdf --out .pdf exits 2');
+    assert.match(r.stderr, /both formats|two formats|not valid when producing both/i,
+        'both-formats error wins');
+    assert.doesNotMatch(r.stderr, /extension does not match/, 'mismatch error does not also fire');
+}
+{
+    // Existing directory literally named *.pdf shadows inference → dir mode, HTML default
+    const trap = path.join(sandbox, 'trap.pdf');
+    fs.mkdirSync(trap);
+    const r = run([mdA, '--out', trap]);
+    assert.strictEqual(r.status, 0, 'existing dir named trap.pdf exits 0');
+    assert.ok(fs.existsSync(path.join(trap, 'sample.html')), 'dir mode writes HTML inside trap.pdf/');
+    assert.ok(!fs.existsSync(path.join(trap, 'sample.pdf')), 'no PDF inferred for a directory target');
+    fs.unlinkSync(path.join(trap, 'sample.html'));
+    fs.rmdirSync(trap);
+}
+{
+    // Trailing separator forces dir mode even with a .pdf-looking name
+    const outDir = path.join(sandbox, 'slash.pdf') + path.sep;
+    const r = run([mdA, '--out', outDir]);
+    assert.strictEqual(r.status, 0, 'trailing-sep .pdf name exits 0 as dir');
+    assert.ok(fs.existsSync(path.join(sandbox, 'slash.pdf', 'sample.html')), 'dir mode writes HTML');
+    assert.ok(!fs.existsSync(path.join(sandbox, 'slash.pdf', 'sample.pdf')), 'no PDF inferred for dir target');
+    fs.unlinkSync(path.join(sandbox, 'slash.pdf', 'sample.html'));
+    fs.rmdirSync(path.join(sandbox, 'slash.pdf'));
+}
+{
+    // Multi-input + file --out still rejected; inference does not relax it
+    const mdB = path.join(sandbox, 'multi.md');
+    fs.writeFileSync(mdB, '# Multi\n', 'utf8');
+    const r = run([mdA, mdB, '--out', path.join(sandbox, 'm.pdf')]);
+    assert.strictEqual(r.status, 2, 'multi-input flag-less file --out exits 2');
+    assert.match(r.stderr, /only valid with one input/, 'multi-input is still explained');
+    fs.unlinkSync(mdB);
+}
+{
+    // .htm stays ambiguous — no alias
+    const r = run([mdA, '--out', path.join(sandbox, 'x.htm')]);
+    assert.strictEqual(r.status, 2, '.htm --out exits 2');
+    assert.match(r.stderr, /must end with/, '.htm is still ambiguous');
+}
+{
+    // Dotfile-style --out '.pdf' (extension only, no stem) is ambiguous, rejected
+    // at argument time — path.extname('.pdf') is '' so the renderer could never
+    // dispatch it anyway.
+    const r = run([mdA, '--out', path.join(sandbox, '.pdf')]);
+    assert.strictEqual(r.status, 2, 'dotfile .pdf --out exits 2');
+    assert.match(r.stderr, /must end with/, 'dotfile-only extension is ambiguous');
+}
+
+console.log('Task 9 — inference guardrails OK');
