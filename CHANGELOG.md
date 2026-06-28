@@ -3,6 +3,31 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.0 — 2026-06-28
+
+### Added
+
+- **KaTeX math rendering.** ` ```math ` fenced blocks, `$$…$$` display math and
+  `$…$` inline math now render as typeset math via server-side KaTeX
+  (`katex.renderToString` + `marked-katex-extension`). Rendering is fully offline
+  and self-contained: the KaTeX stylesheet is inlined with all woff2 fonts
+  base64-embedded, so a math-bearing HTML displays and prints (including the
+  puppeteer PDF path) with no network. The math stylesheet is injected only when
+  a document actually contains math, so math-free output stays byte-identical.
+  Unsupported expressions degrade to red error text (`throwOnError: false`)
+  instead of crashing the render.
+
+### Changed
+
+- **TOC items are now single-line.** Long headings no longer wrap; they are
+  clipped with an ellipsis (full text on hover via `title=`, and always visible
+  in the new breadcrumb). The TOC left edge stays anchored while the document
+  scrolls — it never auto-scrolls horizontally. Row spacing was tightened.
+- **Sticky breadcrumb replaces the static `Contents` header.** The sidebar header
+  now shows the ancestor heading chain of the current scroll position (VSCode
+  sticky-scroll style), stacked and clickable, updating as you scroll. The
+  expand / collapse controls moved to their own row above it.
+
 ## v2.2.0 — 2026-06-11
 
 ### Fixed
