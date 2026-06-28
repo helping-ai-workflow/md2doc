@@ -1,6 +1,6 @@
 {
   "name": "@helping-ai-workflow/md2doc",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support",
   "keywords": [
     "markdown",
@@ -27,7 +27,9 @@
   },
   "dependencies": {
     "@hpcc-js/wasm-graphviz": "1.22.0",
+    "katex": "^0.16.47",
     "marked": "^14.1.0",
+    "marked-katex-extension": "^5.1.10",
     "mermaid": "11.15.0",
     "puppeteer": "^24.15.0",
     "wavedrom": "3.5.0"

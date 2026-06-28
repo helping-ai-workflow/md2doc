@@ -45,15 +45,15 @@ assert.match(html, /<nav class="toc"/, 'expected TOC markup');
 assert.match(html, /<ul class="toc-list toc-list-level-1">/, 'expected nested TOC root list');
 assert.match(
   html,
-  /<details>\s*<summary><a href="#top">Top<\/a><\/summary>/,
+  /<details>\s*<summary><a href="#top" title="Top">Top<\/a><\/summary>/,
   'expected level-1 TOC section to be collapsed by default'
 );
 assert.match(
   html,
-  /<details>\s*<summary><a href="#heading-ref-and-code">Heading ref and code<\/a><\/summary>/,
+  /<details>\s*<summary><a href="#heading-ref-and-code" title="Heading ref and code">Heading ref and code<\/a><\/summary>/,
   'expected nested TOC section to be collapsible'
 );
-assert.match(html, /<a href="#deeper-section">Deeper Section<\/a>/, 'expected deeper heading to appear in TOC');
+assert.match(html, /<a href="#deeper-section" title="Deeper Section">Deeper Section<\/a>/, 'expected deeper heading to appear in TOC');
 assert.match(
   html,
   /<h2 id="heading-ref-and-code" class="heading-with-anchor[^"]*"[^>]*>Heading <a href="#top">ref<\/a> and <code>code<\/code><a class="heading-anchor" href="#heading-ref-and-code" aria-label="Link to this section">#<\/a><\/h2>/,
@@ -228,9 +228,25 @@ assert.match(
 );
 assert.match(
   html,
-  /body\[data-toc-collapsed\] \.reader-tools,\s*body\[data-toc-collapsed\] \.search-results,\s*body\[data-toc-collapsed\] \.toc \> \.toc-list,\s*body\[data-toc-collapsed\] \.toc-title \{\s*display: none;\s*\}/,
+  /body\[data-toc-collapsed\] \.reader-tools,\s*body\[data-toc-collapsed\] \.search-results,\s*body\[data-toc-collapsed\] \.toc \> \.toc-list,\s*body\[data-toc-collapsed\] \.toc-breadcrumb \{\s*display: none;\s*\}/,
   'expected collapsed inner-element hide rules'
 );
+
+// TOC no-wrap + sticky breadcrumb (2026-06-28)
+// req-1: single-line items, ellipsis, no word-break wrap
+assert.match(html, /\.toc a \{[^}]*white-space: nowrap;[^}]*\}/, 'expected .toc a white-space: nowrap');
+assert.match(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'expected .toc a text-overflow: ellipsis');
+assert.doesNotMatch(html, /\.toc a \{[^}]*word-break: break-word/, '.toc a should no longer wrap via word-break');
+// tooltip: full text on hover for clipped items
+assert.match(html, /<a href="#deeper-section" title="Deeper Section">Deeper Section<\/a>/, 'expected title= on TOC link');
+// req-3: sticky breadcrumb replaces the static Contents header
+assert.match(html, /<div class="toc-breadcrumb" data-toc-breadcrumb/, 'expected breadcrumb container');
+assert.doesNotMatch(html, /class="toc-title"/, 'Contents span replaced by breadcrumb');
+assert.match(html, /\.toc-breadcrumb \{/, 'expected breadcrumb CSS block');
+assert.match(html, /\.toc-breadcrumb a \{/, 'expected breadcrumb anchor CSS');
+// runtime population driven by scroll-sync
+assert.match(html, /function renderBreadcrumb\(/, 'expected renderBreadcrumb function');
+assert.match(html, /renderBreadcrumb\(sectionId\)/, 'expected renderBreadcrumb invoked from sync');
 assert.match(html, /localStorage\.getItem\('md2doc\.toc\.collapsed'\)/, 'expected localStorage read');
 assert.match(html, /localStorage\.setItem\('md2doc\.toc\.collapsed'/, 'expected localStorage write');
 assert.match(html, /toggleAttribute\('data-toc-collapsed'\)/, 'expected toggle handler');
@@ -307,6 +323,55 @@ assert.match(dhtml, /<div class="graphviz"><svg/, 'dot block rendered to inline 
 assert.doesNotMatch(dhtml, /data-graphviz-src=/, 'placeholder fully replaced by SVG');
 assert.doesNotMatch(dhtml, /dot render failed/, 'no spawnSync ENOENT warning');
 console.log('md2doc dot WASM test passed');
+
+// ── KaTeX math: ```math fence + $$ display + $ inline, offline fonts ──
+{
+  const mathMd = path.join(tmpDir, 'math.md');
+  const mathHtml = path.join(tmpDir, 'math.html');
+  fs.writeFileSync(mathMd, [
+    '# Math',
+    '',
+    '```math',
+    'Q = RoPE(Q_{raw})',
+    '```',
+    '',
+    'Display: $$a^2 + b^2 = c^2$$',
+    '',
+    'Inline value $x_i$ here.',
+    '',
+    'A bad one: $\\nosuchmacro{x}$ should not crash.',
+    '',
+  ].join('\n'), 'utf8');
+  const mr = spawnSync('node', ['lib/md2doc.js', mathMd, mathHtml], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+  assert.strictEqual(mr.status, 0, 'math fixture renders (bad expr w/ throwOnError:false does not crash)');
+  const mh = fs.readFileSync(mathHtml, 'utf8');
+  // fenced ```math → katex, not a raw code block
+  assert.match(mh, /class="katex/, 'fenced math renders to katex');
+  assert.doesNotMatch(mh, /<code class="language-math">Q = RoPE/, 'fenced math not left as raw code block');
+  // $$ display wrapper
+  assert.match(mh, /katex-display/, 'display $$ renders katex-display');
+  // fence + display + inline → at least 3 katex spans
+  assert.ok((mh.match(/class="katex/g) || []).length >= 3, 'fence + display + inline all rendered');
+  // offline: CSS injected, fonts base64-embedded, no relative/CDN font refs
+  assert.match(mh, /<style data-md2doc-math>/, 'katex style injected when math present');
+  assert.match(mh, /url\(data:font\/woff2;base64,/, 'fonts base64-embedded');
+  assert.doesNotMatch(mh, /url\(fonts\//, 'no relative font path remains (all inlined)');
+  assert.doesNotMatch(mh, /cdn\.jsdelivr\.net\/npm\/katex/, 'no KaTeX CDN reference');
+  console.log('md2doc katex math test passed');
+}
+
+// ── math-free doc must NOT inject katex CSS; currency/shell stays literal ──
+{
+  const nm = path.join(tmpDir, 'nomath.md');
+  const nmHtml = path.join(tmpDir, 'nomath.html');
+  fs.writeFileSync(nm, ['# No math', '', 'Just prose, costs $5 to $10 today and $PATH stays literal.', ''].join('\n'), 'utf8');
+  const nr = spawnSync('node', ['lib/md2doc.js', nm, nmHtml], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+  assert.strictEqual(nr.status, 0, 'math-free fixture renders');
+  const nmh = fs.readFileSync(nmHtml, 'utf8');
+  assert.doesNotMatch(nmh, /class="katex/, 'no katex in math-free doc (currency not mis-parsed)');
+  assert.doesNotMatch(nmh, /data-md2doc-math/, 'no katex CSS injected in math-free doc');
+  console.log('md2doc katex conditional-injection test passed');
+}
 
 // ── --bake-svg produces inert SVG with no diagram-engine runtime ──
 // Capability-gated: needs a usable Chromium. Logs a visible skip if absent —
