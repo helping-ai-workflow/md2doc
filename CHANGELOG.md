@@ -3,6 +3,45 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.1 — 2026-08-20
+
+### Fixed
+
+- **Markdown images now render.** `![alt](assets/pic.png)` was emitted with its
+  relative src verbatim, but the HTML is written somewhere else entirely (the OS
+  temp dir by default, or wherever `--out` points), so the browser resolved the
+  path against the wrong directory and every local image silently failed to
+  load. Local image references are now resolved against the **source markdown's**
+  directory and inlined as base64 `data:` URIs — the same self-contained
+  principle the embedded CSS / KaTeX fonts already follow, and the only form
+  that also survives the puppeteer PDF path (which renders from its own temp
+  HTML). Applies to markdown `![...]()` images and to author-written `<img>`
+  tags (common in specs for `width=`).
+  - Covers `src` **and** `srcset` (a browser prefers `srcset`, so leaving it
+    relative breaks the image even when `src` is inlined), on `<img>` and on
+    `<source>` inside `<picture>`.
+  - Remote (`http(s)://`, protocol-relative) and pre-baked `data:` srcs pass
+    through untouched. Only known URL schemes count as remote, so a filename
+    containing `:` stays a local file.
+  - Percent-encoded names (`my%20pic.png`), `./`-prefixed and absolute paths all
+    resolve. A `?query` is dropped; an SVG `#fragment` is kept on the data URI.
+  - Only known image extensions are inlined — `![x](../../id_rsa)` is left
+    alone and warned about rather than base64'd into a document meant to be
+    shared. An `<img>` inside an HTML comment is skipped for the same reason.
+  - A reference with no file on disk keeps its original src and warns on stderr
+    (`[WARN] image not found, left as-is: ...`) instead of failing the render.
+  - Inlining an image larger than 4 MB warns on stderr; the render still
+    succeeds.
+  - `alt` / `title` keep marked's own escaping — no `&amp;amp;` double-escape —
+    and any image that is *not* inlined renders through marked's stock
+    `image()` renderer, byte-identical to before.
+
+### Note
+
+Each reference carries its own copy of the payload, so a document that shows the
+same 1 MB diagram three times grows by ~4 MB. That is base64's floor for a
+self-contained file; the PDF output is unaffected (Chromium dedupes on decode).
+
 ## v2.4.0 — 2026-06-28
 
 ### Added

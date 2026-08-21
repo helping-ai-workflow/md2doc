@@ -75,6 +75,29 @@ also pass `--open`.
 | `--version`, `-v` | Print version. |
 | `--help`, `-h` | Print help. |
 
+### Images
+
+Local images referenced from the markdown are resolved against the **markdown file's own
+directory** and inlined into the output as base64 `data:` URIs, so the rendered HTML / PDF
+stays self-contained wherever it is written (the OS temp dir by default) and however it is
+later copied or mailed.
+
+```markdown
+![block diagram](assets/block.png)        <!-- inlined -->
+<img src="assets/block.png" width="400">  <!-- inlined, attributes preserved -->
+![remote](https://example.com/x.png)      <!-- left as a remote URL -->
+```
+
+`srcset` and `<source>` inside `<picture>` are inlined too. Only known image
+extensions are inlined, so `![x](../../id_rsa)` is left alone rather than
+base64'd into a document you may be about to share.
+
+A reference with no file on disk keeps its original `src` and prints
+`[WARN] image not found, left as-is: ...` on stderr; the render still succeeds.
+
+Each reference carries its own copy of the payload, so re-using one large diagram
+in several places grows the HTML accordingly. PDF output is unaffected.
+
 ### Migration from md2html / md2pdf (v1.x → v2.0.0)
 
 | Old | New |
