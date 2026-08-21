@@ -10,12 +10,12 @@ Single-file renderer. Everything lives in `lib/md2doc.js`:
 | `marked` block | Custom renderer (`code` / `heading` / `image` / `html` / `paragraph` / `listitem` / `blockquote` / `table`) + TOC builder + section index | lines 108–375 |
 | Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | just above `let bodyHtml` |
 | `<style>` block | Embedded CSS for HTML output | lines 380–820 |
-| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer | lines 850–1300 |
+| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring | lines 850–1300 |
 | Output dispatch | `.html` write or puppeteer-driven `.pdf` export | lines 1300–end |
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `cli.test.js`, `code-operator.test.js`; mostly regex assertions against rendered HTML. Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `cli.test.js`, `code-operator.test.js`; mostly regex assertions against rendered HTML. Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 ## Release Flow
 
