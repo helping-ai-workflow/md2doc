@@ -3,6 +3,25 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.2 — 2026-08-21
+
+### Fixed
+
+- **Zooming no longer loses your place.** Browser zoom (and any window resize)
+  reflows the text column but leaves the pixel scroll offset untouched, so the
+  passage being read slid out of view — measured at 252 px of drift on a real
+  spec for one zoom step, with the browser's own scroll anchoring contributing
+  nothing. The reader runtime now remembers which block sat at the top of the
+  reading column and restores it after the reflow, re-applying it a frame later
+  so late-settling images and diagrams cannot knock it loose again.
+  - The anchor is re-captured on scroll, throttled to one `requestAnimationFrame`
+    and resolved with `elementFromPoint` (falling back to a binary search over
+    the headings), so it costs one hit-test per painted frame rather than a
+    walk of the document.
+  - A height-only resize — a mobile browser hiding its toolbar, a devtools dock —
+    reflows nothing and is deliberately left alone, since correcting the scroll
+    there would only jerk the page.
+
 ## v2.4.1 — 2026-08-20
 
 ### Fixed
