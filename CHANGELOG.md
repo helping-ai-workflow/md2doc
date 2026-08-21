@@ -3,6 +3,26 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.3 — 2026-08-21
+
+### Added
+
+- **Click a diagram or image to open it full-screen.** Spec artwork is drawn far
+  wider than the text column, so the inline copy is unreadably small. Clicking
+  any image, Mermaid, Graphviz or WaveDrom graphic now pops it into a modal
+  stage that zooms and scrolls.
+  - Wheel scrolls, shift+wheel scrolls sideways, ctrl/cmd+wheel zooms around the
+    pointer, and dragging pans. Toolbar buttons and the `+` `-` `0` `1` keys do
+    the same; `Esc`, the ✕ and a click on the backdrop close it.
+  - Zoom resizes the artwork rather than applying a CSS transform, so the scroll
+    extent grows with it — under a transform the enlarged edges cannot be
+    scrolled into view at all.
+  - Vector art opens scaled to fill the window (a 480px-wide waveform is exactly
+    what needs enlarging, and SVG upscales losslessly); a raster image opens at
+    actual size, where going past 100% only buys blur.
+  - An image wrapped in a link stays a link. The overlay is built on first use,
+    is hidden in print, and never reaches the PDF output.
+
 ## v2.4.2 — 2026-08-21
 
 ### Fixed

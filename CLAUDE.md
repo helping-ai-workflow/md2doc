@@ -10,12 +10,12 @@ Single-file renderer. Everything lives in `lib/md2doc.js`:
 | `marked` block | Custom renderer (`code` / `heading` / `image` / `html` / `paragraph` / `listitem` / `blockquote` / `table`) + TOC builder + section index | lines 108–375 |
 | Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | just above `let bodyHtml` |
 | `<style>` block | Embedded CSS for HTML output | lines 380–820 |
-| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring | lines 850–1300 |
+| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox | lines 850–1300 |
 | Output dispatch | `.html` write or puppeteer-driven `.pdf` export | lines 1300–end |
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `cli.test.js`, `code-operator.test.js`; mostly regex assertions against rendered HTML. Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`; mostly regex assertions against rendered HTML. Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 ## Release Flow
 
@@ -44,6 +44,18 @@ The custom table renderer emits `<colgroup>` + per-cell `class="cell-narrow|cell
 2. The heuristic uses **data rows only** for `hasWhitespace` / `maxTokenLen` / `avgCellLen`. Headers like "Clock Domain" contain whitespace but are not representative of cell content. Header is used as fallback only when the column has no data rows.
 
 If you change either rule, re-run `npm test` and visually re-check `mac_merge_tx_spec.md` rendered output — that's the realistic stress test for the heuristic.
+
+## Lightbox Zoom — Do NOT Use `transform: scale()`
+
+`.lightbox-canvas` is resized in px (`width = naturalWidth * zoom`) and its child is
+`width: 100%; height: auto`. That is deliberate: a CSS transform scales the painted
+pixels but leaves the scroll extent at the pre-zoom size, so the enlarged edges become
+unreachable — which defeats the whole point of the overlay. `test/lightbox.test.js`
+asserts `stage.scrollWidth > stage.clientWidth` after zooming, and a transform-based
+rewrite fails it.
+
+`.lightbox-stage` needs `position: relative`: it must be the canvas's `offsetParent`
+for the cursor-anchored zoom maths.
 
 ## CSS Cascade — Read Before Editing
 
