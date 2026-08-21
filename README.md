@@ -98,6 +98,25 @@ A reference with no file on disk keeps its original `src` and prints
 Each reference carries its own copy of the payload, so re-using one large diagram
 in several places grows the HTML accordingly. PDF output is unaffected.
 
+### Viewing diagrams
+
+Click any image, Mermaid, Graphviz or WaveDrom graphic in the rendered HTML to open it
+full-screen.
+
+| Input | Action |
+|---|---|
+| Wheel / shift+wheel | Scroll vertically / horizontally |
+| Ctrl (or ⌘) + wheel | Zoom around the pointer |
+| Drag | Pan |
+| `+` `-` | Zoom in / out |
+| `0` `1` | Fit to window / actual size |
+| Double-click | Toggle fit ↔ 100% |
+| `Esc`, ✕, backdrop click | Close |
+
+Vector diagrams open scaled to fill the window; raster images open at actual size. An
+image wrapped in a link stays a link. The overlay is hidden in print and never reaches
+the PDF output.
+
 ### Migration from md2html / md2pdf (v1.x → v2.0.0)
 
 | Old | New |
