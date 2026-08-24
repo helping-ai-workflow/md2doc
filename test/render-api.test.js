@@ -24,5 +24,23 @@ const { renderMarkdown } = require('../lib/md2doc.js');
   const out2 = await renderMarkdown(md, mdPath, {});
   assert.strictEqual(out2.bodyHtml, out.bodyHtml, 'renders are deterministic');
 
+  // Regression: marked.use() has no de-dup, so installing the subscript /
+  // superscript / KaTeX extensions inside renderMarkdown() (instead of once
+  // at require time) would unshift fresh copies into marked's shared global
+  // extension registry on every call — unbounded growth in a long-lived
+  // process (the editor server calls renderMarkdown() once per edit).
+  const { marked } = require('marked');
+  const mdWithExtensions = '# T\n\nSub ~x~, sup ^y^, math $z$.\n';
+  await renderMarkdown(mdWithExtensions, mdPath, {});
+  const countAfterFirst = (marked.defaults.extensions.inline || []).length;
+  await renderMarkdown(mdWithExtensions, mdPath, {});
+  const countAfterSecond = (marked.defaults.extensions.inline || []).length;
+  await renderMarkdown(mdWithExtensions, mdPath, {});
+  const countAfterThird = (marked.defaults.extensions.inline || []).length;
+  assert.strictEqual(countAfterSecond, countAfterFirst,
+    'marked inline extension registry must not grow between renders');
+  assert.strictEqual(countAfterThird, countAfterSecond,
+    'marked inline extension registry must not grow between renders');
+
   console.log('render-api.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });
