@@ -3,6 +3,14 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.6.1 — 2026-08-24
+
+### Changed
+
+- **TOC horizontal scrollbar.** The TOC list now shows a thin native horizontal
+  scrollbar when a title overflows, so the mouse can drag it directly —
+  shift+wheel still works. Doubles as the "more text clipped" hint.
+
 ## v2.6.0 — 2026-08-24
 
 ### Added

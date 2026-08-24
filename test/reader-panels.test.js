@@ -136,11 +136,13 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
         overflows: list.scrollWidth > list.clientWidth,
         scrollLeft: list.scrollLeft,
         overflowX: getComputedStyle(list).overflowX,
+        scrollbarWidth: getComputedStyle(list).scrollbarWidth,
       };
     });
     assert.ok(tocState.overflows, 'long deep title makes the TOC horizontally overflow');
     assert.strictEqual(tocState.scrollLeft, 0, 'TOC starts anchored at the left');
-    assert.strictEqual(tocState.overflowX, 'hidden', 'no horizontal scrollbar (overflow-x hidden)');
+    assert.strictEqual(tocState.overflowX, 'auto', 'horizontal scrollbar available for mouse drag (overflow-x auto)');
+    assert.strictEqual(tocState.scrollbarWidth, 'thin', 'thin scrollbars keep the sidebar quiet');
 
     const afterShiftWheel = await page.evaluate(() => {
       const list = document.querySelector('.toc > .toc-list');
