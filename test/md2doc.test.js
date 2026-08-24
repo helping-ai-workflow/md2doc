@@ -201,21 +201,17 @@ assert.match(
   'expected sticky zebra-stripe override'
 );
 
-// Task 5 (layout) — A1: TOC adaptive width
+// Task 5 (layout) — A1: TOC adaptive width (default via CSS var fallback so the
+// drag-splitter can override it; see reader-panels.test.js for the drag runtime)
 assert.match(
   html,
-  /\.reader-sidebar \{[^}]*flex: 0 1 300px;[^}]*\}/,
-  'expected sidebar flex 0 1 300px'
+  /\.reader-sidebar \{[^}]*flex: 0 0 auto;[^}]*\}/,
+  'expected sidebar flex 0 0 auto'
 );
 assert.match(
   html,
-  /\.reader-sidebar \{[^}]*width: clamp\(220px, 22vw, 300px\);[^}]*\}/,
-  'expected sidebar width clamp'
-);
-assert.match(
-  html,
-  /\.reader-sidebar \{[^}]*min-width: 220px;[^}]*\}/,
-  'expected sidebar min-width'
+  /\.reader-sidebar \{[^}]*width: var\(--md2doc-sidebar-w, clamp\(220px, 22vw, 300px\)\);[^}]*\}/,
+  'expected sidebar width var with clamp fallback'
 );
 
 // Task 6 (layout) — A2: TOC collapse toggle + persistence
@@ -233,9 +229,10 @@ assert.match(
 );
 
 // TOC no-wrap + sticky breadcrumb (2026-06-28)
-// req-1: single-line items, ellipsis, no word-break wrap
+// req-1: single-line items, no word-break wrap. Ellipsis was replaced by the
+// shift+wheel horizontal peek (reader-panels.test.js) — full natural width.
 assert.match(html, /\.toc a \{[^}]*white-space: nowrap;[^}]*\}/, 'expected .toc a white-space: nowrap');
-assert.match(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'expected .toc a text-overflow: ellipsis');
+assert.match(html, /\.toc a \{[^}]*width: max-content;[^}]*\}/, 'expected .toc a natural width for horizontal peek');
 assert.doesNotMatch(html, /\.toc a \{[^}]*word-break: break-word/, '.toc a should no longer wrap via word-break');
 // tooltip: full text on hover for clipped items
 assert.match(html, /<a href="#deeper-section" title="Deeper Section">Deeper Section<\/a>/, 'expected title= on TOC link');

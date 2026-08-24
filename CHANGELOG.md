@@ -3,6 +3,27 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.6.0 — 2026-08-24
+
+### Added
+
+- **Drag the sidebar/content divider to resize.** The 32px gutter between the
+  sidebar and the document is now a splitter: invisible until hovered (a thin
+  blue line + `col-resize` cursor), drag to set the sidebar width (180px–50vw),
+  double-click to reset. The chosen width persists across reloads via
+  `localStorage`. Hidden in the collapsed rail, the mobile drawer, and print.
+- **TOC horizontal peek with shift+wheel.** Deep headings no longer ellipsize —
+  titles keep their natural single-line width and the list clips them at the
+  edge (no horizontal scrollbar). Shift+wheel scrolls the TOC sideways to read
+  the clipped tails; the position stays where you leave it and defaults to the
+  far left.
+
+### Changed
+
+- **Compact search results.** The search label is now just "Search", snippets
+  shrink to ~25 chars before / ~45 after the hit, clamp to two lines, and the
+  matched keyword is highlighted with `<mark>`.
+
 ## v2.5.0 — 2026-08-21
 
 ### Added
