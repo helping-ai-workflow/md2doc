@@ -3,6 +3,25 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.8.1 — 2026-08-24
+
+### Fixed
+
+- **Mermaid diagrams lost their theme colors in the popup.** Mermaid scopes its
+  embedded CSS to the svg's `#id`; the lightbox clone dropped the id and the
+  theme died. The clone now takes a `lightbox-<id>` rename with the scoped
+  selectors rewritten to match.
+- **Dragging a shape left a ghost at the old spot.** During an `m`-mode gesture
+  the raster clone reverts to the unannotated base image (the overlay renders
+  the live shapes); release re-bakes.
+
+### Changed
+
+- **Stroke widths are now office-like absolute values.** S/M/L = 1/2/4 px at
+  fit zoom (was a multiplier on an auto-thickened base that got chunky on
+  fit-enlarged vector art). Arrow heads and the selection UI scale down
+  accordingly.
+
 ## v2.8.0 — 2026-08-24
 
 ### Added

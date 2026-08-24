@@ -65,6 +65,11 @@ fs.writeFileSync(mdPath, [
   'digraph { rankdir=LR; alpha -> beta -> gamma -> delta; }',
   '```',
   '',
+  '```mermaid',
+  'graph LR',
+  '  A[Start] --> B[End]',
+  '```',
+  '',
   '[![linked](assets/wide.png)](https://example.com/target)',
   '',
 ].join('\n'), 'utf8');
@@ -168,6 +173,26 @@ const ctrlWheel = (deltaY) => `(() => {
     assert.ok(svgOpen.canvasWidth > svgNatural,
       'an SVG smaller than the stage is scaled up to fit (' + svgOpen.canvasWidth + ' > ' + svgNatural + ')');
     assert.ok(svgOpen.canvasWidth <= svgOpen.clientWidth, 'fitted SVG still fits the stage');
+    await page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 200));
+
+    // A mermaid diagram keeps its theme colors in the popup. Mermaid's <style>
+    // is scoped to the svg's #id — the clone must keep those selectors alive.
+    await page.click('main.content .mermaid svg');
+    await new Promise((r) => setTimeout(r, 200));
+    const mermaidFills = await page.evaluate(() => {
+      const pick = (svg) => {
+        const node = svg.querySelector('.node rect, .node polygon, .node path');
+        return node ? getComputedStyle(node).fill : null;
+      };
+      return {
+        inline: pick(document.querySelector('main.content .mermaid svg')),
+        popup: pick(document.querySelector('.lightbox-canvas svg')),
+      };
+    });
+    assert.ok(mermaidFills.inline, 'inline mermaid node found');
+    assert.strictEqual(mermaidFills.popup, mermaidFills.inline,
+      'popup mermaid keeps the inline theme colors (' + mermaidFills.popup + ' vs ' + mermaidFills.inline + ')');
     await page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 200));
 
