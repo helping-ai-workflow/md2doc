@@ -3,6 +3,18 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.7.0 — 2026-08-24
+
+### Added
+
+- **Lightbox annotations.** Mark up any popped-out diagram or image with the
+  shared-whiteboard shortcut set: `f` freehand, `e` ellipse, `r` rectangle,
+  `l` line, `a` arrow, `m` select/move/resize (Del deletes), `Ctrl+Z`/`Ctrl+Y`
+  undo/redo, and a Clear button (one undoable op). Shapes live in image
+  coordinates so they ride every zoom, survive close/reopen of the same image
+  within the page visit, and reset on reload. Esc is layered: cancel the
+  in-progress stroke → drop the selection → close the lightbox.
+
 ## v2.6.1 — 2026-08-24
 
 ### Changed
