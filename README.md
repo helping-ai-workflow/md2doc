@@ -171,7 +171,10 @@ byte-for-byte untouched, whether you save with zero edits or after several.
 of a diagram type (Mermaid or WaveDrom) that the document didn't already contain
 when the page was loaded, that diagram library was never embedded into the page, so
 the new block renders as raw source until you reload the browser tab (no need to
-restart `md2doc --edit`).
+restart `md2doc --edit`). The same applies to math: if a committed edit introduces
+the document's *first* `math` fence or `$…$`/`$$…$$` expression, the KaTeX
+stylesheet was never injected into the page, so the new equation renders unstyled
+(raw KaTeX markup, no CSS) until you reload the tab.
 
 `--edit` does not support directory inputs yet (planned for a later phase) and
 cannot be combined with `--html` / `--pdf` / `--out` / `--bake-svg`.

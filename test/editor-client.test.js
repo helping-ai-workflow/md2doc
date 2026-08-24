@@ -39,4 +39,14 @@ for (const needle of ['__ED__', 'Ctrl', 'beforeunload', '/api/save',
                       '__md2docInitDiagrams', 'ed-raw']) {
   assert.ok(src.includes(needle), `client.js must reference ${needle}`);
 }
+
+// -- structural guard: these sources get inlined into a `<script>...</script>`
+// tag by lib/editor/server.js (see LINEOPS_SRC and clientJs in the GET
+// /edit/:id handler). A literal `</script` substring anywhere in either
+// source — even inside a string literal or comment — would prematurely
+// close that tag in the served HTML and break the page.
+const lineopsSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'lineops.js'), 'utf8');
+assert.ok(!/<\/script/i.test(src), 'client.js must not contain a literal </script sequence');
+assert.ok(!/<\/script/i.test(lineopsSrc), 'lineops.js must not contain a literal </script sequence');
+
 console.log('editor-client.test.js OK');
