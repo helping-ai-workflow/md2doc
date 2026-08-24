@@ -25,6 +25,11 @@ module m; endmodule
 graph TD; a-->b;
 ```
 
+```
+plain fence, no language tag
+second line of plain text
+```
+
 - outer
   - inner 1
   - inner 2

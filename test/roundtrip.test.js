@@ -5,7 +5,7 @@ const path = require('path');
 const http = require('http');
 const assert = require('assert');
 const { createEditorServer } = require('../lib/editor/server.js');
-const { extractBlockSource, commitEdit } = require('../lib/editor/client.js');
+const { commitEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 
 function post(port, p, body) {
