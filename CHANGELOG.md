@@ -3,6 +3,26 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.8.0 — 2026-08-24
+
+### Added
+
+- **Annotations stay on the inline figure after Esc.** Closing the lightbox
+  overlays the drawings on the in-document image/diagram (same-viewBox svg,
+  click-through). In-memory only — reload starts clean; Clear + Esc removes it.
+- **Stroke color and width pickers.** Five color swatches (red/blue/green/
+  orange/black) and S/M/L widths. New shapes take the current style; with a
+  shape selected in `m` mode the pickers restyle it, undoably. Arrow heads
+  follow the stroke color.
+- **⧉ Copy button.** Composites artwork + annotations to a PNG on the
+  clipboard — works for raster images and vector diagrams alike (vector at 2x).
+
+### Fixed
+
+- **Right-click "Copy image" in the lightbox missed the drawings.** The shown
+  raster clone is now re-baked (image + shapes → PNG data URI) on every
+  committed op, so the native copy includes the annotations.
+
 ## v2.7.0 — 2026-08-24
 
 ### Added
