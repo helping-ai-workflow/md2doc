@@ -3,6 +3,13 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **`--edit` mode** — browser-based raw-block editing with byte-exact
+  round-trip, explicit save (mtime-guarded), undo/redo.
+
 ## v2.8.1 — 2026-08-24
 
 ### Fixed

@@ -127,6 +127,55 @@ the PDF output.
 | `md2html foo.md --open` | `md2doc foo.md` (open is default) |
 | `md2html *.md` (output next to source) | `md2doc *.md --out ./build/` (or accept temp output) |
 
+## Editing (`--edit`)
+
+```bash
+md2doc --edit foo.md              # serve foo.md in the browser editor, open a tab
+md2doc --edit foo.md bar.md       # one tab per file
+md2doc --edit foo.md --port 4000  # pin the server to a specific port
+md2doc --edit foo.md --no-open    # start the server without launching a browser tab
+```
+
+`--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
+your browser with a **✎** gutter button next to every top-level block (heading,
+paragraph, table, code fence, list, blockquote, ...). Click it to edit that block's
+raw Markdown source in place.
+
+| Key / control | Action |
+|---|---|
+| **✎** gutter | Open that block's raw source for editing |
+| `Ctrl`/`⌘` + `Enter`, or **✓** | Commit the edit and re-render the block |
+| `Esc`, or **✕** | Cancel the edit, discard the change |
+| `Ctrl`/`⌘` + `S` | Save the document to disk |
+| `Ctrl`/`⌘` + `Z` | Undo the last committed edit |
+| `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo |
+
+**One editor open at a time.** Clicking a second block's gutter while another
+block's editor is still open is refused; the already-open editor flashes so you
+can find it. Commit or cancel it first.
+
+**Save is explicit, not autosave**, and is guarded against clobbering changes made
+outside the browser: each save carries the file's last-known modification time, and
+if the file on disk has changed since the page loaded it (edited elsewhere, or saved
+from another tab), the save is rejected with a conflict banner instead of silently
+overwriting — reload the page to pick up the newer content, then re-apply your edit.
+A failed render or save (e.g. the server process died, or invalid content) also
+surfaces as a dismissible banner rather than silently doing nothing.
+
+**Fidelity guarantee**: only the lines inside the block(s) you actually commit are
+rewritten. Every other line — including whitespace-sensitive formatting like padded
+table columns, trailing spaces, and the file's original EOF-newline state — is left
+byte-for-byte untouched, whether you save with zero edits or after several.
+
+**Known Phase-1 limitation**: if a committed edit introduces the *first* occurrence
+of a diagram type (Mermaid or WaveDrom) that the document didn't already contain
+when the page was loaded, that diagram library was never embedded into the page, so
+the new block renders as raw source until you reload the browser tab (no need to
+restart `md2doc --edit`).
+
+`--edit` does not support directory inputs yet (planned for a later phase) and
+cannot be combined with `--html` / `--pdf` / `--out` / `--bake-svg`.
+
 ## Supported diagram types
 
 Embedded in fenced code blocks inside your Markdown:
