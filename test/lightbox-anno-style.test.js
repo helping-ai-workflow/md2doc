@@ -138,12 +138,14 @@ async function canvasOrigin(page) {
     let styled = await page.evaluate(() => {
       const gs = document.querySelectorAll('.lightbox-anno g[data-anno-id]');
       const el = gs[gs.length - 1].firstChild;
-      return { stroke: el.getAttribute('stroke'), width: el.getAttribute('stroke-width') };
+      return { stroke: el.getAttribute('stroke'), width: Number(el.getAttribute('stroke-width')) };
     });
     assert.strictEqual(styled.stroke, '#3b82f6', 'new shape uses the picked color');
-    const baseWidth = Number(styled.width);
+    // Widths are office-like absolute values: M (default) renders ~2px at fit.
+    assert.ok(Math.abs(styled.width * c2.scale - 2) < 0.35,
+      'default M stroke renders ~2px at fit zoom (' + styled.width * c2.scale + ')');
 
-    await page.click('.lightbox-bar [data-anno-width="1.8"]');
+    await page.click('.lightbox-bar [data-anno-width="4"]');
     await page.keyboard.press('e');
     await drag(page, c2.x + 40, c2.y + 160, c2.x + 160, c2.y + 240);
     styled = await page.evaluate(() => {
@@ -151,8 +153,8 @@ async function canvasOrigin(page) {
       const el = gs[gs.length - 1].firstChild;
       return { width: Number(el.getAttribute('stroke-width')) };
     });
-    assert.ok(Math.abs(styled.width - baseWidth * 1.8) < 0.11,
-      'new shape uses the picked width (' + styled.width + ' vs ' + baseWidth * 1.8 + ')');
+    assert.ok(Math.abs(styled.width * c2.scale - 4) < 0.6,
+      'L stroke renders ~4px at fit zoom (' + styled.width * c2.scale + ')');
 
     // Restyle a selected shape, undoably: select blue rect, click green.
     await page.keyboard.press('m');
@@ -230,6 +232,26 @@ async function canvasOrigin(page) {
       return overlay ? Array.from(overlay.children).filter((el) => el.tagName !== 'defs').length : 0;
     });
     assert.strictEqual(inline, 0, 'cleared annotations leave no inline shapes');
+
+    // ── No ghost while dragging: the raster clone reverts to the base image
+    // during an m-mode gesture (the overlay alone shows the live shapes).
+    await page.click('main.content .anno-inline-wrap img');
+    await new Promise((r) => setTimeout(r, 400));
+    await page.keyboard.press('m');
+    const target = await page.evaluate(() => {
+      const el = document.querySelector('.lightbox-anno g[data-anno-id] rect');
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.mouse.move(target.x, target.y);
+    await page.mouse.down();
+    await page.mouse.move(target.x + 40, target.y + 20, { steps: 4 });
+    const midSrc = await page.evaluate(() => document.querySelector('.lightbox-canvas img').src);
+    assert.strictEqual(midSrc, srcBefore, 'while dragging, the clone shows the unannotated base image (no ghost)');
+    await page.mouse.up();
+    await new Promise((r) => setTimeout(r, 400));
+    const endSrc = await page.evaluate(() => document.querySelector('.lightbox-canvas img').src);
+    assert.notStrictEqual(endSrc, srcBefore, 'release re-bakes the annotated clone');
 
     console.log('md2doc lightbox-anno-style test passed');
   } finally {
