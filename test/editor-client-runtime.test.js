@@ -17,6 +17,14 @@
 // Finding 4: only one raw-edit editor may be open at a time; opening a
 //   second block while one is open is refused, and the open one is not
 //   silently discarded.
+// Finding 4 regression (post-review round 2): undo()/redo() replace the
+//   ENTIRE .content subtree without checking whether some block's editor is
+//   still open. That swap detaches the open textarea without ever running
+//   its own restore() (the only place `activeEditor` used to get cleared),
+//   so `activeEditor` was left pointing at a node no longer in the
+//   document — every later gutter click, on ANY block, then hit the
+//   "a different editor is open" refusal forever. Silent total lockout,
+//   recoverable only by reloading the page.
 
 const fs = require('fs');
 const os = require('os');
@@ -31,7 +39,9 @@ const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'lib', 'editor', 'client.js')
 async function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-rt-'));
   const mdPath = path.join(dir, 'doc.md');
-  const original = ['# Heading', '', 'First paragraph.', '', 'Second paragraph.', ''].join('\n');
+  const original = [
+    '# Heading', '', 'First paragraph.', '', 'Second paragraph.', '', 'Third paragraph.', '',
+  ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
   const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
   return { dir, mdPath, srv, url: srv.urlFor(mdPath) };
@@ -254,6 +264,176 @@ async function newPage(browser) {
 
       await page.close();
       console.log('fix 4: single-editor-at-a-time policy enforced — OK');
+    }
+
+    // ── Finding 4 regression: undo() must resolve an open editor first,
+    //    not silently detach it and lock out every gutter forever ────────
+    // Exact repro from review: commit an edit on A, open B's editor
+    // (leave it UNMODIFIED), blur out of the textarea (so the keydown
+    // handler's `inTextarea` gate lets Ctrl+Z through), then Ctrl+Z.
+    // Whatever the fix does with B (auto-cancel since it has no unsaved
+    // keystrokes, per the chosen policy — or refuse+flash, the other
+    // policy branch), the hard requirement either way is: no lockout —
+    // block C's gutter must still open an editor afterward.
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      assert.ok(ids.length >= 3, 'fixture must have at least 3 paragraph blocks for this repro');
+      const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
+      const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
+      const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
+
+      // commit an edit on A
+      await page.hover(selA);
+      await page.click(selA + ' .ed-gutter');
+      await page.waitForSelector(selA + ' textarea.ed-raw');
+      await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = 'A-COMMITTED-EDIT';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, selA);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Control');
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('A-COMMITTED-EDIT'),
+        { timeout: 5000 }
+      );
+
+      // open B's editor and leave it untouched, then blur off the textarea
+      await page.hover(selB);
+      await page.click(selB + ' .ed-gutter');
+      await page.waitForSelector(selB + ' textarea.ed-raw');
+      await page.click('body'); // focus leaves the textarea -> Ctrl+Z gate passes
+
+      // global Ctrl+Z
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300)); // let any async render settle
+
+      // Whichever policy branch fired, B must not be left dangling: either
+      // it was auto-cancelled (no textarea, live gutter) or it's still open
+      // WITH the refusal flash visible (never neither).
+      const bStillOpen = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB);
+      if (bStillOpen) {
+        assert.ok(
+          await page.evaluate((s) => document.querySelector(s).classList.contains('ed-attn'), selB),
+          'if undo was refused because B looked modified, B must carry the visible refusal cue'
+        );
+      }
+
+      // The hard requirement regardless of branch: NO LOCKOUT. Block C's
+      // gutter must still be able to open an editor.
+      await page.hover(selC);
+      await page.click(selC + ' .ed-gutter');
+      await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
+      assert.ok(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
+        'FIX 4-REGRESSION: undo() must not permanently lock out every block\'s gutter ' +
+        '(activeEditor left dangling on a detached node)'
+      );
+      await page.keyboard.press('Escape');
+
+      await page.close();
+      console.log('fix 4-regression: undo() does not lock out other editors (unmodified B) — OK');
+    }
+
+    // ── Same repro, but B HAS unsaved keystrokes: undo must be refused
+    //    (not silently discard B's typed text), while still not locking
+    //    out block C afterward.
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
+      const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
+      const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
+
+      await page.hover(selA);
+      await page.click(selA + ' .ed-gutter');
+      await page.waitForSelector(selA + ' textarea.ed-raw');
+      await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = 'A-COMMITTED-EDIT-2';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, selA);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Control');
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('A-COMMITTED-EDIT-2'),
+        { timeout: 5000 }
+      );
+
+      // open B and actually type something (unsaved modification)
+      await page.hover(selB);
+      await page.click(selB + ' .ed-gutter');
+      await page.waitForSelector(selB + ' textarea.ed-raw');
+      await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = ta.value + ' UNSAVED-B-KEYSTROKES';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, selB);
+      await page.click('body');
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+
+      // B's unsaved text must survive — undo must have been refused, not
+      // silently discarded B's keystrokes.
+      const bTextareaValue = await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        return ta ? ta.value : null;
+      }, selB);
+      assert.ok(
+        bTextareaValue && bTextareaValue.includes('UNSAVED-B-KEYSTROKES'),
+        'FIX 4-REGRESSION: undo() must not silently discard an open editor\'s unsaved keystrokes'
+      );
+
+      // B is still legitimately open (undo refused rather than discarding
+      // it) — the pre-existing Finding-4 single-editor policy correctly
+      // still refuses C's gutter while B remains open. This is expected,
+      // RECOVERABLE state, not the lockout bug: cancelling B (Esc) must
+      // free the editor back up immediately, proving `activeEditor` is
+      // still a live, resolvable reference and not a detached node.
+      await page.hover(selC);
+      await page.click(selC + ' .ed-gutter');
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
+        false,
+        'C should still be correctly refused while B (unsaved) remains open — this is the existing ' +
+        'single-editor policy working as intended, not the lockout bug'
+      );
+
+      // Cancel B via its ✕ button — Esc is wired on the textarea itself and
+      // focus is currently on `body` (blurred earlier), so the button is
+      // the reliable way to close it here.
+      await page.click(selB + ' .ed-cancel');
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 3000 }, selB);
+
+      // Now that B is closed, the editor slot is free again — the hard
+      // "no permanent lockout" requirement: C's gutter must open normally.
+      await page.hover(selC);
+      await page.click(selC + ' .ed-gutter');
+      await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
+      assert.ok(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
+        'FIX 4-REGRESSION: once B is resolved, block C must be editable again — no permanent lockout'
+      );
+
+      await page.close();
+      console.log('fix 4-regression: undo() refuses (does not discard) a modified open editor, recoverable — OK');
     }
 
     console.log('editor-client-runtime.test.js OK');
