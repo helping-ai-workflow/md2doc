@@ -2328,12 +2328,17 @@ async function saveAndRead(page, mdPath) {
 
     // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
     //    a word via the selection toolbar, edit a table cell, Ctrl+S — all
-    //    three edits land on disk and every untouched line stays
-    //    byte-identical to what setupTableDoc() wrote. Own isolated doc
-    //    (setupTableDoc() is generic — not table-only despite its name),
-    //    same reasoning as every other table scenario above.
+    //    three edits land on disk, and the saved file matches the ORIGINAL
+    //    doc with ONLY those two lines (paragraph, Alice's row) replaced —
+    //    a full-string reconstruction + assert.strictEqual (review fix: a
+    //    prior version used .includes() substring checks for "untouched",
+    //    which cannot catch reordering, dropped/inserted blank lines, or
+    //    block-boundary drift across this multi-edit chain; only a
+    //    reconstructed full-string comparison actually proves that). Own
+    //    isolated doc (setupTableDoc() is generic — not table-only despite
+    //    its name), same reasoning as every other table scenario above.
     {
-      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
         '# E2E Doc', '',
         'Type target paragraph text here.', '',
         '| Name | Note |',
@@ -2387,19 +2392,26 @@ async function saveAndRead(page, mdPath) {
         // 4) Ctrl+S.
         const fileText = await saveAndRead(page, tmdPath);
 
-        // All three edits present.
-        assert.ok(/Type \*\*target\*\* paragraph text here\. EXTRA/.test(fileText),
-          'e2e: the typed text AND the bold must both land in the saved paragraph line, got:\n' + fileText);
-        assert.ok(fileText.includes('| Alice! | hello |'),
-          'e2e: the table cell edit must land in the saved source, got:\n' + fileText);
+        // Full-string reconstruction (review fix): the original doc's lines
+        // with ONLY the two edited lines (paragraph at index 2, Alice's row
+        // at index 6 — see the setupTableDoc() array above) replaced by
+        // their expected post-edit content. assert.strictEqual on the whole
+        // joined text implicitly checks line COUNT (no dropped/inserted
+        // blank lines) and every untouched line byte-for-byte (no
+        // reordering, no block-boundary drift) — a substring .includes()
+        // check cannot prove either of those.
+        const expectedLines = torig.split('\n');
+        assert.strictEqual(expectedLines[2], 'Type target paragraph text here.',
+          'sanity: expected-lines index 2 must be the paragraph line');
+        assert.strictEqual(expectedLines[6], '| Alice | hello |',
+          'sanity: expected-lines index 6 must be Alice\'s row');
+        expectedLines[2] = 'Type **target** paragraph text here. EXTRA';
+        expectedLines[6] = '| Alice! | hello |';
+        const expectedFull = expectedLines.join('\n');
 
-        // Untouched lines stay byte-identical to what setupTableDoc() wrote.
-        assert.ok(fileText.includes('# E2E Doc'), 'heading must stay untouched');
-        assert.ok(fileText.includes('| Name | Note |'), 'table header must stay untouched');
-        assert.ok(fileText.includes('|---|---|'), 'table separator must stay untouched');
-        assert.ok(fileText.includes('| Bob | world |'), 'the untouched table row must stay byte-identical');
-        assert.ok(fileText.includes('Untouched paragraph should stay identical.'),
-          'the untouched trailing paragraph must stay byte-identical');
+        assert.strictEqual(fileText, expectedFull,
+          'e2e: the saved file must equal the original doc with ONLY the paragraph and table-cell ' +
+          'edits applied — every other line (including blank-line spacing) byte-identical, got:\n' + fileText);
 
         await page.close();
         console.log('e2e: type paragraph + bold via toolbar + edit table cell + Ctrl+S — OK');
