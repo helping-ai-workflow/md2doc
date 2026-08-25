@@ -36,7 +36,7 @@
   },
   "scripts": {
     "preinstall": "node scripts/preinstall.js",
-    "test": "node test/md2doc.test.js && node test/blockmap.test.js && node test/images.test.js && node test/scroll-anchor.test.js && node test/lightbox.test.js && node test/lightbox-anno.test.js && node test/lightbox-anno-style.test.js && node test/reader-panels.test.js && node test/cli.test.js && node test/code-operator.test.js && node test/render-api.test.js && node test/lineops.test.js && node test/editmode-render.test.js && node test/editmode-wavedrom-reinit.test.js && node test/editor-server.test.js && node test/cli-edit.test.js && node test/open-viewer.test.js && node test/editor-client.test.js && node test/editor-client-runtime.test.js && node test/roundtrip.test.js && node test/editor-server-throw.test.js && node test/editor-reader-rebind.test.js"
+    "test": "node test/md2doc.test.js && node test/blockmap.test.js && node test/images.test.js && node test/scroll-anchor.test.js && node test/lightbox.test.js && node test/lightbox-anno.test.js && node test/lightbox-anno-style.test.js && node test/reader-panels.test.js && node test/cli.test.js && node test/code-operator.test.js && node test/render-api.test.js && node test/lineops.test.js && node test/editmode-render.test.js && node test/editmode-wavedrom-reinit.test.js && node test/editor-server.test.js && node test/cli-edit.test.js && node test/open-viewer.test.js && node test/editor-client.test.js && node test/editor-client-runtime.test.js && node test/roundtrip.test.js && node test/editor-server-throw.test.js && node test/editor-reader-rebind.test.js && node test/inline-md.test.js"
   },
   "repository": {
     "type": "git",
