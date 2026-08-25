@@ -2326,6 +2326,88 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
+    //    a word via the selection toolbar, edit a table cell, Ctrl+S — all
+    //    three edits land on disk and every untouched line stays
+    //    byte-identical to what setupTableDoc() wrote. Own isolated doc
+    //    (setupTableDoc() is generic — not table-only despite its name),
+    //    same reasoning as every other table scenario above.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '# E2E Doc', '',
+        'Type target paragraph text here.', '',
+        '| Name | Note |',
+        '|---|---|',
+        '| Alice | hello |',
+        '| Bob | world |', '',
+        'Untouched paragraph should stay identical.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        // 1) type in the paragraph — append text via the WYSIWYG editor
+        // (caret starts at the end, per openWysiwygEditor()'s placeCaretAtEnd()).
+        const paraSel = await paragraphSelByText(page, 'Type target paragraph');
+        const paraEditEl = paraSel + ' > *';
+        await openWysiwyg(page, paraSel);
+        await page.keyboard.type(' EXTRA');
+
+        // 2) bold a word via the floating selection toolbar.
+        await selectWordInEl(page, paraEditEl, 'target');
+        await page.waitForSelector('.ed-seltb');
+        await page.click('.ed-seltb-b');
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const st = document.querySelector(s + ' strong');
+            return st ? st.textContent : null;
+          }, paraEditEl),
+          'target',
+          'e2e: Bold via the toolbar must wrap the selected word in <strong>'
+        );
+
+        // Commit the paragraph session (plain Enter — mousedown preventDefault
+        // on the toolbar button kept focus/selection on paraEditEl).
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
+          { timeout: 5000 }
+        );
+
+        // 3) edit a table cell.
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Alice');
+        await page.keyboard.type('!');
+        await page.evaluate(() => document.body.click()); // click outside commits the table session
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Alice!'),
+          { timeout: 5000 }
+        );
+
+        // 4) Ctrl+S.
+        const fileText = await saveAndRead(page, tmdPath);
+
+        // All three edits present.
+        assert.ok(/Type \*\*target\*\* paragraph text here\. EXTRA/.test(fileText),
+          'e2e: the typed text AND the bold must both land in the saved paragraph line, got:\n' + fileText);
+        assert.ok(fileText.includes('| Alice! | hello |'),
+          'e2e: the table cell edit must land in the saved source, got:\n' + fileText);
+
+        // Untouched lines stay byte-identical to what setupTableDoc() wrote.
+        assert.ok(fileText.includes('# E2E Doc'), 'heading must stay untouched');
+        assert.ok(fileText.includes('| Name | Note |'), 'table header must stay untouched');
+        assert.ok(fileText.includes('|---|---|'), 'table separator must stay untouched');
+        assert.ok(fileText.includes('| Bob | world |'), 'the untouched table row must stay byte-identical');
+        assert.ok(fileText.includes('Untouched paragraph should stay identical.'),
+          'the untouched trailing paragraph must stay byte-identical');
+
+        await page.close();
+        console.log('e2e: type paragraph + bold via toolbar + edit table cell + Ctrl+S — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
