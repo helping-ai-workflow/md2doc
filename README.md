@@ -137,48 +137,144 @@ md2doc --edit foo.md --no-open    # start the server without launching a browser
 ```
 
 `--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
-your browser. Click anywhere inside a top-level block (heading, paragraph, table,
-code fence, list, blockquote, ...) to select it — a floating edit bar appears
-anchored above the block, and the block gets a solid outline. Click **✎ 編輯** in
-the bar to edit that block's raw Markdown source in place. Clicking a diagram or
-image still opens the zoom lightbox, unchanged; it doesn't select the block.
+your browser. Click any top-level block (heading, paragraph, table, etc.) to select
+it; a floating edit bar appears above and the block shows a solid outline. For many
+blocks you can edit directly in place (WYSIWYG); click **✎ 編輯** or use the edit bar
+to access raw Markdown editing when needed.
+
+### Inline editing: paragraphs, headings, tables
+
+Click a **paragraph**, **heading**, or **table** to edit its content directly in the
+rendered document — the text appears with bold/italic/code marks visible while you
+type, but no Markdown syntax characters show. Enter commits your changes; Esc
+reverts them.
+
+| Block type | Edit mode |
+|---|---|
+| Paragraph | Direct WYSIWYG: type and format text, selection toolbar for B/I/code/link |
+| Heading | WYSIWYG with depth control: ± buttons increase/decrease the heading level |
+| Table | WYSIWYG cell editing with Tab/Shift+Tab navigation, table-structure buttons for row/column ops and alignment |
+| Code fence, list, blockquote | Raw Markdown (`✎ 編輯` button) |
+| Image, HTML, math | Raw Markdown (auto-opens when block contains unsupported content) |
+
+### Paragraph and heading editing
+
+Click any paragraph or heading to edit it in place. The rendered marks (bold, italic,
+code, links) show while you type — type `**text**` and it renders as **text** instead
+of showing the asterisks.
+
+**Selection toolbar**: when you select text inside a paragraph or heading, a toolbar
+appears with formatting buttons:
+
+| Button | Action |
+|---|---|
+| **B** | Toggle bold (`**text**`) |
+| **I** | Toggle italic (`*text*`) |
+| **`**| Wrap selection in backticks (`` `code` ``) |
+| **[](url)** | Wrap selection as a link; click to edit the URL |
+
+**Key shortcuts**:
+
+| Key | Action |
+|---|---|
+| Enter | Commit and close the editor |
+| Shift + Enter | Insert a line break within the paragraph |
+| Esc | Revert and close the editor |
+
+### Table editing
+
+Click any table to enter edit mode. Cells become editable one at a time.
+
+**Cell navigation**:
+
+| Key | Action |
+|---|---|
+| Click a cell | Switch to that cell and start editing |
+| Tab | Move to the next cell (→) |
+| Shift + Tab | Move to the previous cell (←) |
+| Enter | Insert a line break within the cell (does NOT commit the table) |
+| Esc | Revert the entire table session (all cells) and discard all changes |
+
+**Table structure** (buttons in the edit bar when a table is selected):
+
+| Button | Action |
+|---|---|
+| **＋列** | Insert an empty row after the focused row |
+| **－列** | Delete the focused row (last row and header row are protected) |
+| **＋欄** | Insert an empty column after the focused column |
+| **－欄** | Delete the focused column (last column is protected) |
+| **對齊** | Cycle column alignment: left → center → right → left |
+
+Clicking outside the table, opening a different block, or using undo/redo commits
+the table session automatically (if changes were made) and saves it to disk on the
+next explicit `Ctrl+S`.
+
+**Edited tables emit minimal form**: tables that you edit are saved with single-space
+padding and minimal separators (`|---|`) to keep the Markdown readable and
+version-control-friendly.
+
+### Raw Markdown editing
+
+Click **✎ 編輯** on the edit bar, or select a block whose content can't round-trip
+through WYSIWYG (e.g., contains images, unstyled HTML, or math), to edit the block's
+raw Markdown source in a textarea. Use this to make changes that WYSIWYG doesn't
+support.
 
 | Key / control | Action |
 |---|---|
-| Click a block | Select it — shows the floating edit bar |
-| **✎ 編輯** (in the edit bar) | Open the selected block's raw source for editing |
 | `Ctrl`/`⌘` + `Enter`, or **✓** | Commit the edit and re-render the block |
 | `Esc`, or **✕** | Cancel the edit, discard the change |
+
+### Whole-document controls
+
+| Key / control | Action |
+|---|---|
+| Click a block | Select it (shows edit bar) |
 | Click outside any block, or `Esc` | Dismiss the edit bar / deselect |
 | `Ctrl`/`⌘` + `S` | Save the document to disk |
 | `Ctrl`/`⌘` + `Z` | Undo the last committed edit |
 | `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo |
+| Click a different block (while editing) | Auto-commit the current block if changed, then open the new block |
 
-**One editor open at a time.** Opening a second block's editor (via its edit bar)
-while another block's editor is still open is refused; the already-open editor
-flashes so you can find it. Commit or cancel it first.
+### Save and conflict handling
 
-**Save is explicit, not autosave**, and is guarded against clobbering changes made
-outside the browser: each save carries the file's last-known modification time, and
-if the file on disk has changed since the page loaded it (edited elsewhere, or saved
+**Save is explicit, not autosave**. Your changes are committed to the undo stack
+immediately when you press Enter or click outside a block, but they're not written
+to disk until you press `Ctrl+S`.
+
+**Conflict detection**: each save carries the file's last-known modification time.
+If the file on disk has changed since the page loaded (edited elsewhere, or saved
 from another tab), the save is rejected with a conflict banner instead of silently
 overwriting — reload the page to pick up the newer content, then re-apply your edit.
-A failed render or save (e.g. the server process died, or invalid content) also
-surfaces as a dismissible banner rather than silently doing nothing.
 
-**Fidelity guarantee**: only the lines inside the block(s) you actually commit are
-rewritten. Every other line — including whitespace-sensitive formatting like padded
-table columns, trailing spaces, and the file's original EOF-newline state — is left
-byte-for-byte untouched, whether you save with zero edits or after several.
+### Fidelity guarantee
 
-**Known Phase-1 limitation**: if a committed edit introduces the *first* occurrence
-of a diagram type (Mermaid or WaveDrom) that the document didn't already contain
-when the page was loaded, that diagram library was never embedded into the page, so
-the new block renders as raw source until you reload the browser tab (no need to
-restart `md2doc --edit`). The same applies to math: if a committed edit introduces
-the document's *first* `math` fence or `$…$`/`$$…$$` expression, the KaTeX
-stylesheet was never injected into the page, so the new equation renders unstyled
-(raw KaTeX markup, no CSS) until you reload the tab.
+Only the lines inside the block(s) you actually commit are rewritten. Every other
+line — including whitespace-sensitive formatting like padded table columns, trailing
+spaces, and the file's original EOF-newline state — is left byte-for-byte untouched,
+whether you save with zero edits or after several. This applies both to unchanged
+blocks and to blocks you open and then revert.
+
+### Click-to-switch auto-commit
+
+When you click a different block while one is open:
+- If the current block is **unchanged**, it closes silently (same as Esc).
+- If the current block is **changed**, it commits automatically, then the new block opens.
+
+This means switching blocks flows naturally — you never get stuck waiting to confirm
+or cancel before opening the next one.
+
+### Known Phase-1 limitation
+
+If a committed edit introduces the *first* occurrence of a diagram type (Mermaid or
+WaveDrom) that the document didn't already contain when the page was loaded, that
+diagram library was never embedded into the page, so the new block renders as raw
+source until you reload the browser tab (no need to restart `md2doc --edit`). The
+same applies to math: if a committed edit introduces the document's *first* `math`
+fence or `$…$`/`$$…$$` expression, the KaTeX stylesheet was never injected into the
+page, so the new equation renders unstyled until you reload the tab.
+
+---
 
 `--edit` does not support directory inputs yet (planned for a later phase) and
 cannot be combined with `--html` / `--pdf` / `--out` / `--bake-svg`.

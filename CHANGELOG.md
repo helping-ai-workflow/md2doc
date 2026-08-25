@@ -9,6 +9,10 @@ All notable changes to this project will be documented here. This project adhere
 
 - **`--edit` mode** — browser-based raw-block editing with byte-exact
   round-trip, explicit save (mtime-guarded), undo/redo.
+- **In-place WYSIWYG editing** (paragraphs, headings, tables) with selection toolbar
+  (bold, italic, code, link); Tab/Shift+Tab cell navigation; table row/column ops
+  and alignment cycling. Edited tables emit gate-compatible minimal form (single-space
+  padding, minimal separators). Click-to-switch auto-commits modified blocks.
 
 ## v2.8.1 — 2026-08-24
 
