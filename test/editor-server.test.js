@@ -38,8 +38,11 @@ function req(port, method, p, body) {
     assert.ok(page.body.includes('"lines"'));
     assert.ok(page.body.includes('ed-block'));
     assert.ok(page.body.includes('md2docInlineMd'), 'Task 3: inline-md runtime inlined');
-    assert.ok(page.body.indexOf('md2docInlineMd') < page.body.indexOf('/*client*/'),
-      'inline-md must be injected before the client runtime (client depends on window.md2docInlineMd)');
+    assert.ok(page.body.includes('md2docTableMd'), 'Task 5: table-md runtime inlined');
+    assert.ok(page.body.indexOf('md2docInlineMd') < page.body.indexOf('md2docTableMd'),
+      'inline-md must be injected before table-md (table-md require()s it in node / reads it off window in the browser)');
+    assert.ok(page.body.indexOf('md2docTableMd') < page.body.indexOf('/*client*/'),
+      'table-md must be injected before the client runtime (client depends on window.md2docTableMd)');
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');

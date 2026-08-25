@@ -175,6 +175,57 @@ async function paragraphSelByText(page, prefix) {
   return '.ed-block[data-block-id="' + id + '"]';
 }
 
+// ── Phase-2 Task 5 (table cell WYSIWYG) helpers ──────────────────────────
+// Table scenarios use their OWN isolated doc/server (via setupTableDoc()
+// below) rather than the shared `original` fixture above: the shared doc's
+// many scenarios locate paragraph blocks by fixed array index (ids[0..3])
+// or by relying on the trailing image block staying LAST — inserting table
+// fixtures anywhere in that doc risks disturbing one of those invariants.
+// Isolation also means each table scenario's undo stack / save state can
+// never leak into another.
+async function setupTableDoc(rows) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-table-'));
+  const mdPath = path.join(dir, 'doc.md');
+  const original = rows.join('\n');
+  fs.writeFileSync(mdPath, original, 'utf8');
+  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
+}
+
+// Locates a table block by its 0-based position among ALL table blocks in
+// document order — mirrors paragraphSelByText()'s role for tables (fixture
+// docs below deliberately have >1 table so the "second, untouched table
+// stays byte-identical" requirement is actually exercised).
+async function tableBlockSel(page, index) {
+  const id = await page.evaluate((i) => {
+    const els = document.querySelectorAll('.ed-block[data-block-type="table"]');
+    return els[i] ? els[i].getAttribute('data-block-id') : null;
+  }, index);
+  assert.ok(id, 'table block not found at index ' + index);
+  return '.ed-block[data-block-id="' + id + '"]';
+}
+
+// Real (trusted-ish, coordinate-based) mouse click on whichever TH/TD in
+// `tableSel` has EXACT trimmed text `text` — a genuine bubbling click event,
+// same as an actual user click, unlike calling .click() on the DOM node
+// directly (which drives the same production code path but skips real
+// mouse/focus semantics entirely).
+async function clickCellWithText(page, tableSel, text) {
+  const box = await page.evaluate((ts, t) => {
+    const table = document.querySelector(ts);
+    const cells = table.querySelectorAll('th, td');
+    for (const c of cells) {
+      if (c.textContent.trim() === t) {
+        const r = c.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }
+    }
+    return null;
+  }, tableSel, text);
+  assert.ok(box, 'cell not found with text: ' + text);
+  await page.mouse.click(box.x, box.y);
+}
+
 (async () => {
   const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
@@ -1693,6 +1744,250 @@ async function paragraphSelByText(page, prefix) {
 
       await page.close();
       console.log('sel-toolbar regression: rerenderAll() resets toolbar state, no leaked listener — OK');
+    }
+
+    // ── Phase-2 Task 5: table cell WYSIWYG editing ──────────────────────
+    // click cell -> type -> Tab to next cell -> type -> click outside
+    // commits the WHOLE session as ONE line-range replacement: both edits
+    // land in minimal form, and a SECOND, untouched table in the same doc
+    // stays byte-identical (no session -> no rewrite).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '# Tables', '',
+        '| Name | Note |',
+        '|---|---|',
+        '| Alice | hello |',
+        '| Bob | world |',
+        '',
+        '| X | Y |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const tableCount = await page.evaluate(
+          () => document.querySelectorAll('.ed-block[data-block-type="table"]').length);
+        assert.strictEqual(tableCount, 2, 'fixture sanity: two table blocks');
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Alice');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const ae = document.activeElement;
+            return !!ae && ae.getAttribute('contenteditable') === 'true' &&
+              ae.classList.contains('ed-wys') && ae.textContent.trim() === 'Alice';
+          }),
+          true,
+          'clicking a cell must make it the active contenteditable edit root'
+        );
+        await page.keyboard.type('!'); // caret placed at end -> appends
+
+        await page.keyboard.press('Tab');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const ae = document.activeElement;
+            return ae && ae.classList.contains('ed-wys') ? ae.textContent.trim() : null;
+          }),
+          'hello',
+          'Tab must move the active cell to the next cell in row order'
+        );
+        await page.keyboard.type('!!');
+
+        await page.evaluate(() => document.body.click()); // click outside the table
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Alice!'),
+          { timeout: 5000 }
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-wys')),
+          false,
+          'no cell must remain contenteditable after the session commits'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 300));
+        const fileText = fs.readFileSync(tmdPath, 'utf8');
+
+        assert.ok(fileText.includes('| Name | Note |'), 'header row unchanged, got:\n' + fileText);
+        assert.ok(fileText.includes('|---|---|'), 'unpadded separator row, got:\n' + fileText);
+        assert.ok(fileText.includes('| Alice! | hello!! |'),
+          'both cell edits land in ONE minimal-form row, got:\n' + fileText);
+        assert.ok(fileText.includes('| Bob | world |'),
+          'the untouched row of the EDITED table stays byte-identical, got:\n' + fileText);
+
+        const table2Src = torig.split('\n').slice(7, 10).join('\n'); // '| X | Y |\n|---|---|\n| 1 | 2 |'
+        assert.ok(fileText.includes(table2Src),
+          'a second, untouched table in the same doc must stay byte-identical (no session -> no rewrite), got:\n' + fileText);
+
+        await page.close();
+        console.log('table WYSIWYG: click cell -> type -> Tab -> type -> click outside commits minimal form; other table untouched — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Enter inside a cell inserts a literal <br> — not a session commit (a
+    // table cell session has no Enter-commits-session gesture at all). The
+    // caret is placed MID-TEXT (via a Range, not a click) before pressing
+    // Enter — a deterministic split, unlike positioning at the very end of
+    // a cell's content, where Chrome's contenteditable caret-after-a-
+    // trailing-node placement is itself ambiguous (the SAME reason the
+    // pre-existing Shift+Enter scenario above only checks presence, not
+    // exact ordering, of its two text segments).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Col |',
+        '|---|',
+        '| onetwo |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'onetwo');
+        await page.evaluate((s) => {
+          const cell = document.querySelector(s);
+          const textNode = cell.firstChild;
+          const r = document.createRange();
+          r.setStart(textNode, 3); // between "one" and "two"
+          r.setEnd(textNode, 3);
+          const sel2 = window.getSelection();
+          sel2.removeAllRanges();
+          sel2.addRange(r);
+        }, table0 + ' .ed-wys');
+        await page.keyboard.press('Enter');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const cell = document.querySelector('.ed-wys');
+            return cell ? cell.innerHTML : null;
+          }),
+          'one<br>two',
+          'Enter must insert a <br> node splitting the cell exactly at the caret, not commit the session'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('textarea.ed-raw')),
+          false,
+          'Enter must NOT commit (no raw editor, the cell session stays open)'
+        );
+
+        await page.evaluate(() => document.body.click());
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('one<br>two'),
+          { timeout: 5000 }
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 300));
+        const fileText = fs.readFileSync(tmdPath, 'utf8');
+        assert.ok(fileText.includes('| one<br>two |'),
+          'a cell newline must be emitted as the literal <br>, got:\n' + fileText);
+
+        await page.close();
+        console.log('table WYSIWYG: Enter in a cell emits literal <br> in the saved source — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Esc reverts the WHOLE session (every cell touched this session, not
+    // just the active one) — deliberately different from the paragraph
+    // editor's per-block Esc.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| A | B |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, '1');
+        await page.keyboard.type('CHANGED');
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement.textContent.trim()),
+          '1CHANGED',
+          'sanity: the cell shows the in-progress edit before Esc'
+        );
+
+        await page.keyboard.press('Escape');
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-wys')),
+          false,
+          'Esc must end the session (no cell left contenteditable)'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.content').textContent.includes('CHANGED')),
+          false,
+          'Esc must discard the typed edit — the original cell text must be back'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 300));
+        const fileText = fs.readFileSync(tmdPath, 'utf8');
+        assert.strictEqual(fileText, torig,
+          'Esc must never have touched `lines` — the saved file must be byte-identical to the original, got:\n' + fileText);
+
+        await page.close();
+        console.log('table WYSIWYG: Esc mid-session reverts the whole session; file unchanged after save — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // A table with ANY unsupported cell degrades to raw-edit at OPEN time —
+    // never a half-broken cell session. Checked at both entry points: a
+    // direct click on a cell (no-ops, falls back to plain block-select) and
+    // the ✎ button (routes straight to raw-edit).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| Col |',
+        '|---|',
+        '| ![img](https://example.com/x.png) |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await page.click(table0 + ' tbody td');
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-wys')),
+          false,
+          'a click on a cell in an unsupported table must NOT open a cell session'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) => !document.querySelector(s + ' .ed-bar-edit').hidden, table0),
+          true,
+          'the block must still be selected (bar shown, ✎ visible) — just not editing'
+        );
+
+        await page.click(table0 + ' .ed-bar-edit');
+        await page.waitForSelector(table0 + ' textarea.ed-raw');
+        const rawValue = await page.evaluate(
+          (s) => document.querySelector(s + ' textarea.ed-raw').value, table0);
+        assert.ok(rawValue.includes('![img](https://example.com/x.png)'),
+          '✎ on an unsupported table must degrade straight to raw-edit prefilled with its source, got:\n' + rawValue);
+
+        await page.close();
+        console.log('table WYSIWYG: any unsupported cell degrades the whole table to raw-edit — OK');
+      } finally {
+        tsrv.close();
+      }
     }
 
     console.log('editor-client-runtime.test.js OK');
