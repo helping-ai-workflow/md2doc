@@ -100,9 +100,14 @@ for (const [re, msg] of shortcutOrderChecks) {
 const lineopsSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'lineops.js'), 'utf8');
 const inlineMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'inline-md.js'), 'utf8');
 const tableMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'table-md.js'), 'utf8');
+// Phase 3 Task 1/2: history.js is now ALSO inlined by server.js (injected
+// after table-md, before client — see test/editor-server.test.js) — same
+// literal-</script> exposure as the other three, so it gets the same guard.
+const historySrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'history.js'), 'utf8');
 assert.ok(!/<\/script/i.test(src), 'client.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(lineopsSrc), 'lineops.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(inlineMdSrc), 'inline-md.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(tableMdSrc), 'table-md.js must not contain a literal </script sequence');
+assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal </script sequence');
 
 console.log('editor-client.test.js OK');

@@ -92,24 +92,22 @@ async function setup() {
     const paraBlockId = await page.evaluate(() =>
       document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
     const paraSel = '.ed-block[data-block-id="' + paraBlockId + '"]';
-    // Click the block to select it (shows the floating edit bar), then its
-    // ✎ 編輯 button — the click-bar equivalent of the old hover-gutter click.
-    // Task 3: this fixture's filler paragraphs (plain text + hard-break
-    // <br>s) are WYSIWYG-eligible, so ✎ now routes to the in-place editor
-    // instead of the raw textarea — force raw-edit via the bar's MD escape
-    // hatch so the rest of this test (which asserts on textarea.ed-raw) is
-    // unaffected; this test is about the reader-runtime rebind after ANY
-    // commit, not about which editor produced it.
-    await page.click(paraSel);
-    await page.waitForSelector(paraSel + ' .ed-bar-edit');
-    await page.click(paraSel + ' .ed-bar-edit');
+    // Phase 3 Task 2: paragraphs are always-on contenteditable now (no
+    // click-bar step) — force raw-edit via the ⠿ handle's "MD 原始碼" menu
+    // item instead, so the rest of this test (which asserts on
+    // textarea.ed-raw) is unaffected; this test is about the reader-runtime
+    // rebind after ANY commit, not about which editor produced it.
+    await page.hover(paraSel);
+    await page.click(paraSel + ' .ed-handle');
     await page.waitForFunction(
-      (s) => !!document.querySelector(s + ' textarea.ed-raw') || !!document.querySelector(s + ' .ed-bar-md'),
+      (s) => { const btns = document.querySelectorAll(s + ' .ed-handle-menu-btn'); return btns.length > 0; },
       {}, paraSel
     );
-    if (!(await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), paraSel))) {
-      await page.click(paraSel + ' .ed-bar-md');
-    }
+    await page.evaluate((s) => {
+      const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+        .find((b) => b.textContent === 'MD 原始碼');
+      btn.click();
+    }, paraSel);
     await page.waitForSelector(paraSel + ' textarea.ed-raw');
     await page.evaluate((s) => {
       const ta = document.querySelector(s + ' textarea.ed-raw');

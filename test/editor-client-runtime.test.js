@@ -68,6 +68,13 @@ async function setup() {
     'Link target paragraph text.', '',
     'A [existing link](https://example.com) here.', '',
     'Rerender reset target word here.', '',
+    // Phase 3 Task 2 (burst undo) fixtures — dedicated paragraphs so the
+    // burst-undo scenarios below never depend on state left by another.
+    'Burst undo target text here.', '',
+    'Burst bold undo target word here.', '',
+    'Blur commit target text here.', '',
+    'Burst failure target text here.', '',
+    '![blur degrade fixture](block.png)', '',
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
@@ -83,32 +90,74 @@ async function newPage(browser) {
   return page;
 }
 
-// Opens a block's RAW editor via the click-invoked edit bar (replaces the
-// old per-block hover gutter): click the block to select it (shows the
-// floating bar anchored above it), then click the bar's ✎ 編輯 button.
-//
-// Task 3: ✎ now routes WYSIWYG-eligible paragraph/heading blocks (plain text
-// like "First paragraph." round-trips through the inline serializer) to the
-// in-place WYSIWYG editor instead of the raw textarea. The many pre-existing
-// scenarios below (Finding 1-3, switch-*, single-flight, …) are specifically
-// exercising RAW-TEXTAREA mechanics (Ctrl+Enter, textarea.value, network
-// failure banners) and don't care which route got them there — so when ✎
-// lands on WYSIWYG instead, this helper uses the bar's MD escape-hatch
-// button to force raw-edit, exactly like a real user would, then proceeds
-// exactly as before.
+// Opens a block's RAW editor. Phase 3 Task 2 (always-on editing retires the
+// Phase-2 click-select-then-✎ bar for paragraph/heading blocks): a
+// WYSIWYG-eligible block is already contenteditable the moment it renders,
+// so this now clicks the block (focus starts a burst) and, if it landed in
+// WYSIWYG mode, forces the switch to raw-edit via the ⠿ handle's "MD 原始碼"
+// menu item — the direct migration of the old bar's MD escape hatch. A
+// DEGRADED block (canWysiwyg false) opens the raw textarea immediately on
+// click, with no extra step. The many pre-existing scenarios below
+// (Finding 1-3, switch-*, single-flight, …) are specifically exercising
+// RAW-TEXTAREA mechanics (Ctrl+Enter, textarea.value, network failure
+// banners) and don't care which route got them there.
 async function openBlockEditor(page, sel) {
   await page.click(sel);
-  await page.waitForSelector(sel + ' .ed-bar-edit');
-  await page.click(sel + ' .ed-bar-edit');
+  // page.click() only waits for the click EVENT to be dispatched, not for
+  // client.js's own async focus handling (which may itself be awaiting an
+  // in-flight switchAwayFrom() resolving a DIFFERENT block first — see
+  // startBurst()'s comment) to settle. Wait for that to actually land
+  // (either this block is now the focused burst, or — a degraded block —
+  // its raw textarea already opened) before touching the DOM further, or a
+  // race can hand back a soon-to-be-detached node (a commit's rerenderAll()
+  // swap landing mid-hover/click).
   await page.waitForFunction(
-    (s) => !!document.querySelector(s + ' textarea.ed-raw') || !!document.querySelector(s + ' .ed-bar-md'),
+    (s) => !!document.querySelector(s + ' textarea.ed-raw') ||
+      document.activeElement === document.querySelector(s + ' > *'),
     {}, sel
   );
   const hasRaw = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel);
   if (!hasRaw) {
-    await page.click(sel + ' .ed-bar-md');
+    await clickGutterMenuItem(page, sel, 'MD 原始碼');
     await page.waitForSelector(sel + ' textarea.ed-raw');
   }
+}
+
+// Hovers a block to reveal its ⠿ handle, opens its small menu, and clicks
+// the menu item whose exact textContent is `label` ('−' / '+' /
+// 'MD 原始碼' / '✕'). Mirrors the old clickBarButton() helper's role for
+// the retired paragraph/heading bar buttons.
+async function clickGutterMenuItem(page, sel, label) {
+  await page.hover(sel);
+  await page.click(sel + ' .ed-handle');
+  await page.waitForFunction(
+    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+    {}, sel
+  );
+  await page.evaluate((s, l) => {
+    const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+      .find((b) => b.textContent === l && !b.hidden);
+    if (!btn) throw new Error('gutter menu item not found: ' + l);
+    btn.click();
+  }, sel, label);
+}
+
+// Opens the WYSIWYG editor on a block — Phase 3 Task 2: paragraph/heading
+// blocks are always-on contenteditable, so "opening" is just a click
+// (native focus places the caret and starts a burst — see client.js's
+// startBurst()). Kept as its own helper (rather than inlining page.click()
+// at every call site) purely so the many pre-existing Task 3/4 scenarios
+// below read the same way they did before the migration.
+async function openWysiwyg(page, sel) {
+  await page.click(sel);
+  // Wait for the burst to actually have started (native focus landed AND
+  // client.js's own async focusin handling settled — see openBlockEditor()'s
+  // comment for why a plain contenteditable-true check alone isn't enough:
+  // that's already true before the click for an always-on armed block).
+  await page.waitForFunction(
+    (s) => document.activeElement === document.querySelector(s + ' > *'),
+    {}, sel
+  );
 }
 
 // Task 4 (selection toolbar) helpers: select a specific word (or the whole
@@ -149,16 +198,6 @@ async function selectAllInEl(page, elSelector) {
     s.addRange(range);
     document.dispatchEvent(new Event('selectionchange'));
   }, elSelector);
-}
-
-// Opens the WYSIWYG editor on a block via the click-bar (assumes the block
-// IS WYSIWYG-eligible — plain-text paragraphs/headings that round-trip
-// through the inline serializer, per Task 3's routing).
-async function openWysiwyg(page, sel) {
-  await page.click(sel);
-  await page.waitForSelector(sel + ' .ed-bar-edit');
-  await page.click(sel + ' .ed-bar-edit');
-  await page.waitForSelector(sel + ' .ed-bar-md');
 }
 
 // Locates a paragraph block by a distinctive TEXT PREFIX rather than array
@@ -308,9 +347,10 @@ async function saveAndRead(page, mdPath) {
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
       assert.ok(
-        await page.evaluate((s) => !document.querySelector(s + ' .ed-bar') &&
-          !document.querySelector(s).classList.contains('ed-selected'), sel),
-        'the edit bar must be gone (block deselected) after an Esc cancel'
+        await page.evaluate((s) => !document.querySelector(s + ' textarea.ed-raw') &&
+          document.querySelector(s + ' > *').getAttribute('contenteditable') === 'true' &&
+          !document.querySelector('.ed-handle-menu'), sel),
+        'the block must be back to its normal always-on editable state (no textarea, no leftover ⠿ menu) after an Esc cancel'
       );
       await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 3000 });
@@ -761,8 +801,10 @@ async function saveAndRead(page, mdPath) {
       console.log('single-flight switchAwayFrom: concurrent triggers share one commit, no request race — OK');
     }
 
-    // ── Click-invoked edit bar: select / move / dismiss / lightbox-exempt /
-    //    ✎ opens the raw editor ─────────────────────────────────────────
+    // ── Migrated from "Click-invoked edit bar" (Phase 2): always-on click =
+    //    caret / focus-moves-between-blocks / lightbox-exempt / ⠿ handle
+    //    opens a menu / MD escape hatch — same assertion intent as the
+    //    retired click-select-then-bar flow, re-expressed as focus ─────────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -775,60 +817,63 @@ async function saveAndRead(page, mdPath) {
       const selB = '.ed-block[data-block-id="' + blockIds[2] + '"]';
       const selImgBlock = '.ed-block[data-block-id="' + blockIds[blockIds.length - 1] + '"]';
 
-      // Click block A -> bar appears anchored inside it; block gets a solid
-      // "selected" outline.
+      // Click block A -> no bar, no ed-selected outline (both retired for
+      // paragraph/heading) — native focus lands on its content element,
+      // which starts a burst (contenteditable, already armed at render time).
       await page.click(selA);
-      await page.waitForSelector(selA + ' .ed-bar');
-      assert.ok(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selA),
-        'clicking a block must select it (solid-outline class)'
-      );
-      assert.ok(
-        await page.evaluate((s) => !!document.querySelector(s + ' > .ed-bar'), selA),
-        'the edit bar must be anchored as a child of the clicked/selected block'
-      );
-
-      // Click a DIFFERENT block -> the bar (there is only ever one) moves
-      // there; the previous block is deselected.
-      await page.click(selB);
-      await page.waitForSelector(selB + ' .ed-bar');
-      assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selA),
-        false,
-        'the previously-selected block must be deselected once the bar moves elsewhere'
-      );
-      assert.ok(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selB),
-        'the newly-clicked block must be selected'
+      await page.waitForFunction(
+        (s) => document.activeElement === document.querySelector(s + ' > *'), {}, selA
       );
       assert.strictEqual(
-        await page.evaluate((s) => !document.querySelector(s + ' .ed-bar'), selA),
+        await page.evaluate((s) => document.querySelector(s + ' > *').getAttribute('contenteditable'), selA),
+        'true',
+        'clicking a WYSIWYG-eligible block must place native focus on its (already-armed) content element'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
         true,
-        'only one bar exists — it must not still be attached to the old block'
+        'no .ed-bar for a paragraph/heading block — retired along with click-select'
       );
 
-      // Click outside any block -> the bar is dismissed entirely.
-      await page.evaluate(() => document.body.click());
-      await page.waitForFunction(() => !document.querySelector('.ed-bar'));
+      // Click a DIFFERENT block -> focus moves there; A's (unmodified) burst
+      // is silently dropped, same "switch-cancels" intent as before.
+      await page.click(selB);
+      await page.waitForFunction(
+        (s) => document.activeElement === document.querySelector(s + ' > *'), {}, selB
+      );
       assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selB),
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), selA),
         false,
-        'clicking outside any block must deselect it'
+        'focus must have moved off A once B is clicked'
       );
 
-      // Esc also dismisses the bar (no raw editor open).
+      // Click outside any block -> B's burst ends (unmodified -> silent
+      // drop), nothing left focused inside a block. A synthetic .click()
+      // alone does not itself move focus (unlike a real pointer click) —
+      // blur explicitly first, same technique the single-flight scenario
+      // below uses.
+      await page.evaluate(() => { document.activeElement && document.activeElement.blur(); document.body.click(); });
+      await page.waitForFunction((s) => document.activeElement !== document.querySelector(s + ' > *'), {}, selB);
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), selB),
+        false,
+        'clicking outside any block must move focus away from it'
+      );
+
+      // Esc reverts the burst to its pre-focus baseline and ends it (blurs)
+      // — the always-on replacement for the old "Esc dismisses the bar".
       await page.click(selHeading);
-      await page.waitForSelector(selHeading + ' .ed-bar');
+      await page.waitForFunction(
+        (s) => document.activeElement === document.querySelector(s + ' > *'), {}, selHeading
+      );
       await page.keyboard.press('Escape');
-      await page.waitForFunction((s) => !document.querySelector(s + ' .ed-bar'), {}, selHeading);
-      assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selHeading),
-        false,
-        'Esc must dismiss the bar / deselect the block'
+      await page.waitForFunction(
+        (s) => document.activeElement !== document.querySelector(s + ' > *'), {}, selHeading
       );
 
       // Clicking a lightbox target (an image) must open the lightbox, NOT
-      // the edit bar — img/.mermaid/.graphviz/wavedrom stay excluded.
+      // start editing — img/.mermaid/.graphviz/wavedrom stay excluded, same
+      // as before.
       await page.click(selImgBlock + ' img');
       await page.waitForFunction(() => {
         const lb = document.querySelector('.lightbox');
@@ -837,12 +882,7 @@ async function saveAndRead(page, mdPath) {
       assert.strictEqual(
         await page.evaluate(() => !document.querySelector('.ed-bar')),
         true,
-        'clicking a lightbox target must NOT show the edit bar'
-      );
-      assert.strictEqual(
-        await page.evaluate((s) => !document.querySelector(s).classList.contains('ed-selected'), selImgBlock),
-        true,
-        'clicking a lightbox target must NOT select its containing block'
+        'clicking a lightbox target must not show any bar'
       );
       // Close the lightbox so it doesn't interfere with the assertions below.
       await page.keyboard.press('Escape');
@@ -851,61 +891,53 @@ async function saveAndRead(page, mdPath) {
         return !lb || lb.hidden;
       }, { timeout: 3000 });
 
-      // Task 3: ✎ on a WYSIWYG-eligible paragraph (selA, "First paragraph.")
-      // opens the in-place editor — NO textarea, the bar STAYS (with the MD
-      // escape hatch replacing ✎), and Esc cancels + deselects (bar gone).
-      await page.click(selA);
-      await page.waitForSelector(selA + ' .ed-bar-edit');
-      await page.click(selA + ' .ed-bar-edit');
-      await page.waitForSelector(selA + ' .ed-bar-md');
+      // ⠿ handle: hover reveals it, click opens the small menu (heading ±
+      // for a heading, MD 原始碼, close) — replaces the old bar's ✎/MD combo.
+      await page.hover(selHeading);
+      await page.click(selHeading + ' .ed-handle');
+      await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
-        await page.evaluate((s) => !document.querySelector(s + ' textarea.ed-raw'), selA),
-        true,
-        'WYSIWYG-eligible ✎ must NOT open the raw textarea'
+        await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
+        '+,MD 原始碼,−,✕'.split(',').sort().join(','),
+        'the ⠿ menu on a heading must show ± / MD 原始碼 / ✕'
       );
-      assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s + ' > *').getAttribute('contenteditable'), selA),
-        'true',
-        'the block\'s content element must become contenteditable'
-      );
-      assert.strictEqual(
-        await page.evaluate(() => !document.querySelector('.ed-bar')),
-        false,
-        'the bar must STAY (with the MD escape hatch) while WYSIWYG editing is active'
-      );
-      await page.keyboard.press('Escape');
-      await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, selA);
-      assert.strictEqual(
-        await page.evaluate(() => !document.querySelector('.ed-bar')),
-        true,
-        'the bar must be gone (block deselected) after cancelling the WYSIWYG editor'
-      );
-
-      // The raw-editor-hides-the-bar invariant still holds for a block that
-      // routes to raw-edit — proven here via the MD escape hatch itself
-      // (selHeading is WYSIWYG-eligible too, so ✎ opens WYSIWYG first, then
-      // MD forces the switch to raw-edit).
-      await page.click(selHeading);
-      await page.waitForSelector(selHeading + ' .ed-bar-edit');
-      await page.click(selHeading + ' .ed-bar-edit');
-      await page.waitForSelector(selHeading + ' .ed-bar-md');
-      await page.click(selHeading + ' .ed-bar-md');
+      // The MD escape hatch forces raw-edit even on a WYSIWYG-eligible block
+      // — the direct migration of the old bar's MD button.
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((b) => b.textContent === 'MD 原始碼');
+        btn.click();
+      });
       await page.waitForSelector(selHeading + ' textarea.ed-raw');
       assert.strictEqual(
-        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        await page.evaluate(() => !document.querySelector('.ed-handle-menu')),
         true,
-        'the bar must hide once the raw editor opens (via the MD escape hatch)'
+        'the ⠿ menu must close once the raw editor opens'
       );
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selHeading);
+
+      // A non-heading block's ⠿ menu must hide ± (only MD 原始碼 / ✕ visible).
+      await page.hover(selA);
+      await page.click(selA + ' .ed-handle');
+      await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
-        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        await page.evaluate(() => {
+          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
+          return minus ? minus.hidden : null;
+        }),
         true,
-        'the bar must stay gone (block deselected) after cancelling the raw editor'
+        'a non-heading block\'s ⠿ menu must hide the heading ± buttons'
       );
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
+        btn.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
       await page.close();
-      console.log('click-bar: select / move / dismiss / lightbox-exempt / ✎-opens-editor — OK');
+      console.log('always-on: click = caret/focus, lightbox-exempt, ⠿ handle opens menu + MD escape hatch — OK');
     }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
@@ -920,10 +952,7 @@ async function saveAndRead(page, mdPath) {
       const sel = '.ed-block[data-block-id="' + ids[0] + '"]'; // "First paragraph."
       const editEl = sel + ' > *';
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
       assert.strictEqual(
         await page.evaluate((s) => !document.querySelector(s + ' textarea.ed-raw'), sel),
         true,
@@ -932,7 +961,7 @@ async function saveAndRead(page, mdPath) {
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).getAttribute('contenteditable'), editEl),
         'true',
-        'WYSIWYG: the content element must be contenteditable'
+        'WYSIWYG: the content element must be contenteditable (always-on — already true before the click)'
       );
 
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
@@ -983,10 +1012,7 @@ async function saveAndRead(page, mdPath) {
       // alone) is what cancel() actually restores.
       const originalHtml = await page.evaluate((s) => document.querySelector(s).innerHTML, editEl);
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
 
       assert.strictEqual(
         await page.evaluate((s) => !!document.querySelector(s + ' strong'), editEl),
@@ -1000,7 +1026,9 @@ async function saveAndRead(page, mdPath) {
       );
 
       await page.keyboard.press('Escape');
-      await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, sel);
+      await page.waitForFunction(
+        (s) => document.activeElement !== document.querySelector(s), {}, editEl
+      );
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).innerHTML, editEl),
         originalHtml,
@@ -1011,8 +1039,11 @@ async function saveAndRead(page, mdPath) {
       console.log('wysiwyg: bold shows <strong> while editing, Esc reverts exactly — OK');
     }
 
-    // ── Task 3 WYSIWYG: a paragraph containing an image opens the raw-edit
-    //    textarea instead (not WYSIWYG-eligible) ───────────────────────────
+    // ── Migrated + Phase 3 Task 2 RED scenario "degrade block click ->
+    //    textarea": a paragraph containing an image (not WYSIWYG-eligible)
+    //    is a DEGRADED block — clicking it opens the raw-edit textarea
+    //    IMMEDIATELY, no ⠿ menu / MD step needed at all (brief: "click
+    //    swaps in the in-place monospace textarea immediately") ───────────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -1022,28 +1053,36 @@ async function saveAndRead(page, mdPath) {
           .map((el) => el.getAttribute('data-block-id')));
       const selImg = '.ed-block[data-block-id="' + blockIds[blockIds.length - 1] + '"]';
 
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const el = document.querySelector(s + ' > *');
+          return el.getAttribute('contenteditable');
+        }, selImg),
+        null,
+        'sanity: a degraded (image-containing) block must NOT be armed contenteditable'
+      );
+
       // Dispatch the click on the block itself (bubbles to the delegated
       // document listener) rather than a coordinate-based page.click(), which
       // could land ON the <img> — a lightbox target excluded from selection.
       await page.evaluate((s) => {
         document.querySelector(s).dispatchEvent(new MouseEvent('click', { bubbles: true }));
       }, selImg);
-      await page.waitForSelector(selImg + ' .ed-bar-edit');
-      await page.click(selImg + ' .ed-bar-edit');
       await page.waitForSelector(selImg + ' textarea.ed-raw');
       assert.strictEqual(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selImg),
         true,
-        'WYSIWYG: a block containing an image must open the raw-edit textarea instead'
+        'a degraded block (image-containing paragraph) must open the raw-edit textarea on a SINGLE click, no menu step'
       );
 
       await page.keyboard.press('Escape');
       await page.close();
-      console.log('wysiwyg: image paragraph falls back to raw-edit — OK');
+      console.log('degrade block click->textarea: image paragraph opens raw-edit immediately on click — OK');
     }
 
-    // ── Task 3: heading block shows ± on the bar; clicking + changes the
-    //    '#' count in the source after commit ────────────────────────────
+    // ── Migrated + Phase 3 Task 2 RED scenario "⠿ menu heading ±": the ⠿
+    //    handle's small menu shows ± only for heading blocks; clicking +
+    //    changes the '#' count in the source after commit ────────────────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -1052,35 +1091,66 @@ async function saveAndRead(page, mdPath) {
         document.querySelector('.ed-block[data-block-type="heading"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + headingId + '"]';
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar');
+      await page.hover(sel);
+      await page.click(sel + ' .ed-handle');
+      await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-plus').hidden, sel),
+        await page.evaluate(() => {
+          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
+          return plus ? plus.hidden : null;
+        }),
         false,
-        'heading block: the bar\'s + button must be visible'
+        'heading block: the ⠿ menu\'s + button must be visible'
       );
       assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-minus').hidden, sel),
+        await page.evaluate(() => {
+          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
+          return minus ? minus.hidden : null;
+        }),
         false,
-        'heading block: the bar\'s − button must be visible'
+        'heading block: the ⠿ menu\'s − button must be visible'
       );
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
+        btn.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
+
       const nonHeadingId = await page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
       const selPara = '.ed-block[data-block-id="' + nonHeadingId + '"]';
-      await page.click(selPara);
-      await page.waitForSelector(selPara + ' .ed-bar');
+      await page.hover(selPara);
+      await page.click(selPara + ' .ed-handle');
+      await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-plus').hidden, selPara),
+        await page.evaluate(() => {
+          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
+          return plus ? plus.hidden : null;
+        }),
         true,
-        'non-heading block: the bar\'s + button must stay hidden'
+        'non-heading block: the ⠿ menu\'s + button must stay hidden'
       );
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
+        btn.click();
+      });
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar');
-      await page.click(sel + ' .ed-bar-plus');
+      await page.hover(sel);
+      await page.click(sel + ' .ed-handle');
+      await page.waitForSelector('.ed-handle-menu');
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
+        btn.click();
+      });
       await page.waitForFunction(
         (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
         {}, sel
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-handle-menu')),
+        true,
+        'the ⠿ menu must close itself once a heading-depth op is clicked'
       );
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
@@ -1091,7 +1161,7 @@ async function saveAndRead(page, mdPath) {
         'heading ±: clicking + must increase the heading depth in the source (# -> ##)');
 
       await page.close();
-      console.log('wysiwyg: heading ± buttons change depth, persists to file — OK');
+      console.log('⠿ menu heading ±: shown only for headings, + increases depth and persists to file — OK');
     }
 
     // ── Task 3: Shift+Enter inserts <br> instead of committing; a later
@@ -1106,10 +1176,7 @@ async function saveAndRead(page, mdPath) {
       const sel = '.ed-block[data-block-id="' + ids[1] + '"]'; // "Second paragraph."
       const editEl = sel + ' > *';
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
 
       await page.evaluate((s) => {
         const el = document.querySelector(s);
@@ -1166,10 +1233,7 @@ async function saveAndRead(page, mdPath) {
       const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
       const editEl = sel + ' > *';
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
 
       await page.evaluate((s) => {
         const el = document.querySelector(s);
@@ -1222,10 +1286,7 @@ async function saveAndRead(page, mdPath) {
       const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
       const editEl = sel + ' > *';
 
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
 
       // Simulate content our own paste handler would never itself produce
       // (a styled <span>) landing directly in the DOM — a real drag-drop
@@ -1252,18 +1313,19 @@ async function saveAndRead(page, mdPath) {
       console.log('wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK');
     }
 
-    // ── Task 3 regression (CRITICAL): openWysiwygEditor()'s keydown/paste
-    //    listeners must be removed on cancel() — `editEl` is the block's
-    //    PERSISTENT content element (unlike raw-edit's fresh <textarea>,
-    //    thrown away with the wrap on every cancel), so re-opening WITHOUT
-    //    removing the previous session's listeners stacks N live listener
-    //    sets after N open/Esc cycles. A stale set's `cancel()` closure
-    //    still fires (on the NEXT session's Esc, or racing its commit),
-    //    producing an uncommanded second /api/render that can revert a
-    //    just-typed commit out from under the real one, silently, with no
-    //    banner. Reproduced live before the fix (reviewer-confirmed): 3x
-    //    open/Esc on the same block, then type + Enter -> TWO /api/render
-    //    POSTs instead of one, and the typed text vanished from disk.
+    // ── Migrated regression (CRITICAL): originally proved that
+    //    openWysiwygEditor()'s per-session keydown/paste listeners were
+    //    removed on cancel() (a PERSISTENT content element re-opened N times
+    //    without removing the previous session's listeners would stack N
+    //    live sets, and a stale cancel() closure firing on a later commit
+    //    produced an uncommanded second /api/render). Phase 3 Task 2 makes
+    //    the underlying bug class structurally impossible (armEditables()
+    //    never attaches anything per-block at all — everything routes
+    //    through the ONE delegated focusin/focusout/keydown/paste/input set
+    //    installed once at module load), but the OBSERVABLE property this
+    //    test proves — repeated focus/Esc cycles on the same block never
+    //    cause a later real commit to fire more than one /api/render — is
+    //    still exactly the right thing to keep verifying.
     {
       const page = await newPage(browser);
       let renderRequestCount = 0;
@@ -1281,19 +1343,13 @@ async function saveAndRead(page, mdPath) {
       const editEl = sel + ' > *';
 
       for (let i = 0; i < 3; i++) {
-        await page.click(sel);
-        await page.waitForSelector(sel + ' .ed-bar-edit');
-        await page.click(sel + ' .ed-bar-edit');
-        await page.waitForSelector(sel + ' .ed-bar-md');
+        await openWysiwyg(page, sel);
         await page.keyboard.press('Escape');
-        await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, sel);
+        await page.waitForFunction((s) => document.activeElement !== document.querySelector(s), {}, editEl);
       }
 
       renderRequestCount = 0; // only the real commit below is under test
-      await page.click(sel);
-      await page.waitForSelector(sel + ' .ed-bar-edit');
-      await page.click(sel + ' .ed-bar-edit');
-      await page.waitForSelector(sel + ' .ed-bar-md');
+      await openWysiwyg(page, sel);
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyA');
@@ -1326,13 +1382,20 @@ async function saveAndRead(page, mdPath) {
       console.log('wysiwyg: listener-leak regression — 3x open/Esc then commit fires exactly one render — OK');
     }
 
-    // ── Task 3 regression (IMPORTANT): the unsupported-degrade path firing
-    //    INSIDE switchAwayFrom() (because the user clicked a DIFFERENT
-    //    block C while this block A had unsupported content injected) must
-    //    ABORT the switch, not let the click handler continue on to
-    //    showBarFor(C) — otherwise the bar ends up on C while the
-    //    freshly-opened raw editor sits on A, two different blocks visibly
-    //    "active" at once.
+    // ── Migrated regression (IMPORTANT): originally proved that the
+    //    unsupported-degrade path firing INSIDE switchAwayFrom() (clicking a
+    //    DIFFERENT block C while block A had unsupported content injected)
+    //    aborted the whole click so the OLD single-slot `activeEditor`
+    //    (which could only ever track ONE thing) never ended up split
+    //    between A and C at once. Phase 3 Task 2 changes what's actually
+    //    being proved: `activeEditor` (raw/table) and `currentBurst`
+    //    (always-on WYSIWYG) are now two INDEPENDENT slots, so A degrading
+    //    to raw-edit (activeEditor) and C's native focus starting its own
+    //    burst (currentBurst) can safely coexist — there is no shared state
+    //    left to corrupt. What must still hold, and what this now proves:
+    //    A's degrade is byte-for-byte correct (original source, never the
+    //    corrupted DOM) regardless of C's focus racing it, and C's own burst
+    //    starts cleanly and independently — neither leaks into the other.
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -1346,24 +1409,21 @@ async function saveAndRead(page, mdPath) {
         document.querySelector('.ed-block[data-block-type="heading"]').getAttribute('data-block-id'));
       const selC = '.ed-block[data-block-id="' + headingId + '"]';
 
-      await page.click(selA);
-      await page.waitForSelector(selA + ' .ed-bar-edit');
-      await page.click(selA + ' .ed-bar-edit');
-      await page.waitForSelector(selA + ' .ed-bar-md');
+      await openWysiwyg(page, selA);
 
       // Inject a real text change (so hasChanges() is true and
-      // switchAwayFrom() actually calls commitNow() below, not cancelNow())
-      // ALONGSIDE unsupported content our own paste handler would never
-      // itself produce — same technique as the degrade-never-lose scenario
-      // above, but this time triggered via a switch instead of a direct
-      // Enter.
+      // switchAwayFrom() actually attempts a commit below, not a silent
+      // cancel) ALONGSIDE unsupported content our own paste handler would
+      // never itself produce — same technique as the degrade-never-lose
+      // scenario above, but this time triggered via a focus switch instead
+      // of a direct Enter.
       await page.evaluate((s) => {
         document.querySelector(s).innerHTML += 'EXTRA<span style="color:red">unsupported</span>';
       }, editElA);
 
-      // Click block C while A is modified: switchAwayFrom() must run A's
-      // commitNow(), hit the unsupported branch, and — per the fix — return
-      // false so THIS click's showBarFor(C) never runs.
+      // Click block C while A is modified: A's focusout resolves via
+      // switchAwayFrom(), hits the unsupported branch, and degrades A to
+      // raw-edit — independently of C's own focusin starting its own burst.
       await page.click(selC);
 
       await page.waitForSelector(selA + ' textarea.ed-raw', { timeout: 5000 });
@@ -1373,21 +1433,303 @@ async function saveAndRead(page, mdPath) {
         'IMPORTANT regression: A must degrade to raw-edit prefilled with its ORIGINAL source'
       );
       assert.strictEqual(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selC),
-        false,
-        'IMPORTANT regression: the aborted switch must NOT select C'
+        await page.evaluate((s) => document.querySelector(s + ' > *').getAttribute('contenteditable'), selC),
+        'true',
+        'C\'s own burst must start cleanly (native focus is independent of A\'s degrade)'
       );
       assert.strictEqual(
-        await page.evaluate(() => !!document.querySelector('.ed-bar')),
-        false,
-        'IMPORTANT regression: the bar must not move to C — A\'s raw editor (which hides the bar) ' +
-        'and the (non-existent) selection must agree, not point at two different blocks'
+        await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, selA),
+        'Third paragraph.',
+        'A\'s degraded raw-edit content must stay exactly as degraded — unaffected by C\'s independent burst'
       );
 
       await page.click('.ed-conflict button[aria-label="Dismiss"]');
       await page.click(selA + ' .ed-cancel');
+      await page.keyboard.press('Escape'); // end C's burst too
       await page.close();
-      console.log('wysiwyg: unsupported-degrade mid-switch aborts the switch (no bar/editor split) — OK');
+      console.log('wysiwyg: unsupported-degrade on A and C\'s independent burst coexist cleanly (no shared-state split) — OK');
+    }
+
+    // ── Phase 3 Task 2 RED scenario: Ctrl+Z mid-burst reverts typing; a
+    //    SECOND Ctrl+Z (now at the burst's local bottom) cascades to the
+    //    document-level undo stack, reverting the PREVIOUS committed edit —
+    //    lib/editor/history.js's createBurstHistory() driving the whole
+    //    thing, not the browser's native contenteditable undo (Ctrl+Z is
+    //    intercepted with preventDefault() before either branch runs) ─────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Burst undo target');
+      const editEl = sel + ' > *';
+      const originalText = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
+
+      // A first, real, COMMITTED edit — the "previous committed edit" the
+      // second Ctrl+Z below must cascade to.
+      await openWysiwyg(page, sel);
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.type(' EDIT-ONE');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(
+        (s, t) => document.querySelector(s).textContent === t,
+        {}, editEl, originalText + ' EDIT-ONE'
+      );
+
+      // A second burst on the SAME (now re-armed) block: type more text
+      // (never explicitly flushed — the debounce coalesces every keystroke
+      // into ONE pending snapshot) then a single Ctrl+Z.
+      const sel2 = await paragraphSelByText(page, 'Burst undo target');
+      const editEl2 = sel2 + ' > *';
+      await openWysiwyg(page, sel2);
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl2);
+      await page.keyboard.type(' EDIT-TWO');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl2),
+        originalText + ' EDIT-ONE EDIT-TWO',
+        'sanity: the second burst\'s typing must be visible before any undo'
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl2),
+        originalText + ' EDIT-ONE',
+        'Ctrl+Z mid-burst must revert the typed text back to the burst\'s pre-focus snapshot'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl2),
+        true,
+        'the burst must stay OPEN (still focused) after a mid-burst undo — nothing was committed'
+      );
+
+      // Second Ctrl+Z: local history is now exhausted (back to snapshot 0,
+      // nothing pending) -> commits the burst (a no-op, unchanged) then
+      // cascades to the document-level undo() stack, reverting EDIT-ONE.
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      // originalText ("Burst undo target text here.") is a PREFIX of the
+      // EDIT-ONE-committed text, so a plain .includes(originalText) check is
+      // satisfied even BEFORE this cascade-undo lands (it was already true
+      // from the earlier commit) — wait for the discriminating signal
+      // instead: EDIT-ONE's own text must be GONE.
+      await page.waitForFunction(
+        () => !document.querySelector('.content').textContent.includes('EDIT-ONE'),
+        { timeout: 5000 }
+      );
+      const finalText = await page.evaluate(() => {
+        const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'));
+        const b = blocks.find((el) => el.textContent.trim().startsWith('Burst undo target'));
+        // b.firstElementChild is the <p> content itself — b.textContent
+        // would also include the ⠿ handle's own textContent ("⠿").
+        return b ? b.firstElementChild.textContent.trim() : null;
+      });
+      assert.strictEqual(finalText, originalText,
+        'Ctrl+Z past the burst\'s local bottom must cascade to the document undo stack and revert EDIT-ONE too');
+
+      await page.close();
+      console.log('burst undo: Ctrl+Z mid-burst reverts typing; a second Ctrl+Z cascades to the previous commit — OK');
+    }
+
+    // ── Phase 3 Task 2 RED scenario: bold -> Ctrl+Z reverts the bold
+    //    (native-undo replacement proof) — the toolbar's mark toggle calls
+    //    history.snap() after applying (brief: "Programmatic mutations ...
+    //    call snap() after applying"), and Ctrl+Z inside the burst reverts
+    //    it via OUR history, never committing to the server (no /api/render
+    //    at all) — proof this isn't the browser's own native contenteditable
+    //    undo doing the work (which this file's preventDefault() blocks) ──
+    {
+      const page = await newPage(browser);
+      let renderRequestCount = 0;
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
+        req.continue();
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Burst bold undo target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'target');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-b');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const st = document.querySelector(s + ' strong');
+          return st ? st.textContent : null;
+        }, editEl),
+        'target',
+        'sanity: Bold must wrap "target" in <strong> before the undo'
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' strong'), editEl),
+        true,
+        'Ctrl+Z right after a toolbar Bold must revert the <strong> wrap'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('Burst bold undo target word here.'), editEl),
+        'the text content must be back to plain (unbolded) after the undo'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+        true,
+        'the burst must stay open (still focused) — the undo is purely local, nothing was committed'
+      );
+      assert.strictEqual(renderRequestCount, 0,
+        'the mark-toggle-then-undo round trip must never hit /api/render — proof this is OUR burst ' +
+        'history reverting locally, not a server round trip (and not the browser\'s blocked native undo)');
+
+      await page.keyboard.press('Escape'); // end the burst, discard (never committed)
+      await page.close();
+      console.log('burst undo: bold via toolbar then Ctrl+Z reverts it locally, no server round trip — OK');
+    }
+
+    // ── Phase 3 Task 2 RED scenario "focus-edit-blur commits to disk": no
+    //    Enter, no Ctrl+Enter, no button — just focus a WYSIWYG-eligible
+    //    paragraph, type, and click a DIFFERENT block (a real blur, not a
+    //    keyboard commit) — the burst must commit and the edit must persist
+    //    to the file on save ──────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Blur commit target');
+      const editEl = sel + ' > *';
+      const otherSel = await paragraphSelByText(page, 'Burst bold undo target');
+
+      await openWysiwyg(page, sel);
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.type(' BLUR-COMMITTED');
+
+      // Click a DIFFERENT block — a real blur, no Enter/Ctrl+Enter/button
+      // involved at all.
+      await page.click(otherSel);
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('BLUR-COMMITTED'),
+        { timeout: 5000 }
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+        false,
+        'sanity: the original edit surface must no longer be the live focused element post-commit'
+      );
+
+      await page.keyboard.press('Escape'); // end the OTHER block's own burst (never committed)
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileText = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileText.includes('Blur commit target text here. BLUR-COMMITTED'),
+        'focus-edit-blur must commit to `lines` and persist to disk on save, got:\n' + fileText);
+
+      await page.close();
+      console.log('always-on: focus + type + blur (no Enter) commits and persists to disk — OK');
+    }
+
+    // ── Global Constraint: burst commit-failure carries over the SAME
+    //    rollback + single-flight semantics raw-edit/table sessions have
+    //    always had — a failed /api/render leaves the burst OPEN (DOM/typed
+    //    text untouched, focus returned to it) with a dismissible banner,
+    //    never silently discarding what was typed ─────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().endsWith('/api/render')) {
+          req.respond({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'burst-boom' }) });
+        } else {
+          req.continue();
+        }
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Burst failure target');
+      const editEl = sel + ' > *';
+
+      await openWysiwyg(page, sel);
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.type(' UNSAVED-BURST-TEXT');
+      await page.evaluate((s) => document.querySelector(s).blur(), editEl);
+
+      await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+      const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+      assert.ok(/render failed/i.test(bannerText),
+        'burst commit-failure: banner must explain the render failure, got: ' + bannerText);
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('UNSAVED-BURST-TEXT'), editEl),
+        true,
+        'burst commit-failure: the typed text must stay in the DOM, never silently discarded'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+        true,
+        'burst commit-failure: the burst must stay open — focus returns to the surface after the failed blur-commit'
+      );
+
+      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await page.keyboard.press('Escape'); // discard the still-open burst
+      await page.close();
+      console.log('burst commit-failure: stays open with typed text intact, banner dismissible — OK');
+    }
+
+    // ── Phase 3 Task 2: degraded block "blur commits (changed) or restores
+    //    (unchanged)" — the raw-edit textarea a degraded block opens
+    //    immediately on click now ALSO commits/restores on blur, not just
+    //    via Ctrl+Enter/Esc/✓/✕ (which keep working unchanged) ────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      // Located by its distinctive <img alt> (an image-only paragraph's
+      // textContent is empty, so paragraphSelByText()'s prefix match can't
+      // find it — this fixture's alt text is unique instead).
+      const blockId = await page.evaluate(() => {
+        const img = Array.from(document.querySelectorAll('img'))
+          .find((i) => i.getAttribute('alt') === 'blur degrade fixture');
+        const block = img && img.closest('.ed-block');
+        return block ? block.getAttribute('data-block-id') : null;
+      });
+      assert.ok(blockId, 'fixture paragraph not found: ![blur degrade fixture]');
+      const selDegraded = '.ed-block[data-block-id="' + blockId + '"]';
+      const otherSel = await paragraphSelByText(page, 'Third paragraph');
+
+      // click swaps in the textarea immediately — no menu step.
+      await page.evaluate((s) => {
+        document.querySelector(s).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }, selDegraded);
+      await page.waitForSelector(selDegraded + ' textarea.ed-raw');
+
+      // Unchanged -> blur restores (no textarea left, no server round trip).
+      await page.click(otherSel);
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selDegraded);
+      await page.keyboard.press('Escape'); // end otherSel's own burst, never committed
+
+      // Changed -> blur commits.
+      await page.evaluate((s) => {
+        document.querySelector(s).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }, selDegraded);
+      await page.waitForSelector(selDegraded + ' textarea.ed-raw');
+      await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = '![blur degrade fixture EDITED](block.png)';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, selDegraded);
+      await page.click(otherSel);
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('blur degrade fixture EDITED'),
+        { timeout: 5000 }
+      );
+      await page.keyboard.press('Escape'); // end otherSel's own burst, never committed
+
+      await page.close();
+      console.log('degrade block: blur restores when unchanged, commits when changed — OK');
     }
 
     // ── Task 4: floating selection toolbar appears over a non-collapsed
@@ -1517,7 +1859,18 @@ async function saveAndRead(page, mdPath) {
         'Bold must wrap "commit" in <strong> before commit'
       );
 
-      await page.keyboard.press('Enter'); // WYSIWYG commit (Task 3's onKeydown)
+      await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
+      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      // is an async chain now (one more hop than Phase 2's direct commit()
+      // call from the keydown handler itself) — waiting on innerHTML alone
+      // is not a reliable "commit landed" signal here: applyMarkToggle()
+      // already wrote <strong>commit</strong> into the LIVE (still
+      // uncommitted) DOM the moment Bold was clicked, so that predicate can
+      // already be true before Enter is even pressed. Wait for the ACTUAL
+      // commit-completion signal (the toolbar torn down by
+      // resetSelToolbarState(), which only runs once rerenderAll() has
+      // actually swapped .content) instead.
+      await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('<strong>commit</strong>'),
         { timeout: 5000 }
@@ -1756,6 +2109,11 @@ async function saveAndRead(page, mdPath) {
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
       await page.keyboard.type('-EDITED');
       await page.keyboard.press('Enter');
+      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      // is an async chain (see the sel-toolbar Bold+Enter scenario's comment
+      // above for why an innerHTML-only wait races the actual commit) — wait
+      // for __selCount to actually settle at 0 before asserting on it.
+      await page.waitForFunction(() => window.__selCount === 0, { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('-EDITED'),
         { timeout: 5000 }
