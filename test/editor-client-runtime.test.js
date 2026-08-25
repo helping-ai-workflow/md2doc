@@ -372,54 +372,46 @@ async function clickCellWithText(page, tableSel, text) {
   await page.mouse.click(box.x, box.y);
 }
 
-// Phase-2 Task 6 (table structure ops) helper: the five op buttons live in
-// the DOM from module load (buildBar() runs once — verified NOT rebuilt on
-// selection/re-render, only re-parented via blockEl.appendChild(bar) and
-// un/re-hidden by updateBarButtons()) but start `hidden` — a plain
-// page.click()/waitForSelector() doesn't check that, so poll until
-// updateBarButtons() has un-hidden the button for the currently-selected
-// table block before clicking it.
-//
-// Review fix (Important 2), root-caused via a standalone repro harness
-// (ran the 4-iteration align loop in a tight repeat loop with per-step
-// diagnostics — reproduced the reported flake ~40-75% of the time,
-// confirming it was NOT a rare fluke): a FIRST version used a separate
-// page.waitForFunction(locate+visible) followed by a separate page.click
-// (selector) — that has the re-locate race the review flagged. A SECOND
-// version clicked the exact ElementHandle waitForFunction returned (no
-// second selector query) — this still failed under load: Puppeteer's own
-// ElementHandle.click() internally does scrollIntoViewIfNeeded() + a FRESH
-// boundingBox() read + a COORDINATE-based mouse.click(x, y), each a
-// separate round trip. If a structure op's own commit-and-full-rerender
-// (client.js's rerenderAll(), triggered by the align click from the
-// PREVIOUS loop iteration settling) races that coordinate computation, the
-// physical click can land on whatever now occupies that pixel — often
-// nothing inside any .ed-block — which wireBlockSelection()'s "clicked
-// outside any block" branch reads as a deliberate deselect. That silently
-// killed the whole loop: every retry re-queried the SAME selector, which
-// then never becomes visible again because nothing is selected any more
-// (diagnostics showed `.ed-bar` entirely absent from the document on every
-// retry once this happened, plus one direct capture of Puppeteer's own
-// "Node is detached from document" click error at the moment of the race).
-// Fixed by never dispatching a coordinate-based click at all: the locate
-// AND the click happen inside the SAME page.waitForFunction predicate
-// invocation (one synchronous browser-side JS turn, no intermediate CDP
-// round trip for Puppeteer to compute a now-stale bounding box against),
-// using the DOM's native, non-coordinate `element.click()`. This class of
-// button never depends on click *coordinates* (no drag, no in-page hit
-// testing) so a native `.click()` is behaviorally equivalent for it.
-async function clickBarButton(page, sel) {
-  await page.waitForFunction((s) => {
-    const el = document.querySelector(s);
-    if (el && !el.hidden) {
-      el.click();
-      return true;
-    }
-    return false;
-  }, {}, sel);
+// Task 5 (hover-edge insert bubbles) helpers: compute the pixel coordinates
+// of a column or row insert boundary from the table's LIVE cell rects — the
+// SAME geometry client.js's own updateTableInsertBubbles() computes, so
+// hovering exactly there is guaranteed to land within its TB_EDGE_PX
+// tolerance (both use the exact boundary coordinate, not an approximation).
+// `tableSel` is a block selector (e.g. from tableBlockSel()); the actual
+// <table> is a descendant of it.
+async function colBoundaryCoords(page, tableSel, colIndex) {
+  return page.evaluate((ts, ci) => {
+    const table = document.querySelector(ts + ' table');
+    const r = table.tHead.rows[0].cells[ci].getBoundingClientRect();
+    return { x: r.right, y: table.getBoundingClientRect().top };
+  }, tableSel, colIndex);
+}
+async function rowBoundaryCoords(page, tableSel, afterRowIndex) {
+  return page.evaluate((ts, ari) => {
+    const table = document.querySelector(ts + ' table');
+    const y = ari < 0
+      ? table.tHead.rows[0].getBoundingClientRect().bottom
+      : table.tBodies[0].rows[ari].getBoundingClientRect().bottom;
+    return { x: table.getBoundingClientRect().left, y };
+  }, tableSel, afterRowIndex);
+}
+// Moves the REAL mouse to a boundary (driving client.js's own throttled
+// mousemove listener, exactly like a real user hovering there), waits for
+// the corresponding singleton bubble to become visible, then clicks it.
+async function hoverAndClickColInsert(page, tableSel, colIndex) {
+  const { x, y } = await colBoundaryCoords(page, tableSel, colIndex);
+  await page.mouse.move(x, y);
+  await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
+  await page.click('.ed-tb-insert-col');
+}
+async function hoverAndClickRowInsert(page, tableSel, afterRowIndex) {
+  const { x, y } = await rowBoundaryCoords(page, tableSel, afterRowIndex);
+  await page.mouse.move(x, y);
+  await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
+  await page.click('.ed-tb-insert-row');
 }
 
-// Ctrl+S then re-read the file from disk — used by the Task 6 scenarios
+// Ctrl+S then re-read the file from disk — used by the Task 5/6 scenarios
 // below to assert the committed source after a structure op, same
 // keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
 async function saveAndRead(page, mdPath) {
@@ -2269,11 +2261,16 @@ async function saveAndRead(page, mdPath) {
       console.log('sel-toolbar regression: rerenderAll() resets toolbar state, no leaked listener — OK');
     }
 
-    // ── Phase-2 Task 5: table cell WYSIWYG editing ──────────────────────
-    // click cell -> type -> Tab to next cell -> type -> click outside
-    // commits the WHOLE session as ONE line-range replacement: both edits
-    // land in minimal form, and a SECOND, untouched table in the same doc
-    // stays byte-identical (no session -> no rewrite).
+    // ── Task 5 (Phase 3): table always-on WYSIWYG editing ────────────────
+    // Migrated from Phase-2 Task 5's click-select-then-session model: every
+    // cell of an eligible table is permanently contenteditable (class
+    // 'ed-wys-cell') the moment the page renders — a click is native caret
+    // placement (the delegated focusin listener starts the burst), not an
+    // "open" step. click cell -> type -> Tab to next cell -> type -> blur
+    // (focus leaves the TABLE) still commits the WHOLE burst as ONE
+    // line-range replacement: both edits land in minimal form, and a
+    // SECOND, untouched table in the same doc stays byte-identical (no
+    // burst touched it -> no rewrite).
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
         '# Tables', '',
@@ -2296,15 +2293,25 @@ async function saveAndRead(page, mdPath) {
         assert.strictEqual(tableCount, 2, 'fixture sanity: two table blocks');
 
         const table0 = await tableBlockSel(page, 0);
+        // Every cell is armed BEFORE any click — sanity-check the whole
+        // table's cells are already permanently contenteditable.
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            Array.from(document.querySelectorAll(s + ' th, ' + s + ' td'))
+              .every((c) => c.classList.contains('ed-wys-cell') && c.getAttribute('contenteditable') === 'true'),
+            table0),
+          true,
+          'Task 5: every cell of an eligible table must be permanently contenteditable, not just the clicked one'
+        );
+
         await clickCellWithText(page, table0, 'Alice');
         assert.strictEqual(
           await page.evaluate(() => {
             const ae = document.activeElement;
-            return !!ae && ae.getAttribute('contenteditable') === 'true' &&
-              ae.classList.contains('ed-wys') && ae.textContent.trim() === 'Alice';
+            return !!ae && ae.classList.contains('ed-wys-cell') && ae.textContent.trim() === 'Alice';
           }),
           true,
-          'clicking a cell must make it the active contenteditable edit root'
+          'clicking a cell must start the table burst with that cell focused'
         );
         await page.keyboard.type('!'); // caret placed at end -> appends
 
@@ -2312,22 +2319,24 @@ async function saveAndRead(page, mdPath) {
         assert.strictEqual(
           await page.evaluate(() => {
             const ae = document.activeElement;
-            return ae && ae.classList.contains('ed-wys') ? ae.textContent.trim() : null;
+            return ae && ae.classList.contains('ed-wys-cell') ? ae.textContent.trim() : null;
           }),
           'hello',
-          'Tab must move the active cell to the next cell in row order'
+          'Tab must move the active cell to the next cell in row order, WITHOUT ending the burst'
         );
         await page.keyboard.type('!!');
 
-        await page.evaluate(() => document.body.click()); // click outside the table
+        // Focus leaving the TABLE entirely commits the burst — Tab above,
+        // by contrast, stayed inside it and must NOT have committed.
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Alice!'),
           { timeout: 5000 }
         );
         assert.strictEqual(
-          await page.evaluate(() => !!document.querySelector('.ed-wys')),
-          false,
-          'no cell must remain contenteditable after the session commits'
+          await page.evaluate(() => document.activeElement === document.body),
+          true,
+          'no cell must remain focused after the burst commits (cells stay permanently contenteditable, just not focused)'
         );
 
         await page.keyboard.down('Control');
@@ -2345,23 +2354,27 @@ async function saveAndRead(page, mdPath) {
 
         const table2Src = torig.split('\n').slice(7, 10).join('\n'); // '| X | Y |\n|---|---|\n| 1 | 2 |'
         assert.ok(fileText.includes(table2Src),
-          'a second, untouched table in the same doc must stay byte-identical (no session -> no rewrite), got:\n' + fileText);
+          'a second, untouched table in the same doc must stay byte-identical (no burst -> no rewrite), got:\n' + fileText);
 
         await page.close();
-        console.log('table WYSIWYG: click cell -> type -> Tab -> type -> click outside commits minimal form; other table untouched — OK');
+        console.log('table WYSIWYG: click cell -> type -> Tab -> type -> blur commits minimal form as ONE burst; other table untouched — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // Enter inside a cell inserts a literal <br> — not a session commit (a
-    // table cell session has no Enter-commits-session gesture at all). The
-    // caret is placed MID-TEXT (via a Range, not a click) before pressing
-    // Enter — a deterministic split, unlike positioning at the very end of
-    // a cell's content, where Chrome's contenteditable caret-after-a-
-    // trailing-node placement is itself ambiguous (the SAME reason the
-    // pre-existing Shift+Enter scenario above only checks presence, not
-    // exact ordering, of its two text segments).
+    // Enter inside a cell inserts a literal <br> — not a burst commit (a
+    // table burst has no Enter-commits gesture at all, only leaving the
+    // TABLE or Esc ends it). The caret is placed MID-TEXT (via a Range, not
+    // a click) before pressing Enter — a deterministic split, unlike
+    // positioning at the very end of a cell's content, where Chrome's
+    // contenteditable caret-after-a-trailing-node placement is itself
+    // ambiguous (the SAME reason the pre-existing Shift+Enter scenario
+    // above only checks presence, not exact ordering, of its two text
+    // segments). Reads via `document.activeElement`, not a `.ed-wys-cell`
+    // selector — Task 5 arms EVERY cell of an eligible table permanently, so
+    // a bare class selector would just find whichever cell happens to be
+    // first in document order, not the one under edit.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| Col |',
@@ -2375,8 +2388,8 @@ async function saveAndRead(page, mdPath) {
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'onetwo');
-        await page.evaluate((s) => {
-          const cell = document.querySelector(s);
+        await page.evaluate(() => {
+          const cell = document.activeElement;
           const textNode = cell.firstChild;
           const r = document.createRange();
           r.setStart(textNode, 3); // between "one" and "two"
@@ -2384,23 +2397,23 @@ async function saveAndRead(page, mdPath) {
           const sel2 = window.getSelection();
           sel2.removeAllRanges();
           sel2.addRange(r);
-        }, table0 + ' .ed-wys');
+        });
         await page.keyboard.press('Enter');
         assert.strictEqual(
           await page.evaluate(() => {
-            const cell = document.querySelector('.ed-wys');
-            return cell ? cell.innerHTML : null;
+            const cell = document.activeElement;
+            return cell && cell.classList.contains('ed-wys-cell') ? cell.innerHTML : null;
           }),
           'one<br>two',
-          'Enter must insert a <br> node splitting the cell exactly at the caret, not commit the session'
+          'Enter must insert a <br> node splitting the cell exactly at the caret, not commit the burst'
         );
         assert.strictEqual(
           await page.evaluate(() => !!document.querySelector('textarea.ed-raw')),
           false,
-          'Enter must NOT commit (no raw editor, the cell session stays open)'
+          'Enter must NOT commit (no raw editor, the table burst stays open)'
         );
 
-        await page.evaluate(() => document.body.click());
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('one<br>two'),
           { timeout: 5000 }
@@ -2440,9 +2453,8 @@ async function saveAndRead(page, mdPath) {
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'x');
-        await page.evaluate((s) => {
-          const cell = document.querySelector(s);
-          cell.focus();
+        await page.evaluate(() => {
+          const cell = document.activeElement;
           const r = document.createRange();
           r.selectNodeContents(cell);
           r.collapse(false);
@@ -2453,18 +2465,18 @@ async function saveAndRead(page, mdPath) {
           dt.setData('text/plain', 'line1\nline2');
           const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
           cell.dispatchEvent(ev);
-        }, table0 + ' .ed-wys');
+        });
 
         assert.strictEqual(
           await page.evaluate(() => {
-            const cell = document.querySelector('.ed-wys');
-            return cell ? cell.innerHTML : null;
+            const cell = document.activeElement;
+            return cell && cell.classList.contains('ed-wys-cell') ? cell.innerHTML : null;
           }),
           'xline1<br>line2',
           'a multi-line paste must insert a real <br> between segments, not a raw newline text node'
         );
 
-        await page.evaluate(() => document.body.click());
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('line1<br>line2'),
           { timeout: 5000 }
@@ -2490,9 +2502,12 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
-    // Esc reverts the WHOLE session (every cell touched this session, not
-    // just the active one) — deliberately different from the paragraph
-    // editor's per-block Esc.
+    // Esc reverts the WHOLE burst (every cell touched this burst, not just
+    // the active one) — deliberately different from the paragraph editor's
+    // per-block Esc. Cells stay permanently contenteditable after Esc (Task
+    // 5 arms them once at load, not per-burst), so "the burst ended" is
+    // checked via focus (no cell left FOCUSED), not via the 'ed-wys-cell'
+    // class itself — see revertTableBurstAndEnd()'s comment in client.js.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
         '| A | B |',
@@ -2515,14 +2530,22 @@ async function saveAndRead(page, mdPath) {
 
         await page.keyboard.press('Escape');
         assert.strictEqual(
-          await page.evaluate(() => !!document.querySelector('.ed-wys')),
-          false,
-          'Esc must end the session (no cell left contenteditable)'
+          await page.evaluate(() => document.activeElement === document.body),
+          true,
+          'Esc must end the burst (no cell left focused)'
         );
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.content').textContent.includes('CHANGED')),
           false,
           'Esc must discard the typed edit — the original cell text must be back'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelectorAll(s + ' th, ' + s + ' td')
+              .length === document.querySelectorAll(s + ' .ed-wys-cell').length,
+            table0),
+          true,
+          'every cell must still be contenteditable after Esc — Task 5 arms the whole table once, a burst reverting is not un-arming it'
         );
 
         await page.keyboard.down('Control');
@@ -2534,16 +2557,20 @@ async function saveAndRead(page, mdPath) {
           'Esc must never have touched `lines` — the saved file must be byte-identical to the original, got:\n' + fileText);
 
         await page.close();
-        console.log('table WYSIWYG: Esc mid-session reverts the whole session; file unchanged after save — OK');
+        console.log('table WYSIWYG: Esc mid-burst reverts the whole burst (cells stay armed); file unchanged after save — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // A table with ANY unsupported cell degrades to raw-edit at OPEN time —
-    // never a half-broken cell session. Checked at both entry points: a
-    // direct click on a cell (no-ops, falls back to plain block-select) and
-    // the ✎ button (routes straight to raw-edit).
+    // Task 5 Global Constraint: a table with ANY unsupported cell degrades
+    // to raw-edit at ARM time — never a half-armed table. A degraded table
+    // gets NO 'ed-wys-cell'/'ed-wys-table' classes at all (armEditables()'s
+    // 'table' branch never fires when canWysiwygForTable() is false), so it
+    // falls straight through to the same generic "click opens in-place
+    // source editor" path every other degraded block already has — no bar,
+    // no extra step (this migrates the old ✎-button scenario, since ✎/the
+    // bar no longer exist).
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| Col |',
@@ -2556,39 +2583,42 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
-        await page.click(table0 + ' tbody td');
         assert.strictEqual(
-          await page.evaluate(() => !!document.querySelector('.ed-wys')),
+          await page.evaluate((s) => !!document.querySelector(s + ' .ed-wys-cell'), table0),
           false,
-          'a click on a cell in an unsupported table must NOT open a cell session'
-        );
-        assert.strictEqual(
-          await page.evaluate((s) => !document.querySelector(s + ' .ed-bar-edit').hidden, table0),
-          true,
-          'the block must still be selected (bar shown, ✎ visible) — just not editing'
+          'an unsupported table must have NO cell armed at all'
         );
 
-        await page.click(table0 + ' .ed-bar-edit');
+        await page.click(table0 + ' tbody td');
         await page.waitForSelector(table0 + ' textarea.ed-raw');
         const rawValue = await page.evaluate(
           (s) => document.querySelector(s + ' textarea.ed-raw').value, table0);
         assert.ok(rawValue.includes('![img](https://example.com/x.png)'),
-          '✎ on an unsupported table must degrade straight to raw-edit prefilled with its source, got:\n' + rawValue);
+          'a click on an unsupported table must degrade straight to raw-edit prefilled with its source, got:\n' + rawValue);
 
         await page.close();
-        console.log('table WYSIWYG: any unsupported cell degrades the whole table to raw-edit — OK');
+        console.log('table WYSIWYG: any unsupported cell degrades the whole table to raw-edit on click, no bar step — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // ── Phase-2 Task 6: table structure ops (row/col add/del, alignment) ──
-    // Review fix (Important 1): an op button's auto-open must be gated by
-    // canWysiwygForTable() exactly like ✎ and the direct-cell-click path —
-    // clicking ＋列 on a table with an unsupported cell, with NO session
-    // open yet, must degrade straight to raw-edit (never open a session,
-    // mutate the DOM, and only discover the problem at commit time, which
-    // would silently discard the row-insert the user just triggered).
+    // ── Task 5: hover-edge column/row insert bubbles ────────────────────
+    // Migration note (see the task-5 report's migration table): the OLD
+    // Phase-2 Task 6 ed-bar row/col-op buttons are RETIRED along with the
+    // rest of the click-select bar (this task's Global Constraint — the
+    // bar's last consumer, tables, loses its bar here). insertRow()/
+    // insertColumn() get NEW UI below (hover-edge bubbles); deleteRow()/
+    // deleteColumn()/cycleColumnAlign() get NO UI in this task — they stay
+    // exactly as they were (verified in test/editor-client.test.js's
+    // dead-code grep — the FUNCTIONS remain even though their old ed-bar
+    // wiring doesn't) for T6's future edge-menus to reuse unchanged. There
+    // is deliberately no test here exercising a UI trigger for those three,
+    // since none exists yet; adding their edge-menu UI + tests is T6's job.
+
+    // A degraded (unsupported-cell) table gets NO hover-insert affordance at
+    // all — armEditables() never adds 'ed-wys-table' to it, and
+    // updateTableInsertBubbles() gates on exactly that class.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| Col |', '|---|', '| ![img](https://example.com/x.png) |', '',
@@ -2598,153 +2628,29 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
-        // Same click as the pre-existing "unsupported cell" scenario above:
-        // a direct cell click on an unsupported table selects the block
-        // (bar shown) WITHOUT opening a session — exactly the "no session
-        // open yet" precondition this fix targets.
-        await page.click(table0 + ' tbody td');
+        const { x, y } = await colBoundaryCoords(page, table0, 0);
+        await page.mouse.move(x, y);
+        // Give the throttled mousemove handler a couple of animation frames
+        // to run, then assert the bubble never became visible (there is no
+        // positive event to waitFor here — proving an ABSENCE needs a
+        // fixed settle window instead of a waitForSelector).
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
         assert.strictEqual(
-          await page.evaluate(() => !!document.querySelector('.ed-wys')),
-          false, 'sanity: no cell session must be open yet'
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-col').hidden),
+          true,
+          'an unsupported table must show NO hover-insert bubble at all'
         );
-
-        await clickBarButton(page, table0 + ' .ed-bar-row-plus');
-        // The DISCRIMINATING assertion: without the pre-open gate, the OLD
-        // code path still ends up with clean raw-edit content (commit()'s
-        // own unsupported-fallback reverts the live DOM mutation via
-        // cancel() before ever persisting anything — fully synchronously,
-        // so a textarea-content check alone can't tell the two code paths
-        // apart). What DOES differ observably: the old path opened a
-        // session, mutated the DOM, and only THEN discovered the problem at
-        // commit() — which shows the "含不支援的格式，改用原始碼編輯" banner
-        // (client.js's commit()) even though the user never typed anything.
-        // The gate fix routes straight to raw-edit with NO banner at all —
-        // same as editBtn's own routing for an unsupported table.
-        assert.strictEqual(
-          await page.evaluate(() => !!document.querySelector('.ed-conflict')),
-          false,
-          '＋列 on an unsupported table must route straight to raw-edit with NO ' +
-          '"unsupported format" banner (that banner means a session was opened ' +
-          'and reverted first — the confusing two-step this fix removes)'
-        );
-
-        await page.waitForSelector(table0 + ' textarea.ed-raw');
-        const rawValue = await page.evaluate(
-          (s) => document.querySelector(s + ' textarea.ed-raw').value, table0);
-        assert.ok(rawValue.includes('![img](https://example.com/x.png)'),
-          '＋列 on an unsupported table must degrade straight to raw-edit prefilled with its source, got:\n' + rawValue);
-        assert.strictEqual(rawValue.includes('|  |'),
-          false, '＋列 must NOT have silently applied the row-insert before degrading, got:\n' + rawValue);
 
         await page.close();
-        console.log('table structure ops: op button on an unsupported table degrades to raw-edit, no silent op loss — OK');
+        console.log('table hover-insert: an unsupported table shows no insert bubble — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // ＋列: inserts an empty body row directly after the row containing the
-    // last-focused cell (a click auto-opens the table session — no prior ✎
-    // needed — see runTableStructureOp()'s section comment in client.js).
-    {
-      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
-        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
-      ]);
-      try {
-        const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
-
-        const table0 = await tableBlockSel(page, 0);
-        await clickCellWithText(page, table0, '1');
-        await clickBarButton(page, table0 + ' .ed-bar-row-plus');
-        await page.waitForFunction(
-          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 3,
-          {}, table0
-        );
-
-        const fileText = await saveAndRead(page, tmdPath);
-        assert.ok(fileText.includes(
-          ['| A | B |', '|---|---|', '| 1 | 2 |', '|  |  |', '| 3 | 4 |'].join('\n')),
-          '＋列 must insert an empty row directly after the focused row, got:\n' + fileText);
-
-        await page.close();
-        console.log('table structure ops: ＋列 inserts an empty row after the focused row — OK');
-      } finally {
-        tsrv.close();
-      }
-    }
-
-    // －列: deletes the row containing the focused cell; refuses (banner) to
-    // delete the last remaining body row.
-    {
-      const { srv: tsrv, url: turl } = await setupTableDoc([
-        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
-      ]);
-      try {
-        const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
-
-        const table0 = await tableBlockSel(page, 0);
-        await clickCellWithText(page, table0, '3');
-        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
-        await page.waitForFunction(
-          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 1,
-          {}, table0
-        );
-        const bodyText = await page.evaluate((s) => document.querySelector(s).textContent, table0);
-        assert.ok(!bodyText.includes('3'), '－列 must remove the row containing the focused cell');
-
-        // refuse deleting the last remaining body row
-        await clickCellWithText(page, table0, '1');
-        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
-        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
-        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-        assert.ok(/無法刪除最後一列/.test(bannerText),
-          'refusing to delete the last row must show a banner, got: ' + bannerText);
-        const rowCount = await page.evaluate(
-          (s) => document.querySelector(s).querySelectorAll('tbody tr').length, table0);
-        assert.strictEqual(rowCount, 1, 'the last row must NOT be deleted after refusal');
-
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
-        await page.close();
-        console.log('table structure ops: －列 deletes the focused row; refuses to delete the last row — OK');
-      } finally {
-        tsrv.close();
-      }
-    }
-
-    // －列 on a HEADER cell is refused outright (banner) — the header can
-    // never be removed via the row-delete button, regardless of body row
-    // count.
-    {
-      const { srv: tsrv, url: turl } = await setupTableDoc([
-        '| A | B |', '|---|---|', '| 1 | 2 |', '',
-      ]);
-      try {
-        const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
-
-        const table0 = await tableBlockSel(page, 0);
-        await clickCellWithText(page, table0, 'A');
-        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
-        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
-        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-        assert.ok(/無法刪除標題列/.test(bannerText),
-          'refusing to delete the header row must show a banner, got: ' + bannerText);
-        const headerStillThere = await page.evaluate(
-          (s) => !!document.querySelector(s + ' thead th'), table0);
-        assert.strictEqual(headerStillThere, true, 'the header row must still exist');
-
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
-        await page.close();
-        console.log('table structure ops: －列 on the header row is refused — OK');
-      } finally {
-        tsrv.close();
-      }
-    }
-
-    // ＋欄: inserts an empty column directly after the focused cell's column,
-    // in the header AND every body row.
+    // ＋: hovering a column boundary's top edge reveals the bubble; clicking
+    // it inserts an empty column directly after that boundary's column, in
+    // the header AND every body row — committed once focus leaves the TABLE.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| A | B | C |', '|---|---|---|', '| 1 | 2 | 3 |', '',
@@ -2754,107 +2660,116 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
-        await clickCellWithText(page, table0, '2');
-        await clickBarButton(page, table0 + ' .ed-bar-col-plus');
+        await hoverAndClickColInsert(page, table0, 1); // boundary after column B (index 1)
         await page.waitForFunction(
           (s) => document.querySelector(s + ' thead th').parentElement.children.length === 4,
           {}, table0
         );
+        // The insert is a burst mutation, not yet committed to `lines` —
+        // leaving the table (blur) is what commits it as ONE line-range
+        // replacement, same as any other table edit.
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
 
         const fileText = await saveAndRead(page, tmdPath);
         assert.ok(fileText.includes('| A | B |  | C |'),
-          '＋欄 must insert an empty header cell after the focused column, got:\n' + fileText);
+          'hover-insert ＋ must insert an empty header cell after the hovered column, got:\n' + fileText);
         assert.ok(fileText.includes('| 1 | 2 |  | 3 |'),
-          '＋欄 must insert an empty body cell in every row at the same column, got:\n' + fileText);
+          'hover-insert ＋ must insert an empty body cell in every row at the same column, got:\n' + fileText);
         assert.ok(fileText.includes('|---|---|---|---|'),
-          '＋欄 must add a 4th unaligned separator cell, got:\n' + fileText);
+          'hover-insert ＋ must add a 4th unaligned separator cell, got:\n' + fileText);
 
         await page.close();
-        console.log('table structure ops: ＋欄 inserts an empty column after the focused column — OK');
+        console.log('table hover-insert: ＋ column bubble inserts an empty column after the hovered boundary — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // －欄: deletes the focused cell's column from header + every body row;
-    // refuses (banner) to delete the last remaining column.
+    // ＋: hovering a row boundary's left edge reveals the bubble; clicking it
+    // inserts an empty row directly after that boundary's row (the header's
+    // OWN bottom edge is boundary -1, per insertRow()'s "header counts as
+    // the first boundary" contract).
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
-        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
       ]);
       try {
         const page = await newPage(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
-        await clickCellWithText(page, table0, '1');
-        await clickBarButton(page, table0 + ' .ed-bar-col-minus');
+        await hoverAndClickRowInsert(page, table0, 0); // boundary after the FIRST body row (1 | 2)
         await page.waitForFunction(
-          (s) => document.querySelector(s + ' thead th').parentElement.children.length === 1,
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 3,
           {}, table0
         );
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
 
         const fileText = await saveAndRead(page, tmdPath);
-        assert.ok(fileText.includes(['| B |', '|---|', '| 2 |'].join('\n')),
-          '－欄 must remove the focused column from header + body, got:\n' + fileText);
+        assert.ok(fileText.includes(
+          ['| A | B |', '|---|---|', '| 1 | 2 |', '|  |  |', '| 3 | 4 |'].join('\n')),
+          'hover-insert ＋ must insert an empty row directly after the hovered boundary, got:\n' + fileText);
 
-        // refuse deleting the last remaining column
-        await clickCellWithText(page, table0, '2');
-        await clickBarButton(page, table0 + ' .ed-bar-col-minus');
-        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
-        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-        assert.ok(/無法刪除最後一欄/.test(bannerText),
-          'refusing to delete the last column must show a banner, got: ' + bannerText);
-        const colCount = await page.evaluate(
-          (s) => document.querySelector(s + ' thead th').parentElement.children.length, table0);
-        assert.strictEqual(colCount, 1, 'the last column must NOT be deleted after refusal');
-
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
         await page.close();
-        console.log('table structure ops: －欄 deletes the focused column; refuses to delete the last column — OK');
+        console.log('table hover-insert: ＋ row bubble inserts an empty row after the hovered boundary — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // 對齊: cycles the focused column's alignment left → center → right →
-    // left (wrapping), applied to EVERY cell (th+td) in that column — never
-    // the untouched neighboring column.
+    // Overlay clicks must NOT end the burst (Global Constraint: exclusion
+    // pattern like .ed-conflict/.ed-seltb) — a hover-insert click auto-starts
+    // a burst (brief: "auto-start a burst if none open") that stays OPEN
+    // afterward, and Ctrl+Z on the still-focused cell reverts the insert
+    // IN-BURST (client-side undo, no commit/rerender) rather than cascading
+    // out to the document-level undo stack.
     {
-      const { srv: tsrv, url: turl } = await setupTableDoc([
-        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
       ]);
       try {
         const page = await newPage(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
-        const expected = ['left', 'center', 'right', 'left'];
-        for (const want of expected) {
-          await clickCellWithText(page, table0, '1');
-          await clickBarButton(page, table0 + ' .ed-bar-align');
-          await page.waitForFunction(
-            (s, w) => {
-              const th = document.querySelector(s + ' thead th');
-              return !!th && (th.getAttribute('style') || '') === 'text-align:' + w;
-            }, {}, table0, want
-          );
-        }
-        const styles = await page.evaluate((s) => {
-          const ths = document.querySelectorAll(s + ' thead th');
-          return Array.from(ths).map((th) => th.getAttribute('style'));
-        }, table0);
-        assert.strictEqual(styles[0], 'text-align:left',
-          'after 4 cycles (left,center,right,left) column A must be back to left');
-        assert.strictEqual(styles[1], null,
-          'the untouched column B must never gain an alignment style');
-        const tdStyle = await page.evaluate(
-          (s) => document.querySelector(s + ' tbody td').getAttribute('style'), table0);
-        assert.strictEqual(tdStyle, 'text-align:left',
-          'the body cell in the aligned column must be kept in sync with the header cell (column-uniform assumption)');
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement === document.body),
+          true, 'sanity: no burst open yet (nothing focused)'
+        );
+
+        await hoverAndClickRowInsert(page, table0, 0);
+        await page.waitForFunction(
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 3,
+          {}, table0
+        );
+        // The bubble click must have auto-started (and kept open) a table
+        // burst — a cell is now focused, and no commit has happened.
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'a hover-insert click must auto-start a table burst (a cell must now be focused)'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 2,
+          {}, table0
+        );
+        // Still in-burst — undo did NOT cascade to a full commit/rerender:
+        // the cell is still focused and the burst is still open.
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'Ctrl+Z must revert the insert IN-BURST, not commit/end the burst'
+        );
+
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'the reverted insert must never have reached `lines` — file must be byte-identical to the original, got:\n' + fileText);
 
         await page.close();
-        console.log('table structure ops: 對齊 cycles left→center→right→left on the focused column — OK');
+        console.log('table hover-insert: bubble click auto-starts a burst; Ctrl+Z reverts the insert in-burst — OK');
       } finally {
         tsrv.close();
       }
@@ -2917,7 +2832,7 @@ async function saveAndRead(page, mdPath) {
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'Alice');
         await page.keyboard.type('!');
-        await page.evaluate(() => document.body.click()); // click outside commits the table session
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); }); // focus leaving the TABLE commits the burst
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Alice!'),
           { timeout: 5000 }

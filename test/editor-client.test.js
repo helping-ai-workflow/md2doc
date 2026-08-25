@@ -107,12 +107,20 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.
 for (const needle of ['__ED__', 'Ctrl', 'beforeunload', '/api/save',
                       '/api/render', '/api/ping', '409',
                       '__md2docInitDiagrams', 'ed-raw',
-                      'ed-bar', 'ed-selected', 'wireBlockSelection']) {
+                      'ed-wys-cell', 'ed-tb-insert', 'wireBlockSelection']) {
   assert.ok(src.includes(needle), `client.js must reference ${needle}`);
 }
-// The old hover-gutter DOM wiring must be gone (replaced by the click-bar).
+// The old hover-gutter DOM wiring must be gone (replaced by the click-bar,
+// itself later retired in favor of always-on arming — see Task 5).
 assert.ok(!/ed-gutter/.test(src), 'client.js must not reference the removed .ed-gutter');
 assert.ok(!/attachGutters/.test(src), 'client.js must not reference the removed attachGutters()');
+// Task 5: the click-select edit bar (its last consumer, tables, is retired
+// in this task — T2 already retired it for paragraph/heading) must be
+// fully gone, not just unused.
+for (const needle of ['ed-bar', 'ed-selected', 'openTableEditor', 'runTableStructureOp',
+                      'selectedBlockEl', 'dismissBar', 'showBarFor', 'updateBarButtons']) {
+  assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
+}
 
 // -- Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+Enter: preventDefault() must fire
 // BEFORE any async work (save()/undo()/redo()/commit() all kick off a
@@ -130,8 +138,8 @@ const shortcutOrderChecks = [
     'Ctrl+Enter (raw-editor commit) must preventDefault() before commit()'],
   [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*restore\(\);/,
     'Esc inside the raw editor must preventDefault() before restore()'],
-  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*dismissBar\(\);/,
-    'Esc (global, edit-bar dismiss) must preventDefault() before dismissBar()'],
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*closeGutterMenu\(\);/,
+    'Esc (global, ⠿ menu dismiss) must preventDefault() before closeGutterMenu()'],
 ];
 for (const [re, msg] of shortcutOrderChecks) {
   assert.ok(re.test(src), msg);
