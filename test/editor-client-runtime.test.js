@@ -411,6 +411,48 @@ async function hoverAndClickRowInsert(page, tableSel, afterRowIndex) {
   await page.click('.ed-tb-insert-row');
 }
 
+// ── Task 6 (edge-click menus + row drag-reorder) helpers ────────────────
+// Coordinates INSIDE a column's TOP edge zone / a row's LEFT edge zone — as
+// opposed to colBoundaryCoords()/rowBoundaryCoords() above, which target a
+// BOUNDARY (for the hover-insert bubbles). This is the exact geometry
+// client.js's own hitTestEdgeZone() checks: y within TE_EDGE_PX of the
+// table's top and x within the header cell's own left..right span for a
+// column; x within TE_EDGE_PX of the table's left and y within the row's
+// own top..bottom span for a row.
+async function colEdgeZoneCoords(page, tableSel, colIndex) {
+  return page.evaluate((ts, ci) => {
+    const table = document.querySelector(ts + ' table');
+    const r = table.tHead.rows[0].cells[ci].getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: table.getBoundingClientRect().top };
+  }, tableSel, colIndex);
+}
+async function rowEdgeZoneCoords(page, tableSel, isHeader, bodyIndex) {
+  return page.evaluate((ts, ih, bi) => {
+    const table = document.querySelector(ts + ' table');
+    const row = ih ? table.tHead.rows[0] : table.tBodies[0].rows[bi];
+    const r = row.getBoundingClientRect();
+    return { x: table.getBoundingClientRect().left, y: r.top + r.height / 2 };
+  }, tableSel, isHeader, bodyIndex);
+}
+// A real press+release with NO intermediate movement — same primitive a
+// plain click on an edge zone drives (client.js's drag-threshold check
+// never trips), reused by both the menu-open scenarios and (with actual
+// movement injected between down/up) the drag scenarios below.
+async function pressReleaseAt(page, x, y) {
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.up();
+}
+// Presses at `from`, moves through a midpoint (so the drag crosses
+// client.js's TE_DRAG_THRESHOLD_PX before landing), and releases at `to`.
+async function dragRowTo(page, from, to) {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  await page.mouse.move(from.x + (to.x - from.x) / 2, from.y + (to.y - from.y) / 2, { steps: 5 });
+  await page.mouse.move(to.x, to.y, { steps: 5 });
+  await page.mouse.up();
+}
+
 // Ctrl+S then re-read the file from disk — used by the Task 5/6 scenarios
 // below to assert the committed source after a structure op, same
 // keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
@@ -2770,6 +2812,244 @@ async function saveAndRead(page, mdPath) {
 
         await page.close();
         console.log('table hover-insert: bubble click auto-starts a burst; Ctrl+Z reverts the insert in-burst — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // ── Task 6: table edge-click menus (delete/align) + row drag-reorder ────
+    // Restores the delete-row / delete-column / cycle-align capability
+    // retired with the click-select ed-bar (see the Task-5 migration note
+    // above) in Notion form: click a column's TOP edge (or a row's LEFT
+    // edge) to select it and show a floating menu.
+
+    // Column menu: click shows the menu (highlighted column, 刪除欄/對齊
+    // buttons), 對齊 cycles left->center->right without closing the menu,
+    // 刪除欄 removes the column and closes the menu, and deleting the LAST
+    // remaining column is refused with a banner (column untouched).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const colB = await colEdgeZoneCoords(page, table0, 1);
+        await pressReleaseAt(page, colB.x, colB.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu-delete').textContent), '刪除欄',
+          'the column menu\'s delete button must read 刪除欄');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), false,
+          'the column menu must show the 對齊 button');
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const cells = document.querySelectorAll(s + ' thead th, ' + s + ' tbody td');
+            return Array.from(cells).filter((c) => c.classList.contains('ed-te-hl'))
+              .map((c) => c.textContent).sort().join(',');
+          }, table0),
+          '2,B',
+          'clicking column B\'s top edge must highlight exactly column B\'s cells (header+body)');
+
+        // 對齊: cycle left -> center -> right, each click keeping the menu
+        // (an overlay element) open and NOT ending the burst — the menu
+        // button's own mousedown preventDefault() must keep whatever cell
+        // was focused (none, here) from stealing/losing focus.
+        await page.click('.ed-te-menu-align');
+        await page.waitForFunction(
+          (s) => /text-align:\s*left/.test(document.querySelector(s + ' thead th:nth-child(2)').getAttribute('style') || ''),
+          {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), false,
+          'clicking 對齊 must NOT close the menu (repeated clicks keep cycling)');
+        await page.click('.ed-te-menu-align');
+        await page.waitForFunction(
+          (s) => /text-align:\s*center/.test(document.querySelector(s + ' thead th:nth-child(2)').getAttribute('style') || ''),
+          {}, table0
+        );
+
+        // 刪除欄: removes column B entirely (header + body cell) and closes
+        // the menu; committed to the file once the table burst is left.
+        await page.click('.ed-te-menu-delete');
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead tr').children.length === 1, {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
+          '刪除欄 must close the menu (its target column no longer exists)');
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const afterDelete = await saveAndRead(page, tmdPath);
+        assert.strictEqual(afterDelete, ['| A |', '|---|', '| 1 |', ''].join('\n'),
+          '刪除欄 must remove the column from every row, minimal form, got:\n' + afterDelete);
+
+        // Refusal: the LAST remaining column refuses with a banner and stays.
+        const colA = await colEdgeZoneCoords(page, table0, 0);
+        await pressReleaseAt(page, colA.x, colA.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' thead tr').children.length, table0), 1,
+          'refusing to delete the last column must leave it in place');
+        await page.close();
+        console.log('table edge menus: column menu highlights/aligns/deletes; last column refuses — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Row menu: click shows the menu (刪除列 only, row highlighted),
+    // deleting a body row removes it; the header row and the LAST body row
+    // both refuse with a banner.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const row0 = await rowEdgeZoneCoords(page, table0, false, 0);
+        await pressReleaseAt(page, row0.x, row0.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu-delete').textContent), '刪除列',
+          'the row menu\'s delete button must read 刪除列');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), true,
+          'the row menu must NOT show the 對齊 button');
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' tbody tr:first-child').classList.contains('ed-te-hl'), table0),
+          true, 'clicking row 0\'s left edge must highlight that row');
+
+        await page.click('.ed-te-menu-delete');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' tbody tr').length === 1, {}, table0
+        );
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const afterDelete = await saveAndRead(page, tmdPath);
+        assert.strictEqual(afterDelete, ['| A | B |', '|---|---|', '| 3 | 4 |', ''].join('\n'),
+          '刪除列 must remove exactly that row, got:\n' + afterDelete);
+
+        // Refusal: the LAST body row refuses.
+        const lastRow = await rowEdgeZoneCoords(page, table0, false, 0);
+        await pressReleaseAt(page, lastRow.x, lastRow.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
+          'refusing to delete the last body row must leave it in place');
+        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+
+        // Refusal: the HEADER row refuses.
+        const headerRow = await rowEdgeZoneCoords(page, table0, true, 0);
+        await pressReleaseAt(page, headerRow.x, headerRow.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' thead tr'), table0), true,
+          'refusing to delete the header row must leave it in place');
+
+        await page.close();
+        console.log('table edge menus: row menu highlights/deletes; header + last-body-row refuse — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Row drag-reorder: press-and-drag from the LAST body row's left edge to
+    // ABOVE the first body row -> a drop indicator tracks the pointer, and
+    // dropping reorders the actual <tr> (never a clone) once committed.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| A |', '|---|', '| 1 |', '| 2 |', '| 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const from = await rowEdgeZoneCoords(page, table0, false, 2); // row "3"
+        const to = await rowBoundaryCoords(page, table0, -1); // boundary just above row "1"
+        await dragRowTo(page, from, to);
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(',') === '3,1,2',
+          {}, table0
+        );
+        // The drag must have auto-started (and kept open) a table burst.
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'a row drop must auto-start a table burst (a cell must now be focused)'
+        );
+
+        // Ctrl+Z mid-burst reverts the drag IN-BURST (no commit/rerender —
+        // same "revert without ending the burst" contract Task 5's own
+        // insert-bubble Ctrl+Z scenario asserts).
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(',') === '1,2,3',
+          {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'Ctrl+Z must revert the drag IN-BURST, not commit/end the burst'
+        );
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const afterUndo = await saveAndRead(page, tmdPath);
+        assert.strictEqual(afterUndo, torig,
+          'the reverted drag must never have reached the file — byte-identical to the original, got:\n' + afterUndo);
+
+        await page.close();
+        console.log('table row drag: drop reorders the row; Ctrl+Z reverts it in-burst — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Row drag lands on disk once actually committed (no undo this time),
+    // and Esc DURING a drag cancels it with NO mutation at all — distinct
+    // from Esc-reverts-burst (which this must NOT trigger: the previously-
+    // focused surface, if any, is untouched, and the row never moves).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| A |', '|---|', '| 1 |', '| 2 |', '| 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const from = await rowEdgeZoneCoords(page, table0, false, 2);
+        const to = await rowBoundaryCoords(page, table0, -1);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x, to.y, { steps: 8 }); // cross the drag threshold, mid-drag
+        await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+        await page.keyboard.press('Escape');
+        await page.mouse.up(); // the drag state is already gone — this must be an inert no-op
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0),
+          '1,2,3', 'Esc during a drag must cancel it with NO row reorder at all'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-drop-indicator').hidden), true,
+          'Esc during a drag must hide the drop indicator'
+        );
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig, 'a cancelled drag must never touch the file, got:\n' + fileText);
+
+        await page.close();
+        console.log('table row drag: Esc mid-drag cancels with no mutation — OK');
       } finally {
         tsrv.close();
       }
