@@ -90,12 +90,19 @@ for (const [re, msg] of shortcutOrderChecks) {
 }
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
-// tag by lib/editor/server.js (see LINEOPS_SRC and clientJs in the GET
-// /edit/:id handler). A literal `</script` substring anywhere in either
-// source — even inside a string literal or comment — would prematurely
-// close that tag in the served HTML and break the page.
+// tag by lib/editor/server.js (see LINEOPS_SRC / INLINE_MD_SRC / TABLE_MD_SRC
+// and clientJs in the GET /edit/:id handler). A literal `</script` substring
+// anywhere in ANY of these sources — even inside a string literal or comment
+// — would prematurely close that tag in the served HTML and break the page.
+// Final-review Finding 2: server.js now ALSO inlines inline-md.js and
+// table-md.js (Phase-2 Tasks 2/5) — the guard below only covered
+// client.js + lineops.js and missed those two.
 const lineopsSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'lineops.js'), 'utf8');
+const inlineMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'inline-md.js'), 'utf8');
+const tableMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'table-md.js'), 'utf8');
 assert.ok(!/<\/script/i.test(src), 'client.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(lineopsSrc), 'lineops.js must not contain a literal </script sequence');
+assert.ok(!/<\/script/i.test(inlineMdSrc), 'inline-md.js must not contain a literal </script sequence');
+assert.ok(!/<\/script/i.test(tableMdSrc), 'table-md.js must not contain a literal </script sequence');
 
 console.log('editor-client.test.js OK');
