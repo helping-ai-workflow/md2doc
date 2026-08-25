@@ -3991,6 +3991,478 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // Final whole-branch review (2026-08): Findings 1-6 regression coverage.
+    // Each isolated doc below uses setupTableDoc() (generic despite the
+    // name — writes `rows` verbatim and boots a fresh server) so none of
+    // these depend on — or can leak into — the shared fixture doc above.
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── Finding 1 (Critical): mid-burst Ctrl+S must resolve the open burst
+    //    FIRST (via switchAwayFrom()) so `lines` reflects the just-typed
+    //    edit before save() reads it — never save stale content and clear
+    //    the dirty dot on top of it ─────────────────────────────────────────
+    {
+      const { srv: f1srv, url: f1url, mdPath: f1mdPath } = await setupTableDoc([
+        'Mid-burst save target text here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f1url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Mid-burst save target text here.');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyA');
+        await page.keyboard.up('Control');
+        await page.keyboard.type('EDITED without a blur.');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true,
+          'sanity: the burst must still be open (never blurred) right before Ctrl+S'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f1mdPath, 'utf8');
+        assert.ok(fileText.includes('EDITED without a blur.'),
+          'Ctrl+S while a burst is open (never blurred) must resolve it first and save the just-typed ' +
+          'text — the file must contain it, got:\n' + fileText);
+        const title = await page.title();
+        assert.ok(!title.startsWith('●'),
+          'after a REAL mid-burst save, the dirty dot must be cleared (a genuine save happened, not the ' +
+          'stale-content-then-clear-dirty bug), got title: ' + title);
+
+        await page.close();
+        console.log('Finding 1: Ctrl+S mid-burst resolves the open burst before saving — OK');
+      } finally {
+        f1srv.close();
+      }
+    }
+
+    // ── Finding 2 (Critical): a zero-edit burst must not canonicalize
+    //    non-canonical (hand-padded) source — resolveBurst()'s DOM-unchanged
+    //    fast path skips the serializer entirely when nothing was typed ────
+    {
+      const { srv: f2srv, url: f2url, mdPath: f2mdPath, original: f2orig } = await setupTableDoc([
+        '| Name     | Note |',
+        '|----------|------|',
+        '| Row1     | 2    |',
+        '',
+        'Trailing paragraph text.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f2url, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Row1');
+        // Selecting the cell's own text is a real user interaction that
+        // never mutates the DOM — it must NOT count as an edit.
+        await page.evaluate(() => {
+          const el = document.activeElement;
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const s = window.getSelection();
+          s.removeAllRanges();
+          s.addRange(range);
+        });
+
+        const otherSel = await paragraphSelByText(page, 'Trailing paragraph text.');
+        await page.click(otherSel); // click OUT of the table — a real blur, no typing anywhere
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f2mdPath, 'utf8');
+        assert.strictEqual(fileText, f2orig,
+          'a zero-edit burst (click into a cell, select its text, click out) must leave the saved file ' +
+          'BYTE-IDENTICAL to the padded/non-canonical original — no serializer rewrite, no dirty commit, got:\n' +
+          fileText);
+        const title = await page.title();
+        assert.ok(!title.startsWith('●'), 'a zero-edit burst must never leave the document dirty, got title: ' + title);
+
+        await page.close();
+        console.log('Finding 2: zero-edit burst never canonicalizes non-canonical source — OK');
+      } finally {
+        f2srv.close();
+      }
+    }
+
+    // ── Finding 3 (Important): a sel-toolbar mark toggle applied INSIDE a
+    //    table cell must snap the table burst's local history —
+    //    snapBurstIfActive() now matches when `currentBurst.editEl` (the
+    //    whole <table>) CONTAINS `root` (the individual cell), not only when
+    //    strictly equal ───────────────────────────────────────────────────
+    {
+      const { srv: f3srv, url: f3url } = await setupTableDoc([
+        '| A | B |',
+        '|---|---|',
+        '| bold target word here | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        let renderRequestCount = 0;
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
+          req.continue();
+        });
+        await page.goto(f3url, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'bold target word here');
+        await page.evaluate((word) => {
+          const el = document.activeElement;
+          const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          let node = null, idx = -1, cur;
+          while ((cur = walker.nextNode())) {
+            idx = cur.textContent.indexOf(word);
+            if (idx !== -1) { node = cur; break; }
+          }
+          if (!node) throw new Error('word not found: ' + word);
+          const range = document.createRange();
+          range.setStart(node, idx);
+          range.setEnd(node, idx + word.length);
+          const s = window.getSelection();
+          s.removeAllRanges();
+          s.addRange(range);
+          document.dispatchEvent(new Event('selectionchange'));
+        }, 'target');
+
+        await page.waitForSelector('.ed-seltb');
+        await page.click('.ed-seltb-b');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const st = document.activeElement.closest('td, th').querySelector('strong');
+            return st ? st.textContent : null;
+          }),
+          'target',
+          'sanity: toolbar Bold must wrap "target" in <strong> inside the cell before the undo'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+
+        assert.strictEqual(
+          await page.evaluate((s) => !document.querySelector(s + ' strong'), table0),
+          true,
+          'Ctrl+Z right after a toolbar Bold inside a cell must revert JUST the <strong> wrap'
+        );
+        assert.ok(
+          await page.evaluate((s) => document.querySelector(s).textContent.includes('bold target word here'), table0),
+          'the cell text content must be back to plain (unbolded) after the undo'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true,
+          'the table burst must stay open (a cell still focused) — the undo is purely local, nothing was committed'
+        );
+        assert.strictEqual(renderRequestCount, 0,
+          'the mark-toggle-then-undo round trip inside a table cell must never hit /api/render — proof the ' +
+          'mark toggle was snapped into the BURST-LOCAL history (this reversion happened purely client-side), ' +
+          'not committed-then-cascade-undone over the network');
+
+        await page.keyboard.press('Escape'); // end the burst, discard (never committed)
+        await page.close();
+        console.log('Finding 3: sel-toolbar Bold inside a table cell snaps the table burst\'s local history — OK');
+      } finally {
+        f3srv.close();
+      }
+    }
+
+    // ── Finding 4 (Important): the ⠿ menu's "MD 原始碼" escape hatch must
+    //    DISCARD an in-progress burst (restore editEl.innerHTML from
+    //    burst.original) before opening the raw editor — otherwise the
+    //    un-committed typing survives inside the detached-but-still-
+    //    referenced DOM and resurrects itself the next time that block is
+    //    focused/blurred ───────────────────────────────────────────────────
+    {
+      const { srv: f4srv, url: f4url, mdPath: f4mdPath, original: f4orig } = await setupTableDoc([
+        'Discard resurrection target text here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f4url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Discard resurrection target text here.');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.type(' DISCARDED_TYPING');
+        assert.ok(
+          await page.evaluate((s) => document.querySelector(s).textContent.includes('DISCARDED_TYPING'), editEl),
+          'sanity: the in-progress typing must be visible in the DOM before the MD 原始碼 escape hatch'
+        );
+
+        await clickGutterMenuItem(page, sel, 'MD 原始碼');
+        await page.waitForSelector(sel + ' textarea.ed-raw');
+        const rawValue = await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, sel);
+        assert.ok(!rawValue.includes('DISCARDED_TYPING'),
+          'the raw editor must seed from the committed source (`lines`), never the discarded burst DOM, got: ' + rawValue);
+
+        // Esc cancels the raw editor -> restore() sets blockEl.innerHTML back
+        // to whatever was captured as `original` at openRawEditor() time.
+        await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').focus(), sel);
+        await page.keyboard.press('Escape');
+        await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
+
+        assert.ok(
+          !(await page.evaluate((s) => document.querySelector(s).textContent.includes('DISCARDED_TYPING'), sel)),
+          'the block must NOT show the discarded typing after Esc-ing the raw editor — that DOM must have ' +
+          'been reverted to the pre-edit snapshot BEFORE the raw editor ever captured its own restore-state'
+        );
+
+        // Click back into the block, then click away — a real focus/blur
+        // cycle on whatever DOM the raw editor's Esc left behind.
+        await page.click(sel);
+        await page.waitForFunction(
+          (s) => document.activeElement === document.querySelector(s + ' > *'),
+          {}, sel
+        );
+        await page.evaluate(() => document.activeElement && document.activeElement.blur());
+        await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f4mdPath, 'utf8');
+        assert.ok(!fileText.includes('DISCARDED_TYPING'), 'the discarded typing must never reach the saved file, got:\n' + fileText);
+        assert.strictEqual(fileText, f4orig,
+          'a click-in-click-out with nothing further typed must leave the file byte-identical to the ' +
+          'original — the discard-then-click-cycle must never resurrect the abandoned edit, got:\n' + fileText);
+
+        await page.close();
+        console.log('Finding 4: MD 原始碼 escape hatch discards the burst\'s DOM before opening the raw editor — OK');
+      } finally {
+        f4srv.close();
+      }
+    }
+
+    // ── Finding 5 (Important): the ⠿ handle must not eat the first
+    //    human-speed click when its OWN block has a dirty burst open (5a:
+    //    delegated mousedown preventDefault keeps the burst from blurring
+    //    mid-gesture), and changeHeadingDepth() must re-resolve the LIVE
+    //    block by id after switchAwayFrom() commits that same dirty burst
+    //    (5c) — otherwise 5a's fix alone would make ± silently no-op on a
+    //    dirty heading (the commit that used to already have happened
+    //    earlier — via the OLD unguarded mousedown blur — now happens
+    //    inside changeHeadingDepth()'s own switchAwayFrom() instead, and
+    //    that path's stale-blockEl guard used to just bail out). (5b —
+    //    rerenderAll() also resetting the gutter-menu-open flag — is a
+    //    belt-and-braces hygiene fix mirroring every other overlay reset in
+    //    rerenderAll(); it has no independently observable black-box
+    //    symptom through the paths this file exposes, so it isn't asserted
+    //    by a dedicated scenario here — see the final report.) ────────────
+    {
+      const { srv: f5srv, url: f5url, mdPath: f5mdPath } = await setupTableDoc([
+        '# Heading depth target text', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f5url, { waitUntil: 'networkidle0' });
+
+        const sel = '.ed-block[data-block-type="heading"]';
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true,
+          'sanity: the heading burst must be open (dirty, never blurred) before clicking the handle'
+        );
+
+        await page.hover(sel);
+        const box = await page.evaluate((s) => {
+          const el = document.querySelector(s + ' .ed-handle');
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, sel);
+        // A real "human speed" press: an actual gap between mousedown and
+        // mouseup, long enough for the async commit round trip the OLD,
+        // unguarded mousedown would have kicked off to land mid-gesture.
+        // Post-fix, the burst never blurs at all, so this gap is inert
+        // either way — it's what makes the PRE-fix bug reproduce
+        // deterministically instead of racily.
+        await page.mouse.move(box.x, box.y);
+        await page.mouse.down();
+        await new Promise((r) => setTimeout(r, 250));
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true,
+          '5a: the mousedown on ⠿ must NOT blur the still-open dirty heading burst'
+        );
+        await page.mouse.up();
+
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 2000 }, sel
+        );
+
+        // Click the menu's '+' — resolves (commits) the dirty burst via
+        // switchAwayFrom() first, THEN bumps the heading depth.
+        await page.evaluate((s) => {
+          const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+            .find((b) => b.textContent === '+' && !b.hidden);
+          if (!btn) throw new Error('+ button not found');
+          btn.click();
+        }, sel);
+
+        await page.waitForFunction(
+          (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
+          { timeout: 5000 }, sel
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f5mdPath, 'utf8');
+        assert.strictEqual(fileText, '## Heading depth target text EDITED\n',
+          'both the typed edit and the heading-depth bump must land in the saved file, got:\n' + fileText);
+
+        await page.close();
+        console.log('Finding 5: dirty-heading ⠿->+ works end to end (first-click menu, live blockEl re-query) — OK');
+      } finally {
+        f5srv.close();
+      }
+    }
+
+    // ── Finding 6 (Important): with a dirty burst open ELSEWHERE, a table
+    //    ＋ bubble / edge-menu op / row drop must not silently discard the
+    //    operation — ensureTableBurstOpen() now re-resolves the LIVE table
+    //    by block id (mirroring the focusin listener's own stale-node
+    //    recovery) instead of bailing out on a `tableEl` reference the
+    //    OTHER block's commit just detached ───────────────────────────────
+    {
+      const { srv: f6aSrv, url: f6aUrl, mdPath: f6aMdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| A | B |',
+        '|---|---|',
+        '| 1 | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f6aUrl, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the table op'
+        );
+
+        // Click the table's ＋ column-insert bubble WITHOUT ever blurring
+        // the dirty paragraph burst first — ensureTableBurstOpen()'s own
+        // switchAwayFrom() must resolve it.
+        await hoverAndClickColInsert(page, table0, 0);
+
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead th') &&
+            document.querySelector(s + ' thead th').parentElement.children.length === 3,
+          { timeout: 5000 }, table0
+        );
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the table op'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f6aMdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const headerLine = fileText.split('\n').find((l) => l.trim().startsWith('|') && l.includes('A'));
+        assert.ok(headerLine, 'header line not found in saved file:\n' + fileText);
+        assert.strictEqual(headerLine.split('|').length - 2, 3,
+          'the column insert must have actually landed in the saved file (3 columns), got header line: ' + headerLine);
+
+        await page.close();
+        console.log('Finding 6a: table ＋ column insert with a dirty burst open elsewhere commits BOTH — OK');
+      } finally {
+        f6aSrv.close();
+      }
+    }
+    {
+      const { srv: f6bSrv, url: f6bUrl, mdPath: f6bMdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| Name | Note |',
+        '|---|---|',
+        '| Row1 | 1 |',
+        '| Row2 | 2 |',
+        '| Row3 | 3 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f6bUrl, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the row drag'
+        );
+
+        const from = await rowEdgeZoneCoords(page, table0, false, 2); // "Row3"
+        const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1"
+        await dragRowTo(page, from, to);
+
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td:first-child'))
+            .map((c) => c.textContent.trim()).join(',') === 'Row3,Row1,Row2',
+          { timeout: 5000 }, table0
+        );
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the row drop'
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 400));
+
+        const fileText = fs.readFileSync(f6bMdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const rowLines = fileText.split('\n').filter((l) => l.startsWith('| Row'));
+        assert.deepStrictEqual(rowLines.map((l) => l.split('|')[1].trim()), ['Row3', 'Row1', 'Row2'],
+          'the row reorder must have actually landed in the saved file, got rows:\n' + rowLines.join('\n'));
+
+        await page.close();
+        console.log('Finding 6b: table row drop with a dirty burst open elsewhere commits BOTH — OK');
+      } finally {
+        f6bSrv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();

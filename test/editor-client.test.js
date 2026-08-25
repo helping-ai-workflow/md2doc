@@ -157,7 +157,15 @@ for (const needle of ['ed-bar', 'ed-selected', 'openTableEditor', 'runTableStruc
 // so a future edit that reorders them, or inserts awaited work first,
 // breaks this assertion instead of silently regressing.
 const shortcutOrderChecks = [
-  [/key === 's'\)\s*\{\s*e\.preventDefault\(\);\s*save\(\);/, 'Ctrl+S must preventDefault() before save()'],
+  // Final-review Finding 1: Ctrl+S no longer calls save() directly — it
+  // resolves whatever burst/editor is open FIRST (switchAwayFrom()) so
+  // `lines` reflects a mid-burst keystroke before save() reads it (a
+  // block-comment explaining why sits between preventDefault() and the
+  // call now, hence the `[\s\S]*?` — the invariant this check pins is
+  // still "preventDefault() is the very FIRST statement in the branch,
+  // nothing awaited ahead of it", not "save() is the very next token").
+  [/key === 's'\)\s*\{\s*e\.preventDefault\(\);[\s\S]*?switchAwayFrom\(\)\.then\(\(ok\) => \{ if \(ok\) save\(\); \}\);/,
+    'Ctrl+S must preventDefault() before resolving the open burst and saving'],
   [/key === 'z'\)\s*\{\s*e\.preventDefault\(\);\s*undo\(\);/, 'Ctrl+Z must preventDefault() before undo()'],
   [/\(e\.key === 'y' \|\| \(e\.shiftKey && e\.key === 'Z'\)\)\)\s*\{\s*e\.preventDefault\(\);\s*redo\(\);/,
     'Ctrl+Y / Ctrl+Shift+Z must preventDefault() before redo()'],
