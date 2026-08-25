@@ -24,6 +24,7 @@
 const assert = require('assert');
 const tableMd = require('../lib/editor/table-md.js');
 const inlineMd = require('../lib/editor/inline-md.js');
+const listMd = require('../lib/editor/list-md.js');
 
 // same minimal element stub as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
@@ -42,6 +43,9 @@ function tr(...children) { return el('tr', {}, ...children); }
 function table(headerRow, bodyRows) {
   return el('table', {}, el('colgroup', {}), el('thead', {}, headerRow), el('tbody', {}, ...bodyRows));
 }
+function li(...children) { return el('li', {}, ...children); }
+function ul(...children) { return el('ul', {}, ...children); }
+function ol(...children) { return el('ol', {}, ...children); }
 
 // ── gate assertions (the fossilized contract itself) ─────────────────────
 
@@ -72,6 +76,20 @@ function assertGateCompatTable(md, label) {
   assertOnlyPipePrefixedLines(md, label);
   assertNoTrailingWhitespace(md, label);
   assertNoBareEscapedPipe(md, label);
+}
+
+// Task-3 (list-md.js) contract: every emitted list line is a marker line
+// at some 2-space-multiple indent depth (/^( {2})*(-|\d+\.) /), and the
+// emitted block never contains a blank line (list-md.js's loose-list
+// decision is to degrade to unsupported rather than emit blank-line-
+// separated markdown — see lib/editor/list-md.js's module header).
+function assertGateCompatList(md, label) {
+  md.split('\n').forEach((line, i) => {
+    assert.ok(/^( {2})*(-|\d+\.) /.test(line),
+      label + ': line ' + i + ' fails the list marker/indent contract: ' + JSON.stringify(line));
+  });
+  assertNoTrailingWhitespace(md, label);
+  assert.ok(!md.includes('\n\n'), label + ': emitted block must not contain a blank line, got:\n' + md);
 }
 
 // ── representative serializeTable() outputs ───────────────────────────────
@@ -178,6 +196,35 @@ function assertGateCompatTable(md, label) {
   const p = el('p', {}, el('a', { href: '#ref-1' }, '[ref-1, §2]'));
   const { md } = inlineMd.serializeInline(p);
   assertNoTrailingWhitespace(md, 'citation inline content');
+}
+
+// ── representative serializeList() outputs (Task 3 additions) ────────────
+
+// 9. flat ul / renumbered ol — the common case.
+{
+  const { md } = listMd.serializeList(ul(li('one'), li('two'), li('three')));
+  assertGateCompatList(md, 'flat ul');
+}
+{
+  // renumbering matters here regardless of source order/gaps — the gate
+  // must always see a clean 1..n sequence, never a stale start value.
+  const { md } = listMd.serializeList(ol(li('a'), li('b'), li('c')));
+  assertGateCompatList(md, 'renumbered ol');
+  assert.ok(md.startsWith('1. '), 'renumbered ol must start at 1: ' + md);
+}
+
+// 10. deep mixed nesting (ul > ol > ul) — every line, at every depth, must
+// still satisfy the marker/indent contract and the no-blank-line rule.
+{
+  const list = ul(
+    li('top', ol(
+      li('mid a'),
+      li('mid b', ul(li('deep x'), li('deep y')))
+    )),
+    li('top two')
+  );
+  const { md } = listMd.serializeList(list);
+  assertGateCompatList(md, 'deep mixed nesting');
 }
 
 console.log('gate-compat.test.js OK');
