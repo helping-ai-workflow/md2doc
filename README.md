@@ -223,7 +223,7 @@ focus remains inside the table until you press Esc, click outside, or navigate a
 | Key / Action | Effect |
 |---|---|
 | Click a cell | Move to that cell and edit |
-| Tab | Move to the next cell (left-to-right, row by row; wraps to first cell from last) |
+| Tab | Move to the next cell (left-to-right, row by row; no-op — stays put — on the last cell) |
 | Shift + Tab | Move to the previous cell |
 | Enter | Insert a line break (`<br>`) within the cell (does NOT commit the table) |
 | Esc | Revert the entire table session (all cells) and discard all changes |
