@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('assert');
+const { marked } = require('marked');
 const { serializeInline, canWysiwyg, escapeText } = require('../lib/editor/inline-md.js');
 
 // minimal element stub
@@ -47,5 +48,78 @@ assert.deepStrictEqual(serializeInline(withStyledSpan).unsupported, ['SPAN']);
 assert.strictEqual(canWysiwyg(withStyledSpan), false);
 // <div> boundary between siblings acts as <br>
 assert.strictEqual(serializeInline(el('div', {}, el('div', {}, 'a'), el('div', {}, 'b'))).md, 'a<br>b');
+
+// --- review fixes (2026-08-25): fence-length, bracket escaping, citation degrade, span probe ---
+
+// CRITICAL 1: code content with a 2-backtick run needs a 3-backtick fence,
+// not the previously-fixed 2-backtick fence (which corrupts the round-trip:
+// the interior "``" prematurely closes a 2-backtick fence).
+{
+  const md = serializeInline(el('p', {}, el('code', {}, 'a``b'))).md;
+  assert.strictEqual(md, '``` a``b ```');
+  assert.strictEqual(marked.parseInline(md), '<code>a``b</code>');
+}
+// boundary-touching backtick (content starts with a backtick) — padding is
+// not just cosmetic here, CommonMark requires it or the span fails to parse
+// at all (verified: unpadded "```x``" does not parse as code).
+{
+  const md = serializeInline(el('p', {}, el('code', {}, '`x'))).md;
+  assert.strictEqual(marked.parseInline(md), '<code>`x</code>');
+}
+// pre-existing single-interior-backtick case still round-trips (regression guard)
+{
+  const md = serializeInline(el('p', {}, el('code', {}, 'a`b'))).md;
+  assert.strictEqual(md, '`` a`b ``');
+  assert.strictEqual(marked.parseInline(md), '<code>a`b</code>');
+}
+
+// CRITICAL 2: escapeText must escape `]` unconditionally (mirrors `[`), or
+// bracket pairing in link labels breaks.
+assert.strictEqual(escapeText('[a]'), '\\[a\\]');
+assert.strictEqual(escapeText('['), '\\[');
+assert.strictEqual(escapeText(']'), '\\]');
+// reviewer probe: a normal link whose label is itself "[text]" must still
+// round-trip to a single working anchor (not `[[text]](<a...>` autolink debris).
+{
+  const md = serializeInline(el('p', {}, el('a', { href: 'http://x' }, '[text]'))).md;
+  assert.strictEqual(marked.parseInline(md), '<a href="http://x">[text]</a>');
+}
+// reviewer probe: a near-citation (`#`-href but text isn't `[...]` exactly)
+// must still round-trip to a working link.
+{
+  const md = serializeInline(el('p', {}, el('a', { href: '#note' }, '[abc] extra'))).md;
+  assert.strictEqual(marked.parseInline(md), '<a href="#note">[abc] extra</a>');
+}
+
+// IMPORTANT 3: citation branch degrade-never-lose — if the anchor's children
+// aren't exactly one text node, or the bracketed body itself contains `]`,
+// md2doc's own citation regex ([^\]\n]+) can't re-parse it, so degrade to
+// unsupported instead of emitting corrupt/unparseable citation syntax.
+{
+  // nested formatting inside the citation anchor: not a single text node
+  const withFormattedCitation = el('p', {}, el('a', { href: '#note' }, el('em', {}, '[abc]')));
+  const res = serializeInline(withFormattedCitation);
+  assert.deepStrictEqual(res.unsupported, ['A']);
+  assert.strictEqual(canWysiwyg(withFormattedCitation), false);
+}
+{
+  // body contains a `]` between the outer brackets
+  const withEmbeddedBracket = el('p', {}, el('a', { href: '#note' }, '[abc] and [def]'));
+  const res = serializeInline(withEmbeddedBracket);
+  assert.deepStrictEqual(res.unsupported, ['A']);
+  assert.strictEqual(canWysiwyg(withEmbeddedBracket), false);
+}
+// still-good citation (single text node, no embedded `]`) keeps working
+assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '#ref-1' }, '[ref-1, §2]'))).md, '[[ref-1, §2]]');
+
+// IMPORTANT 4: widen SPAN_ATTR_PROBE to realistic contenteditable attributes
+{
+  const withContentEditableSpan = el('p', {}, el('span', { contenteditable: 'false' }, 'x'));
+  assert.deepStrictEqual(serializeInline(withContentEditableSpan).unsupported, ['SPAN']);
+}
+{
+  const withDirSpan = el('p', {}, el('span', { dir: 'ltr' }, 'x'));
+  assert.deepStrictEqual(serializeInline(withDirSpan).unsupported, ['SPAN']);
+}
 
 console.log('inline-md.test.js OK');
