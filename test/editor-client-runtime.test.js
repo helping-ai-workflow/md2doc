@@ -11,20 +11,23 @@
 // Finding 1: cancel (Esc/✕) or a no-change Ctrl+Enter commit must not leave
 //   the block unable to open its editor again (dead click-bar wiring).
 // Finding 2: a failed /api/render must not wipe .content, and must surface
-//   a dismissible banner instead.
+//   a dismissible banner instead. A failed COMMIT (whether manually
+//   triggered via Ctrl+Enter or auto-triggered by switchAwayFrom()) now
+//   leaves the editor OPEN with the user's text intact — see the Phase-2
+//   Task-1 click-to-switch scenarios below for why: state consistency over
+//   convenience means a switch is refused rather than silently discarding
+//   either block's content.
 // Finding 3: a save() failure outside 200/409 must surface a dismissible
 //   banner and must NOT clear the dirty dot (no silent data-loss illusion).
-// Finding 4: only one raw-edit editor may be open at a time; opening a
-//   second block while one is open is refused, and the open one is not
-//   silently discarded.
-// Finding 4 regression (post-review round 2): undo()/redo() replace the
-//   ENTIRE .content subtree without checking whether some block's editor is
-//   still open. That swap detaches the open textarea without ever running
-//   its own restore() (the only place `activeEditor` used to get cleared),
-//   so `activeEditor` was left pointing at a node no longer in the
-//   document — every later attempt to open a block's editor, on ANY block,
-//   then hit the "a different editor is open" refusal forever. Silent total lockout,
-//   recoverable only by reloading the page.
+//
+// Phase-2 Task 1 (click-to-switch substrate, replaces the old Finding-4
+// "refuse second open" policy and its undo/redo lockout regression):
+// clicking a different block's editor open, or clicking outside any block,
+// or invoking undo/redo, while some block's raw editor is open with
+// modifications now auto-COMMITS that editor (or silently cancels it if
+// unmodified) via switchAwayFrom(), instead of refusing outright. See the
+// switch-commits / switch-cancels / undo-with-modified-open-editor /
+// switch-commit-failure scenarios below.
 
 const fs = require('fs');
 const os = require('os');
@@ -167,8 +170,16 @@ async function openBlockEditor(page, sel) {
         'FIX 2: a failed render must NEVER apply the edit to the DOM (no "undefined" wipe either)');
       assert.ok(!contentHtml.includes('undefined'),
         'FIX 2: a failed render must not stringify `undefined` into innerHTML');
-      await page.waitForFunction(
-        (s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 5000 }, sel
+      // Phase-2 Task 1: a failed commit keeps the editor OPEN with the
+      // user's text intact (state consistency over convenience) instead of
+      // silently discarding it via restore().
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          return ta ? ta.value : null;
+        }, sel),
+        'CHANGED-BUT-RENDER-WILL-FAIL',
+        'FIX 2 (Phase-2): a failed commit must keep the editor open with the unsaved text, not discard it'
       );
 
       await page.click('.ed-conflict button[aria-label="Dismiss"]');
@@ -176,6 +187,11 @@ async function openBlockEditor(page, sel) {
         await page.evaluate(() => !document.querySelector('.ed-conflict')),
         'FIX 2: the render-failure banner must be dismissible'
       );
+      // Cleanup: cancel the still-open editor via its ✕ button (Esc is
+      // wired on the textarea itself, and focus is currently on the
+      // banner's Dismiss button, not the textarea).
+      await page.click(sel + ' .ed-cancel');
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
 
       await page.close();
       console.log('fix 2: render failure leaves DOM untouched + dismissible banner — OK');
@@ -234,14 +250,18 @@ async function openBlockEditor(page, sel) {
       console.log('fix 3: save failure surfaces a banner and keeps dirty state — OK');
     }
 
-    // ── Finding 4: only one editor open at a time ─────────────────────────
+    // ── switch-commits: A open with modifications, click B's block ────────
+    // A's new text must be committed (visible in the rendered page), B's
+    // editor must open, and a Ctrl+Z after closing B must revert A's
+    // just-committed change (it is the newest op on the undo stack).
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
 
       const ids = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('.ed-block')).map((el) => el.getAttribute('data-block-id')));
-      assert.ok(ids.length >= 2, 'fixture must have at least 2 blocks');
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      assert.ok(ids.length >= 2, 'fixture must have at least 2 paragraph blocks');
       const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
       const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
 
@@ -249,45 +269,87 @@ async function openBlockEditor(page, sel) {
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
-        ta.value = 'UNCOMMITTED-A-TEXT';
+        ta.value = 'SWITCH-COMMIT-A-TEXT';
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       }, selA);
 
-      // Try to open B's editor while A is still open.
+      // Click B's block while A is open with modifications: A must
+      // auto-commit, then B's editor opens.
       await openBlockEditor(page, selB);
-      await new Promise((r) => setTimeout(r, 200));
+      await page.waitForSelector(selB + ' textarea.ed-raw', { timeout: 5000 });
 
-      assert.strictEqual(
-        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB),
-        false,
-        'FIX 4: opening a second block editor while one is open must be refused'
-      );
-      assert.strictEqual(
-        await page.evaluate((s) => {
-          const ta = document.querySelector(s + ' textarea.ed-raw');
-          return ta ? ta.value : null;
-        }, selA),
-        'UNCOMMITTED-A-TEXT',
-        'FIX 4: block A\'s uncommitted text must survive the refused second-open attempt'
+      assert.ok(
+        await page.evaluate(() => document.querySelector('.content').innerHTML.includes('SWITCH-COMMIT-A-TEXT')),
+        'switch-commits: A\'s modified text must be committed (visible in rendered content) when switching to B'
       );
       assert.ok(
-        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-attn'), selA),
-        'FIX 4: the already-open editor should get a visible refusal cue'
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB),
+        'switch-commits: B\'s editor must open after the switch'
+      );
+
+      // Close B (unmodified) and undo: the newest op is A's just-committed
+      // switch-triggered edit, so Ctrl+Z must revert THAT.
+      await page.keyboard.press('Escape');
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selB);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      await page.waitForFunction(
+        () => !document.querySelector('.content').innerHTML.includes('SWITCH-COMMIT-A-TEXT'),
+        { timeout: 5000 }
+      );
+      assert.ok(
+        await page.evaluate(() => document.querySelector('.content').innerHTML.includes('First paragraph.')),
+        'switch-commits: Ctrl+Z after closing B must revert A\'s committed switch-triggered edit'
       );
 
       await page.close();
-      console.log('fix 4: single-editor-at-a-time policy enforced — OK');
+      console.log('switch-commits: A auto-commits on switch to B, undo reverts A\'s edit — OK');
     }
 
-    // ── Finding 4 regression: undo() must resolve an open editor first,
-    //    not silently detach it and lock every block's editor forever ─────
-    // Exact repro from review: commit an edit on A, open B's editor
-    // (leave it UNMODIFIED), blur out of the textarea (so the keydown
-    // handler's `inTextarea` gate lets Ctrl+Z through), then Ctrl+Z.
-    // Whatever the fix does with B (auto-cancel since it has no unsaved
-    // keystrokes, per the chosen policy — or refuse+flash, the other
-    // policy branch), the hard requirement either way is: no lockout —
-    // block C must still be able to open its editor afterward.
+    // ── switch-cancels: A open UNMODIFIED, click B: A closes silently,
+    //    B opens ─────────────────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
+      const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
+
+      await openBlockEditor(page, selA);
+      await page.waitForSelector(selA + ' textarea.ed-raw');
+      // A is left untouched — no modification.
+
+      await openBlockEditor(page, selB);
+      await page.waitForSelector(selB + ' textarea.ed-raw', { timeout: 5000 });
+
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selA),
+        false,
+        'switch-cancels: A\'s unmodified editor must close silently when switching to B'
+      );
+      assert.ok(
+        await page.evaluate(() => document.querySelector('.content').innerHTML.includes('First paragraph.')),
+        'switch-cancels: A\'s original content must be restored (no accidental commit)'
+      );
+      assert.ok(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB),
+        'switch-cancels: B\'s editor must open'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('switch-cancels: A closes silently (unmodified), B opens — OK');
+    }
+
+    // ── undo-with-modified-open-editor: A open with modifications, blur,
+    //    Ctrl+Z ──────────────────────────────────────────────────────────
+    // A must auto-commit first (the pre-check's switchAwayFrom call), then
+    // the undo reverts A's just-committed edit — it is the newest op — and
+    // there is no lockout: clicking C afterward must still open an editor.
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -297,67 +359,63 @@ async function openBlockEditor(page, sel) {
           .map((el) => el.getAttribute('data-block-id')));
       assert.ok(ids.length >= 3, 'fixture must have at least 3 paragraph blocks for this repro');
       const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
-      const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
       const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
 
-      // commit an edit on A
       await openBlockEditor(page, selA);
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
-        ta.value = 'A-COMMITTED-EDIT';
+        ta.value = 'UNDO-SWITCH-A-TEXT';
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       }, selA);
-      await page.keyboard.down('Control');
-      await page.keyboard.press('Enter');
-      await page.keyboard.up('Control');
-      await page.waitForFunction(
-        () => document.querySelector('.content').innerHTML.includes('A-COMMITTED-EDIT'),
-        { timeout: 5000 }
-      );
+      // Blur out of the textarea via JS (not a real click — a real click
+      // would ALSO be a "clicked outside a block" switchAwayFrom() trigger
+      // in its own right, racing the in-flight /api/render call against
+      // undo()'s own pre-check below). This purely moves focus off the
+      // textarea so the global keydown handler's `inTextarea` gate lets
+      // Ctrl+Z through to undo().
+      await page.evaluate(() => document.activeElement && document.activeElement.blur());
 
-      // open B's editor and leave it untouched, then blur off the textarea
-      await openBlockEditor(page, selB);
-      await page.waitForSelector(selB + ' textarea.ed-raw');
-      await page.click('body'); // focus leaves the textarea -> Ctrl+Z gate passes
-
-      // global Ctrl+Z
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyZ');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300)); // let any async render settle
 
-      // Whichever policy branch fired, B must not be left dangling: either
-      // it was auto-cancelled (no textarea, block clickable again) or it's still open
-      // WITH the refusal flash visible (never neither).
-      const bStillOpen = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB);
-      if (bStillOpen) {
-        assert.ok(
-          await page.evaluate((s) => document.querySelector(s).classList.contains('ed-attn'), selB),
-          'if undo was refused because B looked modified, B must carry the visible refusal cue'
-        );
-      }
+      // undo()'s own switchAwayFrom() pre-check auto-commits A first, THEN
+      // the undo proceeds and reverts that just-committed op (it's the
+      // newest on the stack) — both must be true by the end.
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('First paragraph.') &&
+          !document.querySelector('.content').innerHTML.includes('UNDO-SWITCH-A-TEXT'),
+        { timeout: 5000 }
+      );
 
-      // The hard requirement regardless of branch: NO LOCKOUT. Block C
-      // must still be able to open its editor.
+      // No lockout: block C must still be able to open its editor.
       await openBlockEditor(page, selC);
       await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
       assert.ok(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
-        'FIX 4-REGRESSION: undo() must not permanently lock out every block\'s editor ' +
-        '(activeEditor left dangling on a detached node)'
+        'undo-with-modified-open-editor: no lockout — block C must open its editor after the undo'
       );
       await page.keyboard.press('Escape');
 
       await page.close();
-      console.log('fix 4-regression: undo() does not lock out other editors (unmodified B) — OK');
+      console.log('undo-with-modified-open-editor: A auto-commits then undo reverts it, no lockout — OK');
     }
 
-    // ── Same repro, but B HAS unsaved keystrokes: undo must be refused
-    //    (not silently discard B's typed text), while still not locking
-    //    out block C afterward.
+    // ── switch-commit-failure: force /api/render 500 while A is modified,
+    //    click B ──────────────────────────────────────────────────────────
+    // Banner shows, A's editor stays open with its unsaved text, and B does
+    // NOT open (state consistency over convenience).
     {
       const page = await newPage(browser);
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().endsWith('/api/render')) {
+          req.respond({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'switch-commit-boom' }) });
+        } else {
+          req.continue();
+        }
+      });
       await page.goto(url, { waitUntil: 'networkidle0' });
 
       const ids = await page.evaluate(() =>
@@ -365,81 +423,46 @@ async function openBlockEditor(page, sel) {
           .map((el) => el.getAttribute('data-block-id')));
       const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
       const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
-      const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
 
       await openBlockEditor(page, selA);
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
-        ta.value = 'A-COMMITTED-EDIT-2';
+        ta.value = 'SWITCH-FAIL-A-TEXT';
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       }, selA);
-      await page.keyboard.down('Control');
-      await page.keyboard.press('Enter');
-      await page.keyboard.up('Control');
-      await page.waitForFunction(
-        () => document.querySelector('.content').innerHTML.includes('A-COMMITTED-EDIT-2'),
-        { timeout: 5000 }
-      );
 
-      // open B and actually type something (unsaved modification)
-      await openBlockEditor(page, selB);
-      await page.waitForSelector(selB + ' textarea.ed-raw');
-      await page.evaluate((s) => {
-        const ta = document.querySelector(s + ' textarea.ed-raw');
-        ta.value = ta.value + ' UNSAVED-B-KEYSTROKES';
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-      }, selB);
-      await page.click('body');
+      // Click B's block while /api/render is forced to fail — the
+      // switch's auto-commit must fail, leaving A open and B unopened.
+      await page.click(selB);
+      await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+      const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+      assert.ok(/render failed/i.test(bannerText),
+        'switch-commit-failure: banner must explain the render failure, got: ' + bannerText);
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyZ');
-      await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
-
-      // B's unsaved text must survive — undo must have been refused, not
-      // silently discarded B's keystrokes.
-      const bTextareaValue = await page.evaluate((s) => {
-        const ta = document.querySelector(s + ' textarea.ed-raw');
-        return ta ? ta.value : null;
-      }, selB);
-      assert.ok(
-        bTextareaValue && bTextareaValue.includes('UNSAVED-B-KEYSTROKES'),
-        'FIX 4-REGRESSION: undo() must not silently discard an open editor\'s unsaved keystrokes'
-      );
-
-      // B is still legitimately open (undo refused rather than discarding
-      // it) — the pre-existing Finding-4 single-editor policy correctly
-      // still refuses to open C's editor while B remains open. This is expected,
-      // RECOVERABLE state, not the lockout bug: cancelling B (Esc) must
-      // free the editor back up immediately, proving `activeEditor` is
-      // still a live, resolvable reference and not a detached node.
-      await openBlockEditor(page, selC);
-      await new Promise((r) => setTimeout(r, 150));
       assert.strictEqual(
-        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          return ta ? ta.value : null;
+        }, selA),
+        'SWITCH-FAIL-A-TEXT',
+        'switch-commit-failure: A\'s editor must stay open with its unsaved text when the auto-commit fails'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB),
         false,
-        'C should still be correctly refused while B (unsaved) remains open — this is the existing ' +
-        'single-editor policy working as intended, not the lockout bug'
+        'switch-commit-failure: B must NOT open when A\'s auto-commit failed'
       );
 
-      // Cancel B via its ✕ button — Esc is wired on the textarea itself and
-      // focus is currently on `body` (blurred earlier), so the button is
-      // the reliable way to close it here.
-      await page.click(selB + ' .ed-cancel');
-      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 3000 }, selB);
-
-      // Now that B is closed, the editor slot is free again — the hard
-      // "no permanent lockout" requirement: C's editor must open normally.
-      await openBlockEditor(page, selC);
-      await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
-      assert.ok(
-        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
-        'FIX 4-REGRESSION: once B is resolved, block C must be editable again — no permanent lockout'
-      );
+      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      // Cleanup: cancel A's still-open editor via its ✕ button (same reason
+      // as above — focus is on the banner's Dismiss button, not the
+      // textarea, so Esc's per-textarea handler wouldn't fire).
+      await page.click(selA + ' .ed-cancel');
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selA);
 
       await page.close();
-      console.log('fix 4-regression: undo() refuses (does not discard) a modified open editor, recoverable — OK');
+      console.log('switch-commit-failure: commit failure keeps A open, blocks B from opening — OK');
     }
 
     // ── Click-invoked edit bar: select / move / dismiss / lightbox-exempt /
