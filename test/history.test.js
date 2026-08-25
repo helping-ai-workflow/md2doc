@@ -60,7 +60,8 @@ h.snap('edit');
 assert.strictEqual(h.size(), 5, 'size increased on unique snap');
 
 // Typing debounce coalesces multiple notes
-h = createBurstHistory(capture, { now: () => 0 });
+let t = 0;
+h = createBurstHistory(capture, { now: () => t });
 state = 'v0';
 h.start();
 assert.strictEqual(h.size(), 1);
@@ -74,18 +75,22 @@ h.noteTyping();
 assert.strictEqual(h.size(), 1, 'multiple noteTyping still 1 (debounced)');
 
 // After time elapses, next noteTyping forces snap
-h.noteTyping({ now: () => 401 });
+t = 401;
+h.noteTyping();
 assert.strictEqual(h.size(), 2, 'noteTyping at 401ms snaps');
 
 state = 'v0.3';
-h.noteTyping({ now: () => 500 });
+t = 500;
+h.noteTyping();
 assert.strictEqual(h.size(), 2, 'within 400ms window, no snap');
 
-h.noteTyping({ now: () => 902 });
+t = 902;
+h.noteTyping();
 assert.strictEqual(h.size(), 3, 'at 902ms (>401+500), snap');
 
 // flushTyping forces snapshot now
-h = createBurstHistory(capture, { now: () => 0 });
+t = 0;
+h = createBurstHistory(capture, { now: () => t });
 state = 'v0';
 h.start();
 
@@ -102,7 +107,8 @@ h.flushTyping();
 assert.strictEqual(h.size(), 3);
 
 // undo() flushes pending typing debounce before stepping
-h = createBurstHistory(capture, { now: () => 0 });
+t = 0;
+h = createBurstHistory(capture, { now: () => t });
 state = 'v0';
 h.start();
 
@@ -110,10 +116,10 @@ state = 'v1';
 h.snap('edit');
 
 state = 'v1.1';
-h.noteTyping({ now: () => 0 });
+h.noteTyping();
 assert.strictEqual(h.size(), 2, 'pending typing not snapped yet');
 
-let undoState = h.undo({ now: () => 100 });
+let undoState = h.undo();
 assert.strictEqual(undoState, 'v1', 'undo returned v1 (after flushing v1.1 and stepping back)');
 assert.strictEqual(h.size(), 2, 'size is 2 after undo (v1.1 moved to redo tail)');
 
