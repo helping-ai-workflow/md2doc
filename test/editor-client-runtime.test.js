@@ -227,16 +227,50 @@ async function clickCellWithText(page, tableSel, text) {
 }
 
 // Phase-2 Task 6 (table structure ops) helper: the five op buttons live in
-// the DOM from module load (buildBar() runs once) but start `hidden` — a
-// plain page.click()/waitForSelector() doesn't check that, so poll until
+// the DOM from module load (buildBar() runs once — verified NOT rebuilt on
+// selection/re-render, only re-parented via blockEl.appendChild(bar) and
+// un/re-hidden by updateBarButtons()) but start `hidden` — a plain
+// page.click()/waitForSelector() doesn't check that, so poll until
 // updateBarButtons() has un-hidden the button for the currently-selected
 // table block before clicking it.
+//
+// Review fix (Important 2), root-caused via a standalone repro harness
+// (ran the 4-iteration align loop in a tight repeat loop with per-step
+// diagnostics — reproduced the reported flake ~40-75% of the time,
+// confirming it was NOT a rare fluke): a FIRST version used a separate
+// page.waitForFunction(locate+visible) followed by a separate page.click
+// (selector) — that has the re-locate race the review flagged. A SECOND
+// version clicked the exact ElementHandle waitForFunction returned (no
+// second selector query) — this still failed under load: Puppeteer's own
+// ElementHandle.click() internally does scrollIntoViewIfNeeded() + a FRESH
+// boundingBox() read + a COORDINATE-based mouse.click(x, y), each a
+// separate round trip. If a structure op's own commit-and-full-rerender
+// (client.js's rerenderAll(), triggered by the align click from the
+// PREVIOUS loop iteration settling) races that coordinate computation, the
+// physical click can land on whatever now occupies that pixel — often
+// nothing inside any .ed-block — which wireBlockSelection()'s "clicked
+// outside any block" branch reads as a deliberate deselect. That silently
+// killed the whole loop: every retry re-queried the SAME selector, which
+// then never becomes visible again because nothing is selected any more
+// (diagnostics showed `.ed-bar` entirely absent from the document on every
+// retry once this happened, plus one direct capture of Puppeteer's own
+// "Node is detached from document" click error at the moment of the race).
+// Fixed by never dispatching a coordinate-based click at all: the locate
+// AND the click happen inside the SAME page.waitForFunction predicate
+// invocation (one synchronous browser-side JS turn, no intermediate CDP
+// round trip for Puppeteer to compute a now-stale bounding box against),
+// using the DOM's native, non-coordinate `element.click()`. This class of
+// button never depends on click *coordinates* (no drag, no in-page hit
+// testing) so a native `.click()` is behaviorally equivalent for it.
 async function clickBarButton(page, sel) {
   await page.waitForFunction((s) => {
     const el = document.querySelector(s);
-    return !!el && !el.hidden;
+    if (el && !el.hidden) {
+      el.click();
+      return true;
+    }
+    return false;
   }, {}, sel);
-  await page.click(sel);
 }
 
 // Ctrl+S then re-read the file from disk — used by the Task 6 scenarios
@@ -2015,6 +2049,66 @@ async function saveAndRead(page, mdPath) {
     }
 
     // ── Phase-2 Task 6: table structure ops (row/col add/del, alignment) ──
+    // Review fix (Important 1): an op button's auto-open must be gated by
+    // canWysiwygForTable() exactly like ✎ and the direct-cell-click path —
+    // clicking ＋列 on a table with an unsupported cell, with NO session
+    // open yet, must degrade straight to raw-edit (never open a session,
+    // mutate the DOM, and only discover the problem at commit time, which
+    // would silently discard the row-insert the user just triggered).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| Col |', '|---|', '| ![img](https://example.com/x.png) |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        // Same click as the pre-existing "unsupported cell" scenario above:
+        // a direct cell click on an unsupported table selects the block
+        // (bar shown) WITHOUT opening a session — exactly the "no session
+        // open yet" precondition this fix targets.
+        await page.click(table0 + ' tbody td');
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-wys')),
+          false, 'sanity: no cell session must be open yet'
+        );
+
+        await clickBarButton(page, table0 + ' .ed-bar-row-plus');
+        // The DISCRIMINATING assertion: without the pre-open gate, the OLD
+        // code path still ends up with clean raw-edit content (commit()'s
+        // own unsupported-fallback reverts the live DOM mutation via
+        // cancel() before ever persisting anything — fully synchronously,
+        // so a textarea-content check alone can't tell the two code paths
+        // apart). What DOES differ observably: the old path opened a
+        // session, mutated the DOM, and only THEN discovered the problem at
+        // commit() — which shows the "含不支援的格式，改用原始碼編輯" banner
+        // (client.js's commit()) even though the user never typed anything.
+        // The gate fix routes straight to raw-edit with NO banner at all —
+        // same as editBtn's own routing for an unsupported table.
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')),
+          false,
+          '＋列 on an unsupported table must route straight to raw-edit with NO ' +
+          '"unsupported format" banner (that banner means a session was opened ' +
+          'and reverted first — the confusing two-step this fix removes)'
+        );
+
+        await page.waitForSelector(table0 + ' textarea.ed-raw');
+        const rawValue = await page.evaluate(
+          (s) => document.querySelector(s + ' textarea.ed-raw').value, table0);
+        assert.ok(rawValue.includes('![img](https://example.com/x.png)'),
+          '＋列 on an unsupported table must degrade straight to raw-edit prefilled with its source, got:\n' + rawValue);
+        assert.strictEqual(rawValue.includes('|  |'),
+          false, '＋列 must NOT have silently applied the row-insert before degrading, got:\n' + rawValue);
+
+        await page.close();
+        console.log('table structure ops: op button on an unsupported table degrades to raw-edit, no silent op loss — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // ＋列: inserts an empty body row directly after the row containing the
     // last-focused cell (a click auto-opens the table session — no prior ✎
     // needed — see runTableStructureOp()'s section comment in client.js).
