@@ -22,9 +22,12 @@
 // against regression, not a red-first feature test. (It stayed green when
 // run against this worktree's Task 2/5 code, unmodified by Task 6.)
 const assert = require('assert');
+const { marked } = require('marked');
 const tableMd = require('../lib/editor/table-md.js');
 const inlineMd = require('../lib/editor/inline-md.js');
 const listMd = require('../lib/editor/list-md.js');
+
+marked.setOptions({ gfm: true, breaks: false });
 
 // same minimal element stub as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
@@ -79,17 +82,37 @@ function assertGateCompatTable(md, label) {
 }
 
 // Task-3 (list-md.js) contract: every emitted list line is a marker line
-// at some 2-space-multiple indent depth (/^( {2})*(-|\d+\.) /), and the
+// at SOME indent depth (/^ *(-|\d+\.) /) — indent is the ACCUMULATED
+// WIDTH of every ancestor item's own marker (a '- ' contributes 2, a
+// '1. ' contributes 3, a '10. ' contributes 4), NOT a fixed multiple of
+// 2 (controller ruling: a flat 2-space indent de-nests a sub-list under
+// an OL parent on re-parse — see lib/editor/list-md.js's module header
+// "INDENT" note and test/list-md.test.js's round-trip cases). The
 // emitted block never contains a blank line (list-md.js's loose-list
 // decision is to degrade to unsupported rather than emit blank-line-
 // separated markdown — see lib/editor/list-md.js's module header).
 function assertGateCompatList(md, label) {
   md.split('\n').forEach((line, i) => {
-    assert.ok(/^( {2})*(-|\d+\.) /.test(line),
+    assert.ok(/^ *(-|\d+\.) /.test(line),
       label + ': line ' + i + ' fails the list marker/indent contract: ' + JSON.stringify(line));
   });
   assertNoTrailingWhitespace(md, label);
   assert.ok(!md.includes('\n\n'), label + ': emitted block must not contain a blank line, got:\n' + md);
+}
+
+// A true structural round-trip: re-lex the REAL emitted md with
+// marked.lexer() and assert it comes back as exactly one top-level list
+// token (a de-nesting bug — e.g. the flat-2-space indent regression this
+// task's controller ruling fixed — splits this into multiple top-level
+// tokens instead). Deliberately does not assert exact item text; this is
+// a structural (ordered/item-count/nesting-depth) tripwire layered on top
+// of assertGateCompatList()'s line-shape checks.
+function assertGateCompatListRoundTrips(md, label) {
+  const lexed = marked.lexer(md);
+  assert.strictEqual(lexed.length, 1,
+    label + ': expected exactly ONE top-level list token after re-lex, got ' + lexed.length + ' — md:\n' + md);
+  assert.strictEqual(lexed[0].type, 'list',
+    label + ': expected the sole top-level token to be a list, got ' + lexed[0].type + ' — md:\n' + md);
 }
 
 // ── representative serializeTable() outputs ───────────────────────────────
@@ -204,12 +227,14 @@ function assertGateCompatList(md, label) {
 {
   const { md } = listMd.serializeList(ul(li('one'), li('two'), li('three')));
   assertGateCompatList(md, 'flat ul');
+  assertGateCompatListRoundTrips(md, 'flat ul');
 }
 {
   // renumbering matters here regardless of source order/gaps — the gate
   // must always see a clean 1..n sequence, never a stale start value.
   const { md } = listMd.serializeList(ol(li('a'), li('b'), li('c')));
   assertGateCompatList(md, 'renumbered ol');
+  assertGateCompatListRoundTrips(md, 'renumbered ol');
   assert.ok(md.startsWith('1. '), 'renumbered ol must start at 1: ' + md);
 }
 
@@ -225,6 +250,18 @@ function assertGateCompatList(md, label) {
   );
   const { md } = listMd.serializeList(list);
   assertGateCompatList(md, 'deep mixed nesting');
+  assertGateCompatListRoundTrips(md, 'deep mixed nesting');
+}
+
+// 11. CRITICAL regression guard — a nested list under an OL item ('1. ' is
+// 3 columns wide, wider than the old flat 2-space indent). This is
+// exactly the shape the controller ruling's Critical-1 finding covered:
+// under the old flat-2-space indent this de-nests on re-parse into
+// separate top-level list tokens instead of staying nested.
+{
+  const { md } = listMd.serializeList(ol(li('a', ul(li('b'), li('c')))));
+  assertGateCompatList(md, 'ol-parent nested ul');
+  assertGateCompatListRoundTrips(md, 'ol-parent nested ul');
 }
 
 console.log('gate-compat.test.js OK');
