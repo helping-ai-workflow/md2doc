@@ -3055,6 +3055,132 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // Review fix (Important): the hover-insert ＋ row bubble's own
+    // (independent) throttled mousemove listener must not repaint itself on
+    // top of the drop indicator during an active drag — the row zone
+    // (TE_EDGE_PX=8) sits well inside the bubble's own proximity threshold
+    // (TB_EDGE_PX=10), so without the fix this reliably reproduces on any
+    // real drag from a row's left edge.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A |', '|---|', '| 1 |', '| 2 |', '| 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const from = await rowEdgeZoneCoords(page, table0, false, 2);
+        const to = await rowBoundaryCoords(page, table0, -1);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x, to.y, { steps: 8 }); // cross the drag threshold, mid-drag
+        await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+        // Give the throttled mousemove/rAF handler a couple of frames to
+        // run — same "proving an absence needs a settle window" idiom
+        // Task 5's own degraded-table hover-insert test uses.
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-row').hidden), true,
+          'the hover-insert row bubble must stay hidden while a real drag is in flight'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-col').hidden), true,
+          'the hover-insert column bubble must stay hidden while a real drag is in flight'
+        );
+
+        await page.mouse.up();
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(',') === '3,1,2',
+          {}, table0
+        );
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, ['| A |', '|---|', '| 3 |', '| 1 |', '| 2 |', ''].join('\n'),
+          'the drag must still commit normally after the mid-drag bubble check, got:\n' + fileText);
+
+        await page.close();
+        console.log('table row drag: hover-insert bubbles stay hidden during an active drag — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Review fix (Critical): a pointercancel (the browser/OS aborting the
+    // gesture — palm rejection, the captured element being removed, ...)
+    // must clean up exactly like Esc-during-drag: row un-dimmed, indicator
+    // hidden, NO mutation — and, critically, the NEXT drag must still work
+    // cleanly afterward. The original bug: with no pointercancel/blur
+    // handling and no setPointerCapture(), a gesture that never delivered a
+    // real pointerup (release over browser chrome / the window edge) left
+    // `tePointer` latched forever — the dragged row stuck dimmed, the
+    // indicator frozen, and the NEXT pointerdown overwriting `tePointer`
+    // without ever cleaning up the old row/indicator.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A |', '|---|', '| 1 |', '| 2 |', '| 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const from = await rowEdgeZoneCoords(page, table0, false, 2); // row "3"
+        const to = await rowBoundaryCoords(page, table0, -1);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move(to.x, to.y, { steps: 8 });
+        await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' tbody tr:nth-child(3)').classList.contains('ed-te-row-dragging'), table0),
+          true, 'sanity: the dragged row must be dimmed while the drag is in flight'
+        );
+
+        // Simulate the browser/OS aborting the gesture — dispatched
+        // directly (Puppeteer has no API to trigger a REAL OS-level
+        // cancellation), but this exercises the exact same document-level
+        // listener client.js wires for a genuine pointercancel.
+        await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true })));
+        // The real mouse button release now arrives AFTER the cancel —
+        // must be a fully inert no-op (tePointer is already null).
+        await page.mouse.up();
+
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' tbody tr:nth-child(3)').classList.contains('ed-te-row-dragging'), table0),
+          false, 'pointercancel must un-dim the dragged row'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-drop-indicator').hidden), true,
+          'pointercancel must hide the drop indicator'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0),
+          '1,2,3', 'pointercancel must apply NO mutation at all — the row must not have moved'
+        );
+
+        // The next drag must still work cleanly — the original latch bug
+        // left this permanently broken (the overwritten `tePointer` piled
+        // state on top of the still-dimmed, never-cleaned-up prior row).
+        const from2 = await rowEdgeZoneCoords(page, table0, false, 0); // row "1"
+        const to2 = await rowBoundaryCoords(page, table0, 2); // boundary after the last body row
+        await dragRowTo(page, from2, to2);
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(',') === '2,3,1',
+          {}, table0
+        );
+
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, ['| A |', '|---|', '| 2 |', '| 3 |', '| 1 |', ''].join('\n'),
+          'the drag AFTER a pointercancel must commit normally, got:\n' + fileText);
+
+        await page.close();
+        console.log('table row drag: pointercancel mid-drag cleans up fully; the next drag still works — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
     //    a word via the selection toolbar, edit a table cell, Ctrl+S — all
     //    three edits land on disk, and the saved file matches the ORIGINAL
