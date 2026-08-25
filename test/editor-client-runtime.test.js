@@ -54,8 +54,19 @@ async function setup() {
     '# Heading', '', 'First paragraph.', '', 'Second paragraph.', '', 'Third paragraph.', '',
     // Kept BEFORE the trailing image block so `blockIds[blockIds.length - 1]`
     // (relied on by the click-bar scenario below) still resolves to the
-    // image paragraph.
+    // image paragraph. Inserting more paragraphs HERE (after this one, still
+    // before the image) is safe for both index-based conventions used
+    // throughout this file: `ids[0..3]` above stay First/Second/Third/Bold,
+    // and the image paragraph stays LAST regardless of how many more
+    // paragraphs are added in between.
     'Bold paragraph with **bold** text.', '',
+    // Task 4 (selection toolbar) fixtures — each dedicated to one scenario
+    // below so none of those scenarios depend on state left by another.
+    'Bold toggle target word here.', '',
+    'Bold commit target word here.', '',
+    'Backtick target has a \\` mark inside.', '',
+    'Link target paragraph text.', '',
+    'A [existing link](https://example.com) here.', '',
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
@@ -97,6 +108,70 @@ async function openBlockEditor(page, sel) {
     await page.click(sel + ' .ed-bar-md');
     await page.waitForSelector(sel + ' textarea.ed-raw');
   }
+}
+
+// Task 4 (selection toolbar) helpers: select a specific word (or the whole
+// contents) of an element via document.createRange()/getSelection(), then
+// manually dispatch selectionchange — same pattern as the brief describes.
+// A manual dispatch is used (rather than relying on the native async
+// selectionchange Chrome fires after addRange()) so the toolbar's
+// show/position logic runs synchronously, deterministically, before the next
+// Puppeteer action.
+async function selectWordInEl(page, elSelector, word) {
+  await page.evaluate((sel, w) => {
+    const el = document.querySelector(sel);
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let node = null, idx = -1;
+    let cur;
+    while ((cur = walker.nextNode())) {
+      idx = cur.textContent.indexOf(w);
+      if (idx !== -1) { node = cur; break; }
+    }
+    if (!node) throw new Error('word not found: ' + w);
+    const range = document.createRange();
+    range.setStart(node, idx);
+    range.setEnd(node, idx + w.length);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  }, elSelector, word);
+}
+
+async function selectAllInEl(page, elSelector) {
+  await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  }, elSelector);
+}
+
+// Opens the WYSIWYG editor on a block via the click-bar (assumes the block
+// IS WYSIWYG-eligible — plain-text paragraphs/headings that round-trip
+// through the inline serializer, per Task 3's routing).
+async function openWysiwyg(page, sel) {
+  await page.click(sel);
+  await page.waitForSelector(sel + ' .ed-bar-edit');
+  await page.click(sel + ' .ed-bar-edit');
+  await page.waitForSelector(sel + ' .ed-bar-md');
+}
+
+// Locates a paragraph block by a distinctive TEXT PREFIX rather than array
+// position — the Task 4 fixture paragraphs below are looked up this way so
+// none of these scenarios depend on the exact index position other
+// scenarios in this file rely on (ids[0..3] etc.).
+async function paragraphSelByText(page, prefix) {
+  const id = await page.evaluate((p) => {
+    const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+      .find((b) => b.textContent.trim().startsWith(p));
+    return el ? el.getAttribute('data-block-id') : null;
+  }, prefix);
+  assert.ok(id, 'fixture paragraph not found for prefix: ' + prefix);
+  return '.ed-block[data-block-id="' + id + '"]';
 }
 
 (async () => {
@@ -1203,6 +1278,309 @@ async function openBlockEditor(page, sel) {
       await page.click(selA + ' .ed-cancel');
       await page.close();
       console.log('wysiwyg: unsupported-degrade mid-switch aborts the switch (no bar/editor split) — OK');
+    }
+
+    // ── Task 4: floating selection toolbar appears over a non-collapsed
+    //    selection inside an active WYSIWYG session; hidden while the
+    //    selection is collapsed; hidden once the session ends (Esc) ───────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Bold toggle target');
+      const editEl = sel + ' > *';
+
+      assert.strictEqual(
+        await page.evaluate(() => !!document.querySelector('.ed-seltb')),
+        false,
+        'the selection toolbar must not exist before any WYSIWYG session is open'
+      );
+
+      await openWysiwyg(page, sel);
+      assert.strictEqual(
+        await page.evaluate(() => !!document.querySelector('.ed-seltb')),
+        false,
+        'the toolbar must stay hidden while the selection is still collapsed (caret at end)'
+      );
+
+      await selectWordInEl(page, editEl, 'toggle');
+      await page.waitForSelector('.ed-seltb');
+      assert.strictEqual(
+        await page.evaluate(() => document.querySelectorAll('.ed-seltb-btn').length),
+        4,
+        'the toolbar must show exactly 4 buttons: B / I / <> / link'
+      );
+
+      // Positioned ABOVE the selection by default — plenty of room above
+      // this paragraph, which isn't near the top of the viewport.
+      const rects = await page.evaluate(() => {
+        const r = document.querySelector('.ed-seltb').getBoundingClientRect();
+        const range = window.getSelection().getRangeAt(0).getBoundingClientRect();
+        return { tbTop: r.top, tbBottom: r.bottom, selTop: range.top };
+      });
+      assert.ok(rects.tbBottom <= rects.selTop + 1,
+        'the toolbar must be positioned above the selection when there is room, got: ' + JSON.stringify(rects));
+      assert.ok(rects.tbTop >= 0, 'the toolbar must stay clamped within the viewport (top >= 0)');
+
+      // Collapsing the selection hides the toolbar.
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sl = window.getSelection();
+        sl.removeAllRanges();
+        sl.addRange(r);
+        document.dispatchEvent(new Event('selectionchange'));
+      }, editEl);
+      await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 3000 });
+
+      // Re-select, then cancel the session (Esc) — the toolbar must not
+      // survive past the session's end.
+      await selectWordInEl(page, editEl, 'toggle');
+      await page.waitForSelector('.ed-seltb');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 3000 });
+
+      await page.close();
+      console.log('sel-toolbar: shows on selection, hides on collapse and on session end — OK');
+    }
+
+    // ── Task 4: clicking Bold wraps the selection in <strong>; clicking
+    //    Bold AGAIN on the (now re-selected) same content unwraps it — the
+    //    toggle policy's "whole selection inside one mark of that type ->
+    //    unwrap" branch ───────────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Bold toggle target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'toggle');
+      await page.waitForSelector('.ed-seltb');
+
+      await page.click('.ed-seltb-b');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const strong = document.querySelector(s + ' strong');
+          return strong ? strong.textContent : null;
+        }, editEl),
+        'toggle',
+        'clicking Bold must wrap the selected word in <strong>'
+      );
+
+      await page.click('.ed-seltb-b');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' strong'), editEl),
+        true,
+        'clicking Bold again on the same (now re-selected) content must unwrap it'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('Bold toggle target word here.'), editEl),
+        'the text content must be back to plain after the round-trip toggle'
+      );
+
+      await page.keyboard.press('Escape'); // discard — never committed
+      await page.close();
+      console.log('sel-toolbar: Bold toggles ON then OFF on the same selection — OK');
+    }
+
+    // ── Task 4: Bold applied once, Enter to commit -> the source line
+    //    gains **word**, and the re-rendered page shows <strong> ─────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Bold commit target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'commit');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-b');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const st = document.querySelector(s + ' strong');
+          return st ? st.textContent : null;
+        }, editEl),
+        'commit',
+        'Bold must wrap "commit" in <strong> before commit'
+      );
+
+      await page.keyboard.press('Enter'); // WYSIWYG commit (Task 3's onKeydown)
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('<strong>commit</strong>'),
+        { timeout: 5000 }
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !!document.querySelector('.ed-seltb')),
+        false,
+        'the selection toolbar must be gone after commit'
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextBold = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(/Bold \*\*commit\*\* target word here\./.test(fileTextBold),
+        'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
+
+      await page.close();
+      console.log('sel-toolbar: Bold + Enter commits **word** to source and <strong> to render — OK');
+    }
+
+    // ── Task 4: the code button wraps the WHOLE paragraph (which contains a
+    //    literal backtick) in <code>; committing must emit the
+    //    double-backtick fence form the serializer uses whenever the
+    //    content itself contains a backtick (see inline-md.js's
+    //    serializeCode()) ───────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Backtick target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+
+      // Fixture sanity: the literal backtick made it into the DOM as plain
+      // text (an escaped \` in the source, not a real pre-existing code span).
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('`'), editEl),
+        'fixture sanity: the paragraph must contain a literal backtick character'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' code'), editEl),
+        true,
+        'fixture sanity: the backtick must be plain text, not already inside a <code> span'
+      );
+
+      await selectAllInEl(page, editEl);
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-code');
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' code'), editEl),
+        true,
+        'the code button must wrap the selection in <code>'
+      );
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction((s) => !!document.querySelector(s + ' code'), {}, sel);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextCode = fs.readFileSync(mdPath, 'utf8');
+      const expectedFence = '`` Backtick target has a ` mark inside. ``';
+      assert.ok(fileTextCode.includes(expectedFence),
+        'sel-toolbar code: the saved source must use the double-backtick fence form, got: ' + fileTextCode);
+
+      await page.close();
+      console.log('sel-toolbar: code button on backtick-containing text emits the double-backtick fence — OK');
+    }
+
+    // ── Task 4: the link button prompts for a URL and wraps the selection
+    //    in <a href>; Enter commits it to `[text](url)` in the source.
+    //    window.prompt is stubbed via evaluateOnNewDocument (installed
+    //    before client.js's own script runs) rather than relying on a real
+    //    dialog, which is unreliable in some headless configs ────────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => {
+        window.prompt = () => 'https://example.org';
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Link target paragraph');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'target');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const a = document.querySelector(s + ' a');
+          return a ? a.getAttribute('href') + '|' + a.textContent : null;
+        }, editEl),
+        'https://example.org|target',
+        'the link button must wrap the selection in <a href> using the (stubbed) prompt result'
+      );
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('href="https://example.org"'),
+        { timeout: 5000 }
+      );
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextLink = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileTextLink.includes('[target](https://example.org)'),
+        'sel-toolbar link: the saved source must contain [target](https://example.org), got: ' + fileTextLink);
+
+      await page.close();
+      console.log('sel-toolbar: link button wraps selection in <a href>, commits to [text](url) — OK');
+    }
+
+    // ── Task 4: the link button on a selection fully inside an EXISTING <a>
+    //    edits (new href), then — reselecting the same text and clicking
+    //    again with an empty URL — clears (unwraps) it. Matches the brief:
+    //    "if the selection is inside an existing link, the button
+    //    edits/clears it" ──────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => {
+        window.__promptQueue = ['https://edited.example', ''];
+        window.prompt = () => window.__promptQueue.shift();
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'A existing link');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const a = document.querySelector(s + ' a');
+          return a ? a.getAttribute('href') : null;
+        }, editEl),
+        'https://example.com',
+        'fixture sanity: the paragraph must already contain an <a href="https://example.com">'
+      );
+
+      await selectWordInEl(page, editEl, 'existing link');
+      await page.waitForSelector('.ed-seltb');
+
+      // First click: the whole selection is inside the existing <a> -> the
+      // prompt (pre-filled with its href) supplies a NEW url -> EDIT.
+      await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const a = document.querySelector(s + ' a');
+          return a ? a.getAttribute('href') : null;
+        }, editEl),
+        'https://edited.example',
+        'the link button on a selection inside an existing link must EDIT its href'
+      );
+
+      // Re-select the same text (still inside the now-edited <a>) and click
+      // again: an empty prompt result CLEARS (unwraps) the link.
+      await selectWordInEl(page, editEl, 'existing link');
+      await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' a'), editEl),
+        true,
+        'the link button with an empty URL must CLEAR (unwrap) the existing link'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('existing link'), editEl),
+        'the link text itself must survive the clear (unwrap keeps the content)'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('sel-toolbar: link button on an existing link edits then clears it — OK');
     }
 
     console.log('editor-client-runtime.test.js OK');
