@@ -140,6 +140,27 @@ function req(port, method, p, body) {
     });
     assert.strictEqual(wrongCt.status, 415, 'wrong content-type must also 415');
 
+    // Multi-chunk UTF-8 integrity: a large CJK payload arrives split across
+    // many TCP chunks; per-chunk `buf += chunk` decoding corrupts any
+    // multi-byte character that straddles a chunk boundary into U+FFFD.
+    // Regression for the real-world zero-edit save that mangled 9 CJK chars
+    // in a 6.5MB design-doc. Payload must be big enough to span chunks.
+    {
+      const cjkLine = '全 IP 唯一的 CRC-32 datapath，訊號取樣於單一 `clk_tx` 時脈域。終點落在 IP 邊界（統計事件、safety 匯流排）。';
+      const bigCjk = ('# 大檔\n\n' + (cjkLine + '\n').repeat(20000));
+      const mtimeBig = fs.statSync(mdPath).mtimeMs;
+      const okBig = await req(srv.port, 'POST', '/api/save',
+        { fileId: 0, content: bigCjk, baseMtimeMs: mtimeBig });
+      assert.strictEqual(okBig.status, 200, 'large CJK save must succeed');
+      const written = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(!written.includes('�'),
+        'multi-chunk CJK payload must not contain U+FFFD replacement chars');
+      assert.strictEqual(written, bigCjk,
+        'large CJK payload must be written byte-identical');
+      // restore the small doc for the following cases
+      fs.writeFileSync(mdPath, fs.readFileSync(mdPath, 'utf8').slice(0, 0) + edited + '\n<!-- vim was here -->\n', 'utf8');
+    }
+
     // Finding 3(b): /api/save without baseMtimeMs → 400, file left untouched
     const beforeMissing = fs.readFileSync(mdPath, 'utf8');
     const missingBase = await req(srv.port, 'POST', '/api/save',
