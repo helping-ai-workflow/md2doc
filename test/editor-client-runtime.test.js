@@ -1067,6 +1067,144 @@ async function openBlockEditor(page, sel) {
       console.log('wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK');
     }
 
+    // ── Task 3 regression (CRITICAL): openWysiwygEditor()'s keydown/paste
+    //    listeners must be removed on cancel() — `editEl` is the block's
+    //    PERSISTENT content element (unlike raw-edit's fresh <textarea>,
+    //    thrown away with the wrap on every cancel), so re-opening WITHOUT
+    //    removing the previous session's listeners stacks N live listener
+    //    sets after N open/Esc cycles. A stale set's `cancel()` closure
+    //    still fires (on the NEXT session's Esc, or racing its commit),
+    //    producing an uncommanded second /api/render that can revert a
+    //    just-typed commit out from under the real one, silently, with no
+    //    banner. Reproduced live before the fix (reviewer-confirmed): 3x
+    //    open/Esc on the same block, then type + Enter -> TWO /api/render
+    //    POSTs instead of one, and the typed text vanished from disk.
+    {
+      const page = await newPage(browser);
+      let renderRequestCount = 0;
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
+        req.continue();
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[3] + '"]'; // "Bold paragraph..." — untouched so far
+      const editEl = sel + ' > *';
+
+      for (let i = 0; i < 3; i++) {
+        await page.click(sel);
+        await page.waitForSelector(sel + ' .ed-bar-edit');
+        await page.click(sel + ' .ed-bar-edit');
+        await page.waitForSelector(sel + ' .ed-bar-md');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, sel);
+      }
+
+      renderRequestCount = 0; // only the real commit below is under test
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await page.keyboard.type('LISTENER-LEAK-REGRESSION-TEXT');
+      await page.keyboard.press('Enter');
+
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('LISTENER-LEAK-REGRESSION-TEXT'),
+        { timeout: 5000 }
+      );
+      // Give any stray duplicate request from a stale listener a moment to
+      // land before counting — the bug's second POST fires asynchronously,
+      // not synchronously with the first.
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(renderRequestCount, 1,
+        'CRITICAL regression: exactly ONE /api/render request for the commit — stale cancel() ' +
+        'listeners from earlier open/Esc cycles must not fire a second one');
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextLeak = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileTextLeak.includes('LISTENER-LEAK-REGRESSION-TEXT'),
+        'CRITICAL regression: the typed text must persist to disk, not be silently reverted ' +
+        'by a stale listener\'s duplicate commit');
+
+      await page.close();
+      console.log('wysiwyg: listener-leak regression — 3x open/Esc then commit fires exactly one render — OK');
+    }
+
+    // ── Task 3 regression (IMPORTANT): the unsupported-degrade path firing
+    //    INSIDE switchAwayFrom() (because the user clicked a DIFFERENT
+    //    block C while this block A had unsupported content injected) must
+    //    ABORT the switch, not let the click handler continue on to
+    //    showBarFor(C) — otherwise the bar ends up on C while the
+    //    freshly-opened raw editor sits on A, two different blocks visibly
+    //    "active" at once.
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const selA = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph." — untouched
+      const editElA = selA + ' > *';
+      const headingId = await page.evaluate(() =>
+        document.querySelector('.ed-block[data-block-type="heading"]').getAttribute('data-block-id'));
+      const selC = '.ed-block[data-block-id="' + headingId + '"]';
+
+      await page.click(selA);
+      await page.waitForSelector(selA + ' .ed-bar-edit');
+      await page.click(selA + ' .ed-bar-edit');
+      await page.waitForSelector(selA + ' .ed-bar-md');
+
+      // Inject a real text change (so hasChanges() is true and
+      // switchAwayFrom() actually calls commitNow() below, not cancelNow())
+      // ALONGSIDE unsupported content our own paste handler would never
+      // itself produce — same technique as the degrade-never-lose scenario
+      // above, but this time triggered via a switch instead of a direct
+      // Enter.
+      await page.evaluate((s) => {
+        document.querySelector(s).innerHTML += 'EXTRA<span style="color:red">unsupported</span>';
+      }, editElA);
+
+      // Click block C while A is modified: switchAwayFrom() must run A's
+      // commitNow(), hit the unsupported branch, and — per the fix — return
+      // false so THIS click's showBarFor(C) never runs.
+      await page.click(selC);
+
+      await page.waitForSelector(selA + ' textarea.ed-raw', { timeout: 5000 });
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, selA),
+        'Third paragraph.',
+        'IMPORTANT regression: A must degrade to raw-edit prefilled with its ORIGINAL source'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selC),
+        false,
+        'IMPORTANT regression: the aborted switch must NOT select C'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !!document.querySelector('.ed-bar')),
+        false,
+        'IMPORTANT regression: the bar must not move to C — A\'s raw editor (which hides the bar) ' +
+        'and the (non-existent) selection must agree, not point at two different blocks'
+      );
+
+      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await page.click(selA + ' .ed-cancel');
+      await page.close();
+      console.log('wysiwyg: unsupported-degrade mid-switch aborts the switch (no bar/editor split) — OK');
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
