@@ -244,6 +244,80 @@ async function tableBlockSel(page, index) {
   return '.ed-block[data-block-id="' + id + '"]';
 }
 
+// ── Phase-3 Task 4 (list WYSIWYG) helpers ────────────────────────────────
+// Same isolation reasoning as setupTableDoc() above: list scenarios get
+// their own doc/server so undo-stack / save state never leaks between them.
+async function setupListDoc(rows) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-list-'));
+  const mdPath = path.join(dir, 'doc.md');
+  const original = rows.join('\n');
+  fs.writeFileSync(mdPath, original, 'utf8');
+  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
+}
+
+// Locates a list block by its 0-based position among ALL list blocks in
+// document order — mirrors tableBlockSel()'s role for lists (fixture docs
+// below deliberately have >1 list so the "untouched sibling list stays
+// byte-identical" requirement is actually exercised).
+async function listBlockSel(page, index) {
+  const id = await page.evaluate((i) => {
+    const els = document.querySelectorAll('.ed-block[data-block-type="list"]');
+    return els[i] ? els[i].getAttribute('data-block-id') : null;
+  }, index);
+  assert.ok(id, 'list block not found at index ' + index);
+  return '.ed-block[data-block-id="' + id + '"]';
+}
+
+// Places a COLLAPSED caret just before (`atStart: true`) or just after
+// (`atStart: false`, default) the first occurrence of `text` found in any
+// text node under `listSel`'s content root — the list-editing equivalent of
+// selectWordInEl() above, used to drive Enter-split/Tab/Shift+Tab at a
+// specific, deterministic position rather than relying on native click
+// coordinates (which real list-item wrapping can make flaky).
+async function placeCaretInListText(page, listSel, text, atStart) {
+  await page.evaluate((sel, t, start) => {
+    const root = document.querySelector(sel + ' > *');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = null, idx = -1, cur;
+    while ((cur = walker.nextNode())) {
+      idx = cur.textContent.indexOf(t);
+      if (idx !== -1) { node = cur; break; }
+    }
+    if (!node) throw new Error('list text not found: ' + t);
+    const offset = start ? idx : idx + t.length;
+    const range = document.createRange();
+    range.setStart(node, offset);
+    range.collapse(true);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+  }, listSel, text, !!atStart);
+}
+
+// Selects the ENTIRE text node whose trimmed content is exactly `text` (a
+// whole list item's own text, no nested sublist) and deletes it via a real
+// Backspace keystroke — used by the empty-Enter scenario below to produce a
+// genuinely-empty <li> through the same native-deletion path a real user
+// would use, rather than mutating textContent directly.
+async function emptyListItemText(page, listSel, text) {
+  await page.evaluate((sel, t) => {
+    const root = document.querySelector(sel + ' > *');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = null, cur;
+    while ((cur = walker.nextNode())) {
+      if (cur.textContent.trim() === t) { node = cur; break; }
+    }
+    if (!node) throw new Error('list item text not found: ' + t);
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+  }, listSel, text);
+  await page.keyboard.press('Backspace');
+}
+
 // Real (trusted-ish, coordinate-based) mouse click on whichever TH/TD in
 // `tableSel` has EXACT trimmed text `text` — a genuine bubbling click event,
 // same as an actual user click, unlike calling .click() on the DOM node
@@ -2844,6 +2918,412 @@ async function saveAndRead(page, mdPath) {
         console.log('e2e: type paragraph + bold via toolbar + edit table cell + Ctrl+S — OK');
       } finally {
         tsrv.close();
+      }
+    }
+
+    // ── Phase 3 Task 4: list WYSIWYG editing (Enter split / Tab indent /
+    //    Shift+Tab outdent / empty-Enter removes) ──────────────────────────
+    // Each scenario below gets its own isolated setupListDoc() server/doc,
+    // same isolation reasoning as the Phase-2 Task 5/6 table scenarios above
+    // (undo-stack / save state must never leak between scenarios).
+
+    // RED: typing inside one item, then blurring, commits ONLY that item's
+    // line — every other line (INCLUDING the second, untouched list block)
+    // stays byte-identical.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+          // A DIFFERENT bullet marker ('*' vs '-') so CommonMark parses this
+          // as a genuinely SEPARATE second list block — same marker with
+          // just a blank line between would still merge into ONE (loose)
+          // list token, which would defeat the "untouched sibling list"
+          // half of this scenario.
+          '* Second one', '* Second two', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        const list1 = await listBlockSel(page, 1);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', false);
+        await page.keyboard.type(' EDIT');
+
+        // Blur by clicking the second (sibling) list — commits list0's
+        // burst; list1's own burst that click just opened is unmodified, so
+        // Escape below silently cancels it without touching `lines`.
+        await page.click(list1 + ' > *');
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Bravo item EDIT'),
+          { timeout: 5000 }
+        );
+        await page.keyboard.press('Escape');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        const expectedLines = lorig.split('\n');
+        assert.strictEqual(expectedLines[3], '- Bravo item', 'sanity: line 3 is Bravo\'s line');
+        expectedLines[3] = '- Bravo item EDIT';
+        assert.strictEqual(fileText, expectedLines.join('\n'),
+          'typing inside one item then blurring must change ONLY that item\'s line — every other ' +
+          'line (including the whole second, untouched list) must stay byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: type in item -> blur -> only that line changes, sibling list untouched — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Enter splits the current item into a new sibling at the caret.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Split target text', '- Bravo item', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        // Caret right after "Split" (before " target text").
+        await placeCaretInListText(page, list0, 'Split', false);
+        await page.keyboard.press('Enter');
+        // Enter must NOT end the burst — it's a structural mutation inside
+        // the SAME sustained editing session (only empty-Enter ends it).
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), list0),
+          true,
+          'Enter (non-empty item) must keep the burst open, not commit/blur it'
+        );
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' > * > li').length === 4,
+          {}, list0
+        );
+
+        // Blur (click the heading) to commit, then save.
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('target text'),
+          { timeout: 5000 }
+        );
+        await page.keyboard.press('Escape'); // end the heading's own (unmodified) burst
+
+        const fileText = await saveAndRead(page, lmdPath);
+        const expectedLines = lorig.split('\n');
+        assert.strictEqual(expectedLines[2], '- Split target text', 'sanity: line 2 is the split target');
+        expectedLines.splice(2, 1, '- Split', '- target text');
+        assert.strictEqual(fileText, expectedLines.join('\n'),
+          'Enter must split the item at the caret into two sibling lines, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Enter splits item into a new sibling at the caret — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Tab indents the item as a child of its previous sibling — the
+    // indent is the ACCUMULATED width of the parent's own marker ("- " is 2
+    // columns), matching list-md.js's documented indent ruling.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          (s) => {
+            const items = document.querySelectorAll(s + ' > * > li');
+            return items.length === 2 && items[0].querySelector('li') &&
+              items[0].querySelector('li').textContent.trim() === 'Bravo item';
+          }, {}, list0
+        );
+
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        const expectedLines = lorig.split('\n');
+        assert.strictEqual(expectedLines[3], '- Bravo item', 'sanity: line 3 is Bravo\'s line');
+        expectedLines[3] = '  - Bravo item';
+        assert.strictEqual(fileText, expectedLines.join('\n'),
+          'Tab must indent the item as a child of the previous sibling, 2-space (marker-width) indent, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab indents item as child of previous sibling (2-space) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Tab with NO previous sibling is a no-op (first item can't indent).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Alpha item', true);
+        await page.keyboard.press('Tab');
+        // Give any (incorrect) mutation a moment to land before asserting
+        // the DOM is unchanged.
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          2,
+          'Tab on the first item (no previous sibling) must be a no-op — item count unchanged'
+        );
+
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'Tab no-op on the first item must leave the file byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab on first item (no previous sibling) is a no-op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Shift+Tab outdents a nested item to sit right after its parent.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '  - Bravo item', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        // sanity: Bravo starts out nested under Alpha.
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const items = document.querySelectorAll(s + ' > * > li');
+            return items.length === 2 && !!items[0].querySelector('li');
+          }, list0),
+          true,
+          'sanity: Bravo must start out nested under Alpha'
+        );
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' > * > li').length === 3,
+          {}, list0
+        );
+
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        const expectedLines = lorig.split('\n');
+        assert.strictEqual(expectedLines[3], '  - Bravo item', 'sanity: line 3 is the nested Bravo line');
+        expectedLines[3] = '- Bravo item';
+        assert.strictEqual(fileText, expectedLines.join('\n'),
+          'Shift+Tab must outdent the item to sit right after its former parent, flush left, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Shift+Tab outdents nested item after its parent — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Shift+Tab at TOP LEVEL is a no-op.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          2,
+          'Shift+Tab at top level must be a no-op — item count unchanged'
+        );
+
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'Shift+Tab no-op at top level must leave the file byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Shift+Tab at top level is a no-op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Enter on an EMPTY item removes it AND ends the burst (commits).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Delete me', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await emptyListItemText(page, list0, 'Delete me');
+        await page.keyboard.press('Enter');
+        // Enter-on-empty ends the burst itself (no separate blur needed).
+        await page.waitForFunction(
+          (s) => document.activeElement !== document.querySelector(s + ' > *'),
+          {}, list0
+        );
+        await page.waitForFunction(
+          () => !document.querySelector('.content').textContent.includes('Delete me'),
+          { timeout: 5000 }
+        );
+
+        const fileText = await saveAndRead(page, lmdPath);
+        const expectedLines = lorig.split('\n').filter((l) => l !== '- Delete me');
+        assert.strictEqual(fileText, expectedLines.join('\n'),
+          'Enter on an empty item must remove it and commit, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Enter on empty item removes it and commits (ends burst) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: Ctrl+Z mid-burst reverts a Tab-indent purely locally — no
+    // /api/render round trip, burst stays open (same proof pattern as the
+    // Phase-3 Task 2 bold-then-undo scenario above).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        let renderRequestCount = 0;
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+          if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
+          req.continue();
+        });
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          (s) => {
+            const items = document.querySelectorAll(s + ' > * > li');
+            return items.length === 2 && !!items[0].querySelector('li');
+          }, {}, list0
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const items = document.querySelectorAll(s + ' > * > li');
+            return items.length === 3 && !items[0].querySelector('li');
+          }, list0),
+          true,
+          'Ctrl+Z mid-burst must revert the Tab-indent back to the flat pre-indent structure'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), list0),
+          true,
+          'the burst must stay open (still focused) after a mid-burst undo — nothing was committed'
+        );
+        assert.strictEqual(renderRequestCount, 0,
+          'Tab-indent-then-undo must never hit /api/render — proof this is OUR burst history reverting ' +
+          'locally, not a server round trip');
+
+        await page.keyboard.press('Escape'); // end the burst, discard (never committed)
+        await page.close();
+        console.log('list WYSIWYG: Ctrl+Z mid-burst reverts a Tab-indent locally, no server round trip — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED: a list with an UNSUPPORTED item (a GFM task-list checkbox) must
+    // degrade to the in-place raw source editor on click — never arm.
+    {
+      const { srv: lsrv, url: lurl } =
+        await setupListDoc([
+          '# List doc', '',
+          '- [ ] todo item', '- normal item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' > *').getAttribute('contenteditable'), list0),
+          null,
+          'an unsupported (checkbox) list must NOT be armed as an always-on WYSIWYG surface'
+        );
+
+        await page.click(list0 + ' > *');
+        await page.waitForSelector(list0 + ' textarea.ed-raw', { timeout: 3000 });
+        const rawValue = await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, list0);
+        assert.ok(rawValue.includes('[ ] todo item'),
+          'clicking an unsupported list must open the raw source editor prefilled with its markdown');
+
+        await page.keyboard.press('Escape');
+        await page.close();
+        console.log('list WYSIWYG: unsupported (checkbox) list degrades to raw source edit on click — OK');
+      } finally {
+        lsrv.close();
       }
     }
 

@@ -41,13 +41,20 @@ function req(port, method, p, body) {
     assert.ok(page.body.includes('md2docTableMd'), 'Task 5: table-md runtime inlined');
     assert.ok(page.body.indexOf('md2docInlineMd') < page.body.indexOf('md2docTableMd'),
       'inline-md must be injected before table-md (table-md require()s it in node / reads it off window in the browser)');
+    assert.ok(page.body.includes('md2docListMd'), 'Task 4: list-md runtime inlined');
+    assert.ok(page.body.indexOf('md2docInlineMd') < page.body.indexOf('md2docListMd'),
+      'inline-md must be injected before list-md (list-md reads window.md2docInlineMd in the browser)');
     assert.ok(page.body.includes('md2docHistory'), 'Phase 3 Task 1/2: burst-history runtime inlined');
     assert.ok(page.body.indexOf('md2docTableMd') < page.body.indexOf('md2docHistory'),
-      'table-md must be injected before history.js (per the Phase 3 injection order: lineops, inline-md, table-md, history, client)');
+      'table-md must be injected before history.js (per the Phase 3 injection order: lineops, inline-md, table-md, list-md, history, client)');
+    assert.ok(page.body.indexOf('md2docListMd') < page.body.indexOf('md2docHistory'),
+      'list-md must be injected before history.js (same injection-order rule)');
     assert.ok(page.body.indexOf('md2docHistory') < page.body.indexOf('/*client*/'),
       'history.js must be injected before the client runtime (client depends on window.md2docHistory)');
     assert.ok(page.body.indexOf('md2docTableMd') < page.body.indexOf('/*client*/'),
       'table-md must be injected before the client runtime (client depends on window.md2docTableMd)');
+    assert.ok(page.body.indexOf('md2docListMd') < page.body.indexOf('/*client*/'),
+      'list-md must be injected before the client runtime (client depends on window.md2docListMd)');
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');
