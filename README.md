@@ -138,40 +138,52 @@ md2doc --edit foo.md --no-open    # start the server without launching a browser
 
 `--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
 your browser. Click any top-level block (heading, paragraph, table, etc.) to select
-it; a floating edit bar appears above and the block shows a solid outline. For many
-blocks you can edit directly in place (WYSIWYG); click **✎ 編輯** or use the edit bar
-to access raw Markdown editing when needed.
+it; a floating edit bar appears above it and the block shows a solid outline.
+Clicking a block only **selects** it — it does not start editing by itself. From the
+edit bar, click **✎ 編輯** to enter editing: paragraph, heading, and table blocks
+open a WYSIWYG session in place; everything else opens raw Markdown in a textarea.
+The one exception is a **table cell** — clicking directly on a cell (not just the
+table's chrome) opens that table's WYSIWYG session immediately, with the clicked
+cell active, no separate ✎ 編輯 click needed.
 
 ### Inline editing: paragraphs, headings, tables
 
-Click a **paragraph**, **heading**, or **table** to edit its content directly in the
-rendered document — the text appears with bold/italic/code marks visible while you
-type, but no Markdown syntax characters show. Enter commits your changes; Esc
-reverts them.
+Select a **paragraph**, **heading**, or **table** and click **✎ 編輯** (or, for a
+table, click a cell directly) to edit its content in the rendered document — the
+text appears with bold/italic/code marks visible while you type, but no Markdown
+syntax characters show. Enter commits your changes; Esc reverts them.
 
 | Block type | Edit mode |
 |---|---|
-| Paragraph | Direct WYSIWYG: type and format text, selection toolbar for B/I/code/link |
-| Heading | WYSIWYG with depth control: ± buttons increase/decrease the heading level |
-| Table | WYSIWYG cell editing with Tab/Shift+Tab navigation, table-structure buttons for row/column ops and alignment |
+| Paragraph | Click **✎ 編輯** for WYSIWYG: type and format text, selection toolbar for B/I/`<>`/🔗 |
+| Heading | Click **✎ 編輯** for WYSIWYG with depth control: ± buttons increase/decrease the heading level |
+| Table | Click any **cell** directly for WYSIWYG cell editing (or **✎ 編輯** to start on the first cell), with Tab/Shift+Tab navigation and table-structure buttons for row/column ops and alignment |
 | Code fence, list, blockquote | Raw Markdown (`✎ 編輯` button) |
 | Image, HTML, math | Raw Markdown (auto-opens when block contains unsupported content) |
 
 ### Paragraph and heading editing
 
-Click any paragraph or heading to edit it in place. The rendered marks (bold, italic,
+Click a paragraph or heading to select it (the edit bar appears above it), then
+click **✎ 編輯** to edit its content in place. The rendered marks (bold, italic,
 code, links) show while you type — type `**text**` and it renders as **text** instead
 of showing the asterisks.
 
-**Selection toolbar**: when you select text inside a paragraph or heading, a toolbar
-appears with formatting buttons:
+**Selection toolbar**: when you select text inside an open paragraph or heading
+WYSIWYG session, a toolbar appears with formatting buttons:
 
 | Button | Action |
 |---|---|
 | **B** | Toggle bold (`**text**`) |
 | **I** | Toggle italic (`*text*`) |
-| **`**| Wrap selection in backticks (`` `code` ``) |
-| **[](url)** | Wrap selection as a link; click to edit the URL |
+| **`<>`** | Wrap selection in backticks (`` `code` ``) |
+| **🔗** | Wrap selection as a link; click to edit the URL |
+
+**Switching to raw Markdown mid-edit**: while a WYSIWYG session (paragraph, heading,
+or table) is open, the edit bar shows an **MD** button. Click it to discard whatever
+you've typed in this session and reopen the same block as raw Markdown text instead
+— the escape hatch for anything WYSIWYG can't express. This is destructive to
+in-progress typing (same as pressing Esc): it does not carry your unsaved edits over
+into the raw textarea, it reopens the block from its last-committed source.
 
 **Key shortcuts**:
 
