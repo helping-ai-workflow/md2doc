@@ -318,6 +318,39 @@ async function emptyListItemText(page, listSel, text) {
   await page.keyboard.press('Backspace');
 }
 
+// Task 4 fix (review, Critical) helper: selects from the first occurrence of
+// `fromText` (start of match) through the first-found-at-or-after occurrence
+// of `toText` (end of match) — used to reproduce the reviewer's exact
+// cross-item probe (a selection whose two boundary points land in two
+// DIFFERENT <li> elements) deterministically, without relying on click
+// coordinates.
+async function selectAcrossListItems(page, listSel, fromText, toText) {
+  await page.evaluate((sel, fromT, toT) => {
+    const root = document.querySelector(sel + ' > *');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let fromNode = null, fromIdx = -1, toNode = null, toIdx = -1, cur;
+    while ((cur = walker.nextNode())) {
+      if (!fromNode) {
+        const i = cur.textContent.indexOf(fromT);
+        if (i !== -1) { fromNode = cur; fromIdx = i; }
+      }
+      if (fromNode && !toNode) {
+        const searchFrom = (cur === fromNode) ? fromIdx : 0;
+        const j = cur.textContent.indexOf(toT, searchFrom);
+        if (j !== -1) { toNode = cur; toIdx = j; }
+      }
+      if (fromNode && toNode) break;
+    }
+    if (!fromNode || !toNode) throw new Error('selectAcrossListItems: text not found');
+    const range = document.createRange();
+    range.setStart(fromNode, fromIdx);
+    range.setEnd(toNode, toIdx + toT.length);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+  }, listSel, fromText, toText);
+}
+
 // Real (trusted-ish, coordinate-based) mouse click on whichever TH/TD in
 // `tableSel` has EXACT trimmed text `text` — a genuine bubbling click event,
 // same as an actual user click, unlike calling .click() on the DOM node
@@ -3322,6 +3355,117 @@ async function saveAndRead(page, mdPath) {
         await page.keyboard.press('Escape');
         await page.close();
         console.log('list WYSIWYG: unsupported (checkbox) list degrades to raw source edit on click — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED (review fix, CRITICAL): a selection spanning MULTIPLE <li>s must
+    // NOT silently delete the spanned content on Enter — reviewer's exact
+    // probe (select mid-"Alpha item" through mid-"Bravo item", Enter) must
+    // be a complete no-op: no mutation, no banner, no history snap.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        const beforeHtml = await page.evaluate((s) => document.querySelector(s + ' > *').innerHTML, list0);
+
+        // Mid-"Alpha item" through mid-"Bravo item" — the reviewer's exact
+        // probe shape, spanning two different <li> elements.
+        await selectAcrossListItems(page, list0, 'ha item', 'Bra');
+        await page.keyboard.press('Enter');
+        // No banner (no failed-commit path was even reached).
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')), false,
+          'a cross-item Enter no-op must never surface a banner'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' > *').innerHTML, list0),
+          beforeHtml,
+          'a selection spanning multiple <li>s must leave the DOM byte-for-byte unchanged on Enter — ' +
+          'no partial deletion of the spanned content'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          3,
+          'item count must stay unchanged (no split, no merge, no item lost)'
+        );
+
+        // Blur (unmodified -> silently cancels) and confirm the FILE is
+        // also byte-identical — the guard never even reached commitEdit().
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'cross-item Enter no-op must leave the saved file byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: Enter with a selection spanning multiple <li>s is a no-op (no data loss) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RED (review fix, IMPORTANT): empty-Enter on the ONLY item of a list
+    // must delete the WHOLE block cleanly (zero lines), absorbing exactly
+    // one adjacent blank-line separator — not leave a stray blank line.
+    // Reviewer's exact byte probe: "# Doc\n\n- Only item\n\nTrailer" ->
+    // "# Doc\n\nTrailer". Also verifies a FOLLOW-UP edit after the removal
+    // still maps to the right block (blockmap/shiftBlocks integrity).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# Doc', '', '- Only item', '', 'Trailer']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await emptyListItemText(page, list0, 'Only item');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          (s) => document.activeElement !== document.querySelector(s + ' > *'),
+          {}, list0
+        );
+        await page.waitForFunction(
+          () => !document.querySelector('.content').textContent.includes('Only item'),
+          { timeout: 5000 }
+        );
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# Doc\n\nTrailer',
+          'removing the only item of a one-item list must delete the whole block and absorb ' +
+          'exactly one blank separator, got:\n' + JSON.stringify(fileText));
+
+        // Follow-up edit after the removal: the trailing paragraph must
+        // still be reachable and commit to the right place — proof the
+        // block map stayed consistent after the block-deleting commit.
+        const trailerSel = await paragraphSelByText(page, 'Trailer');
+        await openWysiwyg(page, trailerSel);
+        await page.evaluate((s) => document.querySelector(s).focus(), trailerSel + ' > *');
+        await page.keyboard.type(' EDITED');
+        await page.evaluate((s) => document.querySelector(s).blur(), trailerSel + ' > *');
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Trailer EDITED'),
+          { timeout: 5000 }
+        );
+        const fileText2 = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText2, '# Doc\n\nTrailer EDITED',
+          'a follow-up edit after the block-removal commit must still land in the right place, got:\n' +
+          JSON.stringify(fileText2));
+
+        await page.close();
+        console.log('list WYSIWYG: empty-Enter on the only item deletes the whole block cleanly, ' +
+          'follow-up edits still map correctly — OK');
       } finally {
         lsrv.close();
       }

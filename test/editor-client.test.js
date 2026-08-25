@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, withHeadingDepth } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, withHeadingDepth } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -32,6 +32,54 @@ assert.deepStrictEqual(u.lines, lines);
 // no-change commit is a no-op (no undo entry)
 const st2 = commitEdit({ lines, blocks, stack: new UndoStack() }, 1, 'para');
 assert.strictEqual(st2.op, null, 'identical text → no op pushed');
+
+// -- Task 4 fix (review, Important): commitListBlockRemoval() line math -----
+// Reviewer's exact probe shape: heading, blank, a ONE-item list, blank,
+// trailer — removing the list must absorb exactly ONE of its two blank
+// separators, not leave a doubled (or zero) blank line.
+{
+  const rLines = ['# Doc', '', '- Only item', '', 'Trailer'];
+  const rBlocks = [
+    { id: 0, type: 'heading',   startLine: 1, endLine: 1 },
+    { id: 1, type: 'list',      startLine: 3, endLine: 3 },
+    { id: 2, type: 'paragraph', startLine: 5, endLine: 5 },
+  ];
+  const rStack = new UndoStack();
+  const r1 = commitListBlockRemoval({ lines: rLines, blocks: rBlocks, stack: rStack }, 1);
+  assert.deepStrictEqual(r1.lines, ['# Doc', '', 'Trailer'],
+    'removing the only item of a one-item list must delete the block AND absorb ' +
+    'exactly one blank separator, not leave a stray blank line');
+  assert.strictEqual(r1.lines.join('\n'), '# Doc\n\nTrailer',
+    'exact byte contract: "# Doc\\n\\n- Only\\n\\nTrailer" -> "# Doc\\n\\nTrailer"');
+  // trailing block (id 2) shifts up by 2 lines (one for the removed list
+  // line itself, one for the absorbed trailing blank).
+  assert.strictEqual(r1.blocks.find((b) => b.id === 2).startLine, 3);
+  // undo restores the ORIGINAL file exactly, including both blank lines.
+  const rUndo = rStack.undo(r1.lines);
+  assert.deepStrictEqual(rUndo.lines, rLines, 'undo must restore the exact original bytes');
+
+  // No blank neighbor on EITHER side (list is the entire file) -> nothing
+  // to absorb, just the block's own line(s) removed.
+  const soloLines = ['- Only item'];
+  const soloBlocks = [{ id: 0, type: 'list', startLine: 1, endLine: 1 }];
+  const soloStack = new UndoStack();
+  const r2 = commitListBlockRemoval({ lines: soloLines, blocks: soloBlocks, stack: soloStack }, 0);
+  assert.deepStrictEqual(r2.lines, [], 'a list with no blank neighbors on either side leaves an empty file');
+  assert.deepStrictEqual(soloStack.undo(r2.lines).lines, soloLines, 'undo restores the solo-list file exactly');
+
+  // No TRAILING blank (list is the LAST block, EOF right after) -> falls
+  // back to absorbing the LEADING blank instead.
+  const eofLines = ['# Doc', '', '- Only item'];
+  const eofBlocks = [
+    { id: 0, type: 'heading', startLine: 1, endLine: 1 },
+    { id: 1, type: 'list',    startLine: 3, endLine: 3 },
+  ];
+  const eofStack = new UndoStack();
+  const r3 = commitListBlockRemoval({ lines: eofLines, blocks: eofBlocks, stack: eofStack }, 1);
+  assert.deepStrictEqual(r3.lines, ['# Doc'],
+    'no trailing blank to absorb (EOF) must fall back to absorbing the leading blank');
+  assert.deepStrictEqual(eofStack.undo(r3.lines).lines, eofLines, 'undo restores the EOF-list file exactly');
+}
 
 // -- Finding 5: empty heading emits no trailing space ------------------------
 // withHeadingDepth(): normal (non-empty) heading text still keeps its single
@@ -100,6 +148,12 @@ for (const [re, msg] of shortcutOrderChecks) {
 const lineopsSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'lineops.js'), 'utf8');
 const inlineMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'inline-md.js'), 'utf8');
 const tableMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'table-md.js'), 'utf8');
+// Phase 3 Task 4: list-md.js is now ALSO inlined by server.js (injected
+// after table-md, before history — see test/editor-server.test.js) — same
+// literal-</script> exposure as the other sources, so it gets the same
+// guard (this was missing from Task 4's own commit — added here as part of
+// the review fix pass, same class of gap as table-md/history already had).
+const listMdSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'list-md.js'), 'utf8');
 // Phase 3 Task 1/2: history.js is now ALSO inlined by server.js (injected
 // after table-md, before client — see test/editor-server.test.js) — same
 // literal-</script> exposure as the other three, so it gets the same guard.
@@ -108,6 +162,7 @@ assert.ok(!/<\/script/i.test(src), 'client.js must not contain a literal </scrip
 assert.ok(!/<\/script/i.test(lineopsSrc), 'lineops.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(inlineMdSrc), 'inline-md.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(tableMdSrc), 'table-md.js must not contain a literal </script sequence');
+assert.ok(!/<\/script/i.test(listMdSrc), 'list-md.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal </script sequence');
 
 console.log('editor-client.test.js OK');
