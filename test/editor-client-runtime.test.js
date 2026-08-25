@@ -9,7 +9,7 @@
 // test/scroll-anchor.test.js).
 //
 // Finding 1: cancel (Esc/✕) or a no-change Ctrl+Enter commit must not leave
-//   the block's gutter button dead (present in the DOM but listener-less).
+//   the block unable to open its editor again (dead click-bar wiring).
 // Finding 2: a failed /api/render must not wipe .content, and must surface
 //   a dismissible banner instead.
 // Finding 3: a save() failure outside 200/409 must surface a dismissible
@@ -22,8 +22,8 @@
 //   still open. That swap detaches the open textarea without ever running
 //   its own restore() (the only place `activeEditor` used to get cleared),
 //   so `activeEditor` was left pointing at a node no longer in the
-//   document — every later gutter click, on ANY block, then hit the
-//   "a different editor is open" refusal forever. Silent total lockout,
+//   document — every later attempt to open a block's editor, on ANY block,
+//   then hit the "a different editor is open" refusal forever. Silent total lockout,
 //   recoverable only by reloading the page.
 
 const fs = require('fs');
@@ -36,11 +36,20 @@ const { createEditorServer } = require('../lib/editor/server.js');
 const REPO = path.resolve(__dirname, '..');
 const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'lib', 'editor', 'client.js'), 'utf8');
 
+// 1x1 transparent PNG (same fixture image as test/images.test.js) — used by
+// the click-bar tests below to exercise the "lightbox targets stay excluded
+// from the edit bar" rule. Appended as a NEW, trailing paragraph block so it
+// never shifts the block indices the other scenarios below rely on.
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
 async function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-rt-'));
   const mdPath = path.join(dir, 'doc.md');
+  fs.writeFileSync(path.join(dir, 'block.png'), Buffer.from(PNG_B64, 'base64'));
   const original = [
     '# Heading', '', 'First paragraph.', '', 'Second paragraph.', '', 'Third paragraph.', '',
+    '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
   const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
@@ -55,6 +64,15 @@ async function newPage(browser) {
   return page;
 }
 
+// Opens a block's raw editor via the click-invoked edit bar (replaces the
+// old per-block hover gutter): click the block to select it (shows the
+// floating bar anchored above it), then click the bar's ✎ 編輯 button.
+async function openBlockEditor(page, sel) {
+  await page.click(sel);
+  await page.waitForSelector(sel + ' .ed-bar-edit');
+  await page.click(sel + ' .ed-bar-edit');
+}
+
 (async () => {
   const { srv, url } = await setup();
   const browser = await puppeteer.launch({
@@ -63,7 +81,9 @@ async function newPage(browser) {
   });
 
   try {
-    // ── Finding 1: gutter must survive cancel AND no-op commit ───────────
+    // ── Finding 1: the block must stay click-to-edit-able after cancel AND
+    //    no-op commit (the click-bar equivalent of "the gutter must not go
+    //    dead") ────────────────────────────────────────────────────────────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -71,45 +91,42 @@ async function newPage(browser) {
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + blockId + '"]';
 
-      // open -> Esc cancel -> gutter must still be LIVE (clickable, not just present)
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      // open -> Esc cancel -> block must still be LIVE (clickable, not just present)
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw');
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
       assert.ok(
-        await page.evaluate((s) => !!document.querySelector(s + ' .ed-gutter'), sel),
-        'gutter markup present after Esc cancel'
+        await page.evaluate((s) => !document.querySelector(s + ' .ed-bar') &&
+          !document.querySelector(s).classList.contains('ed-selected'), sel),
+        'the edit bar must be gone (block deselected) after an Esc cancel'
       );
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 3000 });
       assert.ok(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel),
-        'FIX 1: gutter must reopen the editor after an Esc cancel (was dead before the fix)'
+        'FIX 1: the block must reopen its editor after an Esc cancel (was dead before the fix)'
       );
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
 
-      // open -> no-change Ctrl+Enter (identical text) -> gutter must still be LIVE
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      // open -> no-change Ctrl+Enter (identical text) -> block must still be LIVE
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw');
       await page.keyboard.down('Control');
       await page.keyboard.press('Enter');
       await page.keyboard.up('Control');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, sel);
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 3000 });
       assert.ok(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel),
-        'FIX 1: gutter must reopen the editor after a no-change Ctrl+Enter commit (was dead before the fix)'
+        'FIX 1: the block must reopen its editor after a no-change Ctrl+Enter commit (was dead before the fix)'
       );
       await page.keyboard.press('Escape');
 
       await page.close();
-      console.log('fix 1: gutter revives after cancel / no-op commit — OK');
+      console.log('fix 1: block edit-bar revives after cancel / no-op commit — OK');
     }
 
     // ── Finding 2: failed /api/render must not wipe .content ─────────────
@@ -129,8 +146,7 @@ async function newPage(browser) {
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + blockId + '"]';
 
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -182,8 +198,7 @@ async function newPage(browser) {
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + blockId + '"]';
 
-      await page.hover(sel);
-      await page.click(sel + ' .ed-gutter');
+      await openBlockEditor(page, sel);
       await page.waitForSelector(sel + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -230,8 +245,7 @@ async function newPage(browser) {
       const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
       const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
 
-      await page.hover(selA);
-      await page.click(selA + ' .ed-gutter');
+      await openBlockEditor(page, selA);
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -240,8 +254,7 @@ async function newPage(browser) {
       }, selA);
 
       // Try to open B's editor while A is still open.
-      await page.hover(selB);
-      await page.click(selB + ' .ed-gutter');
+      await openBlockEditor(page, selB);
       await new Promise((r) => setTimeout(r, 200));
 
       assert.strictEqual(
@@ -267,14 +280,14 @@ async function newPage(browser) {
     }
 
     // ── Finding 4 regression: undo() must resolve an open editor first,
-    //    not silently detach it and lock out every gutter forever ────────
+    //    not silently detach it and lock every block's editor forever ─────
     // Exact repro from review: commit an edit on A, open B's editor
     // (leave it UNMODIFIED), blur out of the textarea (so the keydown
     // handler's `inTextarea` gate lets Ctrl+Z through), then Ctrl+Z.
     // Whatever the fix does with B (auto-cancel since it has no unsaved
     // keystrokes, per the chosen policy — or refuse+flash, the other
     // policy branch), the hard requirement either way is: no lockout —
-    // block C's gutter must still open an editor afterward.
+    // block C must still be able to open its editor afterward.
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -288,8 +301,7 @@ async function newPage(browser) {
       const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
 
       // commit an edit on A
-      await page.hover(selA);
-      await page.click(selA + ' .ed-gutter');
+      await openBlockEditor(page, selA);
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -305,8 +317,7 @@ async function newPage(browser) {
       );
 
       // open B's editor and leave it untouched, then blur off the textarea
-      await page.hover(selB);
-      await page.click(selB + ' .ed-gutter');
+      await openBlockEditor(page, selB);
       await page.waitForSelector(selB + ' textarea.ed-raw');
       await page.click('body'); // focus leaves the textarea -> Ctrl+Z gate passes
 
@@ -317,7 +328,7 @@ async function newPage(browser) {
       await new Promise((r) => setTimeout(r, 300)); // let any async render settle
 
       // Whichever policy branch fired, B must not be left dangling: either
-      // it was auto-cancelled (no textarea, live gutter) or it's still open
+      // it was auto-cancelled (no textarea, block clickable again) or it's still open
       // WITH the refusal flash visible (never neither).
       const bStillOpen = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selB);
       if (bStillOpen) {
@@ -327,14 +338,13 @@ async function newPage(browser) {
         );
       }
 
-      // The hard requirement regardless of branch: NO LOCKOUT. Block C's
-      // gutter must still be able to open an editor.
-      await page.hover(selC);
-      await page.click(selC + ' .ed-gutter');
+      // The hard requirement regardless of branch: NO LOCKOUT. Block C
+      // must still be able to open its editor.
+      await openBlockEditor(page, selC);
       await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
       assert.ok(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
-        'FIX 4-REGRESSION: undo() must not permanently lock out every block\'s gutter ' +
+        'FIX 4-REGRESSION: undo() must not permanently lock out every block\'s editor ' +
         '(activeEditor left dangling on a detached node)'
       );
       await page.keyboard.press('Escape');
@@ -357,8 +367,7 @@ async function newPage(browser) {
       const selB = '.ed-block[data-block-id="' + ids[1] + '"]';
       const selC = '.ed-block[data-block-id="' + ids[2] + '"]';
 
-      await page.hover(selA);
-      await page.click(selA + ' .ed-gutter');
+      await openBlockEditor(page, selA);
       await page.waitForSelector(selA + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -374,8 +383,7 @@ async function newPage(browser) {
       );
 
       // open B and actually type something (unsaved modification)
-      await page.hover(selB);
-      await page.click(selB + ' .ed-gutter');
+      await openBlockEditor(page, selB);
       await page.waitForSelector(selB + ' textarea.ed-raw');
       await page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
@@ -402,12 +410,11 @@ async function newPage(browser) {
 
       // B is still legitimately open (undo refused rather than discarding
       // it) — the pre-existing Finding-4 single-editor policy correctly
-      // still refuses C's gutter while B remains open. This is expected,
+      // still refuses to open C's editor while B remains open. This is expected,
       // RECOVERABLE state, not the lockout bug: cancelling B (Esc) must
       // free the editor back up immediately, proving `activeEditor` is
       // still a live, resolvable reference and not a detached node.
-      await page.hover(selC);
-      await page.click(selC + ' .ed-gutter');
+      await openBlockEditor(page, selC);
       await new Promise((r) => setTimeout(r, 150));
       assert.strictEqual(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
@@ -423,9 +430,8 @@ async function newPage(browser) {
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 3000 }, selB);
 
       // Now that B is closed, the editor slot is free again — the hard
-      // "no permanent lockout" requirement: C's gutter must open normally.
-      await page.hover(selC);
-      await page.click(selC + ' .ed-gutter');
+      // "no permanent lockout" requirement: C's editor must open normally.
+      await openBlockEditor(page, selC);
       await page.waitForSelector(selC + ' textarea.ed-raw', { timeout: 3000 });
       assert.ok(
         await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selC),
@@ -434,6 +440,119 @@ async function newPage(browser) {
 
       await page.close();
       console.log('fix 4-regression: undo() refuses (does not discard) a modified open editor, recoverable — OK');
+    }
+
+    // ── Click-invoked edit bar: select / move / dismiss / lightbox-exempt /
+    //    ✎ opens the raw editor ─────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const blockIds = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block')).map((el) => el.getAttribute('data-block-id')));
+      assert.ok(blockIds.length >= 5, 'fixture must have heading + 3 paragraphs + a trailing image paragraph');
+      const selHeading = '.ed-block[data-block-id="' + blockIds[0] + '"]';
+      const selA = '.ed-block[data-block-id="' + blockIds[1] + '"]';
+      const selB = '.ed-block[data-block-id="' + blockIds[2] + '"]';
+      const selImgBlock = '.ed-block[data-block-id="' + blockIds[blockIds.length - 1] + '"]';
+
+      // Click block A -> bar appears anchored inside it; block gets a solid
+      // "selected" outline.
+      await page.click(selA);
+      await page.waitForSelector(selA + ' .ed-bar');
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selA),
+        'clicking a block must select it (solid-outline class)'
+      );
+      assert.ok(
+        await page.evaluate((s) => !!document.querySelector(s + ' > .ed-bar'), selA),
+        'the edit bar must be anchored as a child of the clicked/selected block'
+      );
+
+      // Click a DIFFERENT block -> the bar (there is only ever one) moves
+      // there; the previous block is deselected.
+      await page.click(selB);
+      await page.waitForSelector(selB + ' .ed-bar');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selA),
+        false,
+        'the previously-selected block must be deselected once the bar moves elsewhere'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selB),
+        'the newly-clicked block must be selected'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' .ed-bar'), selA),
+        true,
+        'only one bar exists — it must not still be attached to the old block'
+      );
+
+      // Click outside any block -> the bar is dismissed entirely.
+      await page.evaluate(() => document.body.click());
+      await page.waitForFunction(() => !document.querySelector('.ed-bar'));
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selB),
+        false,
+        'clicking outside any block must deselect it'
+      );
+
+      // Esc also dismisses the bar (no raw editor open).
+      await page.click(selHeading);
+      await page.waitForSelector(selHeading + ' .ed-bar');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction((s) => !document.querySelector(s + ' .ed-bar'), {}, selHeading);
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).classList.contains('ed-selected'), selHeading),
+        false,
+        'Esc must dismiss the bar / deselect the block'
+      );
+
+      // Clicking a lightbox target (an image) must open the lightbox, NOT
+      // the edit bar — img/.mermaid/.graphviz/wavedrom stay excluded.
+      await page.click(selImgBlock + ' img');
+      await page.waitForFunction(() => {
+        const lb = document.querySelector('.lightbox');
+        return !!lb && !lb.hidden;
+      }, { timeout: 3000 });
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        true,
+        'clicking a lightbox target must NOT show the edit bar'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s).classList.contains('ed-selected'), selImgBlock),
+        true,
+        'clicking a lightbox target must NOT select its containing block'
+      );
+      // Close the lightbox so it doesn't interfere with the assertions below.
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => {
+        const lb = document.querySelector('.lightbox');
+        return !lb || lb.hidden;
+      }, { timeout: 3000 });
+
+      // ✎ opens the raw textarea editor, hiding the bar while editing; the
+      // bar stays gone (block deselected) once the editor is cancelled.
+      await page.click(selA);
+      await page.waitForSelector(selA + ' .ed-bar-edit');
+      await page.click(selA + ' .ed-bar-edit');
+      await page.waitForSelector(selA + ' textarea.ed-raw');
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        true,
+        'the bar must hide once the raw editor opens'
+      );
+      await page.keyboard.press('Escape');
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selA);
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        true,
+        'the bar must stay gone (block deselected) after cancelling the raw editor'
+      );
+
+      await page.close();
+      console.log('click-bar: select / move / dismiss / lightbox-exempt / ✎-opens-editor — OK');
     }
 
     console.log('editor-client-runtime.test.js OK');

@@ -36,8 +36,35 @@ assert.strictEqual(st2.op, null, 'identical text → no op pushed');
 const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
 for (const needle of ['__ED__', 'Ctrl', 'beforeunload', '/api/save',
                       '/api/render', '/api/ping', '409',
-                      '__md2docInitDiagrams', 'ed-raw']) {
+                      '__md2docInitDiagrams', 'ed-raw',
+                      'ed-bar', 'ed-selected', 'wireBlockSelection']) {
   assert.ok(src.includes(needle), `client.js must reference ${needle}`);
+}
+// The old hover-gutter DOM wiring must be gone (replaced by the click-bar).
+assert.ok(!/ed-gutter/.test(src), 'client.js must not reference the removed .ed-gutter');
+assert.ok(!/attachGutters/.test(src), 'client.js must not reference the removed attachGutters()');
+
+// -- Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+Enter: preventDefault() must fire
+// BEFORE any async work (save()/undo()/redo()/commit() all kick off a
+// fetch()), or the browser's native shortcut (e.g. the save-page dialog on
+// Ctrl+S) fires alongside ours. Each regex below pins preventDefault()
+// as the FIRST statement in its branch, immediately followed by the call —
+// so a future edit that reorders them, or inserts awaited work first,
+// breaks this assertion instead of silently regressing.
+const shortcutOrderChecks = [
+  [/key === 's'\)\s*\{\s*e\.preventDefault\(\);\s*save\(\);/, 'Ctrl+S must preventDefault() before save()'],
+  [/key === 'z'\)\s*\{\s*e\.preventDefault\(\);\s*undo\(\);/, 'Ctrl+Z must preventDefault() before undo()'],
+  [/\(e\.key === 'y' \|\| \(e\.shiftKey && e\.key === 'Z'\)\)\)\s*\{\s*e\.preventDefault\(\);\s*redo\(\);/,
+    'Ctrl+Y / Ctrl+Shift+Z must preventDefault() before redo()'],
+  [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*commit\(\);/,
+    'Ctrl+Enter (raw-editor commit) must preventDefault() before commit()'],
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*restore\(\);/,
+    'Esc inside the raw editor must preventDefault() before restore()'],
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*dismissBar\(\);/,
+    'Esc (global, edit-bar dismiss) must preventDefault() before dismissBar()'],
+];
+for (const [re, msg] of shortcutOrderChecks) {
+  assert.ok(re.test(src), msg);
 }
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`

@@ -92,8 +92,11 @@ async function setup() {
     const paraBlockId = await page.evaluate(() =>
       document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
     const paraSel = '.ed-block[data-block-id="' + paraBlockId + '"]';
-    await page.hover(paraSel);
-    await page.click(paraSel + ' .ed-gutter');
+    // Click the block to select it (shows the floating edit bar), then its
+    // ✎ 編輯 button — the click-bar equivalent of the old hover-gutter click.
+    await page.click(paraSel);
+    await page.waitForSelector(paraSel + ' .ed-bar-edit');
+    await page.click(paraSel + ' .ed-bar-edit');
     await page.waitForSelector(paraSel + ' textarea.ed-raw');
     await page.evaluate((s) => {
       const ta = document.querySelector(s + ' textarea.ed-raw');

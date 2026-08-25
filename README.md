@@ -137,22 +137,26 @@ md2doc --edit foo.md --no-open    # start the server without launching a browser
 ```
 
 `--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
-your browser with a **✎** gutter button next to every top-level block (heading,
-paragraph, table, code fence, list, blockquote, ...). Click it to edit that block's
-raw Markdown source in place.
+your browser. Click anywhere inside a top-level block (heading, paragraph, table,
+code fence, list, blockquote, ...) to select it — a floating edit bar appears
+anchored above the block, and the block gets a solid outline. Click **✎ 編輯** in
+the bar to edit that block's raw Markdown source in place. Clicking a diagram or
+image still opens the zoom lightbox, unchanged; it doesn't select the block.
 
 | Key / control | Action |
 |---|---|
-| **✎** gutter | Open that block's raw source for editing |
+| Click a block | Select it — shows the floating edit bar |
+| **✎ 編輯** (in the edit bar) | Open the selected block's raw source for editing |
 | `Ctrl`/`⌘` + `Enter`, or **✓** | Commit the edit and re-render the block |
 | `Esc`, or **✕** | Cancel the edit, discard the change |
+| Click outside any block, or `Esc` | Dismiss the edit bar / deselect |
 | `Ctrl`/`⌘` + `S` | Save the document to disk |
 | `Ctrl`/`⌘` + `Z` | Undo the last committed edit |
 | `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo |
 
-**One editor open at a time.** Clicking a second block's gutter while another
-block's editor is still open is refused; the already-open editor flashes so you
-can find it. Commit or cancel it first.
+**One editor open at a time.** Opening a second block's editor (via its edit bar)
+while another block's editor is still open is refused; the already-open editor
+flashes so you can find it. Commit or cancel it first.
 
 **Save is explicit, not autosave**, and is guarded against clobbering changes made
 outside the browser: each save carries the file's last-known modification time, and
