@@ -67,6 +67,7 @@ async function setup() {
     'Backtick target has a \\` mark inside.', '',
     'Link target paragraph text.', '',
     'A [existing link](https://example.com) here.', '',
+    'Rerender reset target word here.', '',
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
@@ -1581,6 +1582,117 @@ async function paragraphSelByText(page, prefix) {
       await page.keyboard.press('Escape');
       await page.close();
       console.log('sel-toolbar: link button on an existing link edits then clears it — OK');
+    }
+
+    // ── Task 4 regression fix (review finding): rerenderAll()'s
+    //    unconditional belt-and-braces reset (activeEditor = null;
+    //    dismissBar();) must ALSO cover the selection-toolbar state,
+    //    including removing its document-level selectionchange listener —
+    //    not just relying on cancel()/commit() to have done it. Verified two
+    //    ways: (a) an instrumented count of currently-attached
+    //    'selectionchange' listeners must return to 0 after a commit-
+    //    triggered swap (proving the listener was actually removed, not
+    //    just that the toolbar node was hidden) and go back to exactly 1 —
+    //    never 2 — once a NEW session opens afterward (proving no stale
+    //    listener survived to stack a duplicate); (b) no .ed-seltb node is
+    //    visible immediately after the swap ─────────────────────────────
+    {
+      const page = await newPage(browser);
+      // Instrument document.addEventListener/removeEventListener for the
+      // 'selectionchange' type specifically — installed via
+      // evaluateOnNewDocument so it wraps the real methods BEFORE client.js's
+      // own script (which attaches the toolbar's listener) ever runs.
+      await page.evaluateOnNewDocument(() => {
+        window.__selCount = 0;
+        const origAdd = document.addEventListener.bind(document);
+        const origRemove = document.removeEventListener.bind(document);
+        document.addEventListener = function (type, listener, opts) {
+          if (type === 'selectionchange') window.__selCount++;
+          return origAdd(type, listener, opts);
+        };
+        document.removeEventListener = function (type, listener, opts) {
+          if (type === 'selectionchange') window.__selCount--;
+          return origRemove(type, listener, opts);
+        };
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Rerender reset target');
+      const editEl = sel + ' > *';
+
+      await openWysiwyg(page, sel);
+      assert.strictEqual(
+        await page.evaluate(() => window.__selCount), 1,
+        'opening a WYSIWYG session must attach exactly one selectionchange listener'
+      );
+      await selectWordInEl(page, editEl, 'reset');
+      await page.waitForSelector('.ed-seltb');
+
+      // Collapse the selection to the end before typing — typing over the
+      // still-selected "reset" word would REPLACE it instead of appending,
+      // which isn't what this scenario needs (it only needed a non-collapsed
+      // selection a moment ago to prove the toolbar's listener was live).
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sl = window.getSelection();
+        sl.removeAllRanges();
+        sl.addRange(r);
+      }, editEl);
+
+      // Commit via plain Enter (no mark toggle needed — any text-changing
+      // commit triggers the same rerenderAll() body swap this fix targets).
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.type('-EDITED');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('-EDITED'),
+        { timeout: 5000 }
+      );
+
+      assert.strictEqual(
+        await page.evaluate(() => window.__selCount), 0,
+        'REVIEW FIX: rerenderAll()\'s swap must actually REMOVE the selectionchange ' +
+        'listener (not just hide the toolbar node) — a leaked listener would leave this at 1'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-seltb')),
+        true,
+        'REVIEW FIX: no .ed-seltb must survive a commit-triggered .content swap'
+      );
+
+      // A brand-new session on the now-rerendered block must attach exactly
+      // ONE more listener (not two) — proving the old session's listener
+      // really was removed rather than merely being shadowed.
+      // Same prefix as before (the paragraph now ends with the appended
+      // "-EDITED" text, but the start is unchanged) — startsWith() still
+      // correctly resolves to the post-swap block.
+      const sel2 = await paragraphSelByText(page, 'Rerender reset target');
+      const editEl2 = sel2 + ' > *';
+      await openWysiwyg(page, sel2);
+      assert.strictEqual(
+        await page.evaluate(() => window.__selCount), 1,
+        'REVIEW FIX: a new session after the swap must have exactly ONE selectionchange ' +
+        'listener attached, never 2 (which would mean the old one leaked)'
+      );
+      await selectWordInEl(page, editEl2, 'reset');
+      await page.waitForSelector('.ed-seltb');
+      assert.strictEqual(
+        await page.evaluate(() => document.querySelectorAll('.ed-seltb').length),
+        1,
+        'exactly one .ed-seltb node backs the (singleton, moved-not-recreated) toolbar'
+      );
+
+      await page.keyboard.press('Escape');
+      assert.strictEqual(
+        await page.evaluate(() => window.__selCount), 0,
+        'the new session\'s own cancel() must remove its listener too'
+      );
+
+      await page.close();
+      console.log('sel-toolbar regression: rerenderAll() resets toolbar state, no leaked listener — OK');
     }
 
     console.log('editor-client-runtime.test.js OK');
