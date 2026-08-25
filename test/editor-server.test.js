@@ -41,6 +41,32 @@ function req(port, method, p, body) {
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');
 
+    // injection must land at the DOCUMENT's closing </body>, not the first
+    // literal "</body>" in the page — a mermaid-bearing doc inlines the
+    // mermaid bundle whose DOMPurify source contains "</body>" inside a JS
+    // string; replacing the first occurrence splices __ED__ into the middle
+    // of that bundle and kills every script on the page.
+    {
+      const mermaidMd = path.join(dir, 'mermaid-doc.md');
+      fs.writeFileSync(mermaidMd,
+        '# M\n\n```mermaid\ngraph TD; a-->b;\n```\n\ntail paragraph\n', 'utf8');
+      const srv2 = await createEditorServer({ files: [mermaidMd], clientJs: '/*client*/' });
+      try {
+        const p2 = await req(srv2.port, 'GET', '/edit/0');
+        assert.strictEqual(p2.status, 200);
+        const edAt = p2.body.indexOf('window.__ED__');
+        assert.ok(edAt !== -1, 'payload injected');
+        const lastEngine = p2.body.lastIndexOf('data-md2doc-diagram-engine=');
+        assert.ok(edAt > lastEngine,
+          '__ED__ must be injected after the last inlined diagram bundle, ' +
+          'not spliced into it (first-"</body>"-occurrence bug)');
+        // and the real closing tag still follows the injection
+        assert.ok(p2.body.lastIndexOf('</body>') > edAt, 'real </body> after inject');
+      } finally {
+        srv2.close();
+      }
+    }
+
     // whitelist
     assert.strictEqual((await req(srv.port, 'GET', '/edit/1')).status, 404);
     assert.strictEqual((await req(srv.port, 'GET', '/edit/../etc')).status, 404);
