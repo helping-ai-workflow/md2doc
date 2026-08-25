@@ -122,6 +122,33 @@ for (const needle of ['ed-bar', 'ed-selected', 'openTableEditor', 'runTableStruc
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
 }
 
+// -- Task 5 review fix: suppressTableFocusout must be exception-safe -------
+// The flag is checked at the TOP of the document-level `focusout` listener
+// (before any block-type branch), so a bare `suppressTableFocusout = true;
+// tableEl.innerHTML = state; suppressTableFocusout = false;` that throws
+// mid-assignment would latch the flag true FOREVER — silently disabling
+// blur-commits for EVERY block type (not just tables) until reload, not
+// just breaking the table burst it was guarding. Every set-to-true site
+// must wrap the guarded statement in try/finally so the flag is cleared
+// even on a throw. Structural (regex) check, same idiom as
+// shortcutOrderChecks below: locate every `= true;` site, then confirm
+// each one is immediately followed by a try/finally block that clears it
+// back to false in the finally — counts must match exactly (a mismatch
+// means some site got the assignment but not the try/finally).
+{
+  const setTrueSites = src.match(/suppressTableFocusout = true;/g) || [];
+  assert.strictEqual(setTrueSites.length, 2,
+    'expected exactly 2 suppressTableFocusout = true sites (tableBurstUndo/tableBurstRedo) — ' +
+    'if a new site is ever added, update this count deliberately and audit it for the same guard');
+  const guardedSites = src.match(
+    /suppressTableFocusout = true;\s*try\s*\{[\s\S]*?\}\s*finally\s*\{\s*suppressTableFocusout = false;\s*\}/g
+  ) || [];
+  assert.strictEqual(guardedSites.length, setTrueSites.length,
+    'every `suppressTableFocusout = true` must be immediately wrapped in a try/finally that clears it back to ' +
+    'false in the finally block — an unguarded assignment latches the flag true forever if the guarded ' +
+    'statement throws, silently disabling blur-commits for every block type until reload');
+}
+
 // -- Ctrl+S / Ctrl+Z / Ctrl+Y / Ctrl+Enter: preventDefault() must fire
 // BEFORE any async work (save()/undo()/redo()/commit() all kick off a
 // fetch()), or the browser's native shortcut (e.g. the save-page dialog on
