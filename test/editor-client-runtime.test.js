@@ -465,6 +465,94 @@ async function openBlockEditor(page, sel) {
       console.log('switch-commit-failure: commit failure keeps A open, blocks B from opening — OK');
     }
 
+    // ── single-flight switchAwayFrom(): two independent triggers firing
+    //    near-simultaneously (an outside click, immediately followed by
+    //    the global Ctrl+Z) must share ONE in-flight commit instead of each
+    //    firing their own independent commit() — otherwise two concurrent
+    //    /api/render calls can race, with the DOM ending up reflecting
+    //    whichever response resolves last while `lines` reflects the
+    //    other (silent save/DOM divergence). /api/render is held (not
+    //    answered) so the race window is observable via the request count
+    //    before either response is allowed to land.
+    {
+      const page = await newPage(browser);
+      const heldRenderRequests = [];
+      let renderRequestCount = 0;
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if (req.method() === 'POST' && req.url().endsWith('/api/render')) {
+          renderRequestCount++;
+          heldRenderRequests.push(req); // held — answered explicitly below
+        } else {
+          req.continue();
+        }
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const selA = '.ed-block[data-block-id="' + ids[0] + '"]';
+
+      await openBlockEditor(page, selA);
+      await page.waitForSelector(selA + ' textarea.ed-raw');
+      await page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = 'SINGLE-FLIGHT-A-TEXT';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, selA);
+
+      // Fire an outside click (dispatched directly via the DOM .click()
+      // API, not coordinate-based, so it unambiguously targets <body>) and
+      // the global Ctrl+Z back-to-back, with no synchronization between
+      // them — both are independent switchAwayFrom() trigger points that
+      // see the SAME still-modified activeEditor. Blur first: a synthetic
+      // .click() does NOT itself move focus off the still-focused textarea
+      // (unlike a real pointer click), and without the blur, Ctrl+Z would
+      // be swallowed by the keydown handler's own `inTextarea` gate before
+      // ever reaching undo() at all.
+      await page.evaluate(() => { document.activeElement && document.activeElement.blur(); document.body.click(); });
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+
+      // Give both triggers' synchronous JS a moment to run and reach
+      // /api/render. The request is held, not answered, so this window is
+      // exactly where a duplicate commit request (if the guard were
+      // missing) would show up as a second held request.
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(renderRequestCount, 1,
+        'single-flight: exactly one /api/render request for the auto-commit — concurrent ' +
+        'switchAwayFrom() triggers must share it, not each fire their own');
+
+      // Release the held commit request; let it resolve for real.
+      heldRenderRequests.shift().continue();
+
+      // Once switchAwayFrom() resolves, undo() proceeds with its OWN
+      // legitimate, SEQUENCED render request (never concurrent with the
+      // commit's) — wait for it to arrive.
+      const deadline = Date.now() + 5000;
+      while (heldRenderRequests.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.strictEqual(renderRequestCount, 2,
+        'single-flight: after the auto-commit resolves, undo() fires its own sequenced render — ' +
+        'total 2, never overlapping with the commit\'s');
+      heldRenderRequests.shift().continue();
+
+      // Final DOM/state must be consistent: the undo reverted the
+      // just-committed edit, not left dangling on whichever response
+      // happened to resolve last.
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('First paragraph.') &&
+          !document.querySelector('.content').innerHTML.includes('SINGLE-FLIGHT-A-TEXT'),
+        { timeout: 5000 }
+      );
+
+      await page.close();
+      console.log('single-flight switchAwayFrom: concurrent triggers share one commit, no request race — OK');
+    }
+
     // ── Click-invoked edit bar: select / move / dismiss / lightbox-exempt /
     //    ✎ opens the raw editor ─────────────────────────────────────────
     {
