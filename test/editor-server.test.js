@@ -37,6 +37,9 @@ function req(port, method, p, body) {
     assert.ok(page.body.includes('window.__ED__'));
     assert.ok(page.body.includes('"lines"'));
     assert.ok(page.body.includes('ed-block'));
+    assert.ok(page.body.includes('md2docInlineMd'), 'Task 3: inline-md runtime inlined');
+    assert.ok(page.body.indexOf('md2docInlineMd') < page.body.indexOf('/*client*/'),
+      'inline-md must be injected before the client runtime (client depends on window.md2docInlineMd)');
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');

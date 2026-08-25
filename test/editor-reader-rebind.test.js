@@ -94,9 +94,22 @@ async function setup() {
     const paraSel = '.ed-block[data-block-id="' + paraBlockId + '"]';
     // Click the block to select it (shows the floating edit bar), then its
     // ✎ 編輯 button — the click-bar equivalent of the old hover-gutter click.
+    // Task 3: this fixture's filler paragraphs (plain text + hard-break
+    // <br>s) are WYSIWYG-eligible, so ✎ now routes to the in-place editor
+    // instead of the raw textarea — force raw-edit via the bar's MD escape
+    // hatch so the rest of this test (which asserts on textarea.ed-raw) is
+    // unaffected; this test is about the reader-runtime rebind after ANY
+    // commit, not about which editor produced it.
     await page.click(paraSel);
     await page.waitForSelector(paraSel + ' .ed-bar-edit');
     await page.click(paraSel + ' .ed-bar-edit');
+    await page.waitForFunction(
+      (s) => !!document.querySelector(s + ' textarea.ed-raw') || !!document.querySelector(s + ' .ed-bar-md'),
+      {}, paraSel
+    );
+    if (!(await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), paraSel))) {
+      await page.click(paraSel + ' .ed-bar-md');
+    }
     await page.waitForSelector(paraSel + ' textarea.ed-raw');
     await page.evaluate((s) => {
       const ta = document.querySelector(s + ' textarea.ed-raw');

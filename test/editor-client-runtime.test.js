@@ -52,6 +52,10 @@ async function setup() {
   fs.writeFileSync(path.join(dir, 'block.png'), Buffer.from(PNG_B64, 'base64'));
   const original = [
     '# Heading', '', 'First paragraph.', '', 'Second paragraph.', '', 'Third paragraph.', '',
+    // Kept BEFORE the trailing image block so `blockIds[blockIds.length - 1]`
+    // (relied on by the click-bar scenario below) still resolves to the
+    // image paragraph.
+    'Bold paragraph with **bold** text.', '',
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
@@ -67,17 +71,36 @@ async function newPage(browser) {
   return page;
 }
 
-// Opens a block's raw editor via the click-invoked edit bar (replaces the
+// Opens a block's RAW editor via the click-invoked edit bar (replaces the
 // old per-block hover gutter): click the block to select it (shows the
 // floating bar anchored above it), then click the bar's ✎ 編輯 button.
+//
+// Task 3: ✎ now routes WYSIWYG-eligible paragraph/heading blocks (plain text
+// like "First paragraph." round-trips through the inline serializer) to the
+// in-place WYSIWYG editor instead of the raw textarea. The many pre-existing
+// scenarios below (Finding 1-3, switch-*, single-flight, …) are specifically
+// exercising RAW-TEXTAREA mechanics (Ctrl+Enter, textarea.value, network
+// failure banners) and don't care which route got them there — so when ✎
+// lands on WYSIWYG instead, this helper uses the bar's MD escape-hatch
+// button to force raw-edit, exactly like a real user would, then proceeds
+// exactly as before.
 async function openBlockEditor(page, sel) {
   await page.click(sel);
   await page.waitForSelector(sel + ' .ed-bar-edit');
   await page.click(sel + ' .ed-bar-edit');
+  await page.waitForFunction(
+    (s) => !!document.querySelector(s + ' textarea.ed-raw') || !!document.querySelector(s + ' .ed-bar-md'),
+    {}, sel
+  );
+  const hasRaw = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel);
+  if (!hasRaw) {
+    await page.click(sel + ' .ed-bar-md');
+    await page.waitForSelector(sel + ' textarea.ed-raw');
+  }
 }
 
 (async () => {
-  const { srv, url } = await setup();
+  const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -643,19 +666,53 @@ async function openBlockEditor(page, sel) {
         return !lb || lb.hidden;
       }, { timeout: 3000 });
 
-      // ✎ opens the raw textarea editor, hiding the bar while editing; the
-      // bar stays gone (block deselected) once the editor is cancelled.
+      // Task 3: ✎ on a WYSIWYG-eligible paragraph (selA, "First paragraph.")
+      // opens the in-place editor — NO textarea, the bar STAYS (with the MD
+      // escape hatch replacing ✎), and Esc cancels + deselects (bar gone).
       await page.click(selA);
       await page.waitForSelector(selA + ' .ed-bar-edit');
       await page.click(selA + ' .ed-bar-edit');
-      await page.waitForSelector(selA + ' textarea.ed-raw');
+      await page.waitForSelector(selA + ' .ed-bar-md');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' textarea.ed-raw'), selA),
+        true,
+        'WYSIWYG-eligible ✎ must NOT open the raw textarea'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').getAttribute('contenteditable'), selA),
+        'true',
+        'the block\'s content element must become contenteditable'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        false,
+        'the bar must STAY (with the MD escape hatch) while WYSIWYG editing is active'
+      );
+      await page.keyboard.press('Escape');
+      await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, selA);
       assert.strictEqual(
         await page.evaluate(() => !document.querySelector('.ed-bar')),
         true,
-        'the bar must hide once the raw editor opens'
+        'the bar must be gone (block deselected) after cancelling the WYSIWYG editor'
+      );
+
+      // The raw-editor-hides-the-bar invariant still holds for a block that
+      // routes to raw-edit — proven here via the MD escape hatch itself
+      // (selHeading is WYSIWYG-eligible too, so ✎ opens WYSIWYG first, then
+      // MD forces the switch to raw-edit).
+      await page.click(selHeading);
+      await page.waitForSelector(selHeading + ' .ed-bar-edit');
+      await page.click(selHeading + ' .ed-bar-edit');
+      await page.waitForSelector(selHeading + ' .ed-bar-md');
+      await page.click(selHeading + ' .ed-bar-md');
+      await page.waitForSelector(selHeading + ' textarea.ed-raw');
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.ed-bar')),
+        true,
+        'the bar must hide once the raw editor opens (via the MD escape hatch)'
       );
       await page.keyboard.press('Escape');
-      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selA);
+      await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selHeading);
       assert.strictEqual(
         await page.evaluate(() => !document.querySelector('.ed-bar')),
         true,
@@ -664,6 +721,350 @@ async function openBlockEditor(page, sel) {
 
       await page.close();
       console.log('click-bar: select / move / dismiss / lightbox-exempt / ✎-opens-editor — OK');
+    }
+
+    // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
+    //    type + Enter commits; file line updated on save ──────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[0] + '"]'; // "First paragraph."
+      const editEl = sel + ' > *';
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' textarea.ed-raw'), sel),
+        true,
+        'WYSIWYG: clicking a paragraph must show NO textarea'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).getAttribute('contenteditable'), editEl),
+        'true',
+        'WYSIWYG: the content element must be contenteditable'
+      );
+
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyA');
+      await page.keyboard.up('Control');
+      await page.keyboard.type('WYSIWYG-EDITED-TEXT');
+      await page.keyboard.press('Enter');
+
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('WYSIWYG-EDITED-TEXT'),
+        { timeout: 5000 }
+      );
+      assert.ok(
+        await page.evaluate(() => !document.querySelector('.content').innerHTML.includes('undefined')),
+        'commit must not stringify undefined into the DOM'
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileText1 = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
+        'WYSIWYG: Enter-commit + save must update the file on disk');
+
+      await page.close();
+      console.log('wysiwyg: paragraph edit commits via Enter and persists to file — OK');
+    }
+
+    // ── Task 3 WYSIWYG: **bold** shows <strong> while editing (no literal
+    //    ** visible in the edit root's text); Esc reverts exactly ─────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const boldId = await page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((b) => b.querySelector('strong'));
+        return el ? el.getAttribute('data-block-id') : null;
+      });
+      assert.ok(boldId, 'fixture must have a paragraph with **bold** text');
+      const sel = '.ed-block[data-block-id="' + boldId + '"]';
+      const editEl = sel + ' > *';
+      // Captured BEFORE any editing interaction — the bar itself is a CHILD
+      // of `sel` once selected, so comparing `sel`'s innerHTML post-edit
+      // would spuriously include/exclude the bar. `editEl` (the <p> tag
+      // alone) is what cancel() actually restores.
+      const originalHtml = await page.evaluate((s) => document.querySelector(s).innerHTML, editEl);
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' strong'), editEl),
+        true,
+        'WYSIWYG: bold text must render as <strong> while editing'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).innerText.includes('**'), editEl),
+        false,
+        'WYSIWYG: no literal ** must be visible in the edit root\'s text'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.waitForFunction((s) => !document.querySelector(s).classList.contains('ed-selected'), {}, sel);
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).innerHTML, editEl),
+        originalHtml,
+        'WYSIWYG: Esc must revert to the exact pre-edit HTML'
+      );
+
+      await page.close();
+      console.log('wysiwyg: bold shows <strong> while editing, Esc reverts exactly — OK');
+    }
+
+    // ── Task 3 WYSIWYG: a paragraph containing an image opens the raw-edit
+    //    textarea instead (not WYSIWYG-eligible) ───────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const blockIds = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const selImg = '.ed-block[data-block-id="' + blockIds[blockIds.length - 1] + '"]';
+
+      // Dispatch the click on the block itself (bubbles to the delegated
+      // document listener) rather than a coordinate-based page.click(), which
+      // could land ON the <img> — a lightbox target excluded from selection.
+      await page.evaluate((s) => {
+        document.querySelector(s).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      }, selImg);
+      await page.waitForSelector(selImg + ' .ed-bar-edit');
+      await page.click(selImg + ' .ed-bar-edit');
+      await page.waitForSelector(selImg + ' textarea.ed-raw');
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), selImg),
+        true,
+        'WYSIWYG: a block containing an image must open the raw-edit textarea instead'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('wysiwyg: image paragraph falls back to raw-edit — OK');
+    }
+
+    // ── Task 3: heading block shows ± on the bar; clicking + changes the
+    //    '#' count in the source after commit ────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const headingId = await page.evaluate(() =>
+        document.querySelector('.ed-block[data-block-type="heading"]').getAttribute('data-block-id'));
+      const sel = '.ed-block[data-block-id="' + headingId + '"]';
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-plus').hidden, sel),
+        false,
+        'heading block: the bar\'s + button must be visible'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-minus').hidden, sel),
+        false,
+        'heading block: the bar\'s − button must be visible'
+      );
+      const nonHeadingId = await page.evaluate(() =>
+        document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
+      const selPara = '.ed-block[data-block-id="' + nonHeadingId + '"]';
+      await page.click(selPara);
+      await page.waitForSelector(selPara + ' .ed-bar');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' .ed-bar-plus').hidden, selPara),
+        true,
+        'non-heading block: the bar\'s + button must stay hidden'
+      );
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar');
+      await page.click(sel + ' .ed-bar-plus');
+      await page.waitForFunction(
+        (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
+        {}, sel
+      );
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileText2 = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(/^## Heading/m.test(fileText2),
+        'heading ±: clicking + must increase the heading depth in the source (# -> ##)');
+
+      await page.close();
+      console.log('wysiwyg: heading ± buttons change depth, persists to file — OK');
+    }
+
+    // ── Task 3: Shift+Enter inserts <br> instead of committing; a later
+    //    plain Enter commits it and it round-trips to the saved source ────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[1] + '"]'; // "Second paragraph."
+      const editEl = sel + ' > *';
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(r);
+      }, editEl);
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+      await page.keyboard.type('SECOND-LINE');
+
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' br'), editEl),
+        true,
+        'Shift+Enter must insert a <br> instead of committing'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel),
+        false,
+        'Shift+Enter must NOT commit (no textarea, editor still open)'
+      );
+
+      await page.keyboard.press('Enter'); // plain Enter now commits
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('SECOND-LINE'),
+        { timeout: 5000 }
+      );
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileText3 = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
+        'Shift+Enter\'s <br> must round-trip into the saved markdown source');
+
+      await page.close();
+      console.log('wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK');
+    }
+
+    // ── Task 3: paste inserts clipboard text as plain text only — no rich
+    //    markup (e.g. a real <b>) ever survives into the DOM ──────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
+      const editEl = sel + ' > *';
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(r);
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'PASTED<b>RICH</b>TEXT');
+        dt.setData('text/html', '<b>evil</b>');
+        const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        el.dispatchEvent(ev);
+      }, editEl);
+
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
+        true,
+        'paste must never introduce a real <b> element — only plain text'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('PASTED<b>RICH</b>TEXT'), editEl),
+        'paste must insert the clipboard\'s plain-text form verbatim as text'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('wysiwyg: paste inserts plain text only, rich markup discarded — OK');
+    }
+
+    // ── Task 3: unsupported content landing mid-session (drag/drop or any
+    //    path other than our own plain-text paste handler) must degrade to
+    //    raw-edit prefilled with the ORIGINAL source on commit, never
+    //    corrupt it — degrade-never-lose ─────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      // ids[0] ("First paragraph.") and ids[1] ("Second paragraph.") were
+      // already committed to different text by earlier scenarios in this
+      // same run (the editor server persists real edits across page loads,
+      // by design) — ids[2] ("Third paragraph.") is the first one none of
+      // the prior scenarios ever committed (the paste scenario above used it
+      // but only cancelled via Esc), so its on-disk source is still known.
+      const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
+      const editEl = sel + ' > *';
+
+      await page.click(sel);
+      await page.waitForSelector(sel + ' .ed-bar-edit');
+      await page.click(sel + ' .ed-bar-edit');
+      await page.waitForSelector(sel + ' .ed-bar-md');
+
+      // Simulate content our own paste handler would never itself produce
+      // (a styled <span>) landing directly in the DOM — a real drag-drop
+      // takes exactly this kind of uncontrolled path.
+      await page.evaluate((s) => {
+        document.querySelector(s).innerHTML += '<span style="color:red">unsupported</span>';
+      }, editEl);
+      await page.evaluate((s) => document.querySelector(s).focus(), editEl);
+      await page.keyboard.press('Enter'); // commit
+
+      await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, sel),
+        'Third paragraph.',
+        'unsupported commit must open raw-edit prefilled with the ORIGINAL source, not the corrupted DOM'
+      );
+      await page.waitForSelector('.ed-conflict');
+      const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+      assert.ok(bannerText.includes('不支援'), 'unsupported commit must show the fallback banner');
+
+      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await page.click(sel + ' .ed-cancel');
+      await page.close();
+      console.log('wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK');
     }
 
     console.log('editor-client-runtime.test.js OK');
