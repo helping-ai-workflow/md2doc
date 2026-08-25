@@ -226,6 +226,30 @@ async function clickCellWithText(page, tableSel, text) {
   await page.mouse.click(box.x, box.y);
 }
 
+// Phase-2 Task 6 (table structure ops) helper: the five op buttons live in
+// the DOM from module load (buildBar() runs once) but start `hidden` — a
+// plain page.click()/waitForSelector() doesn't check that, so poll until
+// updateBarButtons() has un-hidden the button for the currently-selected
+// table block before clicking it.
+async function clickBarButton(page, sel) {
+  await page.waitForFunction((s) => {
+    const el = document.querySelector(s);
+    return !!el && !el.hidden;
+  }, {}, sel);
+  await page.click(sel);
+}
+
+// Ctrl+S then re-read the file from disk — used by the Task 6 scenarios
+// below to assert the committed source after a structure op, same
+// keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
+async function saveAndRead(page, mdPath) {
+  await page.keyboard.down('Control');
+  await page.keyboard.press('KeyS');
+  await page.keyboard.up('Control');
+  await new Promise((r) => setTimeout(r, 300));
+  return fs.readFileSync(mdPath, 'utf8');
+}
+
 (async () => {
   const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
@@ -1985,6 +2009,224 @@ async function clickCellWithText(page, tableSel, text) {
 
         await page.close();
         console.log('table WYSIWYG: any unsupported cell degrades the whole table to raw-edit — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // ── Phase-2 Task 6: table structure ops (row/col add/del, alignment) ──
+    // ＋列: inserts an empty body row directly after the row containing the
+    // last-focused cell (a click auto-opens the table session — no prior ✎
+    // needed — see runTableStructureOp()'s section comment in client.js).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, '1');
+        await clickBarButton(page, table0 + ' .ed-bar-row-plus');
+        await page.waitForFunction(
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 3,
+          {}, table0
+        );
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.ok(fileText.includes(
+          ['| A | B |', '|---|---|', '| 1 | 2 |', '|  |  |', '| 3 | 4 |'].join('\n')),
+          '＋列 must insert an empty row directly after the focused row, got:\n' + fileText);
+
+        await page.close();
+        console.log('table structure ops: ＋列 inserts an empty row after the focused row — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // －列: deletes the row containing the focused cell; refuses (banner) to
+    // delete the last remaining body row.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, '3');
+        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
+        await page.waitForFunction(
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length === 1,
+          {}, table0
+        );
+        const bodyText = await page.evaluate((s) => document.querySelector(s).textContent, table0);
+        assert.ok(!bodyText.includes('3'), '－列 must remove the row containing the focused cell');
+
+        // refuse deleting the last remaining body row
+        await clickCellWithText(page, table0, '1');
+        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/無法刪除最後一列/.test(bannerText),
+          'refusing to delete the last row must show a banner, got: ' + bannerText);
+        const rowCount = await page.evaluate(
+          (s) => document.querySelector(s).querySelectorAll('tbody tr').length, table0);
+        assert.strictEqual(rowCount, 1, 'the last row must NOT be deleted after refusal');
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await page.close();
+        console.log('table structure ops: －列 deletes the focused row; refuses to delete the last row — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // －列 on a HEADER cell is refused outright (banner) — the header can
+    // never be removed via the row-delete button, regardless of body row
+    // count.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'A');
+        await clickBarButton(page, table0 + ' .ed-bar-row-minus');
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/無法刪除標題列/.test(bannerText),
+          'refusing to delete the header row must show a banner, got: ' + bannerText);
+        const headerStillThere = await page.evaluate(
+          (s) => !!document.querySelector(s + ' thead th'), table0);
+        assert.strictEqual(headerStillThere, true, 'the header row must still exist');
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await page.close();
+        console.log('table structure ops: －列 on the header row is refused — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // ＋欄: inserts an empty column directly after the focused cell's column,
+    // in the header AND every body row.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B | C |', '|---|---|---|', '| 1 | 2 | 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, '2');
+        await clickBarButton(page, table0 + ' .ed-bar-col-plus');
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead th').parentElement.children.length === 4,
+          {}, table0
+        );
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.ok(fileText.includes('| A | B |  | C |'),
+          '＋欄 must insert an empty header cell after the focused column, got:\n' + fileText);
+        assert.ok(fileText.includes('| 1 | 2 |  | 3 |'),
+          '＋欄 must insert an empty body cell in every row at the same column, got:\n' + fileText);
+        assert.ok(fileText.includes('|---|---|---|---|'),
+          '＋欄 must add a 4th unaligned separator cell, got:\n' + fileText);
+
+        await page.close();
+        console.log('table structure ops: ＋欄 inserts an empty column after the focused column — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // －欄: deletes the focused cell's column from header + every body row;
+    // refuses (banner) to delete the last remaining column.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, '1');
+        await clickBarButton(page, table0 + ' .ed-bar-col-minus');
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead th').parentElement.children.length === 1,
+          {}, table0
+        );
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.ok(fileText.includes(['| B |', '|---|', '| 2 |'].join('\n')),
+          '－欄 must remove the focused column from header + body, got:\n' + fileText);
+
+        // refuse deleting the last remaining column
+        await clickCellWithText(page, table0, '2');
+        await clickBarButton(page, table0 + ' .ed-bar-col-minus');
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/無法刪除最後一欄/.test(bannerText),
+          'refusing to delete the last column must show a banner, got: ' + bannerText);
+        const colCount = await page.evaluate(
+          (s) => document.querySelector(s + ' thead th').parentElement.children.length, table0);
+        assert.strictEqual(colCount, 1, 'the last column must NOT be deleted after refusal');
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await page.close();
+        console.log('table structure ops: －欄 deletes the focused column; refuses to delete the last column — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // 對齊: cycles the focused column's alignment left → center → right →
+    // left (wrapping), applied to EVERY cell (th+td) in that column — never
+    // the untouched neighboring column.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        const expected = ['left', 'center', 'right', 'left'];
+        for (const want of expected) {
+          await clickCellWithText(page, table0, '1');
+          await clickBarButton(page, table0 + ' .ed-bar-align');
+          await page.waitForFunction(
+            (s, w) => {
+              const th = document.querySelector(s + ' thead th');
+              return !!th && (th.getAttribute('style') || '') === 'text-align:' + w;
+            }, {}, table0, want
+          );
+        }
+        const styles = await page.evaluate((s) => {
+          const ths = document.querySelectorAll(s + ' thead th');
+          return Array.from(ths).map((th) => th.getAttribute('style'));
+        }, table0);
+        assert.strictEqual(styles[0], 'text-align:left',
+          'after 4 cycles (left,center,right,left) column A must be back to left');
+        assert.strictEqual(styles[1], null,
+          'the untouched column B must never gain an alignment style');
+        const tdStyle = await page.evaluate(
+          (s) => document.querySelector(s + ' tbody td').getAttribute('style'), table0);
+        assert.strictEqual(tdStyle, 'text-align:left',
+          'the body cell in the aligned column must be kept in sync with the header cell (column-uniform assumption)');
+
+        await page.close();
+        console.log('table structure ops: 對齊 cycles left→center→right→left on the focused column — OK');
       } finally {
         tsrv.close();
       }
