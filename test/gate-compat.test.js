@@ -147,6 +147,18 @@ function assertGateCompatTable(md, label) {
   assertGateCompatTable(md, 'header-only table');
 }
 
+// 8. Finding 1 (post-review): a cell whose TEXT NODE contains a literal
+// '\n' — e.g. from a paste path that bypassed client.js's <br>-segmentation
+// — must still emit as a SINGLE physical row (no orphan cell line). The
+// embedded newline becomes the literal '<br>' token, same mechanism as
+// case 4 above.
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, 'line one\nline two'))]);
+  const { md } = tableMd.serializeTable(t);
+  assertGateCompatTable(md, 'raw-newline-in-text-node cell');
+  assert.ok(md.includes('<br>'), 'raw-newline-in-text-node cell: must contain the literal <br> token, got:\n' + md);
+}
+
 // ── representative serializeInline() outputs (non-table context) ─────────
 // serializeInline() output becomes ONE line of the emitted document (a
 // paragraph/heading's own line, or — via table-md.js's serializeRow() above

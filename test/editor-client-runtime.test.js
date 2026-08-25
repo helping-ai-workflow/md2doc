@@ -1956,6 +1956,75 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // Final-review Finding 1: pasting text containing a newline into a
+    // table cell must NOT emit a multi-line row (a spec-forbidden orphan
+    // cell line). insertTextAtCaret() now splits pasted text on newlines
+    // and inserts a real <br> between segments — same mechanism as the
+    // "Enter inside a cell" scenario just above, just reached via paste
+    // instead of a keypress.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Col |',
+        '|---|',
+        '| x |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'x');
+        await page.evaluate((s) => {
+          const cell = document.querySelector(s);
+          cell.focus();
+          const r = document.createRange();
+          r.selectNodeContents(cell);
+          r.collapse(false);
+          const sel2 = window.getSelection();
+          sel2.removeAllRanges();
+          sel2.addRange(r);
+          const dt = new DataTransfer();
+          dt.setData('text/plain', 'line1\nline2');
+          const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+          cell.dispatchEvent(ev);
+        }, table0 + ' .ed-wys');
+
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const cell = document.querySelector('.ed-wys');
+            return cell ? cell.innerHTML : null;
+          }),
+          'xline1<br>line2',
+          'a multi-line paste must insert a real <br> between segments, not a raw newline text node'
+        );
+
+        await page.evaluate(() => document.body.click());
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('line1<br>line2'),
+          { timeout: 5000 }
+        );
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await new Promise((r) => setTimeout(r, 300));
+        const fileText = fs.readFileSync(tmdPath, 'utf8');
+        assert.ok(fileText.includes('| xline1<br>line2 |'),
+          'the pasted multi-line cell must commit as ONE physical row containing <br>, got:\n' + fileText);
+        fileText.split('\n').forEach((line) => {
+          if (line.trim() === '') return;
+          assert.ok(!/^line2/.test(line.trim()),
+            'no orphan cell-line starting with the pasted second segment, got:\n' + fileText);
+        });
+
+        await page.close();
+        console.log('table WYSIWYG: pasting multi-line text into a cell commits as ONE row with <br> — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // Esc reverts the WHOLE session (every cell touched this session, not
     // just the active one) — deliberately different from the paragraph
     // editor's per-block Esc.

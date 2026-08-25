@@ -2,8 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, withHeadingDepth } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
+const { marked } = require('marked');
 
 // -- pure state transition --------------------------------------------------
 const lines = ['# T', '', 'para', '', '| A |', '|---|', '| 1 |'];
@@ -31,6 +32,27 @@ assert.deepStrictEqual(u.lines, lines);
 // no-change commit is a no-op (no undo entry)
 const st2 = commitEdit({ lines, blocks, stack: new UndoStack() }, 1, 'para');
 assert.strictEqual(st2.op, null, 'identical text → no op pushed');
+
+// -- Finding 5: empty heading emits no trailing space ------------------------
+// withHeadingDepth(): normal (non-empty) heading text still keeps its single
+// space separator, unchanged.
+assert.strictEqual(withHeadingDepth('## hello', 3), '### hello');
+// An emptied-out heading (all text deleted) must NOT carry a trailing space
+// with nothing after it (spec §4 no-trailing-whitespace).
+assert.strictEqual(withHeadingDepth('## hello', 2), '## hello');
+assert.strictEqual(withHeadingDepth('##', 3), '###');
+assert.strictEqual(withHeadingDepth('## ', 4), '####');
+for (const line of ['###', '####']) {
+  assert.strictEqual(line, line.replace(/\s+$/, ''), `withHeadingDepth output must have no trailing whitespace: ${JSON.stringify(line)}`);
+}
+// marked must still lex the no-space empty heading as a genuine heading
+// token (not silently degrade to a paragraph) — the fix's core assumption.
+{
+  const tokens = marked.lexer('###');
+  assert.strictEqual(tokens[0].type, 'heading');
+  assert.strictEqual(tokens[0].depth, 3);
+  assert.strictEqual(tokens[0].text, '');
+}
 
 // -- page wiring presence ---------------------------------------------------
 const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');

@@ -111,4 +111,44 @@ function table(headerRow, bodyRows) {
   assert.strictEqual(md, ['| Only |', '|---|'].join('\n'));
 }
 
+// Finding 1 defense-in-depth: a cell whose TEXT NODE contains a literal
+// '\n' (e.g. from a paste that bypassed the client.js insertTextAtCaret()
+// segmentation, or any other path that lands raw newline chars in a text
+// node) must still emit as ONE physical table row — the embedded newline
+// is converted to the literal '<br>' token, same as a real <br> element.
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, 'line one\nline two'))]);
+  const { md } = serializeTable(t);
+  assert.strictEqual(md, ['| H |', '|---|', '| line one<br>line two |'].join('\n'));
+  md.split('\n').forEach((line) => assert.ok(line.startsWith('|'), 'row must start with |: ' + line));
+}
+
+// \r\n and bare \r variants also collapse to a single '<br>' (never a raw
+// '\r' surviving into the emitted line).
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, 'a\r\nb\rc'))]);
+  const { md } = serializeTable(t);
+  assert.strictEqual(md, ['| H |', '|---|', '| a<br>b<br>c |'].join('\n'));
+}
+
+// Finding 4: a '|' inside a <code> span in a cell has no faithful
+// gate-safe emission (the &#124; entity doesn't decode inside a code
+// span, and `\|` is the gate's documented trap) — degrade-never-lose:
+// the cell (and therefore the whole table) is reported unsupported via
+// 'CODE' instead of silently corrupting the code span's content.
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, el('code', {}, 'a|b')))]);
+  const { unsupported } = serializeTable(t);
+  assert.ok(unsupported.includes('CODE'), 'code span containing | must be reported unsupported');
+}
+
+// Plain (non-code) pipe-in-text still works exactly as before — Finding 4
+// must not regress the existing &#124; escape path.
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, 'a|b'))]);
+  const { md, unsupported } = serializeTable(t);
+  assert.strictEqual(md, ['| H |', '|---|', '| a&#124;b |'].join('\n'));
+  assert.deepStrictEqual(unsupported, []);
+}
+
 console.log('table-md.test.js OK');
