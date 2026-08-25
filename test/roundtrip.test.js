@@ -9,6 +9,7 @@ const { commitEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { serializeTable } = require('../lib/editor/table-md.js');
 const { serializeInline } = require('../lib/editor/inline-md.js');
+const { serializeList } = require('../lib/editor/list-md.js');
 
 // minimal element stub — same pattern as test/table-md.test.js /
 // test/inline-md.test.js (childNodes/nodeType/nodeName/textContent/
@@ -33,6 +34,9 @@ function table(headerRow, bodyRows) {
     el('tbody', {}, ...bodyRows)
   );
 }
+function li(...children) { return el('li', {}, ...children); }
+function ul(...children) { return el('ul', {}, ...children); }
+function ol(...children) { return el('ol', {}, ...children); }
 
 function post(port, p, body) {
   return new Promise((resolve, reject) => {
@@ -196,6 +200,69 @@ function post(port, p, body) {
         'the emitted line must contain snake_case unescaped');
     } finally {
       srv4.close();
+    }
+  }
+
+  // 5) WYSIWYG list edit on the fixture's nested list (the "- outer /
+  // - inner 1 / - inner 2" nested-list hazard, already present in the
+  // fixture — see fixture xxd evidence in the task-7 report): edited DOM
+  // promotes the outer item to an OL ('1. ' marker, 3 columns wide) with
+  // its nested UL retained as a child — this directly exercises the T3
+  // ruling (indent = accumulated ANCESTOR MARKER WIDTH, not a flat
+  // 2-space-per-depth): the nested UL's indent must be 3 spaces (the
+  // width of '1. '), not 2. Isolated fixture copy again, same reasoning
+  // as steps 3/4: compares against pristine fixture bytes.
+  {
+    const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-rt-list-'));
+    const mdPath5 = path.join(dir5, 'doc.md');
+    fs.writeFileSync(mdPath5, fixture, 'utf8');
+    const mtime5 = fs.statSync(mdPath5).mtimeMs;
+    const srv5 = await createEditorServer({ files: [mdPath5], clientJs: '' });
+    try {
+      const rr5 = await post(srv5.port, '/api/render', { fileId: 0, content: fixture });
+      const lists = rr5.json.blocks.filter((b) => b.type === 'list');
+      assert.strictEqual(lists.length, 1, 'fixture must have exactly one list block');
+      const listBlock = lists[0];
+      const beforeLines = fixture.split('\n').slice(listBlock.startLine - 1, listBlock.endLine);
+      assert.deepStrictEqual(beforeLines, ['- outer', '  - inner 1', '  - inner 2'],
+        'fixture list block must be the nested-list hazard this test targets');
+
+      const edited = ol(
+        li('outer EDITED', ul(li('inner 1'), li('inner 2 EDITED')))
+      );
+      const { md, unsupported } = serializeList(edited);
+      assert.deepStrictEqual(unsupported, []);
+      const expectedLines = [
+        '1. outer EDITED',
+        '   - inner 1',
+        '   - inner 2 EDITED',
+      ];
+      assert.strictEqual(md, expectedLines.join('\n'),
+        'T3 ruling: nested UL indent under a \'1. \' (3-column) OL marker must be 3 spaces, not a flat 2');
+
+      const st5 = commitEdit(
+        { lines: fixture.split('\n'), blocks: rr5.json.blocks, stack: new UndoStack() },
+        listBlock.id, md
+      );
+      const r5 = await post(srv5.port, '/api/save',
+        { fileId: 0, content: st5.lines.join('\n'), baseMtimeMs: mtime5 });
+      assert.strictEqual(r5.status, 200);
+
+      const fileAfter5 = fs.readFileSync(mdPath5, 'utf8');
+      const orig5 = fixture.split('\n');
+      const expectedFull5 = orig5.slice(0, listBlock.startLine - 1)
+        .concat(expectedLines, orig5.slice(listBlock.endLine))
+        .join('\n');
+      assert.strictEqual(fileAfter5, expectedFull5,
+        'only the list block\'s line range may change; every other line must stay byte-identical to the pristine fixture');
+      assert.ok(!fileAfter5.endsWith('\n'),
+        'no-EOF-newline hazard must survive the list edit');
+      assert.ok(fileAfter5.split('\n').some((ln) => / {2}$/.test(ln)),
+        'trailing-space-line hazard must survive the list edit');
+      assert.ok(fileAfter5.includes('§2'),
+        'UTF-8 §2 hazard must survive the list edit');
+    } finally {
+      srv5.close();
     }
   }
 

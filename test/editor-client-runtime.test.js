@@ -3792,6 +3792,205 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // ── Task 7 (Phase 3): full integration mega-e2e ─────────────────────────
+    // One flow exercising every Phase-3 editing surface in sequence, ending
+    // in a full-string reconstruction (same pattern as the "Task 7: one
+    // end-to-end flow" scenario above, extended per the task-7 brief):
+    //   paragraph edit -> heading ± via ⠿ -> list Tab-indent -> table cell
+    //   edit -> hover-＋ column insert -> row drag -> Ctrl+Z twice -> Ctrl+S.
+    //
+    // Ctrl+Z-twice design (documented per the task-7 brief's requirement to
+    // spell out the exact expected state after EACH Z): the row drop
+    // auto-starts a FRESH table burst (the table had no burst open — the
+    // preceding column-insert already committed and ended its own burst via
+    // blur, same as every step below). A fresh burst's local history is
+    // exactly [pre-drag snapshot, post-drag snapshot] (2 entries):
+    //   - Ctrl+Z #1: burst-local undo pops to the pre-drag snapshot — the
+    //     row order reverts IN-BURST (no commit, no rerender; the cell stays
+    //     focused, same contract as the "table row drag: drop reorders the
+    //     row; Ctrl+Z reverts it in-burst" scenario above).
+    //   - Ctrl+Z #2: burst-local history is now exhausted (back to the ONE
+    //     remaining snapshot) -> tableBurstUndo() commits the burst first
+    //     (a no-op: the live DOM now textually matches what's already
+    //     committed, so commitEdit() returns op:null and pushes nothing new)
+    //     -> cascades to the document-level undo() stack, which pops its
+    //     TOPMOST entry: the column-insert commit (the last REAL commit
+    //     before the drag's burst started) — reverting it and ending the
+    //     burst entirely (rerenderAll() unconditionally nulls currentBurst).
+    // Net effect after both Z's: the column insert is gone, the row order is
+    // back to original (it was reverted in-burst before ever reaching
+    // `lines`), and the EARLIER table-cell edit survives untouched (it was
+    // committed BEFORE the column-insert entry, so the single cascaded undo
+    // never reaches it) — exactly "reverting the drag then cascading to the
+    // previous commit".
+    {
+      const { srv: msrv, url: murl, mdPath: mmdPath, original: morig } = await setupTableDoc([
+        '# Heading One', '',
+        'Paragraph text here for editing.', '',
+        '- Alpha item', '- Bravo item', '- Charlie item', '',
+        '| Name | Note |', '|---|---|', '| Row1 | 2 |', '| Row2 | 4 |', '| Row3 | 6 |', '',
+        'Trailing untouched paragraph.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(murl, { waitUntil: 'networkidle0' });
+
+        // 1) paragraph edit (Ctrl+A -> type -> Enter commits and ends the burst).
+        const paraSel = await paragraphSelByText(page, 'Paragraph text here for editing.');
+        const paraEditEl = paraSel + ' > *';
+        await openWysiwyg(page, paraSel);
+        await page.evaluate((s) => document.querySelector(s).focus(), paraEditEl);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyA');
+        await page.keyboard.up('Control');
+        await page.keyboard.type('Paragraph text EDITED for the mega e2e.');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Paragraph text EDITED for the mega e2e.'),
+          { timeout: 5000 }
+        );
+        await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+        // Settle window (same idiom as the row-drag Esc scenario above):
+        // the burst's own rerenderAll() swap has already landed by this
+        // point (both waits above are strictly downstream of it), but give
+        // any trailing reader-rebind/diagram-reinit work inside that same
+        // commit a moment to finish before the next hover/click resolves a
+        // FRESH element handle against this DOM — reduces (does not need to
+        // eliminate) the window for a stale-handle race in what follows.
+        await new Promise((r) => setTimeout(r, 150));
+
+        // 2) heading ± via the ⠿ handle menu's '+' — a direct commitEdit(),
+        // never a burst (see changeHeadingDepth()'s own comment).
+        const selHeading = '.ed-block[data-block-type="heading"]';
+        await clickGutterMenuItem(page, selHeading, '+');
+        await page.waitForFunction(
+          (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
+          {}, selHeading
+        );
+
+        // 3) list Tab-indent: "Bravo item" becomes a child of "Alpha item"
+        // (marker-width indent), then blur commits it.
+        const list0 = await listBlockSel(page, 0);
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          (s) => {
+            const items = document.querySelectorAll(s + ' > * > li');
+            return items.length === 2 && items[0].querySelector('li') &&
+              items[0].querySelector('li').textContent.trim() === 'Bravo item';
+          }, {}, list0
+        );
+        await page.evaluate((s) => { const el = document.querySelector(s); if (el) el.blur(); }, list0 + ' > *');
+        await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+
+        // 4) table cell edit: click "Row1", type '!', blur commits.
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Row1');
+        await page.keyboard.type('!');
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Row1!'),
+          { timeout: 5000 }
+        );
+        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+
+        // 5) hover-＋ column insert after "Name" (boundary index 0) — auto-
+        // starts a table burst; blur commits it (3 columns on disk).
+        await hoverAndClickColInsert(page, table0, 0);
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead th').parentElement.children.length === 3,
+          {}, table0
+        );
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+
+        // 6) row drag: drag "Row3" (last body row) up above "Row1!" — no
+        // burst is open yet, so the drop auto-starts a FRESH one (2-entry
+        // local history: pre-drag, post-drag — see header comment).
+        const from = await rowEdgeZoneCoords(page, table0, false, 2); // "Row3"
+        const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1!"
+        await dragRowTo(page, from, to);
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td:first-child'))
+            .map((c) => c.textContent.trim()).join(',') === 'Row3,Row1!,Row2',
+          {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'the row drop must auto-start a table burst (a cell must now be focused)'
+        );
+
+        // 7) Ctrl+Z #1: reverts the drag IN-BURST — row order back to
+        // Row1!,Row2,Row3; the burst stays open (cell still focused).
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (s) => Array.from(document.querySelectorAll(s + ' tbody td:first-child'))
+            .map((c) => c.textContent.trim()).join(',') === 'Row1!,Row2,Row3',
+          {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          true, 'Ctrl+Z #1 must revert the drag IN-BURST, not commit/end the burst'
+        );
+
+        // 8) Ctrl+Z #2: local history exhausted -> commits the (now no-op)
+        // burst -> cascades to the document-level undo stack, reverting the
+        // column-insert commit (the topmost entry, pushed in step 5) — the
+        // burst ends entirely (rerenderAll() nulls currentBurst).
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (s) => document.querySelector(s + ' thead th').parentElement.children.length === 2,
+          {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement === document.body),
+          true, 'Ctrl+Z #2 must cascade to the document-level undo and end the burst entirely'
+        );
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            Array.from(document.querySelectorAll(s + ' tbody td:first-child')).map((c) => c.textContent.trim()).join(','),
+            table0),
+          'Row1!,Row2,Row3',
+          'row order must be back to original — the drag was reverted in-burst before it ever reached `lines`'
+        );
+
+        // 9) Ctrl+S -> full-text reconstruction: original lines with ONLY
+        // the paragraph, heading, list, and table-cell edits applied — the
+        // column insert and row drag left NO trace (both undone before
+        // ever landing in `lines`), and every other line (including the
+        // trailing untouched paragraph) stays byte-identical.
+        const fileText = await saveAndRead(page, mmdPath);
+        const expectedLines = morig.split('\n');
+        assert.strictEqual(expectedLines[0], '# Heading One', 'sanity: expected-lines index 0 is the heading');
+        assert.strictEqual(expectedLines[2], 'Paragraph text here for editing.', 'sanity: expected-lines index 2 is the paragraph');
+        assert.strictEqual(expectedLines[5], '- Bravo item', 'sanity: expected-lines index 5 is Bravo\'s line');
+        assert.strictEqual(expectedLines[10], '| Row1 | 2 |', 'sanity: expected-lines index 10 is Row1\'s line');
+        expectedLines[0] = '## Heading One';
+        expectedLines[2] = 'Paragraph text EDITED for the mega e2e.';
+        expectedLines[5] = '  - Bravo item';
+        expectedLines[10] = '| Row1! | 2 |';
+        const expectedFull = expectedLines.join('\n');
+        assert.strictEqual(fileText, expectedFull,
+          'the saved file must equal the original doc with ONLY the paragraph/heading/list/table-cell edits ' +
+          'applied — the column insert and row reorder must leave NO trace, and every other line (including ' +
+          'the trailing untouched paragraph) must stay byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('e2e (Phase 3): paragraph + heading± + list Tab-indent + table cell + col-insert + ' +
+          'row drag + Ctrl+Z x2 (revert drag, cascade col-insert) + Ctrl+S — full reconstruction OK');
+      } finally {
+        msrv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
