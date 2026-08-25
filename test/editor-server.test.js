@@ -15,7 +15,7 @@ function req(port, method, p, body) {
       (res) => {
         let buf = '';
         res.on('data', (c) => (buf += c));
-        res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+        res.on('end', () => resolve({ status: res.statusCode, body: buf, headers: res.headers }));
       });
     r.on('error', reject);
     if (data) r.write(data);
@@ -38,6 +38,8 @@ function req(port, method, p, body) {
     assert.ok(page.body.includes('"lines"'));
     assert.ok(page.body.includes('ed-block'));
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
+    assert.strictEqual(page.headers['cache-control'], 'no-store',
+      'edit page must never be cached — it embeds a code+mtime snapshot');
 
     // whitelist
     assert.strictEqual((await req(srv.port, 'GET', '/edit/1')).status, 404);
@@ -84,7 +86,7 @@ function req(port, method, p, body) {
           (res) => {
             let buf = '';
             res.on('data', (c) => (buf += c));
-            res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+            res.on('end', () => resolve({ status: res.statusCode, body: buf, headers: res.headers }));
           });
         r.on('error', reject);
         r.end();
@@ -98,7 +100,7 @@ function req(port, method, p, body) {
         (res) => {
           let buf = '';
           res.on('data', (c) => (buf += c));
-          res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+          res.on('end', () => resolve({ status: res.statusCode, body: buf, headers: res.headers }));
         });
       r.on('error', reject);
       r.write(JSON.stringify({ fileId: 0, content: 'x' }));
