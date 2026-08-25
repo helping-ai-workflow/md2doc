@@ -7,12 +7,22 @@ All notable changes to this project will be documented here. This project adhere
 
 ### Added
 
-- **`--edit` mode** — browser-based raw-block editing with byte-exact
-  round-trip, explicit save (mtime-guarded), undo/redo.
-- **In-place WYSIWYG editing** (paragraphs, headings, tables) with selection toolbar
-  (bold, italic, code, link); Tab/Shift+Tab cell navigation; table row/column ops
-  and alignment cycling. Edited tables emit gate-compatible minimal form (single-space
-  padding, minimal separators). Click-to-switch auto-commits modified blocks.
+- **Phase 3: Notion-grade editing** — click anywhere in a paragraph/heading/list/
+  table to type directly (no "select then edit" step). Rendered formatting shows
+  as you type; focus leaving the block auto-commits. Ctrl+Z/Y step through local
+  block history then cascade to document level. ⠿ block menu offers heading depth
+  control and MD 原始碼 escape hatch.
+- **List structural editing** — Enter splits items, Shift+Enter inserts `<br>`,
+  Tab/Shift+Tab indent/outdent; empty-item Enter removes it. Removing all items
+  deletes the block cleanly.
+- **Table always-on editing** — every cell permanently editable; Tab/Shift+Tab
+  navigate between cells (within table stays in burst); ＋ bubbles on edges insert
+  rows/columns; edge-click menus delete and cycle alignment (columns) or delete
+  (rows); row-edge drag reorders body rows. Edited tables emit gate-compatible
+  minimal form (single-space padding, minimal separators).
+- **Burst undo with cascade** — Ctrl+Z/Y within a block step through that block's
+  local session history; once exhausted, the next step cascades to document-level
+  undo/redo stack.
 
 ## v2.8.1 — 2026-08-24
 

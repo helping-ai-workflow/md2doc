@@ -137,39 +137,48 @@ md2doc --edit foo.md --no-open    # start the server without launching a browser
 ```
 
 `--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
-your browser. Click any top-level block (heading, paragraph, table, etc.) to select
-it; a floating edit bar appears above it and the block shows a solid outline.
-Clicking a block only **selects** it — it does not start editing by itself. From the
-edit bar, click **✎ 編輯** to enter editing: paragraph, heading, and table blocks
-open a WYSIWYG session in place; everything else opens raw Markdown in a textarea.
-The one exception is a **table cell** — clicking directly on a cell (not just the
-table's chrome) opens that table's WYSIWYG session immediately, with the clicked
-cell active, no separate ✎ 編輯 click needed.
+your browser. Click anywhere inside a paragraph, heading, list item, or table cell
+to place your cursor and start typing directly — no separate "select then edit" step.
+The block is live-marked as edited; focus leaving the block commits your changes
+automatically. Press `Ctrl+S` to save to disk explicitly.
 
-### Inline editing: paragraphs, headings, tables
+### Direct editing: click to type
 
-Select a **paragraph**, **heading**, or **table** and click **✎ 編輯** (or, for a
-table, click a cell directly) to edit its content in the rendered document — the
-text appears with bold/italic/code marks visible while you type, but no Markdown
-syntax characters show. Enter commits your changes; Esc reverts them.
+Every paragraph, heading, list, and table cell is editable by clicking inside it.
+The rendered formatting (bold, italic, code, links) displays as you type; no
+Markdown syntax characters are shown. This applies to any block that doesn't
+contain unsupported content (see "Degraded blocks" below).
 
-| Block type | Edit mode |
+| Block type | Interaction |
 |---|---|
-| Paragraph | Click **✎ 編輯** for WYSIWYG: type and format text, selection toolbar for B/I/`<>`/🔗 |
-| Heading | Click **✎ 編輯** for WYSIWYG with depth control: ± buttons increase/decrease the heading level |
-| Table | Click any **cell** directly for WYSIWYG cell editing (or **✎ 編輯** to start on the first cell), with Tab/Shift+Tab navigation and table-structure buttons for row/column ops and alignment |
-| Code fence, list, blockquote | Raw Markdown (`✎ 編輯` button) |
-| Image, HTML, math | Raw Markdown (auto-opens when block contains unsupported content) |
+| Paragraph | Click to place caret, type; Enter commits, Esc reverts |
+| Heading | Click to place caret, type; Enter commits, Esc reverts |
+| List | Click to place caret, type; list-specific keys below |
+| Table | Click any cell to edit; Tab/Shift+Tab navigate between cells |
+
+### ⠿ Block menu
+
+Every block has a ⠿ button on its left edge. Click it to open a menu with block-level
+operations:
+
+| Item | Applies to | Action |
+|---|---|---|
+| **−** (minus) | Heading only | Decrease heading level (# → ... → #####) |
+| **+** (plus) | Heading only | Increase heading level |
+| **MD 原始碼** | All blocks | Discard in-progress edits, switch to raw Markdown source editing |
+| **✕** | All blocks | Close the menu |
+
+The **MD 原始碼** button is the escape hatch: it reverts any unsaved typing in the
+current block and opens the raw Markdown editor instead, letting you make changes
+WYSIWYG cannot express.
 
 ### Paragraph and heading editing
 
-Click a paragraph or heading to select it (the edit bar appears above it), then
-click **✎ 編輯** to edit its content in place. The rendered marks (bold, italic,
-code, links) show while you type — type `**text**` and it renders as **text** instead
-of showing the asterisks.
+Click inside a paragraph or heading to place your cursor. Type and format text
+normally; the rendered marks (bold, italic, code, links) show as you type.
 
-**Selection toolbar**: when you select text inside an open paragraph or heading
-WYSIWYG session, a toolbar appears with formatting buttons:
+**Selection toolbar**: when you select text inside a paragraph or heading, a
+floating toolbar appears with formatting buttons:
 
 | Button | Action |
 |---|---|
@@ -178,80 +187,112 @@ WYSIWYG session, a toolbar appears with formatting buttons:
 | **`<>`** | Wrap selection in backticks (`` `code` ``) |
 | **🔗** | Wrap selection as a link; click to edit the URL |
 
-**Switching to raw Markdown mid-edit**: while a WYSIWYG session (paragraph, heading,
-or table) is open, the edit bar shows an **MD** button. Click it to discard whatever
-you've typed in this session and reopen the same block as raw Markdown text instead
-— the escape hatch for anything WYSIWYG can't express. This is destructive to
-in-progress typing (same as pressing Esc): it does not carry your unsaved edits over
-into the raw textarea, it reopens the block from its last-committed source.
-
 **Key shortcuts**:
 
 | Key | Action |
 |---|---|
 | Enter | Commit and close the editor |
 | Shift + Enter | Insert a line break within the paragraph |
-| Esc | Revert and close the editor |
+| Esc | Revert all edits and close the editor |
+| Ctrl + Z | Step backward through the paragraph's local edit history, then cascade to document-level undos once exhausted |
+| Ctrl + Y (or Ctrl + Shift + Z) | Step forward through the paragraph's local edit history, then cascade to document-level redos once exhausted |
 
-### Table editing
+### List editing
 
-Click any table to enter edit mode. Cells become editable one at a time.
-
-**Cell navigation**:
+Click inside a list item to place your cursor and type. Lists support structural editing:
 
 | Key | Action |
 |---|---|
-| Click a cell | Switch to that cell and start editing |
-| Tab | Move to the next cell (→) |
-| Shift + Tab | Move to the previous cell (←) |
-| Enter | Insert a line break within the cell (does NOT commit the table) |
-| Esc | Revert the entire table session (all cells) and discard all changes |
+| Enter | Split the current item into two siblings at the caret; empty item + Enter removes it and ends the burst |
+| Shift + Enter | Insert a line break (`<br>`) within the item (does not split) |
+| Tab | Indent the current item (becomes a child of the previous sibling; no-op if no previous sibling) |
+| Shift + Tab | Outdent the current item (moves after its parent; no-op at top level) |
+| Esc | Revert all edits and close the list |
+| Ctrl + Z / Ctrl + Y | Step through the list's local edit history, then cascade to document-level history |
 
-**Table structure** (buttons in the edit bar when a table is selected):
+An empty list (all items removed) is cleaned up automatically — the block is deleted
+entirely and the document structure stays consistent.
 
-| Button | Action |
+### Table editing
+
+Click any table cell to edit it. The table is treated as a single editing unit —
+focus remains inside the table until you press Esc, click outside, or navigate away.
+
+**Cell navigation**:
+
+| Key / Action | Effect |
 |---|---|
-| **＋列** | Insert an empty row after the focused row |
-| **－列** | Delete the focused row (last row and header row are protected) |
-| **＋欄** | Insert an empty column after the focused column |
-| **－欄** | Delete the focused column (last column is protected) |
-| **對齊** | Cycle column alignment: left → center → right → left |
+| Click a cell | Move to that cell and edit |
+| Tab | Move to the next cell (left-to-right, row by row; wraps to first cell from last) |
+| Shift + Tab | Move to the previous cell |
+| Enter | Insert a line break (`<br>`) within the cell (does NOT commit the table) |
+| Esc | Revert the entire table session (all cells) and discard all changes |
+| Ctrl + Z / Ctrl + Y | Step through the table's local edit history, then cascade to document-level history |
 
-Clicking outside the table, opening a different block, or using undo/redo commits
-the table session automatically (if changes were made) and saves it to disk on the
-next explicit `Ctrl+S`.
+**Column edge (top boundary)**: hover over the top edge of a column header — a **＋**
+insert bubble appears between columns. Click it to insert an empty column there.
+Click on the column's top edge itself (not the bubble) to open the column menu:
+
+| Option | Action |
+|---|---|
+| **刪除欄** | Delete the column (last column protected) |
+| **對齊** | Cycle alignment: left → center → right → left (no unset state; use Ctrl+Z to revert a cycle) |
+
+**Row edge (left boundary)**: hover over the left edge of a row — a **＋** insert
+bubble appears between rows. Click it to insert an empty row there. Click on the
+row's left edge itself to open the row menu:
+
+| Option | Action |
+|---|---|
+| **刪除列** | Delete the row (header row and last body row protected) |
+| *Drag* | Press and hold on the row edge to drag the row up/down; drop to reorder (body rows only; header fixed) |
 
 **Edited tables emit minimal form**: tables that you edit are saved with single-space
 padding and minimal separators (`|---|`) to keep the Markdown readable and
 version-control-friendly.
 
-### Raw Markdown editing
+### Degraded blocks: code, diagrams, images, math
 
-Click **✎ 編輯** on the edit bar, or select a block whose content can't round-trip
-through WYSIWYG (e.g., contains images, unstyled HTML, or math), to edit the block's
-raw Markdown source in a textarea. Use this to make changes that WYSIWYG doesn't
-support.
+Blocks containing content WYSIWYG cannot represent (code fences, Mermaid/Graphviz/
+WaveDrom diagrams, images, LaTeX math, or unstyled HTML) automatically degrade to
+raw-edit mode: click the block to open the raw Markdown source in a textarea, make
+your changes, then press `Ctrl+Enter` to commit or `Esc` to cancel.
 
-| Key / control | Action |
-|---|---|
-| `Ctrl`/`⌘` + `Enter`, or **✓** | Commit the edit and re-render the block |
-| `Esc`, or **✕** | Cancel the edit, discard the change |
+If a WYSIWYG session encounters unsupported content mid-edit (e.g., via a rich
+paste), it automatically falls back to raw-edit with the block's untouched
+on-disk source, preserving your unsaved work context.
+
+### Burst undo: local history + cascade
+
+Ctrl+Z / Ctrl+Y step through a block's local edit history first (the changes you
+made in the current editing session). Once that history is exhausted, the next
+Ctrl+Z cascades out to the document-level undo stack, covering all committed edits.
+This lets you undo/redo recent changes within a block without affecting work in
+other blocks.
 
 ### Whole-document controls
 
 | Key / control | Action |
 |---|---|
-| Click a block | Select it (shows edit bar) |
-| Click outside any block, or `Esc` | Dismiss the edit bar / deselect |
-| `Ctrl`/`⌘` + `S` | Save the document to disk |
-| `Ctrl`/`⌘` + `Z` | Undo the last committed edit |
-| `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo |
-| Click a different block (while editing) | Auto-commit the current block if changed, then open the new block |
+| `Ctrl`/`⌘` + `S` | Save the document to disk (explicit; changes commit locally when focus leaves) |
+| `Ctrl`/`⌘` + `Z` | Undo: first steps through the focused block's local history, then cascades to document level |
+| `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo: mirrors undo's cascade behavior |
+| Click outside any block | Commit any open block if changed, dismiss the ⠿ handle menu |
+| `Esc` (at document level, not in an open block) | Close the ⠿ handle menu |
+
+### Auto-commit on focus change
+
+When focus leaves a block:
+- If the block is **unchanged**, it closes silently.
+- If the block is **changed**, it commits automatically to the undo stack (but not to disk — you must press Ctrl+S for that).
+
+This means switching between blocks flows naturally — you never get stuck waiting to
+confirm or cancel.
 
 ### Save and conflict handling
 
 **Save is explicit, not autosave**. Your changes are committed to the undo stack
-immediately when you press Enter or click outside a block, but they're not written
+immediately when you press Enter or focus leaves a block, but they're not written
 to disk until you press `Ctrl+S`.
 
 **Conflict detection**: each save carries the file's last-known modification time.
@@ -267,24 +308,19 @@ spaces, and the file's original EOF-newline state — is left byte-for-byte unto
 whether you save with zero edits or after several. This applies both to unchanged
 blocks and to blocks you open and then revert.
 
-### Click-to-switch auto-commit
+### Known Phase-3 limitations
 
-When you click a different block while one is open:
-- If the current block is **unchanged**, it closes silently (same as Esc).
-- If the current block is **changed**, it commits automatically, then the new block opens.
+**First diagram/math type requires reload**: if a committed edit introduces the
+*first* occurrence of a diagram type (Mermaid or WaveDrom) that the document didn't
+already contain when the page was loaded, that diagram library was never embedded
+into the page, so the new block renders as raw source until you reload the browser
+tab (no need to restart `md2doc --edit`). The same applies to math: if a committed
+edit introduces the document's *first* `math` fence or `$…$`/`$$…$$` expression,
+the KaTeX stylesheet was never injected, so the equation renders unstyled until you
+reload the tab.
 
-This means switching blocks flows naturally — you never get stuck waiting to confirm
-or cancel before opening the next one.
-
-### Known Phase-1 limitation
-
-If a committed edit introduces the *first* occurrence of a diagram type (Mermaid or
-WaveDrom) that the document didn't already contain when the page was loaded, that
-diagram library was never embedded into the page, so the new block renders as raw
-source until you reload the browser tab (no need to restart `md2doc --edit`). The
-same applies to math: if a committed edit introduces the document's *first* `math`
-fence or `$…$`/`$$…$$` expression, the KaTeX stylesheet was never injected into the
-page, so the new equation renders unstyled until you reload the tab.
+**Alignment cycle has no unset state**: the **對齊** button cycles through left,
+center, and right alignment. To revert an unwanted alignment, use Ctrl+Z.
 
 ---
 
