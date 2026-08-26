@@ -518,6 +518,38 @@ async function saveAndRead(page, mdPath) {
   return fs.readFileSync(mdPath, 'utf8');
 }
 
+// Dispatches one real mousemove and waits for client.js's rAF-throttled
+// mousemove listener to actually PROCESS it before returning — a double
+// requestAnimationFrame, same "settle window" idiom the header-row-shows-
+// no-grip scenario above already uses. Necessary because Puppeteer's own
+// `page.mouse.move(x, y, {steps: N})` fires all N synthetic events with no
+// delay between them; client.js's listener only reads the LATEST
+// tbMoveX/Y/Target once per animation frame (see its "coalesced to at most
+// once per animation frame" comment), so a `{steps}` move would collapse an
+// entire multi-point travel into a single recompute at the FINAL point —
+// silently skipping over the exact mid-corridor point the grip-reachability
+// bug lives at. Dispatching one move and settling one frame at a time is
+// what actually exercises each intermediate point.
+async function movePointerAndSettle(page, x, y) {
+  await page.mouse.move(x, y);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+}
+
+// Steps the pointer from `from` to `to` in `steps` increments, settling one
+// animation frame at a time (movePointerAndSettle() above) — simulating a
+// REAL pointer travelling from inside a table cell, across the
+// TE_GRIP_GAP_PX corridor OUTSIDE the table, to a grip. Used by the
+// grip-reachability regression scenario below; every other grip-targeting
+// helper in this file (pressReleaseAt/dragRowTo/gripCenter) teleports
+// straight to the target and never crosses this corridor at all.
+async function travelPointer(page, from, to, steps) {
+  for (let i = 1; i <= steps; i++) {
+    const x = from.x + (to.x - from.x) * (i / steps);
+    const y = from.y + (to.y - from.y) * (i / steps);
+    await movePointerAndSettle(page, x, y);
+  }
+}
+
 (async () => {
   const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
@@ -3122,6 +3154,88 @@ async function saveAndRead(page, mdPath) {
 
         await page.close();
         console.log('table grip/bubble hit zones: never intersect at the reported overlap corner — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Grip reachability by a REAL (non-teleporting) pointer: commit a490f6c
+    // moved both grips TE_GRIP_GAP_PX (14px) outside the table to avoid the
+    // bubble overlap covered by the previous scenario — but a pointer
+    // travelling from inside a cell toward the grip crosses that 14px
+    // corridor OUTSIDE the table on the way there. The original
+    // updateTableEdgeGrips() hid the grip the instant `target` left the
+    // table/cell, before the pointer ever reached the grip itself, so a
+    // human moving the mouse (rather than teleport-clicking, as every OTHER
+    // scenario in this file does via pressReleaseAt/gripCenter) could never
+    // actually arrive at it. travelPointer() above drives a genuine
+    // multi-step mousemove sequence, settling client.js's rAF-throttled
+    // hit-test once per intermediate point, to actually exercise the
+    // corridor crossing.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Row grip: start just INSIDE the table's own left edge (5px in, at
+        // row 0's vertical center) rather than at the cell's geometric
+        // center — a plain 2-column test table stretches to fill the whole
+        // content width (each cell hundreds of px wide), so starting from
+        // the cell's center and interpolating in only 5-10 steps toward the
+        // grip would stride clean OVER the narrow (~TE_GRIP_GAP_PX-wide)
+        // corridor without ever sampling a point inside it, silently
+        // passing on a table this wide regardless of the bug. Starting
+        // right at the boundary the pointer is about to cross keeps the
+        // whole travelled distance commensurate with the corridor itself,
+        // so every step actually samples it — matching how a real user
+        // would approach the edge in the first place.
+        const rowEdgeStart = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          const row = table.tBodies[0].rows[0];
+          const r = row.getBoundingClientRect();
+          return { x: tableRect.left + 5, y: r.top + r.height / 2 };
+        }, table0);
+        await page.mouse.move(rowEdgeStart.x, rowEdgeStart.y);
+        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        const rowGripTarget = await gripCenter(page, '.ed-te-grip-row');
+        await travelPointer(page, rowEdgeStart, rowGripTarget, 8);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'the row grip must still be visible once a REAL travelling pointer reaches it across the ' +
+          'TE_GRIP_GAP_PX corridor (a teleporting click would never catch this)');
+
+        // Column grip: same shape, starting just inside the table's own top
+        // edge (5px down, at column 0's horizontal center) and travelling
+        // up to the column grip's own on-screen center.
+        const colEdgeStart = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          const th = table.tHead.rows[0].cells[0];
+          const r = th.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: tableRect.top + 5 };
+        }, table0);
+        await page.mouse.move(colEdgeStart.x, colEdgeStart.y);
+        await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
+        const colGripTarget = await gripCenter(page, '.ed-te-grip-col');
+        await travelPointer(page, colEdgeStart, colGripTarget, 8);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
+          'the column grip must still be visible once a REAL travelling pointer reaches it across the ' +
+          'TE_GRIP_GAP_PX corridor (a teleporting click would never catch this)');
+
+        // The a490f6c non-intersection guarantee (grip rect vs. insert-bubble
+        // rect, at the exact reported overlap corner) is unaffected by this
+        // fix — only the grip's VISIBILITY-persistence logic changed, never
+        // its position/size — and stays covered by the dedicated scenario
+        // immediately above this one.
+
+        await page.close();
+        console.log('table grips: survive a REAL pointer travelling across the hover corridor — OK');
       } finally {
         tsrv.close();
       }
