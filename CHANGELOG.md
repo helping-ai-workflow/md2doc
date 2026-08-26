@@ -3,6 +3,32 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Phase 3: Notion-grade editing** — click anywhere in a paragraph/heading/list/
+  table to type directly (no "select then edit" step). Rendered formatting shows
+  as you type; focus leaving the block auto-commits. Ctrl+Z/Y step through local
+  block history then cascade to document level. ⠿ block menu offers heading depth
+  control and MD 原始碼 escape hatch.
+- **List structural editing** — Enter splits items, Shift+Enter inserts `<br>`,
+  Tab/Shift+Tab indent/outdent; empty-item Enter removes it. Removing all items
+  deletes the block cleanly.
+- **Table always-on editing** — every cell permanently editable; Tab/Shift+Tab
+  navigate between cells (within table stays in burst); ＋ bubbles on edges insert
+  rows/columns; edge-click menus delete and cycle alignment (columns) or delete
+  (rows); row-edge drag reorders body rows. Edited tables emit gate-compatible
+  minimal form (single-space padding, minimal separators).
+- **Burst undo with cascade** — Ctrl+Z/Y within a block step through that block's
+  local session history; once exhausted, the next step cascades to document-level
+  undo/redo stack.
+- **Block-level insert and delete** — a ＋ button next to every block's ⠿ handle
+  opens a menu (段落/標題/清單/表格/程式碼) to insert a new block directly below,
+  with the cursor landing in it immediately; the ⠿ menu gained a 刪除 item to
+  delete the whole block (absorbing one adjacent blank line, mirroring the
+  existing empty-list-removal line math). Both are a single Ctrl+Z step.
+
 ## v2.8.1 — 2026-08-24
 
 ### Fixed

@@ -33,6 +33,8 @@ function printHelp() {
         '  --no-open           Skip the viewer launch.',
         '  --quiet             Suppress per-file progress messages.',
         '  --bake-svg          Pre-render mermaid/wavedrom to inert SVG (HTML output only; needs Chromium).',
+        '  --edit              Serve listed .md files in the browser editor (localhost).',
+        '  --port <n>          Pin the editor server port (only with --edit).',
         '  --version, -v       Print version.',
         '  --help, -h          Print this help.',
         ''
@@ -47,6 +49,8 @@ function parseArgs(argv) {
     let openExplicit = null; // null = unset; true/false = user-specified
     let quiet = false;
     let bakeSvg = false;
+    let edit = false;
+    let port = null;
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -64,6 +68,21 @@ function parseArgs(argv) {
         if (a === '--no-open') { openExplicit = false; continue; }
         if (a === '--quiet') { quiet = true; continue; }
         if (a === '--bake-svg') { bakeSvg = true; continue; }
+        if (a === '--edit') { edit = true; continue; }
+        if (a === '--port') {
+            i++;
+            if (i >= argv.length) {
+                process.stderr.write('error: --port requires a value\n');
+                process.exit(2);
+            }
+            const n = Number(argv[i]);
+            if (!Number.isInteger(n) || n < 0) {
+                process.stderr.write('error: --port must be a non-negative integer\n');
+                process.exit(2);
+            }
+            port = n;
+            continue;
+        }
         if (a === '--out') {
             if (out !== null) {
                 process.stderr.write('error: --out specified more than once\n');
@@ -105,7 +124,7 @@ function parseArgs(argv) {
         open = (out === null);
     }
 
-    return { inputs, formats, formatsExplicit, out, open, quiet, bakeSvg };
+    return { inputs, formats, formatsExplicit, out, open, quiet, bakeSvg, edit, port };
 }
 
 function shortHash(absPath) {
@@ -200,38 +219,7 @@ function resolveOutputs(args) {
     return pairs;
 }
 
-function isWSL() {
-    if (process.platform !== 'linux') return false;
-    if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
-    try {
-        return fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop');
-    } catch (_) {
-        return false;
-    }
-}
-
-function openViewer(filePath) {
-    const platform = process.platform;
-    let cmd, args;
-    if (platform === 'darwin') {
-        cmd = 'open'; args = [filePath];
-    } else if (platform === 'win32') {
-        cmd = 'cmd'; args = ['/c', 'start', '""', filePath];
-    } else if (isWSL()) {
-        const r = spawnSync('wslpath', ['-w', filePath], { encoding: 'utf8' });
-        if (r.status === 0 && r.stdout) {
-            cmd = 'explorer.exe'; args = [r.stdout.trim()];
-        } else {
-            cmd = 'xdg-open'; args = [filePath];
-        }
-    } else {
-        cmd = 'xdg-open'; args = [filePath];
-    }
-    const r = spawnSync(cmd, args, { stdio: 'ignore' });
-    if (r.error) {
-        process.stderr.write('warning: could not launch viewer for ' + filePath + ': ' + r.error.message + '\n');
-    }
-}
+const { openViewer } = require('../lib/editor/open.js');
 
 function main() {
     const args = parseArgs(process.argv.slice(2));
@@ -241,6 +229,31 @@ function main() {
             process.stderr.write('error: input not found: ' + input + '\n');
             process.exit(1);
         }
+    }
+
+    if (args.edit) {
+        if (args.formatsExplicit || args.out !== null || args.bakeSvg) {
+            process.stderr.write('error: --edit cannot be combined with --html/--pdf/--out/--bake-svg\n');
+            process.exit(2);
+        }
+        for (const input of args.inputs) {
+            if (!fs.existsSync(input)) {
+                process.stderr.write('error: input not found: ' + input + '\n');
+                process.exit(1);
+            }
+            if (fs.statSync(input).isDirectory()) {
+                process.stderr.write('error: --edit directory mode is not implemented yet (Phase 3)\n');
+                process.exit(2);
+            }
+        }
+        const { startEditSession } = require('../lib/editor/cli.js');
+        startEditSession({ files: args.inputs, port: args.port, open: args.open, quiet: args.quiet })
+            .catch((e) => { process.stderr.write('error: ' + e.message + '\n'); process.exit(1); });
+        return; // do not fall through to render pipeline
+    }
+    if (args.port !== null) {
+        process.stderr.write('error: --port is only valid with --edit\n');
+        process.exit(2);
     }
 
     const pairs = resolveOutputs(args);
