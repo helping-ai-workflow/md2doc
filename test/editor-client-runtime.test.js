@@ -3367,6 +3367,60 @@ async function travelPointer(page, from, to, steps) {
       }
     }
 
+    // Review fix (Important): the FIRST version of the corridor fix above
+    // was over-permissive — it kept a grip visible anywhere within the
+    // table's expanded rect, along the table's FULL height/width, not just
+    // near the row/column the grip is actually anchored to. On a tall
+    // table, hovering row 1 then moving the pointer to the left margin at
+    // the LAST row's height (far below row 1's own grip) used to keep row
+    // 1's grip visible at its now-stale position instead of hiding it
+    // (reviewer live-reproduced). pointInRowGripZone()/pointInColGripZone()
+    // fix this by gating the keep-zone on the specific shown grip's own
+    // anchor row/column extent — this is that repro turned into a permanent
+    // regression test: a genuine exit (same corridor x, unrelated row's
+    // height) must still hide the grip.
+    {
+      const rows10 = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A |', '|---|', ...rows10.map((n) => '| ' + n + ' |'), '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Hover row 1 (body index 0) to arm its row grip.
+        await hoverBodyRowCell(page, table0, 0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'fixture sanity: hovering row 1 must arm the row grip');
+
+        // Move to the SAME corridor x (just left of the table, where the
+        // grip lives) but at the LAST row's (body index 9) vertical
+        // center — far from row 1's own grip, a genuine exit, not travel
+        // toward it.
+        const target = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          const lastRow = table.tBodies[0].rows[9];
+          const r = lastRow.getBoundingClientRect();
+          return { x: tableRect.left - 5, y: r.top + r.height / 2 };
+        }, table0);
+        await page.mouse.move(target.x, target.y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'moving to the left margin at a DIFFERENT row\'s height must hide row 1\'s grip, ' +
+          'not keep it visible at its stale position');
+
+        await page.close();
+        console.log('table grips: hover corridor is anchored to its own row, not the whole table — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // Row drag-reorder: press-and-drag from the LAST body row's left edge to
     // ABOVE the first body row -> a drop indicator tracks the pointer, and
     // dropping reorders the actual <tr> (never a clone) once committed.
