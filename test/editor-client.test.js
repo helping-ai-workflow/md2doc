@@ -244,8 +244,12 @@ const shortcutOrderChecks = [
     'Ctrl+Y / Ctrl+Shift+Z must preventDefault() before redo()'],
   [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*commit\(\);/,
     'Ctrl+Enter (raw-editor commit) must preventDefault() before commit()'],
-  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*restore\(\);/,
-    'Esc inside the raw editor must preventDefault() before restore()'],
+  // §10-gap fix (review): Esc inside the raw editor now goes through
+  // cancelAndMaybeDiscard() (restore() + the pristine-insert auto-remove
+  // check) instead of calling restore() directly — deliberate, not a
+  // regression (see cancelAndMaybeDiscard()'s own comment).
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*cancelAndMaybeDiscard\(\);/,
+    'Esc inside the raw editor must preventDefault() before cancelAndMaybeDiscard()'],
   [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*closeGutterMenu\(\);/,
     'Esc (global, ⠿ menu dismiss) must preventDefault() before closeGutterMenu()'],
 ];

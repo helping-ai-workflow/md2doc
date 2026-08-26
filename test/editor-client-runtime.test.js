@@ -5041,7 +5041,11 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // ── insert table → skeleton in file, caret in first (body) cell ────────
+    // ── insert table → skeleton in file, caret in first (body) cell, then
+    //    TYPE into it (positive control — review fix: an UNTOUCHED insert
+    //    now auto-removes itself on save/blur, see the dedicated abandon
+    //    scenario below, so this table's skeleton only survives to disk
+    //    once genuinely edited, same contract as every other kind) ────────
     {
       const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc(
         ['# Doc', '', 'Para one.', '', 'Para two.']);
@@ -5058,14 +5062,15 @@ async function clickInsertMenuItem(page, sel, label) {
           return !!firstBodyCell && document.activeElement === firstBodyCell;
         });
         assert.ok(caretInFirstBodyCell, 'caret must land in the new table\'s first BODY cell, not the header');
+        await page.keyboard.type('hi');
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(
           savedText,
-          '# Doc\n\nPara one.\n\n| A | B |\n|---|---|\n|  |  |\n\nPara two.',
-          'exact byte contract for the table skeleton, got:\n' + savedText
+          '# Doc\n\nPara one.\n\n| A | B |\n|---|---|\n| hi |  |\n\nPara two.',
+          'exact byte contract for the table skeleton once typed into, got:\n' + savedText
         );
         await page.close();
-        console.log('§10: insert table -> skeleton in file, caret in first cell — OK');
+        console.log('§10: insert table -> skeleton in file, caret in first cell, typed content lands — OK');
       } finally {
         biSrv.close();
       }
@@ -5179,22 +5184,41 @@ async function clickInsertMenuItem(page, sel, label) {
           'sanity: the dirty burst must still be open (never blurred) before the insert'
         );
 
+        const beforeCount = await page.evaluate(() =>
+          document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
         const insertSel = await paragraphSelByText(page, 'Insert target text here.');
         await clickInsertMenuItem(page, insertSel, '段落');
-        await page.waitForFunction(
-          () => document.querySelector('.content').textContent.includes('Dirty target text here. EDITED')
-        );
         assert.ok(
           await page.evaluate(() =>
             document.querySelector('.content').textContent.includes('Dirty target text here. EDITED')),
           'the dirty burst elsewhere must have been COMMITTED (not silently discarded) by the insert'
         );
+        // Two rerenderAll()s happen inside insertBlockBelow() here — one
+        // resolving the dirty burst (switchAwayFrom(), already asserted
+        // above), a SEPARATE one for the insert itself — so waiting for
+        // the "EDITED" text (the FIRST one's effect) is not enough: it can
+        // be true before the second has even started, and typing before
+        // focus actually lands on the new block drops keystrokes into
+        // whatever's briefly focused (or nothing) in between. Wait for the
+        // new block to actually exist AND be focused first.
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount + 1
+        );
+        await page.waitForFunction(() => {
+          const paras = document.querySelectorAll('.ed-block[data-block-type="paragraph"] > *');
+          return Array.from(paras).some((p) => p === document.activeElement);
+        });
+        // Review fix: an UNTOUCHED insert now auto-removes itself on save
+        // (see the dedicated abandon scenario below) — type into it so
+        // "the insert lands" is actually what this scenario exercises.
+        await page.keyboard.type('New inserted text');
 
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(
           savedText,
-          '# Doc\n\nDirty target text here. EDITED\n\nInsert target text here.\n\n​\n\nTrailer text here.',
-          'both the dirty burst commit AND the insert must land, got:\n' + savedText
+          '# Doc\n\nDirty target text here. EDITED\n\nInsert target text here.\n\nNew inserted text\n\nTrailer text here.',
+          'both the dirty burst commit AND the typed insert must land, got:\n' + savedText
         );
         await page.close();
         console.log('§10: insert with a dirty burst open elsewhere commits BOTH — OK');
@@ -5275,6 +5299,119 @@ async function clickInsertMenuItem(page, sel, label) {
         );
         await page.close();
         console.log('§10: 標題/清單/程式碼 inserts all land correctly — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── review fix: abandoned (never-edited) inserts must not pollute the
+    //    file — "insert ＋, click away without typing" is an ordinary
+    //    changed-my-mind action. For EACH of the 5 block kinds: insert,
+    //    click a DIFFERENT existing block (blur away, never typing a single
+    //    character), then confirm (a) the block is gone from the DOM, (b)
+    //    the document title carries no dirty marker (zero net undo ops —
+    //    checked BEFORE any save), and (c) the saved file is byte-identical
+    //    to the pre-insert original. All five reuse the SAME original
+    //    doc/page sequentially — each abandon must leave the doc back at
+    //    the exact same baseline for the next one to start from. ─────────
+    {
+      const rows = [
+        'Away target.', '', 'Paragraph anchor.', '', 'Heading anchor.', '',
+        'List anchor.', '', 'Table anchor.', '', 'Code anchor.',
+      ];
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const baseTitle = await page.evaluate(() => document.title);
+        assert.ok(!baseTitle.startsWith('●'), 'sanity: freshly-loaded page must not start dirty');
+
+        async function abandonAndVerify(anchorText, kind, countSel, waitExtra) {
+          const anchorSel = await paragraphSelByText(page, anchorText);
+          const beforeCount = await page.evaluate(
+            (s) => document.querySelectorAll(s).length, countSel);
+          await clickInsertMenuItem(page, anchorSel, kind);
+          await page.waitForFunction(
+            (s, n) => document.querySelectorAll(s).length === n,
+            {}, countSel, beforeCount + 1
+          );
+          if (waitExtra) await page.waitForSelector(waitExtra);
+          // Click a DIFFERENT, untouched block — a real blur, no typing.
+          const awaySel = await paragraphSelByText(page, 'Away target.');
+          await page.click(awaySel);
+          await page.waitForFunction(
+            (s, n) => document.querySelectorAll(s).length === n,
+            {}, countSel, beforeCount
+          );
+          const title = await page.evaluate(() => document.title);
+          assert.strictEqual(title, baseTitle,
+            kind + ': title must show no dirty marker immediately after an untouched abandon (zero net undo ops), got ' +
+            JSON.stringify(title));
+          const savedText = await saveAndRead(page, biMdPath);
+          assert.strictEqual(savedText, original,
+            kind + ': an untouched abandoned insert must leave the saved file byte-identical to the pre-insert original, got:\n' + savedText);
+        }
+
+        await abandonAndVerify('Paragraph anchor.', '段落', '.ed-block[data-block-type="paragraph"]');
+        await abandonAndVerify('Heading anchor.', '標題', '.ed-block[data-block-type="heading"]');
+        await abandonAndVerify('List anchor.', '清單', '.ed-block[data-block-type="list"]');
+        await abandonAndVerify('Table anchor.', '表格', '.ed-block[data-block-type="table"]');
+        await abandonAndVerify('Code anchor.', '程式碼', '.ed-block[data-block-type="code"]',
+          '.ed-block[data-block-type="code"] textarea.ed-raw');
+
+        await page.close();
+        console.log('§10 review fix: abandoned inserts (all 5 kinds) auto-remove, zero net undo ops, byte-identical file — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── review fix: Ctrl+Z on an untouched pristine insert must still
+    //    remove it in exactly ONE step (not clobber the doc by cascading a
+    //    SECOND undo past it) — the auto-remove-on-blur IS the undo. ──────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(
+        ['# Doc', '', 'Earlier edit target.', '', 'Insert anchor.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+
+        // An EARLIER, real, committed edit — the op a wrongly-double-cascaded
+        // Ctrl+Z would incorrectly reach past the insert and revert too.
+        const earlierSel = await paragraphSelByText(page, 'Earlier edit target.');
+        await openWysiwyg(page, earlierSel);
+        await page.keyboard.type(' EDITED');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Earlier edit target. EDITED')
+        );
+
+        const anchorSel = await paragraphSelByText(page, 'Insert anchor.');
+        const beforeCount = await page.evaluate(() =>
+          document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
+        await clickInsertMenuItem(page, anchorSel, '段落');
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount + 1
+        );
+        // No typing — Ctrl+Z immediately.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount
+        );
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Earlier edit target. EDITED')),
+          'ONE Ctrl+Z on a pristine insert must remove ONLY the insert — the earlier real edit must survive untouched'
+        );
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(savedText, '# Doc\n\nEarlier edit target. EDITED\n\nInsert anchor.',
+          'the earlier edit must still be saved; the insert must be fully gone, got:\n' + savedText);
+        await page.close();
+        console.log('§10 review fix: Ctrl+Z on a pristine insert removes ONLY the insert (no double-cascade) — OK');
       } finally {
         biSrv.close();
       }

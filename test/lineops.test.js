@@ -50,4 +50,24 @@ assert.strictEqual(st.dirtyDepth, 0);
 u = st.undo(rd.lines);
 assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
 
+// §10-gap fix (review): discardTop() — reverses the top op like undo()
+// does, but leaves NO redo trail behind (contrast with the undo/redo
+// round-trip above, where the same op comes back via redo()).
+{
+  const dst = new UndoStack();
+  let dcur = ['p', 'q', 'r'];
+  const dop = { startLine: 2, endLine: 2, before: ['q'], after: ['Q'] };
+  dcur = replaceLines(dcur, 2, 2, dop.after).lines; // ['p', 'Q', 'r']
+  dst.push(dop);
+  assert.strictEqual(dst.dirtyDepth, 1);
+
+  const d = dst.discardTop(dcur);
+  assert.deepStrictEqual(d.lines, ['p', 'q', 'r'], 'discardTop reverses the op exactly like undo would');
+  assert.strictEqual(dst.dirtyDepth, 0, 'the discarded op no longer counts toward dirtiness');
+  assert.strictEqual(dst.redo(d.lines), null,
+    'discardTop must leave NO redo trail — this is what distinguishes it from undo()');
+  assert.strictEqual(dst.undo(d.lines), null, 'the stack is genuinely empty, not just redo-less');
+  assert.strictEqual(dst.discardTop(d.lines), null, 'discardTop on an empty stack is a no-op, same contract as undo()/redo()');
+}
+
 console.log('lineops.test.js OK');
