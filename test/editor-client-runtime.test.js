@@ -68,6 +68,10 @@ async function setup() {
     'Link target paragraph text.', '',
     'A [existing link](https://example.com) here.', '',
     'Rerender reset target word here.', '',
+    // FIX 2 (strikethrough/underline selection-toolbar marks) fixtures.
+    'Strike toggle target word here.', '',
+    'Strike commit target word here.', '',
+    'Underline commit target word here.', '',
     // Phase 3 Task 2 (burst undo) fixtures — dedicated paragraphs so the
     // burst-undo scenarios below never depend on state left by another.
     'Burst undo target text here.', '',
@@ -1986,8 +1990,8 @@ async function travelPointer(page, from, to, steps) {
       await page.waitForSelector('.ed-seltb');
       assert.strictEqual(
         await page.evaluate(() => document.querySelectorAll('.ed-seltb-btn').length),
-        4,
-        'the toolbar must show exactly 4 buttons: B / I / <> / link'
+        6,
+        'the toolbar must show exactly 6 buttons: B / I / S / U / <> / link'
       );
 
       // Positioned ABOVE the selection by default — plenty of room above
@@ -2118,6 +2122,128 @@ async function travelPointer(page, from, to, steps) {
 
       await page.close();
       console.log('sel-toolbar: Bold + Enter commits **word** to source and <strong> to render — OK');
+    }
+
+    // ── FIX 2: clicking S (刪除線/strikethrough) wraps the selection in
+    //    <del>; clicking it AGAIN on the (now re-selected) same content
+    //    unwraps it — same toggle-policy branch the Bold scenario above
+    //    exercises, applied to applyMarkToggle('DEL') via closestMarkAncestor
+    //    ─────────────────────────────────────────────────────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Strike toggle target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'toggle');
+      await page.waitForSelector('.ed-seltb');
+
+      await page.click('.ed-seltb-s');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const del = document.querySelector(s + ' del');
+          return del ? del.textContent : null;
+        }, editEl),
+        'toggle',
+        'clicking S must wrap the selected word in <del>'
+      );
+
+      await page.click('.ed-seltb-s');
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' del'), editEl),
+        true,
+        'clicking S again on the same (now re-selected) content must unwrap it'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('Strike toggle target word here.'), editEl),
+        'the text content must be back to plain after the round-trip toggle'
+      );
+
+      await page.keyboard.press('Escape'); // discard — never committed
+      await page.close();
+      console.log('sel-toolbar: S (strikethrough) toggles ON then OFF on the same selection — OK');
+    }
+
+    // ── FIX 2: S applied once, Enter to commit -> the source line gains
+    //    ~~word~~, and the re-rendered page shows <del> ──────────────────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Strike commit target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'commit');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-s');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const del = document.querySelector(s + ' del');
+          return del ? del.textContent : null;
+        }, editEl),
+        'commit',
+        'S must wrap "commit" in <del> before commit'
+      );
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('<del>commit</del>'),
+        { timeout: 5000 }
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextStrike = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileTextStrike.includes('Strike ~~commit~~ target word here.'),
+        'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
+
+      await page.close();
+      console.log('sel-toolbar: S + Enter commits ~~word~~ to source and <del> to render — OK');
+    }
+
+    // ── FIX 2: U applied once, Enter to commit -> the source line gains the
+    //    literal <u>word</u>, and the re-rendered page shows an underline
+    //    (marked passes raw inline <u> through untouched, by design) ─────
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Underline commit target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      await selectWordInEl(page, editEl, 'commit');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-u');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const u = document.querySelector(s + ' u');
+          return u ? u.textContent : null;
+        }, editEl),
+        'commit',
+        'U must wrap "commit" in <u> before commit'
+      );
+
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
+      await page.waitForFunction(
+        () => document.querySelector('.content').innerHTML.includes('<u>commit</u>'),
+        { timeout: 5000 }
+      );
+
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyS');
+      await page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const fileTextU = fs.readFileSync(mdPath, 'utf8');
+      assert.ok(fileTextU.includes('Underline <u>commit</u> target word here.'),
+        'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
+
+      await page.close();
+      console.log('sel-toolbar: U + Enter commits <u>word</u> to source and renders underlined — OK');
     }
 
     // ── Task 4: the code button wraps the WHOLE paragraph (which contains a

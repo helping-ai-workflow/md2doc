@@ -173,6 +173,20 @@ function assertGateCompatListRoundTrips(md, label) {
   assertGateCompatTable(md, 'rich inline content in cell');
 }
 
+// 5b. strikethrough (DEL) + underline (U) inside a cell — the FIX-2
+// addition. `~~...~~` and the literal `<u>...</u>` inline HTML must both
+// stay single-line and gate-compatible exactly like every other mark above.
+{
+  const t = table(
+    tr(th({}, 'H')),
+    [tr(td({}, 'a ', el('del', {}, 'struck'), ' ', el('u', {}, 'under'), ' b'))]
+  );
+  const { md } = tableMd.serializeTable(t);
+  assertGateCompatTable(md, 'strikethrough + underline in cell');
+  assert.ok(md.includes('~~struck~~'), 'strikethrough in cell: must contain ~~struck~~, got:\n' + md);
+  assert.ok(md.includes('<u>under</u>'), 'underline in cell: must contain <u>under</u>, got:\n' + md);
+}
+
 // 6. CJK / multi-byte content — trailing-whitespace and pipe-prefix
 // invariants must hold regardless of byte width.
 {

@@ -122,4 +122,41 @@ assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '#ref-1' }, '[ref
   assert.deepStrictEqual(serializeInline(withDirSpan).unsupported, ['SPAN']);
 }
 
+// --- strikethrough (DEL/S) + underline (U) marks ---
+
+// DEL and S both serialize to GFM `~~...~~`, matching what marked itself
+// emits for `~~x~~` (probed above the fix: marked.parseInline('~~b~~') ===
+// '<del>b</del>') — the toolbar always creates DEL; S is accepted on input
+// (e.g. some browsers' native strikethrough) but serializes identically.
+assert.strictEqual(serializeInline(el('p', {}, el('del', {}, 'x'))).md, '~~x~~');
+assert.strictEqual(serializeInline(el('p', {}, el('s', {}, 'x'))).md, '~~x~~');
+assert.strictEqual(marked.parseInline(serializeInline(el('p', {}, el('del', {}, 'word'))).md), '<del>word</del>');
+
+// U has no Markdown syntax and emits literal inline HTML by design — marked
+// passes raw inline `<u>...</u>` straight through untouched.
+assert.strictEqual(serializeInline(el('p', {}, el('u', {}, 'x'))).md, '<u>x</u>');
+assert.strictEqual(marked.parseInline(serializeInline(el('p', {}, el('u', {}, 'word'))).md), '<u>word</u>');
+
+// nested with bold, both directions
+assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, el('del', {}, 'x')))).md, '**~~x~~**');
+assert.strictEqual(serializeInline(el('p', {}, el('del', {}, el('strong', {}, 'x')))).md, '~~**x**~~');
+assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, el('u', {}, 'x')))).md, '**<u>x</u>**');
+
+// both marks are part of the supported set now (canWysiwyg stays true)
+assert.strictEqual(canWysiwyg(el('p', {}, el('del', {}, 'x'), ' ', el('u', {}, 'y'))), true);
+
+// escaping: every `~` is escaped unconditionally, so typing a literal
+// "~~text~~" (no strikethrough intent) round-trips as plain text instead of
+// silently becoming real strikethrough on the next render.
+assert.strictEqual(escapeText('a~b'), 'a\\~b');
+assert.strictEqual(escapeText('a~~b~~c'), 'a\\~\\~b\\~\\~c');
+assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
+// a real toolbar-made DEL survives right next to escaped literal tildes in
+// plain sibling text, without either bleeding into the other.
+{
+  const md = serializeInline(el('p', {}, 'a~~b~~c ', el('del', {}, 'd'), ' e~~f~~g')).md;
+  assert.strictEqual(md, 'a\\~\\~b\\~\\~c ~~d~~ e\\~\\~f\\~\\~g');
+  assert.strictEqual(marked.parseInline(md), 'a~~b~~c <del>d</del> e~~f~~g');
+}
+
 console.log('inline-md.test.js OK');
