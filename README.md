@@ -166,11 +166,31 @@ operations:
 | **−** (minus) | Heading only | Decrease heading level (# → ... → #####) |
 | **+** (plus) | Heading only | Increase heading level |
 | **MD 原始碼** | All blocks | Discard in-progress edits, switch to raw Markdown source editing |
+| **刪除** | All blocks | Delete the block entirely (absorbs one adjacent blank line; one Ctrl+Z restores it exactly) |
 | **✕** | All blocks | Close the menu |
 
 The **MD 原始碼** button is the escape hatch: it reverts any unsaved typing in the
 current block and opens the raw Markdown editor instead, letting you make changes
 WYSIWYG cannot express.
+
+### ＋ Insert menu
+
+Every block also has a ＋ button, stacked just above the ⠿ handle in the same left
+gutter. Click it to open a menu for inserting a new block directly below:
+
+| Item | Inserts |
+|---|---|
+| **段落** | An empty paragraph |
+| **標題** | An empty `##` heading |
+| **清單** | An empty single-item list |
+| **表格** | A minimal 2×2 table skeleton |
+| **程式碼** | An empty fenced code block |
+
+The new block is inserted below the block whose ＋ you clicked, and the cursor lands
+directly in it — the first (body) cell for a table, the raw source editor for a code
+block, and the always-on WYSIWYG surface (pre-selected, so your first keystroke
+replaces the placeholder) for everything else. The whole insert is a single Ctrl+Z
+step — one undo removes the block entirely.
 
 ### Paragraph and heading editing
 
@@ -283,8 +303,8 @@ other blocks.
 | `Ctrl`/`⌘` + `S` | Save the document to disk (explicit; changes commit locally when focus leaves) |
 | `Ctrl`/`⌘` + `Z` | Undo: first steps through the focused block's local history, then cascades to document level |
 | `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo: mirrors undo's cascade behavior |
-| Click outside any block | Commit any open block if changed, dismiss the ⠿ handle menu |
-| `Esc` (at document level, not in an open block) | Close the ⠿ handle menu |
+| Click outside any block | Commit any open block if changed, dismiss the ⠿/＋ menu |
+| `Esc` (at document level, not in an open block) | Close the ⠿/＋ menu |
 
 ### Auto-commit on focus change
 

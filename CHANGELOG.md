@@ -23,6 +23,11 @@ All notable changes to this project will be documented here. This project adhere
 - **Burst undo with cascade** — Ctrl+Z/Y within a block step through that block's
   local session history; once exhausted, the next step cascades to document-level
   undo/redo stack.
+- **Block-level insert and delete** — a ＋ button next to every block's ⠿ handle
+  opens a menu (段落/標題/清單/表格/程式碼) to insert a new block directly below,
+  with the cursor landing in it immediately; the ⠿ menu gained a 刪除 item to
+  delete the whole block (absorbing one adjacent blank line, mirroring the
+  existing empty-list-removal line math). Both are a single Ctrl+Z step.
 
 ## v2.8.1 — 2026-08-24
 
