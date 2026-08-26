@@ -478,6 +478,15 @@ async function elementRect(page, sel) {
 function rectsIntersect(a, b) {
   return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
+// Pixel-approximate equality assertion (Node-side): passes if |actual −
+// expected| <= 1, accounting for subpixel rounding in getBoundingClientRect.
+// Used by grip-position scenarios to assert the new border-centred geometry
+// without being brittle against fractional pixel differences across platforms.
+function expectApprox(actual, expected, label) {
+  assert.ok(Math.abs(actual - expected) <= 1,
+    (label ? label + ': ' : '') + 'expected ≈' + expected.toFixed(2) +
+    ', got ' + actual.toFixed(2) + ' (diff=' + (actual - expected).toFixed(2) + ')');
+}
 // Convenience wrappers: hover the cell, then read back the grip's own
 // center — the coordinates every menu-open/drag scenario below presses at.
 async function colGripCoords(page, tableSel, colIndex) {
@@ -3243,26 +3252,76 @@ async function clickInsertMenuItem(page, sel, label) {
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'hovering the header row must still reveal the COLUMN grip for that column');
 
+        // Position (P0-a): row grip centerline ON the table's left border,
+        // centered on its row — expectApprox(actual, expected) allows ±1px for
+        // subpixel rounding. Re-hover body row 0 first (the header hover above
+        // hides the row grip).
+        await hoverBodyRowCell(page, table0, 0);
+        const rowGripPos = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          const row = table.tBodies[0].rows[0];
+          const rowRect = row.getBoundingClientRect();
+          const grip = document.querySelector('.ed-te-grip-row');
+          const gr = grip.getBoundingClientRect();
+          return {
+            gripLeft: gr.left, gripTop: gr.top,
+            expectedLeft: tableRect.left - gr.width / 2,
+            expectedTop: rowRect.top + rowRect.height / 2 - gr.height / 2,
+          };
+        }, table0);
+        expectApprox(rowGripPos.gripLeft, rowGripPos.expectedLeft, 'row grip left (centerline on table left border)');
+        expectApprox(rowGripPos.gripTop, rowGripPos.expectedTop, 'row grip top (centered on row)');
+
+        // Position (P0-a): col grip centerline ON the table's top border,
+        // centered on its column.
+        await hoverColumnCell(page, table0, 0);
+        const colGripPos = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          const cell = table.tHead.rows[0].cells[0];
+          const cellRect = cell.getBoundingClientRect();
+          const grip = document.querySelector('.ed-te-grip-col');
+          const gc = grip.getBoundingClientRect();
+          return {
+            gripLeft: gc.left, gripTop: gc.top,
+            expectedLeft: cellRect.left + cellRect.width / 2 - gc.width / 2,
+            expectedTop: tableRect.top - gc.height / 2,
+          };
+        }, table0);
+        expectApprox(colGripPos.gripLeft, colGripPos.expectedLeft, 'col grip left (centered on column)');
+        expectApprox(colGripPos.gripTop, colGripPos.expectedTop, 'col grip top (centerline on table top border)');
+
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip; border-centred position — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // Review fix (Important): a grip and the hover-insert ＋ bubble at the
-    // NEAREST boundary must never have intersecting hit rects. On the
-    // original TE_GRIP_GAP_PX=4 geometry, hovering a few px inside the
-    // table's edge, right next to a boundary, showed BOTH the grip and the
-    // bubble simultaneously with overlapping rects — the grip's higher
-    // z-index (9 vs the bubble's 8) silently ate a click aimed at "insert
-    // row/column here". Reproduces the EXACT reported corner for both
-    // pairs on a plain, normal-row-height table: row pair — 3px inside the
-    // table's left edge, 3px below the boundary above row 0 (this is
-    // simultaneously inside row 0's own cell, arming the row grip, AND
-    // within TB_EDGE_PX of that boundary, arming the row insert bubble);
-    // column pair — the symmetric corner, 3px below the table's top edge,
-    // 3px right of the boundary between columns A and B.
+    // Review fix (Important): a click aimed at the hover-insert ＋ bubble must
+    // NOT be silently eaten by the row/col grip at the same location.
+    //
+    // ORIGINAL BUG (TE_GRIP_GAP_PX=4): the grip and bubble had intersecting
+    // hit rects at this corner; the grip's higher z-index (9 vs the bubble's
+    // 8) swallowed the click. The old fix (TE_GRIP_GAP_PX=14) separated the
+    // rects by moving the grips 14px outside the table — but that 14px gap
+    // conflicted with the upcoming left-gutter chrome (P0-a).
+    //
+    // NEW MECHANISM (P0-a border-centred geometry): both grips now sit ON the
+    // table border (their centerline coincides with the table edge), so their
+    // hit rects DO overlap the bubble's hit rect — separated rects are no
+    // longer guaranteed and the old !rectsIntersect() assertion would FAIL.
+    // The invariant "insert-bubble click is never eaten by the grip" is now
+    // maintained by z-index ordering alone: .ed-te-grip-row/.ed-te-grip-col
+    // get z-index:7 (below the bubble's z-index:8), so even though the rects
+    // overlap, the browser's hit-test gives the click to the BUBBLE, not the
+    // grip.
+    //
+    // This scenario still reproduces the EXACT reported overlap corners (same
+    // coordinates as before), but now asserts the invariant via the browser's
+    // own stacking order rather than a rect-separation check, which is
+    // strictly stronger evidence. The console.log reflects the new mechanism.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -3286,11 +3345,31 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.mouse.move(rowCorner.x, rowCorner.y);
         await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
         await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
-        const rowGripRect = await elementRect(page, '.ed-te-grip-row');
-        const rowBubbleRect = await elementRect(page, '.ed-tb-insert-row');
-        assert.ok(!rectsIntersect(rowGripRect, rowBubbleRect),
-          'the row grip and row insert bubble hit rects must never intersect, got grip=' +
-          JSON.stringify(rowGripRect) + ' bubble=' + JSON.stringify(rowBubbleRect));
+        // Assert the bubble wins the browser hit-test at the exact corner
+        // (strictly stronger than a rect-separation check: the browser itself
+        // is the arbiter of which element receives the click).
+        const rowHitResult = await page.evaluate((cx, cy) => {
+          const el = document.elementFromPoint(cx, cy);
+          const bubble = document.querySelector('.ed-tb-insert-row');
+          const grip = document.querySelector('.ed-te-grip-row');
+          const hitsBubble = el === bubble || (bubble && bubble.contains(el));
+          return {
+            hitsBubble,
+            hitsGrip: el === grip || (grip && grip.contains(el)),
+            tagName: el ? el.tagName : null,
+            className: el ? el.className : null,
+            bubbleZ: bubble ? getComputedStyle(bubble).zIndex : null,
+            gripZ: grip ? getComputedStyle(grip).zIndex : null,
+          };
+        }, rowCorner.x, rowCorner.y);
+        console.log('row corner hit-test:', JSON.stringify(rowHitResult));
+        assert.ok(rowHitResult.hitsBubble,
+          'elementFromPoint at the row overlap corner must resolve to the insert bubble, not the grip — ' +
+          'got tagName=' + rowHitResult.tagName + ' className=' + rowHitResult.className);
+        assert.ok(
+          parseInt(rowHitResult.bubbleZ, 10) > parseInt(rowHitResult.gripZ, 10),
+          'row insert bubble z-index (' + rowHitResult.bubbleZ + ') must be numerically greater than ' +
+          'row grip z-index (' + rowHitResult.gripZ + ')');
 
         const colCorner = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
@@ -3303,32 +3382,49 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.mouse.move(colCorner.x, colCorner.y);
         await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
         await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
-        const colGripRect = await elementRect(page, '.ed-te-grip-col');
-        const colBubbleRect = await elementRect(page, '.ed-tb-insert-col');
-        assert.ok(!rectsIntersect(colGripRect, colBubbleRect),
-          'the column grip and column insert bubble hit rects must never intersect, got grip=' +
-          JSON.stringify(colGripRect) + ' bubble=' + JSON.stringify(colBubbleRect));
+        // Same bubble-wins-hit-test assertion for the column pair.
+        const colHitResult = await page.evaluate((cx, cy) => {
+          const el = document.elementFromPoint(cx, cy);
+          const bubble = document.querySelector('.ed-tb-insert-col');
+          const grip = document.querySelector('.ed-te-grip-col');
+          const hitsBubble = el === bubble || (bubble && bubble.contains(el));
+          return {
+            hitsBubble,
+            hitsGrip: el === grip || (grip && grip.contains(el)),
+            tagName: el ? el.tagName : null,
+            className: el ? el.className : null,
+            bubbleZ: bubble ? getComputedStyle(bubble).zIndex : null,
+            gripZ: grip ? getComputedStyle(grip).zIndex : null,
+          };
+        }, colCorner.x, colCorner.y);
+        console.log('col corner hit-test:', JSON.stringify(colHitResult));
+        assert.ok(colHitResult.hitsBubble,
+          'elementFromPoint at the col overlap corner must resolve to the insert bubble, not the grip — ' +
+          'got tagName=' + colHitResult.tagName + ' className=' + colHitResult.className);
+        assert.ok(
+          parseInt(colHitResult.bubbleZ, 10) > parseInt(colHitResult.gripZ, 10),
+          'col insert bubble z-index (' + colHitResult.bubbleZ + ') must be numerically greater than ' +
+          'col grip z-index (' + colHitResult.gripZ + ')');
 
         await page.close();
-        console.log('table grip/bubble hit zones: never intersect at the reported overlap corner — OK');
+        console.log('table grip/bubble click priority: bubble wins hit-test at the overlap corner (z-index ordering) — OK');
       } finally {
         tsrv.close();
       }
     }
 
-    // Grip reachability by a REAL (non-teleporting) pointer: commit a490f6c
-    // moved both grips TE_GRIP_GAP_PX (14px) outside the table to avoid the
-    // bubble overlap covered by the previous scenario — but a pointer
-    // travelling from inside a cell toward the grip crosses that 14px
-    // corridor OUTSIDE the table on the way there. The original
-    // updateTableEdgeGrips() hid the grip the instant `target` left the
-    // table/cell, before the pointer ever reached the grip itself, so a
-    // human moving the mouse (rather than teleport-clicking, as every OTHER
-    // scenario in this file does via pressReleaseAt/gripCenter) could never
-    // actually arrive at it. travelPointer() above drives a genuine
-    // multi-step mousemove sequence, settling client.js's rAF-throttled
-    // hit-test once per intermediate point, to actually exercise the
-    // corridor crossing.
+    // Grip reachability by a REAL (non-teleporting) pointer: the grips now
+    // sit ON the table border (P0-a border-centred geometry), straddling it
+    // by ~10px on each side. A pointer travelling from inside a cell toward
+    // the grip crosses the ~10px corridor OUTSIDE the table (the grip's own
+    // left/top half) on the way there. The original updateTableEdgeGrips()
+    // hid the grip the instant `target` left the table/cell, before the
+    // pointer ever reached the grip itself, so a human moving the mouse
+    // (rather than teleport-clicking, as every OTHER scenario in this file
+    // does via pressReleaseAt/gripCenter) could never actually arrive at it.
+    // travelPointer() above drives a genuine multi-step mousemove sequence,
+    // settling client.js's rAF-throttled hit-test once per intermediate
+    // point, to actually exercise the corridor crossing.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -3343,13 +3439,12 @@ async function clickInsertMenuItem(page, sel, label) {
         // center — a plain 2-column test table stretches to fill the whole
         // content width (each cell hundreds of px wide), so starting from
         // the cell's center and interpolating in only 5-10 steps toward the
-        // grip would stride clean OVER the narrow (~TE_GRIP_GAP_PX-wide)
-        // corridor without ever sampling a point inside it, silently
-        // passing on a table this wide regardless of the bug. Starting
-        // right at the boundary the pointer is about to cross keeps the
-        // whole travelled distance commensurate with the corridor itself,
-        // so every step actually samples it — matching how a real user
-        // would approach the edge in the first place.
+        // grip would stride clean OVER the narrow (~10px) corridor without
+        // ever sampling a point inside it, silently passing on a table this
+        // wide regardless of the bug. Starting right at the boundary the
+        // pointer is about to cross keeps the whole travelled distance
+        // commensurate with the corridor itself, so every step actually
+        // samples it — matching how a real user would approach the edge.
         const rowEdgeStart = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
           const tableRect = table.getBoundingClientRect();
@@ -3364,7 +3459,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
           'the row grip must still be visible once a REAL travelling pointer reaches it across the ' +
-          'TE_GRIP_GAP_PX corridor (a teleporting click would never catch this)');
+          'hover corridor (a teleporting click would never catch this)');
 
         // Column grip: same shape, starting just inside the table's own top
         // edge (5px down, at column 0's horizontal center) and travelling
@@ -3383,13 +3478,14 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'the column grip must still be visible once a REAL travelling pointer reaches it across the ' +
-          'TE_GRIP_GAP_PX corridor (a teleporting click would never catch this)');
+          'hover corridor (a teleporting click would never catch this)');
 
-        // The a490f6c non-intersection guarantee (grip rect vs. insert-bubble
-        // rect, at the exact reported overlap corner) is unaffected by this
-        // fix — only the grip's VISIBILITY-persistence logic changed, never
-        // its position/size — and stays covered by the dedicated scenario
-        // immediately above this one.
+        // The click-priority guarantee (bubble wins browser hit-test at the
+        // overlap corner, enforced by z-index ordering rather than rect
+        // separation) is unaffected by this fix — only the grip's
+        // VISIBILITY-persistence logic changed, never its position/z-index
+        // — and stays covered by the dedicated scenario immediately above
+        // this one.
 
         await page.close();
         console.log('table grips: survive a REAL pointer travelling across the hover corridor — OK');
