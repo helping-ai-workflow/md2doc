@@ -458,6 +458,22 @@ async function gripCenter(page, gripSel) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, gripSel);
 }
+// Reads back a live element's client rect as a plain {left, right, top,
+// bottom} object — used by the grip/insert-bubble non-intersection scenario
+// below to compare two overlay elements' hit boxes.
+async function elementRect(page, sel) {
+  return page.evaluate((s) => {
+    const r = document.querySelector(s).getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+  }, sel);
+}
+// Plain axis-aligned-rectangle intersection test (Node-side, no page
+// involved) — two rects that merely TOUCH at an edge (e.g. `a.right ===
+// b.left`) do NOT count as intersecting, matching the strict '<'/'>'
+// comparisons a real overlapping-hit-area bug would need to trigger.
+function rectsIntersect(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
 // Convenience wrappers: hover the cell, then read back the grip's own
 // center — the coordinates every menu-open/drag scenario below presses at.
 async function colGripCoords(page, tableSel, colIndex) {
@@ -3045,6 +3061,72 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
+    // Review fix (Important): a grip and the hover-insert ＋ bubble at the
+    // NEAREST boundary must never have intersecting hit rects. On the
+    // original TE_GRIP_GAP_PX=4 geometry, hovering a few px inside the
+    // table's edge, right next to a boundary, showed BOTH the grip and the
+    // bubble simultaneously with overlapping rects — the grip's higher
+    // z-index (9 vs the bubble's 8) silently ate a click aimed at "insert
+    // row/column here". Reproduces the EXACT reported corner for both
+    // pairs on a plain, normal-row-height table: row pair — 3px inside the
+    // table's left edge, 3px below the boundary above row 0 (this is
+    // simultaneously inside row 0's own cell, arming the row grip, AND
+    // within TB_EDGE_PX of that boundary, arming the row insert bubble);
+    // column pair — the symmetric corner, 3px below the table's top edge,
+    // 3px right of the boundary between columns A and B.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const rowCorner = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          // Same boundary Y client.js's own updateTableInsertBubbles() uses
+          // for "insert after the header" (afterRowIndex: -1): the HEADER
+          // row's own bottom edge, not row 0's top (kept as two separate
+          // reads rather than assumed-equal, in case thead/tbody ever grow
+          // a border/spacing gap between them).
+          const boundaryY = table.tHead.rows[0].getBoundingClientRect().bottom;
+          return { x: tableRect.left + 3, y: boundaryY + 3 };
+        }, table0);
+        await page.mouse.move(rowCorner.x, rowCorner.y);
+        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
+        const rowGripRect = await elementRect(page, '.ed-te-grip-row');
+        const rowBubbleRect = await elementRect(page, '.ed-tb-insert-row');
+        assert.ok(!rectsIntersect(rowGripRect, rowBubbleRect),
+          'the row grip and row insert bubble hit rects must never intersect, got grip=' +
+          JSON.stringify(rowGripRect) + ' bubble=' + JSON.stringify(rowBubbleRect));
+
+        const colCorner = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const tableRect = table.getBoundingClientRect();
+          // Same boundary X client.js's own updateTableInsertBubbles() uses
+          // for "insert after column 0": that header cell's own right edge.
+          const boundaryX = table.tHead.rows[0].cells[0].getBoundingClientRect().right;
+          return { x: boundaryX + 3, y: tableRect.top + 3 };
+        }, table0);
+        await page.mouse.move(colCorner.x, colCorner.y);
+        await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
+        await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
+        const colGripRect = await elementRect(page, '.ed-te-grip-col');
+        const colBubbleRect = await elementRect(page, '.ed-tb-insert-col');
+        assert.ok(!rectsIntersect(colGripRect, colBubbleRect),
+          'the column grip and column insert bubble hit rects must never intersect, got grip=' +
+          JSON.stringify(colGripRect) + ' bubble=' + JSON.stringify(colBubbleRect));
+
+        await page.close();
+        console.log('table grip/bubble hit zones: never intersect at the reported overlap corner — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // Row drag-reorder: press-and-drag from the LAST body row's left edge to
     // ABOVE the first body row -> a drop indicator tracks the pointer, and
     // dropping reorders the actual <tr> (never a clone) once committed.
@@ -3140,12 +3222,15 @@ async function saveAndRead(page, mdPath) {
       }
     }
 
-    // Review fix (Important): the hover-insert ＋ row bubble's own
+    // Review fix (Important): the hover-insert bubbles' and grips' own
     // (independent) throttled mousemove listener must not repaint itself on
-    // top of the drop indicator during an active drag — the row zone
-    // (TE_EDGE_PX=8) sits well inside the bubble's own proximity threshold
-    // (TB_EDGE_PX=10), so without the fix this reliably reproduces on any
-    // real drag from a row's left edge.
+    // top of the drop indicator during an active drag — a drag that starts
+    // at the row grip (outside the table) and moves across cells/boundaries
+    // inside it passes right through the exact hover positions that would
+    // otherwise trigger the ＋ bubbles and the column grip, so without the
+    // drag gate (see the mousemove listener's `tePointer.dragging` branch
+    // near the bottom of client.js) this reliably reproduces on any real
+    // drag from the row grip.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| A |', '|---|', '| 1 |', '| 2 |', '| 3 |', '',
