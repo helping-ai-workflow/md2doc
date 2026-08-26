@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, withHeadingDepth } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -79,6 +79,79 @@ assert.strictEqual(st2.op, null, 'identical text → no op pushed');
   assert.deepStrictEqual(r3.lines, ['# Doc'],
     'no trailing blank to absorb (EOF) must fall back to absorbing the leading blank');
   assert.deepStrictEqual(eofStack.undo(r3.lines).lines, eofLines, 'undo restores the EOF-list file exactly');
+}
+
+// -- §10-gap fix: commitBlockInsertion() line math ---------------------------
+// Mirrors commitListBlockRemoval()'s own three-case coverage above, in
+// reverse: mid-doc (reuse the existing trailing blank as the separator to
+// whatever follows), EOF (no trailing content to separate from — no trailing
+// blank added), and a non-blank neighbor (no blank line to reuse — a fresh
+// trailing separator is added so the new block doesn't merge into the next
+// one when re-lexed).
+{
+  // mid-doc: hovered block already has a blank line after it (the normal
+  // case) — that existing blank is REUSED as NEWBLOCK's own trailing
+  // separator, not doubled up.
+  const mLines = ['# Doc', '', 'Para1', '', 'Para2'];
+  const mBlocks = [
+    { id: 0, type: 'heading',   startLine: 1, endLine: 1 },
+    { id: 1, type: 'paragraph', startLine: 3, endLine: 3 },
+    { id: 2, type: 'paragraph', startLine: 5, endLine: 5 },
+  ];
+  const mStack = new UndoStack();
+  const m1 = commitBlockInsertion({ lines: mLines, blocks: mBlocks, stack: mStack }, 1, ['NEWBLOCK']);
+  assert.deepStrictEqual(m1.lines, ['# Doc', '', 'Para1', '', 'NEWBLOCK', '', 'Para2']);
+  assert.strictEqual(m1.lines.join('\n'), '# Doc\n\nPara1\n\nNEWBLOCK\n\nPara2',
+    'exact byte contract: one fresh leading blank, existing trailing blank reused');
+  assert.strictEqual(m1.newStartLine, 5, 'new block content starts at line 5 (1-indexed)');
+  // trailing block (id 2) shifts down by 2 lines (blank + NEWBLOCK).
+  assert.strictEqual(m1.blocks.find((b) => b.id === 2).startLine, 7);
+  assert.deepStrictEqual(mStack.undo(m1.lines).lines, mLines, 'undo restores the exact original bytes');
+
+  // EOF: hovered block is the LAST block in the file — no trailing blank is
+  // added (nothing follows to separate from).
+  const eLines = ['# Doc', '', 'Para1'];
+  const eBlocks = [
+    { id: 0, type: 'heading',   startLine: 1, endLine: 1 },
+    { id: 1, type: 'paragraph', startLine: 3, endLine: 3 },
+  ];
+  const eStack = new UndoStack();
+  const m2 = commitBlockInsertion({ lines: eLines, blocks: eBlocks, stack: eStack }, 1, ['NEWBLOCK']);
+  assert.deepStrictEqual(m2.lines, ['# Doc', '', 'Para1', '', 'NEWBLOCK']);
+  assert.strictEqual(m2.lines.join('\n'), '# Doc\n\nPara1\n\nNEWBLOCK',
+    'EOF: no trailing blank line appended after the new block');
+  assert.strictEqual(m2.newStartLine, 5);
+  assert.deepStrictEqual(eStack.undo(m2.lines).lines, eLines, 'undo restores the exact original (EOF) bytes');
+
+  // non-blank neighbor: the hovered block is immediately followed by
+  // another block's content with NO blank line between them (malformed/
+  // edge-case input) — a fresh trailing blank is added so NEWBLOCK doesn't
+  // merge into what follows when the document is re-lexed.
+  const nLines = ['Para1', 'Para2'];
+  const nBlocks = [
+    { id: 0, type: 'paragraph', startLine: 1, endLine: 1 },
+    { id: 1, type: 'paragraph', startLine: 2, endLine: 2 },
+  ];
+  const nStack = new UndoStack();
+  const m3 = commitBlockInsertion({ lines: nLines, blocks: nBlocks, stack: nStack }, 0, ['NEWBLOCK']);
+  assert.deepStrictEqual(m3.lines, ['Para1', '', 'NEWBLOCK', '', 'Para2']);
+  assert.strictEqual(m3.lines.join('\n'), 'Para1\n\nNEWBLOCK\n\nPara2',
+    'no pre-existing blank to reuse: a fresh trailing blank is added too');
+  assert.strictEqual(m3.newStartLine, 3);
+  assert.deepStrictEqual(nStack.undo(m3.lines).lines, nLines, 'undo restores the exact original bytes');
+
+  // Multi-line new block (e.g. the table skeleton) round-trips too.
+  const tLines = ['Para1', '', 'Para2'];
+  const tBlocks = [
+    { id: 0, type: 'paragraph', startLine: 1, endLine: 1 },
+    { id: 1, type: 'paragraph', startLine: 3, endLine: 3 },
+  ];
+  const tStack = new UndoStack();
+  const m4 = commitBlockInsertion({ lines: tLines, blocks: tBlocks, stack: tStack }, 0,
+    ['| A | B |', '|---|---|', '|  |  |']);
+  assert.strictEqual(m4.lines.join('\n'), 'Para1\n\n| A | B |\n|---|---|\n|  |  |\n\nPara2');
+  assert.strictEqual(m4.newStartLine, 3);
+  assert.deepStrictEqual(tStack.undo(m4.lines).lines, tLines, 'undo restores exactly, multi-line insert included');
 }
 
 // -- Finding 5: empty heading emits no trailing space ------------------------

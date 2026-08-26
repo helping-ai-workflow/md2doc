@@ -554,6 +554,36 @@ async function travelPointer(page, from, to, steps) {
   }
 }
 
+// ── §10-gap fix (block-level insert/delete) helpers ─────────────────────
+// Own isolated doc/server per scenario group, same isolation reasoning as
+// setupTableDoc()/setupListDoc() above.
+async function setupBlockOpsDoc(rows) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-blockops-'));
+  const mdPath = path.join(dir, 'doc.md');
+  const original = rows.join('\n');
+  fs.writeFileSync(mdPath, original, 'utf8');
+  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
+}
+
+// Hovers a block to reveal its ＋ button, opens its small insert menu, and
+// clicks the menu item whose exact textContent is `label` (段落/標題/清單/
+// 表格/程式碼). Mirrors clickGutterMenuItem()'s role for the ⠿ menu.
+async function clickInsertMenuItem(page, sel, label) {
+  await page.hover(sel);
+  await page.click(sel + ' .ed-insert');
+  await page.waitForFunction(
+    (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
+    {}, sel
+  );
+  await page.evaluate((s, l) => {
+    const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
+      .find((b) => b.textContent === l);
+    if (!btn) throw new Error('insert menu item not found: ' + l);
+    btn.click();
+  }, sel, label);
+}
+
 (async () => {
   const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
@@ -1130,8 +1160,9 @@ async function travelPointer(page, from, to, steps) {
       assert.strictEqual(
         await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
           .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-        '+,MD 原始碼,−,✕'.split(',').sort().join(','),
-        'the ⠿ menu on a heading must show ± / MD 原始碼 / ✕'
+        // §10-gap fix: the ⠿ menu also gained a 刪除 (delete block) item.
+        '+,MD 原始碼,−,✕,刪除'.split(',').sort().join(','),
+        'the ⠿ menu on a heading must show ± / MD 原始碼 / 刪除 / ✕'
       );
       // The MD escape hatch forces raw-edit even on a WYSIWYG-eligible block
       // — the direct migration of the old bar's MD button.
@@ -4949,6 +4980,303 @@ async function travelPointer(page, from, to, steps) {
         console.log('Finding 6b: table row drop with a dirty burst open elsewhere commits BOTH — OK');
       } finally {
         f6bSrv.close();
+      }
+    }
+
+    // ── §10-gap fix: block-level INSERT (＋) and DELETE (⠿ menu) ───────────
+
+    // ── ＋ menu appears, with the 5 expected items ──────────────────────────
+    {
+      const { srv: biSrv, url: biUrl } = await setupBlockOpsDoc(
+        ['# Doc', '', 'Para one.', '', 'Para two.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'Para one.');
+        await page.hover(sel);
+        await page.click(sel + ' .ed-insert');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
+          {}, sel
+        );
+        const labels = await page.evaluate((s) =>
+          Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn')).map((b) => b.textContent),
+          sel);
+        assert.deepStrictEqual(labels, ['段落', '標題', '清單', '表格', '程式碼'],
+          '＋ menu must offer exactly the 5 block kinds, in order');
+        await page.close();
+        console.log('§10: ＋ menu appears with 5 items — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── insert paragraph → type → saved file exact ──────────────────────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc(
+        ['# Doc', '', 'Para one.', '', 'Para two.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'Para one.');
+        const beforeCount = await page.evaluate(() =>
+          document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
+        await clickInsertMenuItem(page, sel, '段落');
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount + 1
+        );
+        // Caret must land in the new block's own edit surface, focused and
+        // ready to type — the "select-all placeholder" contract means the
+        // very first keystroke replaces the ZWSP placeholder, not appends
+        // next to it.
+        await page.keyboard.type('Hello inserted');
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(savedText, '# Doc\n\nPara one.\n\nHello inserted\n\nPara two.',
+          'exact byte contract for a paragraph insert immediately typed into, got:\n' + savedText);
+        await page.close();
+        console.log('§10: insert paragraph -> type -> saved file exact — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── insert table → skeleton in file, caret in first (body) cell ────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc(
+        ['# Doc', '', 'Para one.', '', 'Para two.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'Para one.');
+        await clickInsertMenuItem(page, sel, '表格');
+        await page.waitForSelector('.ed-block[data-block-type="table"] td');
+        const caretInFirstBodyCell = await page.evaluate(() => {
+          const table = document.querySelector('.ed-block[data-block-type="table"] table');
+          const firstBodyCell = table && table.tBodies[0] && table.tBodies[0].rows[0] &&
+            table.tBodies[0].rows[0].cells[0];
+          return !!firstBodyCell && document.activeElement === firstBodyCell;
+        });
+        assert.ok(caretInFirstBodyCell, 'caret must land in the new table\'s first BODY cell, not the header');
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(
+          savedText,
+          '# Doc\n\nPara one.\n\n| A | B |\n|---|---|\n|  |  |\n\nPara two.',
+          'exact byte contract for the table skeleton, got:\n' + savedText
+        );
+        await page.close();
+        console.log('§10: insert table -> skeleton in file, caret in first cell — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── delete block via ⠿ → file exact (blank line absorbed) ──────────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc(
+        ['# Doc', '', 'ParaA.', '', 'ParaB.', '', 'ParaC.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'ParaB.');
+        await clickGutterMenuItem(page, sel, '刪除');
+        await page.waitForFunction(
+          () => !Array.from(document.querySelectorAll('.ed-block'))
+            .some((b) => b.textContent.includes('ParaB.'))
+        );
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(savedText, '# Doc\n\nParaA.\n\nParaC.',
+          'delete must absorb exactly one blank-line separator, got:\n' + savedText);
+        await page.close();
+        console.log('§10: delete block via ⠿ -> file exact (blank absorbed) — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── Ctrl+Z restores delete ───────────────────────────────────────────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(
+        ['# Doc', '', 'ParaA.', '', 'ParaB.', '', 'ParaC.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'ParaB.');
+        await clickGutterMenuItem(page, sel, '刪除');
+        await page.waitForFunction(
+          () => !Array.from(document.querySelectorAll('.ed-block'))
+            .some((b) => b.textContent.includes('ParaB.'))
+        );
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => Array.from(document.querySelectorAll('.ed-block'))
+            .some((b) => b.textContent.includes('ParaB.'))
+        );
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(savedText, original,
+          'Ctrl+Z after a block delete must restore the ORIGINAL bytes exactly, got:\n' + savedText);
+        await page.close();
+        console.log('§10: Ctrl+Z restores delete — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── Ctrl+Z removes insert ────────────────────────────────────────────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(
+        ['# Doc', '', 'Para one.', '', 'Para two.']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        const sel = await paragraphSelByText(page, 'Para one.');
+        const beforeCount = await page.evaluate(() =>
+          document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
+        await clickInsertMenuItem(page, sel, '段落');
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount + 1
+        );
+        // No typing — Ctrl+Z immediately: the fresh burst on the new block
+        // is already at its history bottom (untouched), so this cascades
+        // straight out to the document-level undo() stack, which must
+        // remove the whole inserted block in ONE step.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
+          {}, beforeCount
+        );
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(savedText, original,
+          'Ctrl+Z after a block insert must remove it entirely (ONE undo op), got:\n' + savedText);
+        await page.close();
+        console.log('§10: Ctrl+Z removes insert — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── insert with a dirty burst open elsewhere → burst committed AND
+    //    insert lands ────────────────────────────────────────────────────────
+    {
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc([
+        '# Doc', '', 'Dirty target text here.', '', 'Insert target text here.', '', 'Trailer text here.',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+
+        const dirtySel = await paragraphSelByText(page, 'Dirty target text here.');
+        await openWysiwyg(page, dirtySel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), dirtySel),
+          true,
+          'sanity: the dirty burst must still be open (never blurred) before the insert'
+        );
+
+        const insertSel = await paragraphSelByText(page, 'Insert target text here.');
+        await clickInsertMenuItem(page, insertSel, '段落');
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('Dirty target text here. EDITED')
+        );
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty target text here. EDITED')),
+          'the dirty burst elsewhere must have been COMMITTED (not silently discarded) by the insert'
+        );
+
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(
+          savedText,
+          '# Doc\n\nDirty target text here. EDITED\n\nInsert target text here.\n\n​\n\nTrailer text here.',
+          'both the dirty burst commit AND the insert must land, got:\n' + savedText
+        );
+        await page.close();
+        console.log('§10: insert with a dirty burst open elsewhere commits BOTH — OK');
+      } finally {
+        biSrv.close();
+      }
+    }
+
+    // ── extra coverage: 標題/清單/程式碼 insert kinds also land correctly
+    //    (段落/表格 already covered above) — three sequential inserts on the
+    //    same doc, each typed into and committed via the NEXT insert's own
+    //    switchAwayFrom() (structural ops resolve whatever's open first —
+    //    same requirement as the dirty-burst-elsewhere scenario above), the
+    //    last one (the code fence) committed by the final Ctrl+S. ──────────
+    {
+      // No pre-existing heading block in this fixture (unlike the other
+      // scenarios' '# Doc' title) — the single '.ed-block[data-block-type=
+      // "heading"]' this doc will ever contain is the one inserted below,
+      // so it can be located unambiguously without an index/text lookup.
+      const { srv: biSrv, url: biUrl, mdPath: biMdPath } = await setupBlockOpsDoc([
+        'Heading anchor.', '', 'List anchor.', '', 'Code anchor.', '', 'Trailer.',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+
+        const hSel = await paragraphSelByText(page, 'Heading anchor.');
+        await clickInsertMenuItem(page, hSel, '標題');
+        await page.waitForSelector('.ed-block[data-block-type="heading"]');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.activeElement === document.querySelector('.ed-block[data-block-type="heading"] > *')),
+          true, 'caret must land in the freshly-inserted heading'
+        );
+        await page.keyboard.type('New Heading');
+
+        const lSel = await paragraphSelByText(page, 'List anchor.');
+        await clickInsertMenuItem(page, lSel, '清單');
+        await page.waitForSelector('.ed-block[data-block-type="list"] li');
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.ed-block[data-block-type="heading"] > *').textContent === 'New Heading'),
+          'the heading insert must have been committed by the list insert\'s own switchAwayFrom()'
+        );
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.activeElement === document.querySelector('.ed-block[data-block-type="list"] > *')),
+          true, 'caret must land in the freshly-inserted list'
+        );
+        await page.keyboard.type('New item text');
+
+        const cSel = await paragraphSelByText(page, 'Code anchor.');
+        await clickInsertMenuItem(page, cSel, '程式碼');
+        await page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.ed-block[data-block-type="list"] li').textContent === 'New item text'),
+          'the list insert must have been committed by the code insert\'s own switchAwayFrom()'
+        );
+        // Caret must sit on the blank BODY line between the two fences, not
+        // after the closing fence — otherwise typing would land outside
+        // (or merge onto the same line as) the code block.
+        const taState = await page.evaluate(() => {
+          const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+          return { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+        });
+        assert.strictEqual(taState.value, '```\n\n```', 'the code skeleton is a fence pair with one empty body line');
+        assert.strictEqual(taState.start, 4, 'caret must sit on the blank body line, not at the end');
+        assert.strictEqual(taState.end, 4);
+        await page.keyboard.type('console.log(1);');
+
+        const savedText = await saveAndRead(page, biMdPath);
+        assert.strictEqual(
+          savedText,
+          'Heading anchor.\n\n## New Heading\n\nList anchor.\n\n- New item text\n\n' +
+          'Code anchor.\n\n```\nconsole.log(1);\n```\n\nTrailer.',
+          'all three inserts (標題/清單/程式碼) must land with their typed content, got:\n' + savedText
+        );
+        await page.close();
+        console.log('§10: 標題/清單/程式碼 inserts all land correctly — OK');
+      } finally {
+        biSrv.close();
       }
     }
 
