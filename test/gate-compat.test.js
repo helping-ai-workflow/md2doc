@@ -278,4 +278,23 @@ function assertGateCompatListRoundTrips(md, label) {
   assertGateCompatListRoundTrips(md, 'ol-parent nested ul');
 }
 
+// 12. ed-li-text DOM shape (Task 4 output): line-shape and round-trip
+// invariants must hold for the new <li> format the editor actually produces.
+// A task item's '- [ ] ' marker is 6 chars wide; the nested item indents by
+// 6 spaces — still satisfies /^ *(-|\d+\.) / and re-lexes as one top-level
+// list token (6 ≥ 2, the parent bullet's actual CommonMark attachment width).
+{
+  const edLi1 = el('LI', { 'data-block-id': '0' },
+    el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
+    el('DIV', { class: 'ed-li-text' }, 'todo item'),
+    ul(el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, 'nested item')))
+  );
+  const edLi2 = el('LI', { 'data-block-id': '2' },
+    el('DIV', { class: 'ed-li-text' }, 'plain item')
+  );
+  const { md } = listMd.serializeList(ul(edLi1, edLi2));
+  assertGateCompatList(md, 'ed-li-text shape');
+  assertGateCompatListRoundTrips(md, 'ed-li-text shape');
+}
+
 console.log('gate-compat.test.js OK');
