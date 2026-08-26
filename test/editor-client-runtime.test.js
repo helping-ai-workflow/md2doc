@@ -412,39 +412,77 @@ async function hoverAndClickRowInsert(page, tableSel, afterRowIndex) {
 }
 
 // ── Task 6 (edge-click menus + row drag-reorder) helpers ────────────────
-// Coordinates INSIDE a column's TOP edge zone / a row's LEFT edge zone — as
-// opposed to colBoundaryCoords()/rowBoundaryCoords() above, which target a
-// BOUNDARY (for the hover-insert bubbles). This is the exact geometry
-// client.js's own hitTestEdgeZone() checks: y within TE_EDGE_PX of the
-// table's top and x within the header cell's own left..right span for a
-// column; x within TE_EDGE_PX of the table's left and y within the row's
-// own top..bottom span for a row.
-async function colEdgeZoneCoords(page, tableSel, colIndex) {
-  return page.evaluate((ts, ci) => {
+// The invisible TE_EDGE_PX pixel-hunting zones the ORIGINAL Task 6 design
+// used are retired — user-acceptance feedback found them unusably small
+// with no visible affordance. Interaction now goes through two Notion-style
+// grip handles (.ed-te-grip-row / .ed-te-grip-col): hovering a cell reveals
+// the corresponding grip (client.js's own rAF-throttled mousemove listener,
+// same one that drives the hover-insert bubbles), and the grip itself —
+// not raw table-edge geometry — is the click/drag target below.
+//
+// hoverColumnCell()/hoverBodyRowCell() hover a real cell (driving that
+// listener exactly like a real user) and wait for the matching grip to
+// appear; gripCenter() reads back that grip's own on-screen center so a
+// caller can press/drag AT it.
+async function hoverColumnCell(page, tableSel, colIndex) {
+  const box = await page.evaluate((ts, ci) => {
     const table = document.querySelector(ts + ' table');
     const r = table.tHead.rows[0].cells[ci].getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: table.getBoundingClientRect().top };
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, tableSel, colIndex);
+  await page.mouse.move(box.x, box.y);
+  await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
 }
-async function rowEdgeZoneCoords(page, tableSel, isHeader, bodyIndex) {
-  return page.evaluate((ts, ih, bi) => {
+async function hoverBodyRowCell(page, tableSel, bodyIndex) {
+  const box = await page.evaluate((ts, bi) => {
     const table = document.querySelector(ts + ' table');
-    const row = ih ? table.tHead.rows[0] : table.tBodies[0].rows[bi];
-    const r = row.getBoundingClientRect();
-    return { x: table.getBoundingClientRect().left, y: r.top + r.height / 2 };
-  }, tableSel, isHeader, bodyIndex);
+    const r = table.tBodies[0].rows[bi].cells[0].getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, tableSel, bodyIndex);
+  await page.mouse.move(box.x, box.y);
+  await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
 }
-// A real press+release with NO intermediate movement — same primitive a
-// plain click on an edge zone drives (client.js's drag-threshold check
-// never trips), reused by both the menu-open scenarios and (with actual
-// movement injected between down/up) the drag scenarios below.
+// Hovers the HEADER row's first cell WITHOUT waiting for a row grip — used
+// by the "header row shows no grip" scenario below, where none must appear.
+async function hoverHeaderRowCell(page, tableSel) {
+  const box = await page.evaluate((ts) => {
+    const table = document.querySelector(ts + ' table');
+    const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, tableSel);
+  await page.mouse.move(box.x, box.y);
+}
+async function gripCenter(page, gripSel) {
+  return page.evaluate((s) => {
+    const r = document.querySelector(s).getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, gripSel);
+}
+// Convenience wrappers: hover the cell, then read back the grip's own
+// center — the coordinates every menu-open/drag scenario below presses at.
+async function colGripCoords(page, tableSel, colIndex) {
+  await hoverColumnCell(page, tableSel, colIndex);
+  return gripCenter(page, '.ed-te-grip-col');
+}
+async function rowGripCoords(page, tableSel, bodyIndex) {
+  await hoverBodyRowCell(page, tableSel, bodyIndex);
+  return gripCenter(page, '.ed-te-grip-row');
+}
+// A real press+release with NO intermediate movement AT the grip's own
+// coordinates — same primitive a plain click on a grip drives (client.js's
+// drag-threshold check never trips), reused by both the menu-open scenarios
+// and (with actual movement injected between down/up) the drag scenarios
+// below.
 async function pressReleaseAt(page, x, y) {
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.up();
 }
-// Presses at `from`, moves through a midpoint (so the drag crosses
-// client.js's TE_DRAG_THRESHOLD_PX before landing), and releases at `to`.
+// Presses at `from` (the row grip's own coordinates), moves through a
+// midpoint (so the drag crosses client.js's TE_DRAG_THRESHOLD_PX before
+// landing), and releases at `to` (a drop-boundary coordinate from
+// rowBoundaryCoords() above — unrelated to the grips, still plain table-row
+// geometry).
 async function dragRowTo(page, from, to) {
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
@@ -2836,7 +2874,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const colB = await colEdgeZoneCoords(page, table0, 1);
+        const colB = await colGripCoords(page, table0, 1);
         await pressReleaseAt(page, colB.x, colB.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         assert.strictEqual(
@@ -2887,7 +2925,7 @@ async function saveAndRead(page, mdPath) {
           '刪除欄 must remove the column from every row, minimal form, got:\n' + afterDelete);
 
         // Refusal: the LAST remaining column refuses with a banner and stays.
-        const colA = await colEdgeZoneCoords(page, table0, 0);
+        const colA = await colGripCoords(page, table0, 0);
         await pressReleaseAt(page, colA.x, colA.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         await page.click('.ed-te-menu-delete');
@@ -2903,8 +2941,10 @@ async function saveAndRead(page, mdPath) {
     }
 
     // Row menu: click shows the menu (刪除列 only, row highlighted),
-    // deleting a body row removes it; the header row and the LAST body row
-    // both refuse with a banner.
+    // deleting a body row removes it; the LAST body row refuses with a
+    // banner. The header row is covered separately below (it never gets a
+    // row grip at all, so there is no click path left to reach its old
+    // refusal banner through).
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -2914,7 +2954,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const row0 = await rowEdgeZoneCoords(page, table0, false, 0);
+        const row0 = await rowGripCoords(page, table0, 0);
         await pressReleaseAt(page, row0.x, row0.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         assert.strictEqual(
@@ -2937,7 +2977,7 @@ async function saveAndRead(page, mdPath) {
           '刪除列 must remove exactly that row, got:\n' + afterDelete);
 
         // Refusal: the LAST body row refuses.
-        const lastRow = await rowEdgeZoneCoords(page, table0, false, 0);
+        const lastRow = await rowGripCoords(page, table0, 0);
         await pressReleaseAt(page, lastRow.x, lastRow.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         await page.click('.ed-te-menu-delete');
@@ -2947,18 +2987,59 @@ async function saveAndRead(page, mdPath) {
           'refusing to delete the last body row must leave it in place');
         await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
 
-        // Refusal: the HEADER row refuses.
-        const headerRow = await rowEdgeZoneCoords(page, table0, true, 0);
-        await pressReleaseAt(page, headerRow.x, headerRow.y);
-        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
-        await page.click('.ed-te-menu-delete');
-        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        await page.close();
+        console.log('table edge menus: row menu highlights/deletes; last-body-row refuses — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // Grip handles: hovering a body row/column reveals an adequately-sized
+    // (>=18x24px) grip; the header row (never deletable/draggable) never
+    // gets a row grip at all, even while hovered.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await hoverColumnCell(page, table0, 0);
+        const colBox = await page.evaluate(() => {
+          const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+          return { width: r.width, height: r.height };
+        });
+        assert.ok(colBox.width >= 18 && colBox.height >= 24,
+          'the column grip must be at least 18x24px, got ' + colBox.width + 'x' + colBox.height);
+
+        await hoverBodyRowCell(page, table0, 0);
+        const rowBox = await page.evaluate(() => {
+          const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return { width: r.width, height: r.height };
+        });
+        assert.ok(rowBox.width >= 18 && rowBox.height >= 24,
+          'the row grip must be at least 18x24px, got ' + rowBox.width + 'x' + rowBox.height);
+
+        // Header row: hovering it must never reveal a row grip (it isn't
+        // deletable/draggable) — give the throttled mousemove/rAF handler a
+        // couple of frames to settle, same "proving an absence needs a
+        // settle window" idiom Task 5's own degraded-table hover-insert test
+        // uses, then assert the row grip stayed hidden.
+        await hoverHeaderRowCell(page, table0);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
         assert.strictEqual(
-          await page.evaluate((s) => !!document.querySelector(s + ' thead tr'), table0), true,
-          'refusing to delete the header row must leave it in place');
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'hovering the header row must never reveal a row grip');
+        // The column grip must still work over the header row's own cells
+        // (columns include the header — delete/align both apply to it).
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
+          'hovering the header row must still reveal the COLUMN grip for that column');
 
         await page.close();
-        console.log('table edge menus: row menu highlights/deletes; header + last-body-row refuse — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip — OK');
       } finally {
         tsrv.close();
       }
@@ -2976,7 +3057,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const from = await rowEdgeZoneCoords(page, table0, false, 2); // row "3"
+        const from = await rowGripCoords(page, table0, 2); // row "3"
         const to = await rowBoundaryCoords(page, table0, -1); // boundary just above row "1"
         await dragRowTo(page, from, to);
         await page.waitForFunction(
@@ -3028,7 +3109,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const from = await rowEdgeZoneCoords(page, table0, false, 2);
+        const from = await rowGripCoords(page, table0, 2);
         const to = await rowBoundaryCoords(page, table0, -1);
         await page.mouse.move(from.x, from.y);
         await page.mouse.down();
@@ -3044,6 +3125,10 @@ async function saveAndRead(page, mdPath) {
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-drop-indicator').hidden), true,
           'Esc during a drag must hide the drop indicator'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').classList.contains('ed-te-grip-dragging')),
+          false, 'Esc during a drag must strip the row grip\'s "dragging" visual too'
         );
         const fileText = await saveAndRead(page, tmdPath);
         assert.strictEqual(fileText, torig, 'a cancelled drag must never touch the file, got:\n' + fileText);
@@ -3070,7 +3155,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const from = await rowEdgeZoneCoords(page, table0, false, 2);
+        const from = await rowGripCoords(page, table0, 2);
         const to = await rowBoundaryCoords(page, table0, -1);
         await page.mouse.move(from.x, from.y);
         await page.mouse.down();
@@ -3088,11 +3173,32 @@ async function saveAndRead(page, mdPath) {
           await page.evaluate(() => document.querySelector('.ed-tb-insert-col').hidden), true,
           'the hover-insert column bubble must stay hidden while a real drag is in flight'
         );
+        // Same reasoning applies to the column GRIP (it isn't meaningful
+        // mid row-drag); the ROW grip is the opposite — it must stay
+        // visible and switch to its "dragging" visual, since it IS the
+        // handle the user is holding (brief: "the active grip may stay as
+        // the drag handle visual").
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), true,
+          'the column grip must stay hidden while a real row drag is in flight'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'the row grip (the active drag handle) must stay visible during its own drag'
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').classList.contains('ed-te-grip-dragging')),
+          true, 'the row grip must wear its "dragging" visual while its own drag is in flight'
+        );
 
         await page.mouse.up();
         await page.waitForFunction(
           (s) => Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(',') === '3,1,2',
           {}, table0
+        );
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').classList.contains('ed-te-grip-dragging')),
+          false, 'the row grip must drop its "dragging" visual once the drag ends'
         );
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         const fileText = await saveAndRead(page, tmdPath);
@@ -3100,7 +3206,7 @@ async function saveAndRead(page, mdPath) {
           'the drag must still commit normally after the mid-drag bubble check, got:\n' + fileText);
 
         await page.close();
-        console.log('table row drag: hover-insert bubbles stay hidden during an active drag — OK');
+        console.log('table row drag: hover-insert bubbles + grips hide/switch correctly during an active drag — OK');
       } finally {
         tsrv.close();
       }
@@ -3125,7 +3231,7 @@ async function saveAndRead(page, mdPath) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        const from = await rowEdgeZoneCoords(page, table0, false, 2); // row "3"
+        const from = await rowGripCoords(page, table0, 2); // row "3"
         const to = await rowBoundaryCoords(page, table0, -1);
         await page.mouse.move(from.x, from.y);
         await page.mouse.down();
@@ -3150,6 +3256,10 @@ async function saveAndRead(page, mdPath) {
           false, 'pointercancel must un-dim the dragged row'
         );
         assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').classList.contains('ed-te-grip-dragging')),
+          false, 'pointercancel must strip the row grip\'s "dragging" visual too'
+        );
+        assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-drop-indicator').hidden), true,
           'pointercancel must hide the drop indicator'
         );
@@ -3161,7 +3271,7 @@ async function saveAndRead(page, mdPath) {
         // The next drag must still work cleanly — the original latch bug
         // left this permanently broken (the overwritten `tePointer` piled
         // state on top of the still-dimmed, never-cleaned-up prior row).
-        const from2 = await rowEdgeZoneCoords(page, table0, false, 0); // row "1"
+        const from2 = await rowGripCoords(page, table0, 0); // row "1"
         const to2 = await rowBoundaryCoords(page, table0, 2); // boundary after the last body row
         await dragRowTo(page, from2, to2);
         await page.waitForFunction(
@@ -3911,7 +4021,7 @@ async function saveAndRead(page, mdPath) {
         // 6) row drag: drag "Row3" (last body row) up above "Row1!" — no
         // burst is open yet, so the drop auto-starts a FRESH one (2-entry
         // local history: pre-drag, post-drag — see header comment).
-        const from = await rowEdgeZoneCoords(page, table0, false, 2); // "Row3"
+        const from = await rowGripCoords(page, table0, 2); // "Row3"
         const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1!"
         await dragRowTo(page, from, to);
         await page.waitForFunction(
@@ -4429,7 +4539,7 @@ async function saveAndRead(page, mdPath) {
           'sanity: the paragraph burst must be dirty and open (never blurred) before the row drag'
         );
 
-        const from = await rowEdgeZoneCoords(page, table0, false, 2); // "Row3"
+        const from = await rowGripCoords(page, table0, 2); // "Row3"
         const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1"
         await dragRowTo(page, from, to);
 

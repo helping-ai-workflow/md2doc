@@ -229,23 +229,29 @@ focus remains inside the table until you press Esc, click outside, or navigate a
 | Esc | Revert the entire table session (all cells) and discard all changes |
 | Ctrl + Z / Ctrl + Y | Step through the table's local edit history, then cascade to document-level history |
 
-**Column edge (top boundary)**: hover over the top edge of a column header — a **＋**
-insert bubble appears between columns. Click it to insert an empty column there.
-Click on the column's top edge itself (not the bubble) to open the column menu:
+**Column grip**: hover any cell in a column — a small horizontal 6-dot grip handle
+appears just above it (Notion-style affordance, replacing the old edge-hover-only
+target). Click the grip to open the column menu:
 
 | Option | Action |
 |---|---|
 | **刪除欄** | Delete the column (last column protected) |
 | **對齊** | Cycle alignment: left → center → right → left (no unset state; use Ctrl+Z to revert a cycle) |
 
-**Row edge (left boundary)**: hover over the left edge of a row — a **＋** insert
-bubble appears between rows. Click it to insert an empty row there. Click on the
-row's left edge itself to open the row menu:
+A **＋** insert bubble separately appears when you hover the top boundary between
+two columns — click it to insert an empty column there.
+
+**Row grip**: hover any cell in a body row — a small vertical 6-dot grip handle
+appears just left of it (the header row never gets one; it isn't deletable or
+draggable). Click the grip to open the row menu:
 
 | Option | Action |
 |---|---|
 | **刪除列** | Delete the row (header row and last body row protected) |
-| *Drag* | Press and hold on the row edge to drag the row up/down; drop to reorder (body rows only; header fixed) |
+| *Drag* | Press and hold the row grip and drag up/down; drop to reorder (body rows only; header fixed) |
+
+A **＋** insert bubble separately appears when you hover the left boundary between
+two rows — click it to insert an empty row there.
 
 **Edited tables emit minimal form**: tables that you edit are saved with single-space
 padding and minimal separators (`|---|`) to keep the Markdown readable and
