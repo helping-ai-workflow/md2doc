@@ -283,4 +283,90 @@ function assertRoundTrips(listEl, label) {
   assert.ok(!md.includes('\n\n'), 'no blank line inside emitted block');
 }
 
+// 9. ed-li-text wrapper is unwrapped, not flagged as unsupported
+{
+  const liEl = el('LI', { 'data-block-id': '0' }, el('DIV', { class: 'ed-li-text' }, text('hi')));
+  const r = serializeList(el('UL', {}, liEl));
+  assert.strictEqual(r.md, '- hi');
+  assert.deepStrictEqual(r.unsupported, []);
+}
+
+// 10. checkbox span is consumed into the task marker, not flagged unsupported
+{
+  const cli = el('LI', { 'data-block-id': '0' },
+    el('SPAN', { class: 'ed-li-check', 'data-checked': '1' }),
+    el('DIV', { class: 'ed-li-text' }, text('done'))
+  );
+  const r10 = serializeList(el('UL', {}, cli));
+  assert.strictEqual(r10.md, '- [x] done');
+  assert.deepStrictEqual(r10.unsupported, [],
+    'the consumed checkbox span must NOT be reported unsupported');
+}
+
+// 11. task child indent = 6 columns ('- [ ] ' is 6 chars wide; childIndentPrefix
+// derives from marker.length, so the nested item indents by exactly 6 spaces)
+{
+  const pli = el('LI', { 'data-block-id': '0' },
+    el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
+    el('DIV', { class: 'ed-li-text' }, text('parent')),
+    el('UL', {},
+      el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, text('kid')))
+    )
+  );
+  assert.strictEqual(serializeList(el('UL', {}, pli)).md, '- [ ] parent\n      - kid');
+}
+
+// 11b. ORDERED task child indent = 7 columns ('1. [x] ' is 7 chars wide) —
+// the ordered branch must combine BOTH the '1. ' bullet width and the '[x] '
+// checkbox width when deriving childIndentPrefix, not just one of them.
+{
+  const pli = el('LI', { 'data-block-id': '0' },
+    el('SPAN', { class: 'ed-li-check', 'data-checked': '1' }),
+    el('DIV', { class: 'ed-li-text' }, text('parent')),
+    el('UL', {},
+      el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, text('kid')))
+    )
+  );
+  assert.strictEqual(serializeList(el('OL', {}, pli)).md, '1. [x] parent\n       - kid');
+}
+
+// 12. per-li attribution: unsupported names carry the li's blockId
+{
+  const badLi = el('LI', { 'data-block-id': '2' },
+    el('DIV', { class: 'ed-li-text' }, el('VIDEO', {}))
+  );
+  const rb = serializeList(el('UL', {}, badLi));
+  assert.deepStrictEqual(rb.unsupportedByLi, [{ blockId: '2', names: ['VIDEO'] }]);
+  // the flat `unsupported` list and the emitted md must agree with the per-li
+  // attribution: VIDEO dropped, the now-empty li serialized to a bare marker.
+  assert.deepStrictEqual(rb.unsupported, ['VIDEO']);
+  assert.strictEqual(rb.md, '-',
+    'a li whose only content was a dropped VIDEO serializes to a bare marker');
+}
+
+// 13. ordered task item round-trips as task: true (RULING F-N — the ordered
+// branch must not swallow the checkbox; bullet '1. ' and checkbox '[x] '
+// are independent parts, yielding '1. [x] done', not '1. done')
+{
+  const otli = el('LI', { 'data-block-id': '3' },
+    el('SPAN', { class: 'ed-li-check', 'data-checked': '1' }),
+    el('DIV', { class: 'ed-li-text' }, text('done'))
+  );
+  const otr = serializeList(el('OL', {}, otli));
+  assert.strictEqual(otr.md, '1. [x] done');
+  const lexedOt = marked.lexer(otr.md);
+  assert.strictEqual(lexedOt[0].items[0].task, true, 'ordered task item must re-lex as task: true');
+}
+
+// 14. loose item via ed-li-text: .ed-li-text containing a single <p> must
+// still trigger loose-item detection (the unwrap feeds the SAME contentNodes
+// list — RULING F-M serializer-side test)
+{
+  const looseLi = el('LI', { 'data-block-id': '4' },
+    el('DIV', { class: 'ed-li-text' }, el('P', {}, text('paragraph')))
+  );
+  const looseR = serializeList(el('UL', {}, looseLi));
+  assert.ok(looseR.unsupported.includes('P'), 'loose item via ed-li-text must report P unsupported');
+}
+
 console.log('list-md.test.js OK');

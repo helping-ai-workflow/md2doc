@@ -126,6 +126,14 @@ assert.match(
   'expected td/th code nowrap'
 );
 
+// Task 2 (editor) — P0-b: splitter drag-line hugs TOC side, not centered
+// Anchor with (?:^|\}) so a scoped `body[...] .sidebar-splitter {` override can
+// never satisfy this guard while the unscoped base rule is missing.
+assert.match(html, /(?:^|\})\s*\.sidebar-splitter\s*\{[^}]*justify-content:\s*flex-start/,
+  'sidebar-splitter must justify-content: flex-start');
+assert.match(html, /\.sidebar-splitter::before\s*\{[^}]*margin-left:\s*4px/,
+  'sidebar-splitter::before must carry margin-left: 4px');
+
 // Task 3 (layout) — B3 fixture: classify and emit colgroup + cell classes
 const tableMdPath  = path.join(tmpDir, 'tables.md');
 const tableHtmlPath = path.join(tmpDir, 'tables.html');

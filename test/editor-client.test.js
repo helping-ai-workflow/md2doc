@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -284,5 +284,35 @@ assert.ok(!/<\/script/i.test(inlineMdSrc), 'inline-md.js must not contain a lite
 assert.ok(!/<\/script/i.test(tableMdSrc), 'table-md.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(listMdSrc), 'list-md.js must not contain a literal </script sequence');
 assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal </script sequence');
+
+// -- commitRangeEdit: explicit range, same op shape -------------------------
+// Asserted values (startLine/endLine/before/after and the null no-op) are
+// law from the task brief; helper spelling is ours (no mkState helper exists).
+{
+  const cLines = ['- a', '- b', '- c'];
+  const cBlocks = [
+    { id: 0, type: 'li', startLine: 1, endLine: 1 },
+    { id: 1, type: 'li', startLine: 2, endLine: 2 },
+    { id: 2, type: 'li', startLine: 3, endLine: 3 },
+  ];
+  const cStack = new UndoStack();
+  const r = commitRangeEdit({ lines: cLines, blocks: cBlocks, stack: cStack }, 1, 3, '- a\n- B\n- c');
+  assert.deepStrictEqual(r.op, {
+    startLine: 1, endLine: 3,
+    before: ['- a', '- b', '- c'],
+    after: ['- a', '- B', '- c'],
+  });
+  // no-op: committing identical text to an already-updated state returns
+  // op===null AND must not push onto the SAME stack that the real edit above
+  // used. (A fresh UndoStack here would make the "does not push" claim
+  // untestable — the depth would trivially be 0 either way.) UndoStack exposes
+  // no `undoOps` array; the real op count lives in `_done` (raw) / `dirtyDepth`.
+  const depthBefore = cStack._done.length;
+  assert.strictEqual(depthBefore, 1, 'sanity: the real range edit pushed exactly one op');
+  const noOp = commitRangeEdit({ lines: r.lines, blocks: r.blocks, stack: cStack }, 1, 3, r.lines.slice(0, 3).join('\n'));
+  assert.strictEqual(noOp.op, null, 'committing unchanged text must return op===null');
+  assert.strictEqual(cStack._done.length, depthBefore,
+    'a no-op commit must NOT push onto the undo stack (depth unchanged)');
+}
 
 console.log('editor-client.test.js OK');
