@@ -6653,6 +6653,166 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── Task 9: clickable task-list checkboxes ────────────────────────────
+
+    // T9-1: basic toggle — unordered task list.
+    // '- [ ] todo' → click .ed-li-check → file: '- [x] todo';
+    // click again → '- [ ] todo'; Ctrl+Z steps back one toggle.
+    // Asserts FILE BYTES (not just DOM attribute) at each step.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# Task doc', '', '- [ ] todo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // Locate the checkbox span.
+        const checkSel = 'li.ed-block[data-block-type="li"] .ed-li-check';
+        await page.waitForSelector(checkSel);
+
+        // Click once — should flip unchecked→checked and commit.
+        // Capture the li (a CHILD of .content) as the stale handle: when
+        // rerenderAll() replaces contentEl.innerHTML the li is detached.
+        const staleHandle1 = await page.evaluateHandle(() =>
+          document.querySelector('li.ed-block[data-block-type="li"]'));
+        await page.click(checkSel);
+        await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle1);
+        await staleHandle1.dispose();
+
+        let fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.includes('- [x] todo'),
+          'click #1: file must contain "- [x] todo", got:\n' + fileText);
+        assert.ok(!fileText.includes('- [ ] todo'),
+          'click #1: "- [ ] todo" must be gone from the file, got:\n' + fileText);
+
+        // Click again — should flip checked→unchecked.
+        const staleHandle2 = await page.evaluateHandle(() =>
+          document.querySelector('li.ed-block[data-block-type="li"]'));
+        await page.click(checkSel);
+        await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle2);
+        await staleHandle2.dispose();
+
+        fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.includes('- [ ] todo'),
+          'click #2: file must contain "- [ ] todo", got:\n' + fileText);
+        assert.ok(!fileText.includes('- [x] todo'),
+          'click #2: "- [x] todo" must be gone from the file, got:\n' + fileText);
+
+        // Ctrl+Z — should revert the second toggle (file back to "- [x] todo").
+        const staleHandle3 = await page.evaluateHandle(() =>
+          document.querySelector('li.ed-block[data-block-type="li"]'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        // Wait for the re-render triggered by undo (li is re-created).
+        await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle3);
+        await staleHandle3.dispose();
+        fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.includes('- [x] todo'),
+          'Ctrl+Z: undo of second toggle must restore "- [x] todo", got:\n' + fileText);
+
+        await page.close();
+        console.log('Task 9: checkbox toggle (unordered) — unchecked→checked→unchecked, Ctrl+Z reverts — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // T9-2: ordered task list — '1. [ ] todo' → toggle → '1. [x] todo'.
+    // The ordered bullet must survive the toggle (marker stays '1. ').
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# Task doc', '', '1. [ ] todo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const checkSel = 'li.ed-block[data-block-type="li"] .ed-li-check';
+        await page.waitForSelector(checkSel);
+
+        // Capture the li (child of .content) as stale handle — see T9-1 comment.
+        const staleHandle = await page.evaluateHandle(() =>
+          document.querySelector('li.ed-block[data-block-type="li"]'));
+        await page.click(checkSel);
+        await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle);
+        await staleHandle.dispose();
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.includes('1. [x] todo'),
+          'ordered task list toggle must produce "1. [x] todo", got:\n' + fileText);
+        assert.ok(!fileText.includes('1. [ ] todo'),
+          'ordered task list: "1. [ ] todo" must be gone, got:\n' + fileText);
+
+        await page.close();
+        console.log('Task 9: checkbox toggle (ordered list) — marker kept, state flipped — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // T9-3: structural gate — a run containing an unsupported li (with <video>)
+    // must refuse the toggle: banner appears, DOM shape unchanged (the checkbox
+    // data-checked attribute stays the same), file bytes unchanged.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# Task doc', '',
+          '- [ ] todo',
+          '- bad <video src="x"></video>',
+          '- [x] done',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // Find the first checkbox (the '- [ ] todo' item).
+        const todoCheckSel = await page.evaluate(() => {
+          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+          const todoLi = lis.find((li) => {
+            const check = li.querySelector(':scope > .ed-li-check');
+            return check && check.getAttribute('data-checked') === '0' &&
+                   li.querySelector(':scope > .ed-li-text') &&
+                   li.querySelector(':scope > .ed-li-text').textContent.trim() === 'todo';
+          });
+          if (!todoLi) return null;
+          const check = todoLi.querySelector(':scope > .ed-li-check');
+          const id = todoLi.getAttribute('data-block-id');
+          return id ? 'li.ed-block[data-block-id="' + id + '"] > .ed-li-check' : null;
+        });
+        assert.ok(todoCheckSel, '"todo" li checkbox not found');
+
+        const beforeChecked = await page.evaluate((s) =>
+          document.querySelector(s) && document.querySelector(s).getAttribute('data-checked'), todoCheckSel);
+        assert.strictEqual(beforeChecked, '0', 'sanity: checkbox must start unchecked');
+
+        // Click the checkbox — must be refused.
+        await page.click(todoCheckSel);
+        // Give any async handler time to settle.
+        await new Promise((r) => setTimeout(r, 400));
+
+        // Banner must have appeared.
+        const bannerVisible = await page.evaluate(() => !!document.querySelector('.ed-conflict'));
+        assert.ok(bannerVisible, 'clicking a checkbox in a run with unsupported li must show the refusal banner');
+
+        // DOM attribute must be unchanged.
+        const afterChecked = await page.evaluate((s) =>
+          document.querySelector(s) && document.querySelector(s).getAttribute('data-checked'), todoCheckSel);
+        assert.strictEqual(afterChecked, '0',
+          'the checkbox data-checked must remain "0" after a refused toggle, got: ' + afterChecked);
+
+        // File must be byte-identical — nothing was committed.
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'refused toggle must leave the file byte-identical, got:\n' + fileText);
+
+        await page.close();
+        console.log('Task 9: checkbox toggle refused on run with unsupported li — banner shown, DOM and file intact — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
