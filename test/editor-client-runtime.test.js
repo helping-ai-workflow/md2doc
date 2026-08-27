@@ -5170,6 +5170,111 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // RULING F-T: Tab must not RETYPE the item it moves. `a` already owns an
+    // ORDERED sublist and `b` is a bullet, so appending b into a's <ol> would
+    // emit it as '2. b' — list-md.js derives an item's marker from its list node,
+    // not from anything on the item. The indent target is therefore `a`'s
+    // sublist of the SAME type as the list b is LEAVING (created here, since a
+    // has no unordered sublist). Same root cause as row 6's adoption target, and
+    // runShapeOf() cannot see it — the file bytes are the assertion.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- a', '  1. x', '- b', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:x | 0:b',
+          'sanity: the fixture must start as a > (ol:x) and a sibling bullet b');
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:x | 1:b',
+          'b must become a child of a, alongside the pre-existing ordered sublist');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('li.ed-block'));
+            const b = lis.find((l) => {
+              const surface = l.querySelector(':scope > .ed-li-text');
+              return surface && surface.textContent.trim() === 'b';
+            });
+            return b ? b.parentElement.nodeName : null;
+          }),
+          'UL',
+          'the indented item must land in an UNORDERED list — the type of the list it came from'
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- a\n  1. x\n  - b\n',
+          'the indented bullet must still be emitted as a bullet (never renumbered into a\'s ' +
+          'ordered sublist), got:\n' + JSON.stringify(fileText));
+
+        await reopenWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          { timeout: 5000 }
+        );
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z must restore the mixed-type shape exactly, got:\n' + JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 5 / F-T): Tab keeps the moved item\'s own list type across a ' +
+          'mixed-type previous sibling — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RULING F-U: liOwnTextIsBlank() treats an NBSP-only surface as blank (so the
+    // press outdents), but the placeholder clear used to fire only on
+    // textContent === '' — so that item committed as '- ' + a stray NBSP instead
+    // of a bare '-'. A real user reaches this state by emptying an item and then
+    // pressing Space: Chromium stores the space as &nbsp; in a contenteditable.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- a', '  - b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await emptyListItemText(page, list0, 'b');
+        await page.keyboard.press('Space');
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement.innerHTML), '&nbsp;',
+          'sanity: Chromium must have stored the typed space as an NBSP — the whole point of F-U'
+        );
+
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- a\n-\n',
+          'an NBSP-only item must outdent to a BARE "-" — list-md.js only trims trailing space/tab, ' +
+          'so an unhandled NBSP would survive into the line, got:\n' + JSON.stringify(fileText));
+        assert.ok(fileText.indexOf('\u00a0') === -1,
+          'no NBSP may survive anywhere in the committed file');
+
+        await page.close();
+        console.log('list WYSIWYG (row 3 / F-U): an NBSP-only item outdents to a bare "-" — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     // Per-li arch: each li is armed independently via canWysiwygForLi().
     // Checkbox (task-list) lis are armed — the .ed-li-check span is handled
     // by serializeList() directly and produces no `unsupported` entries.
