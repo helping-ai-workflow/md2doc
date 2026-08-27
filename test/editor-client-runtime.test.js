@@ -153,7 +153,21 @@ async function clickGutterMenuItem(page, sel, label) {
 // at every call site) purely so the many pre-existing Task 3/4 scenarios
 // below read the same way they did before the migration.
 async function openWysiwyg(page, sel) {
-  await page.click(sel);
+  // Task 8 (per-li arch geometry): a li block's box ENCLOSES its nested
+  // sublist, so page.click()'s center-of-box coordinate for a parent item
+  // lands on a CHILD item's surface (or the gap between them) rather than on
+  // the parent's own .ed-li-text — the burst then opens on the wrong li and
+  // the wait below never settles. Click the surface itself for li blocks;
+  // identical target for a li with no sublist, and every non-li caller keeps
+  // clicking the block box exactly as before.
+  // The li check is deliberately made against the SELECTOR STRING
+  // (listBlockSel() / liBlockSelByText() both return 'li.ed-block[...]') rather
+  // than by asking the page: an extra CDP round-trip here would shift EVERY
+  // caller's click one round-trip later, which is enough to lose a
+  // stale-handle race against a commit's .content swap in the scenarios that
+  // click immediately after a commit.
+  const isLi = sel.indexOf('li.ed-block') === 0;
+  await page.click(isLi ? sel + ' > .ed-li-text' : sel);
   // Wait for the burst to actually have started (native focus landed AND
   // client.js's own async focusin handling settled — see openBlockEditor()'s
   // comment for why a plain contenteditable-true check alone isn't enough:
@@ -162,6 +176,36 @@ async function openWysiwyg(page, sel) {
     (s) => document.activeElement === document.querySelector(s + ' > *'),
     {}, sel
   );
+}
+
+// Task 8: re-opens a burst on `sel` when that surface may ALREADY hold native
+// focus. A Ctrl+S resolves the open burst (client.js's resolveBurst()) and
+// ends it, but deliberately does NOT blur — so page.click() on the same
+// surface fires no focusin and no NEW burst starts, leaving the next keystroke
+// unowned. Blur explicitly first, then open the normal way.
+async function reopenWysiwyg(page, sel) {
+  await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+  await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
+  await openWysiwyg(page, sel);
+}
+
+// Task 8: waits until the node currently matching `sel` has actually been
+// REPLACED by a commit's rerenderAll() .content swap. Capture the handle BEFORE
+// the keystroke that commits, then await its detachment.
+//
+// Needed wherever a commit's only other observable signal is text that was
+// ALREADY on screen before the commit (anything typed into a burst): a
+// waitForFunction on that text returns immediately, so the steps that follow
+// resolve their element handles against the still-live PRE-commit DOM and the
+// swap then tears those nodes out mid-hover/click ("Node is detached from
+// document"). Deterministic, unlike a fixed settle timeout: the captured node
+// is guaranteed to be the pre-commit one.
+async function nodeHandleFor(page, sel) {
+  return page.evaluateHandle((s) => document.querySelector(s), sel);
+}
+async function awaitContentSwap(page, staleHandle) {
+  await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle);
+  await staleHandle.dispose();
 }
 
 // Task 4 (selection toolbar) helpers: select a specific word (or the whole
@@ -293,6 +337,66 @@ async function listBlockSel(page, index) {
   return 'li.ed-block[data-block-id="' + id + '"]';
 }
 
+// Task 8: selector for the li.ed-block whose OWN text (its .ed-li-text
+// surface, excluding any nested sublist) trims to exactly `text` — needed by
+// the row-3/5/6 scenarios, which act on a NESTED item that listBlockSel()
+// (first li of a run) cannot address.
+async function liBlockSelByText(page, text) {
+  const id = await page.evaluate((t) => {
+    const lis = Array.prototype.slice.call(
+      document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+    const hit = lis.find((li) => {
+      const surface = li.querySelector(':scope > .ed-li-text');
+      return surface && surface.textContent.trim() === t;
+    });
+    return hit ? hit.getAttribute('data-block-id') : null;
+  }, text);
+  assert.ok(id, 'li block with own text "' + text + '" not found');
+  return 'li.ed-block[data-block-id="' + id + '"]';
+}
+
+// Task 8: the run's li lines in document order, read back from the SERVER-
+// rendered DOM — `data-indent` and `data-block-id` are produced by
+// blockmap.js from the committed markdown, so this is a faithful (and
+// commit-proving) projection of what actually landed in `lines`.
+async function runShapeOf(page, listSel) {
+  return page.evaluate((sel) => {
+    const liEl = document.querySelector(sel);
+    let root = null;
+    let cur = liEl && liEl.parentElement;
+    while (cur) {
+      if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
+          (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
+        root = cur;
+      }
+      cur = cur.parentElement;
+    }
+    if (!root) return null;
+    return Array.prototype.slice.call(root.querySelectorAll('li.ed-block')).map((li) => {
+      const surface = li.querySelector(':scope > .ed-li-text');
+      return li.getAttribute('data-indent') + ':' + (surface ? surface.textContent.trim() : '');
+    }).join(' | ');
+  }, listSel);
+}
+
+// Task 8: true iff the caret is COLLAPSED at the very start of `el` (no text
+// between the surface's start and the caret) — row 1's "caret to new block
+// start" assertion. Container-shape agnostic (the caret may sit on the
+// surface element itself at offset 0, or inside its first text node).
+async function caretIsAtStartOf(page, elSel) {
+  return page.evaluate((s) => {
+    const el = document.querySelector(s);
+    const sel = window.getSelection();
+    if (!el || !sel.rangeCount || !sel.isCollapsed) return false;
+    const r = sel.getRangeAt(0);
+    if (!el.contains(r.startContainer) && r.startContainer !== el) return false;
+    const probe = document.createRange();
+    probe.selectNodeContents(el);
+    probe.setEnd(r.startContainer, r.startOffset);
+    return probe.toString().length === 0;
+  }, elSel);
+}
+
 // Places a COLLAPSED caret just before (`atStart: true`) or just after
 // (`atStart: false`, default) the first occurrence of `text` found in any
 // text node under the outermost UL/OL that `listSel`'s li belongs to —
@@ -338,7 +442,7 @@ async function placeCaretInListText(page, listSel, text, atStart) {
 // Per-li arch: tree-walks from the outermost UL/OL root (same as
 // placeCaretInListText above) so nested items are reachable.
 async function emptyListItemText(page, listSel, text) {
-  await page.evaluate((sel, t) => {
+  const ownerSel = await page.evaluate((sel, t) => {
     const liEl = document.querySelector(sel);
     let root = null;
     let cur = liEl && liEl.parentElement;
@@ -356,12 +460,32 @@ async function emptyListItemText(page, listSel, text) {
       if (wCur.textContent.trim() === t) { node = wCur; break; }
     }
     if (!node) throw new Error('list item text not found: ' + t);
+    // Task 8 (per-li arch): every <li> has its OWN contenteditable
+    // .ed-li-text surface, so the native Backspace below is only delivered to
+    // the editing host that actually owns `node` if that host has focus. The
+    // caller may have opened the burst on a DIFFERENT li of the same run
+    // (openWysiwyg() always focuses the run's FIRST li), in which case the
+    // keystroke would land there and the selection would not be deleted at
+    // all. Focus the owning surface first — which is also exactly where a
+    // real user's caret would already be.
+    let owner = node.parentNode;
+    while (owner && !(owner.classList && owner.classList.contains('ed-li-text'))) {
+      owner = owner.parentNode;
+    }
+    if (owner) owner.focus();
     const range = document.createRange();
     range.selectNodeContents(node);
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(range);
+    const ownerLi = owner && owner.closest && owner.closest('li.ed-block');
+    return ownerLi
+      ? 'li.ed-block[data-block-id="' + ownerLi.getAttribute('data-block-id') + '"] > .ed-li-text'
+      : null;
   }, listSel, text);
+  if (ownerSel) {
+    await page.waitForFunction((s) => document.activeElement === document.querySelector(s), {}, ownerSel);
+  }
   await page.keyboard.press('Backspace');
 }
 
@@ -1795,11 +1919,15 @@ async function clickInsertMenuItem(page, sel, label) {
       await openWysiwyg(page, sel);
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
       await page.keyboard.type(' EDIT-ONE');
+      const staleEditEl = await nodeHandleFor(page, editEl);
       await page.keyboard.press('Enter');
       await page.waitForFunction(
         (s, t) => document.querySelector(s).textContent === t,
         {}, editEl, originalText + ' EDIT-ONE'
       );
+      // ' EDIT-ONE' is already on screen (it was typed), so the wait above can
+      // pass BEFORE the commit's re-render — see awaitContentSwap()'s comment.
+      await awaitContentSwap(page, staleEditEl);
 
       // A second burst on the SAME (now re-armed) block: type more text
       // (never explicitly flushed — the debounce coalesces every keystroke
@@ -4038,8 +4166,9 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // Task 8: green once Notion key semantics land
-    if (false) { // Task 8: Enter splits the current item into a new sibling at the caret.
+    // ── Task 8: Notion key semantics (spec §4 / §11 rows 1, 3, 5, 6, 7, 8) ──
+    // Row 1: Enter splits the current item into a new sibling at the caret.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4099,9 +4228,10 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Tab indents the item as a child of its previous sibling — the
+    // Tab indents the item as a child of its previous sibling — the
     // indent is the ACCUMULATED width of the parent's own marker ("- " is 2
     // columns), matching list-md.js's documented indent ruling.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4115,14 +4245,22 @@ async function clickInsertMenuItem(page, sel, label) {
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'Bravo item', true);
         await page.keyboard.press('Tab');
+        // Task 8: wait for the COMMITTED structure. data-indent is written by
+        // blockmap.js from the markdown, so requiring "1" here means the run's
+        // line-range replace and its re-render have both landed. Waiting on the
+        // bare DOM shape instead would be satisfied by the pre-commit LOCAL
+        // mutation, and the very next page.click() would then race the commit's
+        // .content swap ("Node is detached from document").
         await page.waitForFunction(
           (s) => {
             // Per-li: count top-level items in the run's parent UL/OL
             const li = document.querySelector(s);
             if (!li || !li.parentElement) return false;
             const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 2 && topItems[0].querySelector('li.ed-block') &&
-              topItems[0].querySelector('li.ed-block').textContent.trim() === 'Bravo item';
+            const nested = topItems[0] && topItems[0].querySelector('li.ed-block');
+            return topItems.length === 2 && !!nested &&
+              nested.getAttribute('data-indent') === '1' &&
+              nested.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
 
@@ -4144,7 +4282,8 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Tab with NO previous sibling is a no-op (first item can't indent).
+    // Row 7: Tab with NO previous sibling is a no-op (first item can't indent).
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4186,7 +4325,11 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Shift+Tab outdents a nested item to sit right after its parent.
+    // Shift+Tab outdents a nested item to sit right after its parent. NOTE
+    // (Task 8): this fixture's nested item has NO following same-level
+    // sibling, so the Notion adoption rule (row 6) is not exercised here —
+    // see the dedicated "Shift+Tab adoption" scenario further below for it.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4215,12 +4358,18 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Shift');
         await page.keyboard.press('Tab');
         await page.keyboard.up('Shift');
+        // Task 8: data-indent === '0' on all three is what proves the run's
+        // line-range replace COMMITTED and re-rendered (the pre-commit local
+        // mutation already produces three top-level <li>s, and clicking during
+        // that window races the .content swap).
         await page.waitForFunction(
           (s) => {
             // Per-li: 3 flat items after Shift+Tab outdents Bravo
             const li = document.querySelector(s);
-            return li && li.parentElement &&
-              li.parentElement.querySelectorAll(':scope > li.ed-block').length === 3;
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 3 && Array.prototype.every.call(topItems,
+              (t) => t.getAttribute('data-indent') === '0');
           }, {}, list0
         );
 
@@ -4242,7 +4391,8 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Shift+Tab at TOP LEVEL is a no-op.
+    // Row 8: Shift+Tab at TOP LEVEL is a no-op.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4284,7 +4434,16 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Enter on an EMPTY item removes it AND ends the burst (commits).
+    // Row 3 (top-level press): Enter on an EMPTY top-level item removes it
+    // AND ends the burst (commits). Spec §4 converts the block to a
+    // paragraph; markdown cannot persist an empty paragraph, so the existing
+    // §10 pristine-insert machinery supplies a self-removing provisional
+    // paragraph — abandoning it (here: never typing into it before Ctrl+S)
+    // leaves the file byte-identical to "the li was just deleted", which is
+    // exactly what this scenario asserts. See the dedicated row-3 scenario
+    // below for the two-press outdent-then-paragraph flow and its undo
+    // granularity.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4307,6 +4466,19 @@ async function clickInsertMenuItem(page, sel, label) {
           () => !document.querySelector('.content').textContent.includes('Delete me'),
           { timeout: 5000 }
         );
+        // Task 8: the top-level press ALSO hands the user a focused provisional
+        // paragraph (spec §4's "converts to a paragraph") — a second commit
+        // that lands strictly after the removal's own re-render. Wait for it to
+        // be established before saving, so this scenario measures the settled
+        // state instead of racing the second half of the flow (a Ctrl+S that
+        // arrives in between would persist the paragraph's placeholder line,
+        // because resolveBurst() has not had a chance to recognise the insert
+        // as abandoned yet).
+        await page.waitForFunction(
+          () => !!document.activeElement && !!document.activeElement.closest &&
+            !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
+          { timeout: 5000 }
+        );
 
         const fileText = await saveAndRead(page, lmdPath);
         const expectedLines = lorig.split('\n').filter((l) => l !== '- Delete me');
@@ -4320,10 +4492,25 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: Ctrl+Z mid-burst reverts a Tab-indent purely locally — no
-    // /api/render round trip, burst stays open (same proof pattern as the
-    // Phase-3 Task 2 bold-then-undo scenario above).
-      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+    // ONE Ctrl+Z reverts a Tab-indent completely (single-undo granularity).
+    //
+    // TASK-8 CORRECTION (documented deviation from this body's pre-migration
+    // assertions): before Task 8, Tab was a burst-LOCAL DOM mutation whose
+    // commit was deferred to focusout, so this scenario asserted
+    // `renderRequestCount === 0` ("no server round trip") and "the burst
+    // stays open". Spec §3 makes a structural change a line-range replace of
+    // the whole run, and the Task-8 plan spells the pipeline out as
+    // serialize run → commitRangeEdit → rerenderAll → focusBlockAtLine — i.e.
+    // Tab COMMITS immediately (it must: the same pipeline is what turns the
+    // provisional <li> an Enter-split creates into a real, armed, id-bearing
+    // block). A committing key cannot also be a zero-round-trip local edit,
+    // so those two assertions were inverted against the shipped design. The
+    // VALUE this scenario carries — "one Ctrl+Z puts the list back exactly
+    // how it was" — is preserved and in fact strengthened: the file is now
+    // asserted byte-identical after the undo, which the old in-burst version
+    // could not check at all (nothing had reached `lines`).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
           '- Alpha item', '- Bravo item', '- Charlie item', '',
@@ -4341,49 +4528,361 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'Bravo item', true);
+        const rendersBeforeTab = renderRequestCount;
         await page.keyboard.press('Tab');
+        // The COMMITTED structure (server-rendered): Bravo is a nested
+        // li.ed-block — i.e. it carries a server-assigned data-block-id and
+        // data-indent="1", which only a real /api/render round trip produces.
         await page.waitForFunction(
           (s) => {
-            // Per-li: 2 top-level items after Tab-indent, first has a nested li
             const li = document.querySelector(s);
             if (!li || !li.parentElement) return false;
             const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 2 && !!topItems[0].querySelector('li.ed-block');
+            if (topItems.length !== 2) return false;
+            const nested = topItems[0].querySelector('li.ed-block');
+            return !!nested && nested.getAttribute('data-indent') === '1' &&
+              nested.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
+        assert.ok(renderRequestCount > rendersBeforeTab,
+          'Tab must COMMIT the structural change (spec §3: one line-range replace of the run), ' +
+          'which necessarily round-trips /api/render');
 
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
-        assert.strictEqual(
-          await page.evaluate((s) => {
-            // Per-li: 3 flat items after Ctrl+Z reverts the Tab-indent
+        await page.waitForFunction(
+          (s) => {
+            // 3 flat items again after ONE Ctrl+Z reverts the whole Tab-indent
             const li = document.querySelector(s);
             if (!li || !li.parentElement) return false;
             const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
             return topItems.length === 3 && !topItems[0].querySelector('li.ed-block');
-          }, list0),
+          }, {}, list0
+        );
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'ONE Ctrl+Z after a Tab-indent must restore the pre-key lines exactly — a structural key is ' +
+          'a SINGLE undo op, got:\n' + fileText);
+
+        await page.close();
+        console.log('list WYSIWYG: ONE Ctrl+Z reverts a Tab-indent completely (single undo op) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // ── Task 8 rows 1 / 5 / 6 / 3: the DISTINGUISHING cases ────────────────
+    // The migrated bodies above cover the shapes where the old (pre-Task-8)
+    // rules and the Notion rules happen to agree. These four scenarios use
+    // the spec's own fixtures, where they DISAGREE, so they are what actually
+    // pins row 1 (caret/focus target), row 5 (Tab moves the subtree, later
+    // siblings untouched), row 6 (Shift+Tab adopts the former following
+    // siblings) and row 3 (empty-li Enter = outdent per press, then paragraph).
+
+    // Row 1: '- ab' with the caret between 'a' and 'b' -> ['- a', '- b'],
+    // focus on the NEW block (run startLine + 1) with the caret at its start;
+    // ONE Ctrl+Z restores the pre-key line.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc(['# List doc', '', '- ab', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'a', false); // caret between a|b
+        await page.keyboard.press('Enter');
+        // Both halves must be REAL blocks (server-assigned data-block-id) —
+        // the provisional <li> the split creates only becomes one via the
+        // structural commit + re-render.
+        await page.waitForFunction(
+          (s) => {
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const items = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return items.length === 2 &&
+              items[0].textContent.trim() === 'a' && items[1].textContent.trim() === 'b';
+          }, {}, list0
+        );
+
+        // Focus target: the SECOND li of the run — the run starts at line 3
+        // and the serializer emits exactly one line per li in document order,
+        // so that li is line 4 = range.startLine + indexOfNewLiInRun.
+        const newLiSel = await liBlockSelByText(page, 'b');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > .ed-li-text'), newLiSel),
           true,
-          'Ctrl+Z mid-burst must revert the Tab-indent back to the flat pre-indent structure'
+          'Enter must focus the NEW block (the tail half), not the original li'
+        );
+        assert.strictEqual(await caretIsAtStartOf(page, newLiSel + ' > .ed-li-text'), true,
+          'the caret must sit at the START of the new block (spec §11 row 1)');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- a\n- b\n',
+          'Enter mid-text must split the item at the caret into two sibling lines, got:\n' +
+          JSON.stringify(fileText));
+
+        // ONE Ctrl+Z restores the pre-key lines. The Ctrl+S above resolved
+        // (and thereby ENDED) the burst focusBlockAtLine had re-opened, so
+        // re-arm one first — a keystroke with no burst open is not ours.
+        await reopenWysiwyg(page, newLiSel);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block').length === 1, { timeout: 5000 });
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z after an Enter-split must restore the pre-key lines exactly, got:\n' +
+          JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 1): Enter splits at the caret, focus+caret on the new block, ' +
+          'one undo op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Row 5: Tab indents the caret item AND its whole subtree; the following
+    // same-level sibling ('- c') is untouched.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- a', '- b', '  - b1', '  - b2', '- c', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 0:b | 1:b1 | 1:b2 | 0:c',
+          'sanity: the fixture must start as a / b(+b1,b2) / c');
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'b', true); // caret in 'b' (start)
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 2:b1 | 2:b2 | 0:c',
+          'Tab must indent the caret item AND its whole subtree, leaving later siblings alone');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- a\n  - b\n    - b1\n    - b2\n- c\n',
+          'row 5: Tab must move b + its subtree one level in (accumulated marker-width indent) and ' +
+          'leave c untouched, got:\n' + JSON.stringify(fileText));
+
+        await reopenWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 0,
+          { timeout: 5000 }
+        );
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z after a Tab must restore the pre-key lines exactly, got:\n' +
+          JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 5): Tab moves the item + its subtree only, one undo op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Row 6: Shift+Tab on 'b1' raises it one level AND ADOPTS its former
+    // following same-level sibling 'b2' as its child (Notion's asymmetric
+    // outdent — b2's own visual indent is unchanged, which is what makes it
+    // look right). This is the case the migrated Shift+Tab body above cannot
+    // express (its nested item has no following sibling), and the one that
+    // replaces the old "siblings stay" rule.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- a', '- b', '  - b1', '  - b2', '- c', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'b1', true);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block').length === 5 &&
+            document.querySelectorAll('li.ed-block[data-indent="0"]').length === 4,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 0:b | 0:b1 | 1:b2 | 0:c',
+          'row 6: b1 must rise one level and b2 (its former following same-level sibling) must ' +
+          'become b1\'s child');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- a\n- b\n- b1\n  - b2\n- c\n',
+          'row 6: Shift+Tab must emit b1 at top level with b2 adopted underneath it (b2\'s own ' +
+          'indent column unchanged), got:\n' + JSON.stringify(fileText));
+
+        await reopenWysiwyg(page, await liBlockSelByText(page, 'b1'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 3,
+          { timeout: 5000 }
+        );
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z after a Shift+Tab must restore the pre-key lines exactly, got:\n' +
+          JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 6): Shift+Tab raises the item and adopts its former following ' +
+          'siblings, one undo op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Row 3: an EMPTY li + Enter outdents ONE level per press; at top level
+    // the next press converts the block to a paragraph. Markdown cannot
+    // persist an empty paragraph, so the top-level press reuses the existing
+    // §10 pristine-insert flow: the user gets a focused provisional paragraph
+    // that self-removes if abandoned, and becomes a real paragraph as soon as
+    // anything is typed into it.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- alpha', '  - nested item', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        const nestedSel = await liBlockSelByText(page, 'nested item');
+
+        await openWysiwyg(page, nestedSel);
+        await emptyListItemText(page, list0, 'nested item');
+
+        // Press 1 — nested empty li: outdent one level, still a li. The
+        // committed markdown is proven by the SERVER-rendered data-indent.
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 0:',
+          'row 3 press 1: the empty nested li must outdent one level and STAY a li (spec §4)');
+
+        // Press 2 — now top level: the li becomes a paragraph. No Ctrl+S in
+        // between: Ctrl+S resolves (and ends) the burst focusBlockAtLine
+        // re-opened, after which Enter would no longer be ours.
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block').length === 1 &&
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }
         );
         assert.strictEqual(
-          await page.evaluate((s) => {
-            // Per-li: check any li in the run still has focus (burst stays open)
-            const li = document.querySelector(s);
-            const root = li && li.parentElement;
-            return root && root.contains(document.activeElement) &&
-              document.activeElement.classList.contains('ed-li-text');
-          }, list0),
+          await page.evaluate(() => {
+            const ae = document.activeElement;
+            const blockEl = ae && ae.closest && ae.closest('.ed-block');
+            return !!blockEl && blockEl.getAttribute('data-block-type') === 'paragraph';
+          }),
           true,
-          'the burst must stay open (still focused) after a mid-burst undo — nothing was committed'
+          'row 3 press 2 (top level): the user must end up in a focused provisional PARAGRAPH block'
         );
-        assert.strictEqual(renderRequestCount, 0,
-          'Tab-indent-then-undo must never hit /api/render — proof this is OUR burst history reverting ' +
-          'locally, not a server round trip');
 
-        await page.keyboard.press('Escape'); // end the burst, discard (never committed)
+        // Typing into it makes it real; blur commits it.
+        await page.keyboard.type('PARA');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('PARA'), { timeout: 5000 });
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- alpha\n\nPARA\n',
+          'row 3: two Enter presses must leave the list with only "alpha" and a real paragraph where ' +
+          'the emptied item was, got:\n' + JSON.stringify(fileText));
+
         await page.close();
-        console.log('list WYSIWYG: Ctrl+Z mid-burst reverts a Tab-indent locally, no server round trip — OK');
+        console.log('list WYSIWYG (row 3): empty-li Enter outdents per press, then converts to a ' +
+          'paragraph — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Row 3, top-level press — UNDO GRANULARITY (RULING F-J).
+    // Every other structural key is ONE undo op. This press is not: markdown
+    // cannot hold an empty paragraph, so it is li-removal (commit #1) followed
+    // by the §10 pristine paragraph insert (commit #2). The repo's existing
+    // pristine machinery makes an ABANDONED insert cost zero NET undo ops
+    // (UndoStack.discardTop(), see "abandoned inserts (all 5 kinds)
+    // auto-remove" and "Ctrl+Z on a pristine insert removes ONLY the insert"
+    // above), so the OBSERVED granularity — asserted below rather than forced
+    // — is: Ctrl+Z #1 removes the provisional paragraph and pushes nothing;
+    // Ctrl+Z #2 is the first one that touches the stack, and it reverts the
+    // li removal. Two presses to get back to the pre-key lines.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc(['# List doc', '', '- alpha', '- beta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, list0);
+        await emptyListItemText(page, list0, 'beta');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block').length === 1 &&
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }
+        );
+
+        // Ctrl+Z #1: the provisional paragraph is still untouched, so this is
+        // the pristine auto-remove — the li removal is NOT reverted with it.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 0,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha',
+          'Ctrl+Z #1 must remove ONLY the provisional paragraph — the li removal stays applied');
+
+        // Ctrl+Z #2: the first press that pops the undo stack — the emptied
+        // li comes back.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block').length === 2, { timeout: 5000 });
+        // The emptying itself was an UNCOMMITTED burst edit (nothing had
+        // reached `lines` before Enter), and the removal's undo op restores the
+        // run's ON-DISK "before" — so 'beta' comes back with its text, not as
+        // an empty item. That is the correct single-op inverse of the commit
+        // that was actually made.
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 0:beta',
+          'Ctrl+Z #2 must revert the li removal — the run returns to its last committed state');
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'after both undos the file must be byte-identical to the original, got:\n' +
+          JSON.stringify(fileText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 3 / F-J): top-level empty-Enter granularity = pristine-insert ' +
+          'auto-remove + ONE stack op — OK');
       } finally {
         lsrv.close();
       }
@@ -4511,10 +5010,11 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: cross-item Enter no-op (CRITICAL): a selection spanning MULTIPLE <li>s must
+    // cross-item Enter no-op (CRITICAL): a selection spanning MULTIPLE <li>s must
     // NOT silently delete the spanned content on Enter — reviewer's exact
     // probe (select mid-"Alpha item" through mid-"Bravo item", Enter) must
     // be a complete no-op: no mutation, no banner, no history snap.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
           '# List doc', '',
@@ -4567,12 +5067,16 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    if (false) { // Task 8: empty-Enter on the ONLY item of a list
+    // empty-Enter on the ONLY item of a list
     // must delete the WHOLE block cleanly (zero lines), absorbing exactly
     // one adjacent blank-line separator — not leave a stray blank line.
     // Reviewer's exact byte probe: "# Doc\n\n- Only item\n\nTrailer" ->
     // "# Doc\n\nTrailer". Also verifies a FOLLOW-UP edit after the removal
     // still maps to the right block (blockmap/shiftBlocks integrity).
+    // Task 8: the provisional paragraph the top-level press inserts is
+    // abandoned (never typed into) here, so it self-removes on the Ctrl+S
+    // resolution and leaves no trace — see the row-3 scenario below.
+    {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc(['# Doc', '', '- Only item', '', 'Trailer']);
       try {
@@ -4589,6 +5093,19 @@ async function clickInsertMenuItem(page, sel, label) {
         );
         await page.waitForFunction(
           () => !document.querySelector('.content').textContent.includes('Only item'),
+          { timeout: 5000 }
+        );
+        // Task 8: the top-level press ALSO hands the user a focused provisional
+        // paragraph (spec §4's "converts to a paragraph") — a second commit
+        // that lands strictly after the removal's own re-render. Wait for it to
+        // be established before saving, so this scenario measures the settled
+        // state instead of racing the second half of the flow (a Ctrl+S that
+        // arrives in between would persist the paragraph's placeholder line,
+        // because resolveBurst() has not had a chance to recognise the insert
+        // as abandoned yet).
+        await page.waitForFunction(
+          () => !!document.activeElement && !!document.activeElement.closest &&
+            !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
           { timeout: 5000 }
         );
 
@@ -4622,7 +5139,7 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // Task 8: full integration mega-e2e (uses Tab — pending Task 8 key semantics) ─────────────────────────
+    // full integration mega-e2e ───────────────────────────────────────────
     // One flow exercising every Phase-3 editing surface in sequence, ending
     // in a full-string reconstruction (same pattern as the "Task 7: one
     // end-to-end flow" scenario above, extended per the task-7 brief):
@@ -4653,7 +5170,7 @@ async function clickInsertMenuItem(page, sel, label) {
     // committed BEFORE the column-insert entry, so the single cascaded undo
     // never reaches it) — exactly "reverting the drag then cascading to the
     // previous commit".
-    if (false) { // Task 8: mega-e2e uses Tab (list Tab-indent step) — pending Task 8 key semantics
+    {
       const { srv: msrv, url: murl, mdPath: mmdPath, original: morig } = await setupTableDoc([
         '# Heading One', '',
         'Paragraph text here for editing.', '',
@@ -4704,14 +5221,22 @@ async function clickInsertMenuItem(page, sel, label) {
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'Bravo item', true);
         await page.keyboard.press('Tab');
+        // Task 8: wait for the COMMITTED structure, not merely the local DOM
+        // mutation — data-indent is written by blockmap.js from the markdown, so
+        // requiring it to be "1" means the run's line-range replace AND its
+        // re-render have both landed (and therefore that the structural op's own
+        // focus restoration has already run, which is what makes the blur below
+        // deterministic).
         await page.waitForFunction(
           (s) => {
             // Per-li: 2 top-level items after Tab-indent, first item has Bravo nested
             const li = document.querySelector(s);
             if (!li || !li.parentElement) return false;
             const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 2 && topItems[0].querySelector('li.ed-block') &&
-              topItems[0].querySelector('li.ed-block').textContent.trim() === 'Bravo item';
+            const nested = topItems[0] && topItems[0].querySelector('li.ed-block');
+            return topItems.length === 2 && !!nested &&
+              nested.getAttribute('data-indent') === '1' &&
+              nested.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
         await page.evaluate(() => {
@@ -5701,10 +6226,14 @@ async function clickInsertMenuItem(page, sel, label) {
         const earlierSel = await paragraphSelByText(page, 'Earlier edit target.');
         await openWysiwyg(page, earlierSel);
         await page.keyboard.type(' EDITED');
+        const staleEarlier = await nodeHandleFor(page, earlierSel);
         await page.keyboard.press('Enter');
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Earlier edit target. EDITED')
         );
+        // ' EDITED' is already on screen (it was typed), so the wait above can
+        // pass BEFORE the commit's re-render — see awaitContentSwap()'s comment.
+        await awaitContentSwap(page, staleEarlier);
 
         const anchorSel = await paragraphSelByText(page, 'Insert anchor.');
         const beforeCount = await page.evaluate(() =>
