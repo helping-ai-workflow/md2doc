@@ -641,22 +641,6 @@ async function gripCenter(page, gripSel) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, gripSel);
 }
-// Reads back a live element's client rect as a plain {left, right, top,
-// bottom} object — used by the grip/insert-bubble non-intersection scenario
-// below to compare two overlay elements' hit boxes.
-async function elementRect(page, sel) {
-  return page.evaluate((s) => {
-    const r = document.querySelector(s).getBoundingClientRect();
-    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
-  }, sel);
-}
-// Plain axis-aligned-rectangle intersection test (Node-side, no page
-// involved) — two rects that merely TOUCH at an edge (e.g. `a.right ===
-// b.left`) do NOT count as intersecting, matching the strict '<'/'>'
-// comparisons a real overlapping-hit-area bug would need to trigger.
-function rectsIntersect(a, b) {
-  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-}
 // Pixel-approximate equality assertion (Node-side): passes if |actual −
 // expected| <= 1, accounting for subpixel rounding in getBoundingClientRect.
 // Used by grip-position scenarios to assert the new border-centred geometry
@@ -3528,27 +3512,47 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.mouse.move(rowCorner.x, rowCorner.y);
         await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
         await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
-        // Assert the bubble wins the browser hit-test at the exact corner
-        // (strictly stronger than a rect-separation check: the browser itself
-        // is the arbiter of which element receives the click).
-        const rowHitResult = await page.evaluate((cx, cy) => {
-          const el = document.elementFromPoint(cx, cy);
+        // The row grip is centred on the hovered row's VERTICAL CENTRE while
+        // the row-insert bubble sits on the row BOUNDARY, so boundaryY+3 lands
+        // in the bubble but can fall ABOVE the grip's y-extent (taller rows) —
+        // the two overlay rects still OVERLAP in a band, but the raw corner
+        // point is not guaranteed to be inside the grip. Hit-test at the centre
+        // of the actual grip∩bubble overlap so the point is provably inside
+        // BOTH rects and the z-order battle is genuinely exercised.
+        const rowHitResult = await page.evaluate(() => {
           const bubble = document.querySelector('.ed-tb-insert-row');
           const grip = document.querySelector('.ed-te-grip-row');
-          const hitsBubble = el === bubble || (bubble && bubble.contains(el));
+          const b = bubble.getBoundingClientRect();
+          const g = grip.getBoundingClientRect();
+          const ox1 = Math.max(b.left, g.left), ox2 = Math.min(b.right, g.right);
+          const oy1 = Math.max(b.top, g.top), oy2 = Math.min(b.bottom, g.bottom);
+          const overlaps = ox1 < ox2 && oy1 < oy2;
+          const px = (ox1 + ox2) / 2, py = (oy1 + oy2) / 2;
+          const el = overlaps ? document.elementFromPoint(px, py) : null;
           return {
-            hitsBubble,
-            hitsGrip: el === grip || (grip && grip.contains(el)),
+            overlaps,
+            pointInGripY: py >= g.top && py <= g.bottom,
+            pointInBubbleY: py >= b.top && py <= b.bottom,
+            hitsBubble: !!el && (el === bubble || bubble.contains(el)),
+            hitsGrip: !!el && (el === grip || grip.contains(el)),
             tagName: el ? el.tagName : null,
             className: el ? el.className : null,
-            bubbleZ: bubble ? getComputedStyle(bubble).zIndex : null,
-            gripZ: grip ? getComputedStyle(grip).zIndex : null,
+            bubbleZ: getComputedStyle(bubble).zIndex,
+            gripZ: getComputedStyle(grip).zIndex,
           };
-        }, rowCorner.x, rowCorner.y);
+        });
         console.log('row corner hit-test:', JSON.stringify(rowHitResult));
+        assert.ok(rowHitResult.overlaps,
+          'precondition: the row grip and insert bubble rects must overlap for this battle ' +
+          'to be meaningful (if a taller row ever breaks this, shrink the fixture)');
+        assert.ok(rowHitResult.pointInGripY && rowHitResult.pointInBubbleY,
+          'the hit-test point must lie inside BOTH the row grip and the bubble');
         assert.ok(rowHitResult.hitsBubble,
-          'elementFromPoint at the row overlap corner must resolve to the insert bubble, not the grip — ' +
+          'elementFromPoint inside the row grip∩bubble overlap must resolve to the insert bubble, not the grip — ' +
           'got tagName=' + rowHitResult.tagName + ' className=' + rowHitResult.className);
+        assert.ok(!rowHitResult.hitsGrip,
+          'the row grip must NOT receive the hit at a point it geometrically covers — ' +
+          'z-order alone must hand the click to the bubble');
         assert.ok(
           parseInt(rowHitResult.bubbleZ, 10) > parseInt(rowHitResult.gripZ, 10),
           'row insert bubble z-index (' + rowHitResult.bubbleZ + ') must be numerically greater than ' +
@@ -3565,25 +3569,59 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.mouse.move(colCorner.x, colCorner.y);
         await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
         await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
-        // Same bubble-wins-hit-test assertion for the column pair.
-        const colHitResult = await page.evaluate((cx, cy) => {
-          const el = document.elementFromPoint(cx, cy);
+        // GEOMETRY NOTE (item-1 documented-impossibility case). The ROW pair
+        // above overlaps (grip and bubble both hug the same table edge), so its
+        // battle is exercised live. The COLUMN pair does NOT: the col grip is
+        // centred on the hovered COLUMN'S CENTRE while the col-insert bubble
+        // sits on the column BOUNDARY, so they are ~half a column-width apart.
+        // Overlap requires columnWidth/2 < gripHalf(14)+bubbleHalf(9)=23, i.e.
+        // columnWidth < 46px — but a real table stretches to the content width,
+        // so even this 2-column fixture's column B is ~375px wide and the grip
+        // ends up ~165px clear of the boundary bubble. There is therefore NO
+        // point that lies in both rects to hit-test, for ANY realistic table.
+        // We branch: IF the rects ever overlap (a pathologically narrow column,
+        // or a future geometry change centring the col grip on the boundary
+        // like the row grip), assert the bubble wins the hit-test; ALWAYS
+        // assert the shared z-index invariant, which is the actual guarantee
+        // that protects the click wherever the two rects DO overlap.
+        const colHitResult = await page.evaluate(() => {
           const bubble = document.querySelector('.ed-tb-insert-col');
           const grip = document.querySelector('.ed-te-grip-col');
-          const hitsBubble = el === bubble || (bubble && bubble.contains(el));
+          const b = bubble.getBoundingClientRect();
+          const g = grip.getBoundingClientRect();
+          const ox1 = Math.max(b.left, g.left), ox2 = Math.min(b.right, g.right);
+          const oy1 = Math.max(b.top, g.top), oy2 = Math.min(b.bottom, g.bottom);
+          const overlaps = ox1 < ox2 && oy1 < oy2;
+          const px = (ox1 + ox2) / 2, py = (oy1 + oy2) / 2;
+          const el = overlaps ? document.elementFromPoint(px, py) : null;
           return {
-            hitsBubble,
-            hitsGrip: el === grip || (grip && grip.contains(el)),
+            overlaps,
+            b: { left: b.left, right: b.right, width: b.width },
+            g: { left: g.left, right: g.right, width: g.width },
+            pointInGripX: px >= g.left && px <= g.right,
+            pointInBubbleX: px >= b.left && px <= b.right,
+            hitsBubble: !!el && (el === bubble || bubble.contains(el)),
+            hitsGrip: !!el && (el === grip || grip.contains(el)),
             tagName: el ? el.tagName : null,
             className: el ? el.className : null,
-            bubbleZ: bubble ? getComputedStyle(bubble).zIndex : null,
-            gripZ: grip ? getComputedStyle(grip).zIndex : null,
+            bubbleZ: getComputedStyle(bubble).zIndex,
+            gripZ: getComputedStyle(grip).zIndex,
           };
-        }, colCorner.x, colCorner.y);
+        });
         console.log('col corner hit-test:', JSON.stringify(colHitResult));
-        assert.ok(colHitResult.hitsBubble,
-          'elementFromPoint at the col overlap corner must resolve to the insert bubble, not the grip — ' +
-          'got tagName=' + colHitResult.tagName + ' className=' + colHitResult.className);
+        if (colHitResult.overlaps) {
+          // Narrow-column / future-geometry branch: a real in-both point exists,
+          // so exercise the live battle.
+          assert.ok(colHitResult.pointInGripX && colHitResult.pointInBubbleX,
+            'the hit-test point must lie inside BOTH the col grip x-extent and the bubble x-extent');
+          assert.ok(colHitResult.hitsBubble,
+            'elementFromPoint inside the col grip∩bubble overlap must resolve to the insert bubble, not the grip — ' +
+            'got tagName=' + colHitResult.tagName + ' className=' + colHitResult.className);
+          assert.ok(!colHitResult.hitsGrip,
+            'the col grip must NOT receive the hit where it overlaps the bubble — z-order hands it to the bubble');
+        }
+        // ALWAYS assert the load-bearing invariant (the only guarantee for
+        // columns, since their rects don't overlap for a realistic table).
         assert.ok(
           parseInt(colHitResult.bubbleZ, 10) > parseInt(colHitResult.gripZ, 10),
           'col insert bubble z-index (' + colHitResult.bubbleZ + ') must be numerically greater than ' +
@@ -5359,6 +5397,12 @@ async function clickInsertMenuItem(page, sel, label) {
           const surface = bad.querySelector('.ed-li-text');
           return surface ? surface.getAttribute('contenteditable') : 'no surface';
         });
+        // Precondition: the fixture actually produced a <video> li. Without
+        // this, a fixture regression that drops the video would make badLiArmed
+        // === 'bad li not found' (which is !== 'true') and the degrade
+        // assertion below would pass VACUOUSLY.
+        assert.notStrictEqual(badLiArmed, 'bad li not found',
+          'fixture precondition: an li containing <video> must be rendered');
         assert.ok(badLiArmed !== 'true',
           'the li containing <video> must NOT be armed (contenteditable must not be "true"), got: ' + badLiArmed);
 
@@ -6786,10 +6830,13 @@ async function clickInsertMenuItem(page, sel, label) {
           document.querySelector(s) && document.querySelector(s).getAttribute('data-checked'), todoCheckSel);
         assert.strictEqual(beforeChecked, '0', 'sanity: checkbox must start unchecked');
 
-        // Click the checkbox — must be refused.
+        // Click the checkbox — must be refused. The refusal's synchronous
+        // side-effect is the banner (.ed-conflict) being inserted, so wait on
+        // THAT deterministically rather than a fixed setTimeout — a refused op
+        // produces no re-render to await, but the banner append is the direct
+        // observable of the refusal and eliminates the slow-host flake.
         await page.click(todoCheckSel);
-        // Give any async handler time to settle.
-        await new Promise((r) => setTimeout(r, 400));
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
 
         // Banner must have appeared.
         const bannerVisible = await page.evaluate(() => !!document.querySelector('.ed-conflict'));

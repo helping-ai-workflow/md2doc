@@ -31,9 +31,15 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   // unwrapped inner content equals the plain render's content
   const stripped = edit.bodyHtml
     .replace(/<div class="ed-block"[^>]*>/g, '')
-    .replace(/<\/div>\n?(?=<div class="ed-block"|$)/g, '');
+    .replace(/<\/div>\n?(?=<div class="ed-block"|$)/g, '')
+    .replace(/<li class="ed-block"[^>]*>/g, '<li>');
   assert.ok(stripped.includes('<table') && plain.bodyHtml.includes('<table'),
     'table renders in both');
+  // stripped must honestly mean "edit wrappers removed": neither the div nor
+  // the per-li ed-block wrapper may survive (the fixture contains a list, so a
+  // regex that only unwraps divs would leave <li class="ed-block"…> behind).
+  assert.ok(!/class="ed-block"/.test(stripped),
+    'stripped must contain no ed-block wrappers (div OR li)');
 
   // re-init hook present in the full page script
   assert.ok(edit.html.includes('__md2docInitDiagrams'),
@@ -68,6 +74,20 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   const taskHtml = await renderEdit('- [x] done');
   assert(/<span class="ed-li-check" data-checked="1" role="checkbox" aria-checked="true"><\/span><div class="ed-li-text">done<\/div>/.test(taskHtml),
     'task check span before ed-li-text');
+
+  // UNCHECKED task item: data-checked="0" / aria-checked="false" (the checked
+  // case above alone leaves the unchecked branch of the check chrome untested)
+  const uncheckedHtml = await renderEdit('- [ ] todo');
+  assert(/<span class="ed-li-check" data-checked="0" role="checkbox" aria-checked="false"><\/span><div class="ed-li-text">todo<\/div>/.test(uncheckedHtml),
+    'unchecked task check span carries data-checked="0" / aria-checked="false"');
+
+  // ORDERED list with a non-1 `start`: the rendered <ol> must carry start="3"
+  // (only start="1"/default was previously exercised).
+  const olStartHtml = await renderEdit('3. third\n4. fourth');
+  assert(/<ol start="3">/.test(olStartHtml),
+    'a list starting at 3 must render <ol start="3">');
+  assert(/data-list-type="ol"/.test(olStartHtml),
+    'the non-1-start ol items are still per-li ol blocks');
 
   // loose list: <p> must be preserved inside ed-li-text (RULING F-L)
   const looseHtml = await renderEdit('- a\n\n- b');

@@ -68,6 +68,11 @@ assert.deepStrictEqual(
   assert.strictEqual(blocks.find((b) => b.type === 'list'), undefined, 'no list-container block');
   // ids strictly document-ordered
   assert.deepStrictEqual(blocks.map((b) => b.id), blocks.map((_, i) => i));
+  // a NON-task li must not carry a `checked` key at all (the `if (item.task)`
+  // guard's narrowness): a stray `checked: false` would be indistinguishable
+  // downstream from a genuine unchecked task item.
+  assert.strictEqual('checked' in lis[0], false,
+    'non-task li must have no `checked` property');
 }
 // task list items
 {
