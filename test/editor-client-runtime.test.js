@@ -3475,15 +3475,21 @@ async function clickInsertMenuItem(page, sel, label) {
     // rects by moving the grips 14px outside the table — but that 14px gap
     // conflicted with the upcoming left-gutter chrome (P0-a).
     //
-    // NEW MECHANISM (P0-a border-centred geometry): both grips now sit ON the
-    // table border (their centerline coincides with the table edge), so their
-    // hit rects DO overlap the bubble's hit rect — separated rects are no
-    // longer guaranteed and the old !rectsIntersect() assertion would FAIL.
-    // The invariant "insert-bubble click is never eaten by the grip" is now
-    // maintained by z-index ordering alone: .ed-te-grip-row/.ed-te-grip-col
-    // get z-index:7 (below the bubble's z-index:8), so even though the rects
-    // overlap, the browser's hit-test gives the click to the BUBBLE, not the
-    // grip.
+    // NEW MECHANISM (P0-a border-centred geometry): the grips no longer sit
+    // clear of the table, so separated rects are no longer guaranteed and the
+    // old !rectsIntersect() assertion would FAIL. But the two grips behave
+    // DIFFERENTLY here, and the assertions below reflect that: the ROW grip's
+    // hit rect OVERLAPS the row-insert bubble's, so that battle is exercised
+    // live (assert overlaps, then assert the browser hands the hit-test point
+    // to the BUBBLE, not the grip). The COL grip is centred on the hovered
+    // COLUMN'S CENTRE, so for any realistic (wide) column it does NOT overlap
+    // the col-insert bubble — its live hit-test is therefore branched (only if
+    // the rects happen to overlap). The invariant "insert-bubble click is
+    // never eaten by the grip" is maintained by z-index ordering:
+    // .ed-te-grip-row/.ed-te-grip-col get z-index:7 (below the bubble's
+    // z-index:8), so wherever the rects DO overlap the browser's hit-test gives
+    // the click to the BUBBLE. That z-order invariant (bubbleZ > gripZ) is
+    // asserted for BOTH row and col unconditionally.
     //
     // This scenario still reproduces the EXACT reported overlap corners (same
     // coordinates as before), but now asserts the invariant via the browser's
@@ -5436,6 +5442,147 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await page.close();
         console.log('per-li WYSIWYG: §8 degrade — unarmed li stays intact, armed sibling commits correctly — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // F-W (Critical, silent data loss): a run containing a LOOSE list item
+    // pushes 'P' to serializeList()'s `unsupported` array ONLY — NOT to
+    // `unsupportedByLi` (which collects per-li inline-serializer names like
+    // VIDEO). The burst-resolve li branch used to gate its partial-vs-whole
+    // commit on `unsupportedByLi.length`, so a text edit to a SUPPORTED li in
+    // such a run took the WHOLE-RUN tight commit — and the tight runMd has the
+    // loose blank line collapsed, so committing it DELETED the blank and
+    // silently flattened the loose sublist. Fix: gate on `unsupported.length`
+    // (the superset). This case edits the li BEFORE the loose blank.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc([
+          '# List doc', '',
+          '- outer',
+          '  - inner a',
+          '',            // loose blank INSIDE the nested sublist
+          '  - inner b',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // Edit the SUPPORTED `outer` li (positioned before the loose blank).
+        await openWysiwyg(page, await liBlockSelByText(page, 'outer'));
+        await page.keyboard.type(' EDITED');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('outer EDITED'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        // Byte-identical to the original except the outer text — CRUCIALLY the
+        // loose blank line between `inner a` and `inner b` must SURVIVE.
+        assert.strictEqual(
+          fileText,
+          '# List doc\n\n- outer EDITED\n  - inner a\n\n  - inner b\n',
+          'F-W: editing a supported li BEFORE a loose item must preserve the loose ' +
+          'blank line byte-for-byte (partial commit), got:\n' + JSON.stringify(fileText)
+        );
+
+        await page.close();
+        console.log('per-li WYSIWYG: F-W — loose run, edit li BEFORE the blank, blank survives — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // F-W (Critical, the offset TRAP): the SAME loose-run bug, but the edited
+    // li sits AFTER the loose blank. Even a gate-only fix (partial path with
+    // the OLD `editedBlock.startLine - range.startLine` source-line offset)
+    // FAILS here: the tight runMd has one line per li and NO blank lines, so a
+    // supported li positioned after a loose item has a SOURCE startLine that
+    // overshoots the tight runMd's line count — the naive slice returns '' and
+    // commitRangeRemoval DELETES the li's line. The offset MUST instead be the
+    // li's POSITION among the run's li blocks in DFS document order. Source
+    //     - a
+    //       - x
+    //     (blank)
+    //       - y
+    //     - b
+    // gives li blocks a[l3] x[l4] y[l6] b[l7]; naive offset for b = 7-3 = 4
+    // into a 4-line (idx 0-3) tight runMd → slice(4,5) === '' → deletes `b`.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc([
+          '# List doc', '',
+          '- a',
+          '  - x',
+          '',            // loose blank INSIDE the nested sublist, BEFORE `b`
+          '  - y',
+          '- b',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // Edit the SUPPORTED `b` li (positioned AFTER the loose blank).
+        await openWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await page.keyboard.type(' EDITED');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('b EDITED'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        // `b`'s line must be committed correctly (NOT deleted), and the loose
+        // blank must survive — byte-identical to the original except `b`.
+        assert.strictEqual(
+          fileText,
+          '# List doc\n\n- a\n  - x\n\n  - y\n- b EDITED\n',
+          'F-W: editing a supported li AFTER a loose item must commit that li\'s own ' +
+          'line (not delete it) and preserve the loose blank — got:\n' + JSON.stringify(fileText)
+        );
+
+        await page.close();
+        console.log('per-li WYSIWYG: F-W — loose run, edit li AFTER the blank (offset trap), b committed, blank survives — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // F-W (no-regression): a fully-supported TIGHT run (unsupported.length===0)
+    // must STILL take the WHOLE-RUN commit path on a text edit — the gate
+    // change (unsupportedByLi → unsupported) must not misroute a clean run to
+    // the partial path. Editing one item leaves its siblings byte-identical
+    // and introduces NO blank line.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc([
+          '# List doc', '',
+          '- alpha', '- bravo', '- charlie',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'alpha'));
+        await page.keyboard.type(' EDITED');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('alpha EDITED'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(
+          fileText,
+          '# List doc\n\n- alpha EDITED\n- bravo\n- charlie\n',
+          'F-W no-regression: a fully-supported tight run whole-run commits — ' +
+          'siblings byte-identical, no blank introduced, got:\n' + JSON.stringify(fileText)
+        );
+
+        await page.close();
+        console.log('per-li WYSIWYG: F-W no-regression — fully-supported tight run whole-run commits — OK');
       } finally {
         lsrv.close();
       }
