@@ -4888,6 +4888,288 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // Row 3's OUTDENT press is bound by RULING F-J's single-undo rule (only the
+    // TOP-LEVEL press is exempt): ONE Ctrl+Z must restore the pre-key lines.
+    // The emptying itself was an uncommitted burst edit, so "pre-key lines" is
+    // the original file.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc(['# List doc', '', '- alpha', '  - nested item', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'nested item'));
+        await emptyListItemText(page, list0, 'nested item');
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 0:',
+          'sanity: the outdent press committed');
+
+        // The burst focusBlockAtLine re-opened is still live, so this Ctrl+Z is
+        // ours: burst-local history is at its bottom, so it cascades to the
+        // document-level undo and pops the outdent's single op.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 1:nested item',
+          'ONE Ctrl+Z must put the nested item back exactly where it was');
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z after row 3\'s outdent press must restore the pre-key lines exactly (F-J binds ' +
+          'this press, unlike the top-level one), got:\n' + JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 3 / F-J): the OUTDENT press is a single undo op — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RULING F-Q, both halves. Spec §11 row 3 says "empty indented li + Enter =
+    // outdent one level per press" with NO carve-out for an item that owns a
+    // sublist: the subtree travels with the item, so nothing is orphaned.
+    // (Before F-Q this fell through to the row-1 SPLIT and produced two empty
+    // items with the subtree re-parented under the second.) The top-level →
+    // paragraph step is the one case that still refuses, because a paragraph
+    // cannot own list children.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- a', '  - b', '    - x', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 2:x',
+          'sanity: the fixture must start as a > b > x');
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'b'));
+        await emptyListItemText(page, list0, 'b');
+
+        // Half A: empty li that OWNS a sublist, at data-indent > 0 -> outdents,
+        // subtree in tow.
+        await page.keyboard.press('Enter');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 0: | 1:x',
+          'F-Q half A: an EMPTY item that owns a sublist must outdent like any other empty item, ' +
+          'carrying its subtree — not split into two empty items');
+        const afterOutdent = await saveAndRead(page, lmdPath);
+        assert.strictEqual(afterOutdent, '# List doc\n\n- a\n-\n  - x\n',
+          'F-Q half A: file bytes after the outdent, got:\n' + JSON.stringify(afterOutdent));
+
+        // Half B: the same item is now EMPTY, TOP-LEVEL and still owns a
+        // sublist -> the paragraph step must refuse (complete no-op).
+        await reopenWysiwyg(page, await liBlockSelByText(page, ''));
+        await page.keyboard.press('Enter');
+        await new Promise((r) => setTimeout(r, 250)); // let any (incorrect) commit land
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 0: | 1:x',
+          'F-Q half B: converting an empty TOP-LEVEL item that owns a sublist to a paragraph would ' +
+          'orphan its children, so the press must be a complete no-op');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+          0,
+          'F-Q half B: no provisional paragraph may be inserted for the refused press'
+        );
+        const afterRefusal = await saveAndRead(page, lmdPath);
+        assert.strictEqual(afterRefusal, afterOutdent,
+          'F-Q half B: the refused press must leave the file byte-identical, got:\n' +
+          JSON.stringify(afterRefusal));
+
+        await page.close();
+        console.log('list WYSIWYG (row 3 / F-Q): empty item owning a sublist outdents; at top level ' +
+          'the paragraph step refuses — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Row 6 adoption must not RETYPE the adopted items. `b1` already owns an
+    // ORDERED sublist, and `b2` is a bullet: appending b2 into b1's <ol> would
+    // emit it as '2. b2' — a marker change to an item the user never touched.
+    // The adopted followers go into a type-MATCHED sublist (created if b1 has
+    // none), which list-md.js emits as a second nested list of that item.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- b', '  - b1', '    1. x', '  - b2', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        assert.strictEqual(await runShapeOf(page, list0), '0:b | 1:b1 | 2:x | 1:b2',
+          'sanity: the fixture must start as b > (b1 > ol:x, b2)');
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'b1'));
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        assert.strictEqual(await runShapeOf(page, list0), '0:b | 0:b1 | 1:x | 1:b2',
+          'b1 rises one level; x stays its child and b2 is adopted as a child too');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('li.ed-block'));
+            const b2 = lis.find((l) => {
+              const s = l.querySelector(':scope > .ed-li-text');
+              return s && s.textContent.trim() === 'b2';
+            });
+            return b2 ? b2.parentElement.nodeName : null;
+          }),
+          'UL',
+          'the adopted item must land in an UNORDERED list — the type of the list it came from'
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- b\n- b1\n  1. x\n  - b2\n',
+          'the adopted bullet must still be emitted as a bullet (never renumbered into b1\'s ' +
+          'ordered sublist), got:\n' + JSON.stringify(fileText));
+
+        await reopenWysiwyg(page, await liBlockSelByText(page, 'b1'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 1,
+          { timeout: 5000 }
+        );
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z must restore the mixed-type nesting exactly, got:\n' + JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG (row 6): adopted followers keep their own list type across a ' +
+          'mixed-type sublist — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // REGRESSION GUARD for the reason suppressLiFocusout exists (client.js).
+    // Chromium runs its unfocus step — firing a synchronous focusout — BEFORE it
+    // detaches a node, so a structural key that moves the li whose .ed-li-text
+    // has focus reaches resolveBurst() with the run still in its PRE-mutation
+    // shape and the burst still live; resolveBurst()'s li branch then serializes
+    // and commits that stale run BEFORE commitListStructure() commits the real
+    // one. Two ops for one keystroke.
+    // resolveBurst()'s byte-identical guard hides it whenever the burst is
+    // pristine, which is why rows 5/6 (caret moved into another li, nothing
+    // typed) cannot detect it: this scenario TYPES into the very li it then
+    // Tabs, so the guard does not fire and the stale commit is reachable. With
+    // the suppression in place there is exactly ONE op, whose `before` is the
+    // pre-typing file; without it, one Ctrl+Z leaves the typed character behind
+    // in a still-flat list.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc(['# List doc', '', '- Alpha item', '- Bravo item', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        const bravoSel = await liBlockSelByText(page, 'Bravo item');
+
+        // Focus the li that is ABOUT TO MOVE (not a sibling), and dirty it.
+        await openWysiwyg(page, bravoSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type('X');
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          { timeout: 5000 }
+        );
+        // The typed character must survive: the suppression drops the focusout,
+        // not the DOM, and commitListStructure() re-serializes the LIVE run.
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- Alpha item\n  - Bravo itemX\n',
+          'the indent AND the typed character must land in ONE commit, got:\n' +
+          JSON.stringify(fileText));
+
+        await reopenWysiwyg(page, await liBlockSelByText(page, 'Bravo itemX'));
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 0,
+          { timeout: 5000 }
+        );
+        const undoneText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(undoneText, lorig,
+          'ONE Ctrl+Z after "type then Tab" must restore the PRE-TYPING bytes — a second, stale ' +
+          'commit from the mid-mutation focusout would leave "- Bravo itemX" flat instead, got:\n' +
+          JSON.stringify(undoneText));
+
+        await page.close();
+        console.log('list WYSIWYG: type-then-Tab is ONE undo op (mid-mutation focusout suppressed) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // RULING F-R: a structural key is refused RUN-WIDE when any li in the run is
+    // unsupported, because spec §3 makes the commit unit the whole run (an
+    // indent rewrites other lines' indent prefixes and ordinals) and
+    // re-serializing a run that holds an unsupported li strips that li's
+    // content. Spec §8's per-li narrowing applies to TYPING, not to this.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- ok item',
+          '- bad <video src="x"></video>',
+          '- also ok',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        const beforeShape = await runShapeOf(page, list0);
+
+        // "also ok" IS armed (§8 degrades only the <video> li), so a burst opens
+        // normally — and Tab would indent it under the unsupported li.
+        await openWysiwyg(page, await liBlockSelByText(page, 'also ok'));
+        await page.keyboard.press('Tab');
+        await new Promise((r) => setTimeout(r, 250)); // let any (incorrect) commit land
+
+        assert.ok(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')),
+          'the refused structural key must surface a banner explaining why nothing happened'
+        );
+        assert.ok(
+          (await page.evaluate(() => document.querySelector('.ed-conflict').textContent))
+            .includes('無法調整結構'),
+          'the banner must be the structural-refusal message (繁體中文)'
+        );
+        assert.strictEqual(await runShapeOf(page, list0), beforeShape,
+          'the refused key must leave the run structurally untouched');
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, lorig,
+          'the refused key must leave the file byte-identical — including the <video> li\'s own ' +
+          'source line, got:\n' + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('list WYSIWYG (F-R): a structural key inside a run holding an unsupported li is ' +
+          'refused run-wide with a banner, file untouched — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     // Per-li arch: each li is armed independently via canWysiwygForLi().
     // Checkbox (task-list) lis are armed — the .ed-li-check span is handled
     // by serializeList() directly and produces no `unsupported` entries.
