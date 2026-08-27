@@ -91,8 +91,87 @@ async function newPage(browser) {
   // beforeunload fires legitimately once a block is dirty; auto-accept so
   // navigations/tests don't hang on a dialog Puppeteer won't dismiss itself.
   page.on('dialog', (d) => d.accept());
+  // Count client.js's own in-flight /api/render + /api/save requests so the
+  // helpers below can wait for the editor to be QUIESCENT before resolving an
+  // element handle. Without this, any action that triggers an auto-commit
+  // (switchAwayFrom()) races that commit's rerenderAll() .content swap: the
+  // node the next Puppeteer action resolves is torn out mid-action. That race
+  // is invisible on a fast dev box and reproducible on a slow one — it is the
+  // real cause of the CI-only failure on the v2.9.0 tag
+  // ("Node is either not clickable or not an Element" out of page.hover()),
+  // and of its siblings "Node is detached from document", "gutter menu item
+  // not found" and a textarea that never appears.
+  await page.evaluateOnNewDocument(() => {
+    window.__edInflight = 0;
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+      if (!/\/api\/(render|save)\b/.test(url)) return origFetch.call(this, input, init);
+      window.__edInflight++;
+      const settle = () => { window.__edInflight--; };
+      return origFetch.call(this, input, init).then(
+        (res) => { settle(); return res; },
+        (err) => { settle(); throw err; }
+      );
+    };
+  });
   return page;
 }
+
+// Two table scenarios below deliberately use a REMOTE image src — that is what
+// makes the cell unsupported. Their `networkidle0` navigation then waits on a
+// real fetch to example.com, which never settles offline (a 30s navigation
+// timeout). Stub the host at the request layer: the fixture keeps its meaning
+// and the page load stays hermetic.
+async function newPageStubbingRemote(browser) {
+  const page = await newPage(browser);
+  await page.setRequestInterception(true);
+  page.on('request', (req) => {
+    if (/^https?:\/\/example\.com\//.test(req.url())) {
+      req.respond({ status: 200, contentType: 'image/png', body: Buffer.from(PNG_B64, 'base64') });
+      return;
+    }
+    req.continue();
+  });
+  return page;
+}
+
+// Waits until no /api/render or /api/save is in flight AND the frame that
+// applies its DOM swap has been painted. Deterministic (unlike a fixed sleep):
+// the counter is incremented by client.js's own request and decremented when
+// that request settles; the two rAFs then let rerenderAll()'s synchronous
+// .content swap land before the caller resolves an element handle.
+async function settleEditor(page) {
+  await page.waitForFunction(() => !window.__edInflight, { timeout: 15000 });
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+}
+
+// Ctrl+S is fire-and-forget from the page's side: the file on disk only changes
+// once /api/save has settled. Wait for the editor's OWN in-flight request
+// rather than sleeping a fixed 300-400 ms — that guess is a coin flip on a
+// loaded CI runner, the same latent-flake class that failed the v2.9.0
+// publish. The short grace window is kept so scenarios asserting the file did
+// NOT change still give a stray save time to land.
+async function awaitSaveSettled(page, quietMs = 200) {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    await settleEditor(page);
+    // A Ctrl+S pressed while a commit's /api/render is still in flight issues
+    // its /api/save only AFTER that render settles, so a single
+    // wait-then-grace can sample the gap BETWEEN the two requests and return
+    // before the save has even been sent. Re-check after the grace window and
+    // go round again if the page became busy inside it.
+    await new Promise((r) => setTimeout(r, quietMs));
+    const busy = await page.evaluate(() => !!window.__edInflight);
+    if (!busy || Date.now() > deadline) return;
+  }
+}
+
+// Symptoms of "the node I was acting on got swapped out from under me". All
+// four have been observed for the same single root cause (a commit's
+// rerenderAll() landing mid-interaction), so all four are retryable.
+const STALE_NODE_RE =
+  /not clickable or not an Element|detached from document|no longer attached|not visible|gutter menu item not found|Waiting (?:failed|for selector)/i;
 
 // Opens a block's RAW editor. Phase 3 Task 2 (always-on editing retires the
 // Phase-2 click-select-then-✎ bar for paragraph/heading blocks): a
@@ -122,8 +201,21 @@ async function openBlockEditor(page, sel) {
   );
   const hasRaw = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel);
   if (!hasRaw) {
-    await clickGutterMenuItem(page, sel, 'MD 原始碼');
-    await page.waitForSelector(sel + ' textarea.ed-raw');
+    // The click above may itself have triggered an auto-commit of a
+    // PREVIOUSLY open block (switchAwayFrom()); that commit's rerenderAll()
+    // swap can land right between the menu click and the textarea appearing,
+    // discarding the doomed node's menu action. Retry the whole route — each
+    // attempt re-settles first, so a retry is a clean second try, not a
+    // faster repeat of the same race.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await clickGutterMenuItem(page, sel, 'MD 原始碼');
+        await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+        break;
+      } catch (err) {
+        if (attempt >= 3 || !STALE_NODE_RE.test(String(err && err.message))) throw err;
+      }
+    }
   }
 }
 
@@ -132,18 +224,33 @@ async function openBlockEditor(page, sel) {
 // 'MD 原始碼' / '✕'). Mirrors the old clickBarButton() helper's role for
 // the retired paragraph/heading bar buttons.
 async function clickGutterMenuItem(page, sel, label) {
-  await page.hover(sel);
-  await page.click(sel + ' .ed-handle');
-  await page.waitForFunction(
-    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
-    {}, sel
-  );
-  await page.evaluate((s, l) => {
-    const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
-      .find((b) => b.textContent === l && !b.hidden);
-    if (!btn) throw new Error('gutter menu item not found: ' + l);
-    btn.click();
-  }, sel, label);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await settleEditor(page);
+      // Re-opening an already-open menu would TOGGLE it shut, so only take the
+      // hover+handle route when this block has no menu on screen (a retry
+      // after a swap always does — the swap took the menu with it).
+      const menuOpen = await page.evaluate(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0, sel);
+      if (!menuOpen) {
+        await page.hover(sel);
+        await page.click(sel + ' .ed-handle');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 5000 }, sel
+        );
+      }
+      await page.evaluate((s, l) => {
+        const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+          .find((b) => b.textContent === l && !b.hidden);
+        if (!btn) throw new Error('gutter menu item not found: ' + l);
+        btn.click();
+      }, sel, label);
+      return;
+    } catch (err) {
+      if (attempt >= 3 || !STALE_NODE_RE.test(String(err && err.message))) throw err;
+    }
+  }
 }
 
 // Opens the WYSIWYG editor on a block — Phase 3 Task 2: paragraph/heading
@@ -690,7 +797,7 @@ async function saveAndRead(page, mdPath) {
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyS');
   await page.keyboard.up('Control');
-  await new Promise((r) => setTimeout(r, 300));
+  await awaitSaveSettled(page);
   return fs.readFileSync(mdPath, 'utf8');
 }
 
@@ -1417,7 +1524,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileText1 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
         'WYSIWYG: Enter-commit + save must update the file on disk');
@@ -1589,7 +1696,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileText2 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/^## Heading/m.test(fileText2),
         'heading ±: clicking + must increase the heading depth in the source (# -> ##)');
@@ -1646,7 +1753,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileText3 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
         'Shift+Enter\'s <br> must round-trip into the saved markdown source');
@@ -1806,7 +1913,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextLeak = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLeak.includes('LISTENER-LEAK-REGRESSION-TEXT'),
         'CRITICAL regression: the typed text must persist to disk, not be silently reverted ' +
@@ -2062,7 +2169,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileText = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText.includes('Blur commit target text here. BLUR-COMMITTED'),
         'focus-edit-blur must commit to `lines` and persist to disk on save, got:\n' + fileText);
@@ -2322,7 +2429,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextBold = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/Bold \*\*commit\*\* target word here\./.test(fileTextBold),
         'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
@@ -2403,7 +2510,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextStrike = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextStrike.includes('Strike ~~commit~~ target word here.'),
         'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
@@ -2444,7 +2551,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextU = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextU.includes('Underline <u>commit</u> target word here.'),
         'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
@@ -2492,7 +2599,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextCode = fs.readFileSync(mdPath, 'utf8');
       const expectedFence = '`` Backtick target has a ` mark inside. ``';
       assert.ok(fileTextCode.includes(expectedFence),
@@ -2537,7 +2644,7 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 300));
+      await awaitSaveSettled(page);
       const fileTextLink = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLink.includes('[target](https://example.org)'),
         'sel-toolbar link: the saved source must contain [target](https://example.org), got: ' + fileTextLink);
@@ -2803,7 +2910,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 300));
+        await awaitSaveSettled(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
 
         assert.ok(fileText.includes('| Name | Note |'), 'header row unchanged, got:\n' + fileText);
@@ -2883,7 +2990,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 300));
+        await awaitSaveSettled(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| one<br>two |'),
           'a cell newline must be emitted as the literal <br>, got:\n' + fileText);
@@ -2946,7 +3053,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 300));
+        await awaitSaveSettled(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| xline1<br>line2 |'),
           'the pasted multi-line cell must commit as ONE physical row containing <br>, got:\n' + fileText);
@@ -3012,7 +3119,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 300));
+        await awaitSaveSettled(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.strictEqual(fileText, torig,
           'Esc must never have touched `lines` — the saved file must be byte-identical to the original, got:\n' + fileText);
@@ -3040,7 +3147,7 @@ async function clickInsertMenuItem(page, sel, label) {
         '',
       ]);
       try {
-        const page = await newPage(browser);
+        const page = await newPageStubbingRemote(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
@@ -3085,7 +3192,7 @@ async function clickInsertMenuItem(page, sel, label) {
         '| Col |', '|---|', '| ![img](https://example.com/x.png) |', '',
       ]);
       try {
-        const page = await newPage(browser);
+        const page = await newPageStubbingRemote(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
 
         const table0 = await tableBlockSel(page, 0);
@@ -4071,7 +4178,17 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Commit the paragraph session (plain Enter — mousedown preventDefault
         // on the toolbar button kept focus/selection on paraEditEl).
+        // The <strong> asserted above is OPTIMISTIC DOM: WYSIWYG puts it on
+        // screen BEFORE the commit's /api/render round-trip lands, so a
+        // waitForFunction on that markup returns while rerenderAll()'s
+        // .content swap is still IN FLIGHT. The table steps below would then
+        // start a burst on a node that gets torn out mid-edit — the cell edit
+        // never reaches `lines` and Ctrl+S saves the document without it.
+        // Invisible on a fast dev box, a real flake on a loaded CI runner, so
+        // wait for the swap itself (the idiom awaitContentSwap() exists for).
+        const paraStale = await nodeHandleFor(page, paraSel);
         await page.keyboard.press('Enter');
+        await awaitContentSwap(page, paraStale);
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
           { timeout: 5000 }
@@ -5823,7 +5940,7 @@ async function clickInsertMenuItem(page, sel, label) {
           if (ae && ae.classList.contains('ed-li-text')) ae.blur();
         });
         await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
-        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+        await settleEditor(page); // commit round-trip settle (was a fixed 150 ms window)
 
         // 4) table cell edit: click "Row1", type '!', blur commits.
         const table0 = await tableBlockSel(page, 0);
@@ -5835,7 +5952,7 @@ async function clickInsertMenuItem(page, sel, label) {
           () => document.querySelector('.content').textContent.includes('Row1!'),
           { timeout: 5000 }
         );
-        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+        await settleEditor(page); // commit round-trip settle (was a fixed 150 ms window)
 
         // 5) hover-＋ column insert after "Name" (boundary index 0) — auto-
         // starts a table burst; blur commits it (3 columns on disk).
@@ -5846,7 +5963,7 @@ async function clickInsertMenuItem(page, sel, label) {
         );
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
-        await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
+        await settleEditor(page); // commit round-trip settle (was a fixed 150 ms window)
 
         // 6) row drag: drag "Row3" (last body row) up above "Row1!" — no
         // burst is open yet, so the drop auto-starts a FRESH one (2-entry
@@ -5966,7 +6083,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f1mdPath, 'utf8');
         assert.ok(fileText.includes('EDITED without a blur.'),
@@ -6018,7 +6135,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f2mdPath, 'utf8');
         assert.strictEqual(fileText, f2orig,
@@ -6173,7 +6290,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f4mdPath, 'utf8');
         assert.ok(!fileText.includes('DISCARDED_TYPING'), 'the discarded typing must never reach the saved file, got:\n' + fileText);
@@ -6265,7 +6382,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f5mdPath, 'utf8');
         assert.strictEqual(fileText, '## Heading depth target text EDITED\n',
@@ -6327,7 +6444,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f6aMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -6387,7 +6504,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyS');
         await page.keyboard.up('Control');
-        await new Promise((r) => setTimeout(r, 400));
+        await awaitSaveSettled(page);
 
         const fileText = fs.readFileSync(f6bMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
