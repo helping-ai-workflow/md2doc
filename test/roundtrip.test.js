@@ -227,6 +227,7 @@ function post(port, p, body) {
       const liBlocks5 = rr5.json.blocks.filter((b) => b.type === 'li');
       const outerLi = liBlocks5.find((b) => fixture.split('\n')[b.startLine - 1] === '- outer');
       assert.ok(outerLi, 'fixture must have an "outer" li block');
+      // +2 window = 3 items, one line each, as in this fixture. Widen if the fixture gains more items or multi-line lis.
       const runLis5 = liBlocks5.filter((b) => b.startLine >= outerLi.startLine &&
         b.startLine <= outerLi.startLine + 2);
       const runStart5 = outerLi.startLine;

@@ -4057,13 +4057,23 @@ async function clickInsertMenuItem(page, sel, label) {
         // Enter must NOT end the burst — it's a structural mutation inside
         // the SAME sustained editing session (only empty-Enter ends it).
         assert.strictEqual(
-          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), list0),
+          await page.evaluate((s) => {
+            // Per-li: check that ANY li in the same run still has its .ed-li-text focused
+            const li = document.querySelector(s);
+            const root = li && li.parentElement;
+            return root && root.contains(document.activeElement) &&
+              document.activeElement.classList.contains('ed-li-text');
+          }, list0),
           true,
           'Enter (non-empty item) must keep the burst open, not commit/blur it'
         );
         await page.waitForFunction(
-          (s) => document.querySelectorAll(s + ' > * > li').length === 4,
-          {}, list0
+          (s) => {
+            // Per-li: count li.ed-block elements within the same parent UL/OL
+            const li = document.querySelector(s);
+            return li && li.parentElement &&
+              li.parentElement.querySelectorAll('li.ed-block').length === 4;
+          }, {}, list0
         );
 
         // Blur (click the heading) to commit, then save.
@@ -4107,9 +4117,12 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.waitForFunction(
           (s) => {
-            const items = document.querySelectorAll(s + ' > * > li');
-            return items.length === 2 && items[0].querySelector('li') &&
-              items[0].querySelector('li').textContent.trim() === 'Bravo item';
+            // Per-li: count top-level items in the run's parent UL/OL
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 2 && topItems[0].querySelector('li.ed-block') &&
+              topItems[0].querySelector('li.ed-block').textContent.trim() === 'Bravo item';
           }, {}, list0
         );
 
@@ -4149,7 +4162,11 @@ async function clickInsertMenuItem(page, sel, label) {
         // the DOM is unchanged.
         await new Promise((r) => setTimeout(r, 150));
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          await page.evaluate((s) => {
+            // Per-li: count li.ed-block in the run's parent UL/OL
+            const li = document.querySelector(s);
+            return li && li.parentElement ? li.parentElement.querySelectorAll('li.ed-block').length : 0;
+          }, list0),
           2,
           'Tab on the first item (no previous sibling) must be a no-op — item count unchanged'
         );
@@ -4183,8 +4200,11 @@ async function clickInsertMenuItem(page, sel, label) {
         // sanity: Bravo starts out nested under Alpha.
         assert.strictEqual(
           await page.evaluate((s) => {
-            const items = document.querySelectorAll(s + ' > * > li');
-            return items.length === 2 && !!items[0].querySelector('li');
+            // Per-li: 2 top-level items in the run, first item has a nested li.ed-block
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 2 && !!topItems[0].querySelector('li.ed-block');
           }, list0),
           true,
           'sanity: Bravo must start out nested under Alpha'
@@ -4196,8 +4216,12 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.keyboard.up('Shift');
         await page.waitForFunction(
-          (s) => document.querySelectorAll(s + ' > * > li').length === 3,
-          {}, list0
+          (s) => {
+            // Per-li: 3 flat items after Shift+Tab outdents Bravo
+            const li = document.querySelector(s);
+            return li && li.parentElement &&
+              li.parentElement.querySelectorAll(':scope > li.ed-block').length === 3;
+          }, {}, list0
         );
 
         const heading = '.ed-block[data-block-type="heading"]';
@@ -4236,7 +4260,11 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.up('Shift');
         await new Promise((r) => setTimeout(r, 150));
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          await page.evaluate((s) => {
+            // Per-li: count li.ed-block in the run's parent UL/OL
+            const li = document.querySelector(s);
+            return li && li.parentElement ? li.parentElement.querySelectorAll('li.ed-block').length : 0;
+          }, list0),
           2,
           'Shift+Tab at top level must be a no-op — item count unchanged'
         );
@@ -4316,8 +4344,11 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.waitForFunction(
           (s) => {
-            const items = document.querySelectorAll(s + ' > * > li');
-            return items.length === 2 && !!items[0].querySelector('li');
+            // Per-li: 2 top-level items after Tab-indent, first has a nested li
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 2 && !!topItems[0].querySelector('li.ed-block');
           }, {}, list0
         );
 
@@ -4326,14 +4357,23 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.up('Control');
         assert.strictEqual(
           await page.evaluate((s) => {
-            const items = document.querySelectorAll(s + ' > * > li');
-            return items.length === 3 && !items[0].querySelector('li');
+            // Per-li: 3 flat items after Ctrl+Z reverts the Tab-indent
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 3 && !topItems[0].querySelector('li.ed-block');
           }, list0),
           true,
           'Ctrl+Z mid-burst must revert the Tab-indent back to the flat pre-indent structure'
         );
         assert.strictEqual(
-          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'), list0),
+          await page.evaluate((s) => {
+            // Per-li: check any li in the run still has focus (burst stays open)
+            const li = document.querySelector(s);
+            const root = li && li.parentElement;
+            return root && root.contains(document.activeElement) &&
+              document.activeElement.classList.contains('ed-li-text');
+          }, list0),
           true,
           'the burst must stay open (still focused) after a mid-burst undo — nothing was committed'
         );
@@ -4404,6 +4444,73 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // Per-li arch §8 degrade: a run where ONE li has unsupported inline content
+    // (<video>) must NOT degrade its siblings. The supported lis remain armed
+    // and editable; the unsupported one is permanently unarmed. When the user
+    // edits an armed li and blurs, the partial-run commit path (client.js:1560)
+    // commits only that li's own line range — the unsupported li's source line
+    // is left byte-identical. This sub-block gives the only test coverage for
+    // that path (commitMd = edited li's slice of runMd, commitStart/End = edited
+    // li's own startLine/endLine).
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- ok item',
+          '- bad <video src="x"></video>',
+          '- also ok',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // (i) The unsupported li (contains <video>) must NOT be armed.
+        const badLiArmed = await page.evaluate(() => {
+          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+          const bad = lis.find((li) => li.querySelector('video'));
+          if (!bad) return 'bad li not found';
+          const surface = bad.querySelector('.ed-li-text');
+          return surface ? surface.getAttribute('contenteditable') : 'no surface';
+        });
+        assert.ok(badLiArmed !== 'true',
+          'the li containing <video> must NOT be armed (contenteditable must not be "true"), got: ' + badLiArmed);
+
+        // (ii) The two supported lis must both be individually armed.
+        const armedSel = 'li.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]';
+        const armedCount = await page.evaluate((s) => document.querySelectorAll(s).length, armedSel);
+        assert.strictEqual(armedCount, 2,
+          '"ok item" and "also ok" must both be individually armed; expected 2, got ' + armedCount);
+
+        // (iii) Edit "ok item", blur, verify partial-run commit: edited line
+        //       changes, <video> line stays byte-identical to original.
+        const okLiSel = await page.evaluate(() => {
+          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+          const ok = lis.find((li) => !li.querySelector('video') && li.textContent.trim() === 'ok item');
+          return ok ? 'li.ed-block[data-block-id="' + ok.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(okLiSel, '"ok item" li not found');
+        await openWysiwyg(page, okLiSel);
+        await page.keyboard.type(' EDITED');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('ok item EDITED'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.includes('- ok item EDITED'),
+          'partial-run commit must update the edited li line, got:\n' + fileText);
+        const videoLine = lorig.split('\n').find((l) => l.includes('<video'));
+        assert.ok(videoLine && fileText.includes(videoLine),
+          'the <video> li line must be byte-identical to the original after a partial-run commit, got:\n' + fileText);
+
+        await page.close();
+        console.log('per-li WYSIWYG: §8 degrade — unarmed li stays intact, armed sibling commits correctly — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     if (false) { // Task 8: cross-item Enter no-op (CRITICAL): a selection spanning MULTIPLE <li>s must
     // NOT silently delete the spanned content on Enter — reviewer's exact
     // probe (select mid-"Alpha item" through mid-"Bravo item", Enter) must
@@ -4419,7 +4526,9 @@ async function clickInsertMenuItem(page, sel, label) {
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
-        const beforeHtml = await page.evaluate((s) => document.querySelector(s + ' > *').innerHTML, list0);
+        // Per-li: capture the whole UL's innerHTML (parent of all lis in the run)
+        // so the no-op assertion covers all items, not just the first li's surface.
+        const beforeHtml = await page.evaluate((s) => document.querySelector(s).parentElement.innerHTML, list0);
 
         // Mid-"Alpha item" through mid-"Bravo item" — the reviewer's exact
         // probe shape, spanning two different <li> elements.
@@ -4431,13 +4540,13 @@ async function clickInsertMenuItem(page, sel, label) {
           'a cross-item Enter no-op must never surface a banner'
         );
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s + ' > *').innerHTML, list0),
+          await page.evaluate((s) => document.querySelector(s).parentElement.innerHTML, list0),
           beforeHtml,
           'a selection spanning multiple <li>s must leave the DOM byte-for-byte unchanged on Enter — ' +
           'no partial deletion of the spanned content'
         );
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelectorAll(s + ' > * > li').length, list0),
+          await page.evaluate((s) => document.querySelector(s).parentElement.querySelectorAll('li.ed-block').length, list0),
           3,
           'item count must stay unchanged (no split, no merge, no item lost)'
         );
@@ -4597,12 +4706,19 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.waitForFunction(
           (s) => {
-            const items = document.querySelectorAll(s + ' > * > li');
-            return items.length === 2 && items[0].querySelector('li') &&
-              items[0].querySelector('li').textContent.trim() === 'Bravo item';
+            // Per-li: 2 top-level items after Tab-indent, first item has Bravo nested
+            const li = document.querySelector(s);
+            if (!li || !li.parentElement) return false;
+            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            return topItems.length === 2 && topItems[0].querySelector('li.ed-block') &&
+              topItems[0].querySelector('li.ed-block').textContent.trim() === 'Bravo item';
           }, {}, list0
         );
-        await page.evaluate((s) => { const el = document.querySelector(s); if (el) el.blur(); }, list0 + ' > *');
+        await page.evaluate(() => {
+          // Per-li: blur whatever .ed-li-text is currently focused (may be Bravo, not Alpha)
+          const ae = document.activeElement;
+          if (ae && ae.classList.contains('ed-li-text')) ae.blur();
+        });
         await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
         await new Promise((r) => setTimeout(r, 150)); // settle window, see step 1's comment
 
