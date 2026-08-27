@@ -5,7 +5,7 @@ const path = require('path');
 const http = require('http');
 const assert = require('assert');
 const { createEditorServer } = require('../lib/editor/server.js');
-const { commitEdit } = require('../lib/editor/client.js');
+const { commitEdit, commitRangeEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { serializeTable } = require('../lib/editor/table-md.js');
 const { serializeInline } = require('../lib/editor/inline-md.js');
@@ -220,12 +220,20 @@ function post(port, p, body) {
     const srv5 = await createEditorServer({ files: [mdPath5], clientJs: '' });
     try {
       const rr5 = await post(srv5.port, '/api/render', { fileId: 0, content: fixture });
-      const lists = rr5.json.blocks.filter((b) => b.type === 'list');
-      assert.strictEqual(lists.length, 1, 'fixture must have exactly one list block');
-      const listBlock = lists[0];
-      const beforeLines = fixture.split('\n').slice(listBlock.startLine - 1, listBlock.endLine);
+      // Per-li architecture: list items are now individual blocks with type 'li'.
+      // Find the li blocks covering the nested-list run ("- outer / - inner 1 / - inner 2"
+      // at lines 33-35 of the fixture) by locating the 'outer' item's li block, then
+      // collecting all li blocks within the 3-line span (outer + 2 nested).
+      const liBlocks5 = rr5.json.blocks.filter((b) => b.type === 'li');
+      const outerLi = liBlocks5.find((b) => fixture.split('\n')[b.startLine - 1] === '- outer');
+      assert.ok(outerLi, 'fixture must have an "outer" li block');
+      const runLis5 = liBlocks5.filter((b) => b.startLine >= outerLi.startLine &&
+        b.startLine <= outerLi.startLine + 2);
+      const runStart5 = outerLi.startLine;
+      const runEnd5 = runLis5[runLis5.length - 1].endLine;
+      const beforeLines = fixture.split('\n').slice(runStart5 - 1, runEnd5);
       assert.deepStrictEqual(beforeLines, ['- outer', '  - inner 1', '  - inner 2'],
-        'fixture list block must be the nested-list hazard this test targets');
+        'fixture list run must be the nested-list hazard this test targets');
 
       const edited = ol(
         li('outer EDITED', ul(li('inner 1'), li('inner 2 EDITED')))
@@ -240,9 +248,9 @@ function post(port, p, body) {
       assert.strictEqual(md, expectedLines.join('\n'),
         'T3 ruling: nested UL indent under a \'1. \' (3-column) OL marker must be 3 spaces, not a flat 2');
 
-      const st5 = commitEdit(
+      const st5 = commitRangeEdit(
         { lines: fixture.split('\n'), blocks: rr5.json.blocks, stack: new UndoStack() },
-        listBlock.id, md
+        runStart5, runEnd5, md
       );
       const r5 = await post(srv5.port, '/api/save',
         { fileId: 0, content: st5.lines.join('\n'), baseMtimeMs: mtime5 });
@@ -250,8 +258,8 @@ function post(port, p, body) {
 
       const fileAfter5 = fs.readFileSync(mdPath5, 'utf8');
       const orig5 = fixture.split('\n');
-      const expectedFull5 = orig5.slice(0, listBlock.startLine - 1)
-        .concat(expectedLines, orig5.slice(listBlock.endLine))
+      const expectedFull5 = orig5.slice(0, runStart5 - 1)
+        .concat(expectedLines, orig5.slice(runEnd5))
         .join('\n');
       assert.strictEqual(fileAfter5, expectedFull5,
         'only the list block\'s line range may change; every other line must stay byte-identical to the pristine fixture');
