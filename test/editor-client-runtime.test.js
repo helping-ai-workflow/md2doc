@@ -776,6 +776,23 @@ async function rowGripCoords(page, tableSel, bodyIndex) {
   await hoverBodyRowCell(page, tableSel, bodyIndex);
   return gripCenter(page, '.ed-te-grip-row');
 }
+// Same idea for the HEADER row's own grip (spec §3.10 — the header row is
+// draggable too, since position alone decides header identity). Cannot reuse
+// rowGripCoords()'s "grip centre == row centre" wait: the header grip is
+// deliberately offset DOWN by TE_HEADER_GRIP_DY_PX (16) to stay clear of the
+// column-grip band, so the wait has to expect that offset or it would settle
+// on a stale body-row position.
+async function headerGripCoords(page, tableSel) {
+  await hoverHeaderRowCell(page, tableSel);
+  await page.waitForFunction((ts) => {
+    const g = document.querySelector('.ed-te-grip-row');
+    if (!g || g.hidden) return false;
+    const hr = document.querySelector(ts + ' table').tHead.rows[0].getBoundingClientRect();
+    const gr = g.getBoundingClientRect();
+    return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+  }, { timeout: 3000 }, tableSel);
+  return gripCenter(page, '.ed-te-grip-row');
+}
 // A real press+release with NO intermediate movement AT the grip's own
 // coordinates — same primitive a plain click on a grip drives (client.js's
 // drag-threshold check never trips), reused by both the menu-open scenarios
@@ -4207,6 +4224,100 @@ async function clickInsertMenuItem(page, sel, label) {
           'dragging a row and dropping it back where it was must not rewrite the file, got:\n' + fileText);
         await page.close();
         console.log('table row drag: drop-in-place is byte-identical (no canonical rewrite) — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Same guarantee, but with the burst ALREADY OPEN before the gesture —
+    // which is the only ordering that can see a `class=""` residue. On the
+    // scenario above, pointerup strips `ed-te-row-dragging` BEFORE
+    // performRowDrop() awaits ensureTableBurstOpen(), so `burst.original`
+    // is captured with the residue already in place and matches at save
+    // time. Click a cell first and the capture predates the drag: the
+    // renderer emits a bare `<tr>`, classList.add()/remove() leaves
+    // `class=""` behind, and resolveBurst()'s zero-edit guard
+    // (`burst.editEl.innerHTML === burst.original`) then sees a diff that
+    // no user edit produced — canonicalizing a hand-padded table on a
+    // gesture that changed nothing.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note |', '|--------|------|', '| Alice  | a    |', '| Bob    | b    |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Alice'); // burst opens HERE, before any drag
+        const from = await rowGripCoords(page, table0, 0);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' table tbody tr').getAttribute('class'), table0),
+          null,
+          'the drag class must be REMOVED, not left as class="" — an empty attribute still counts as a diff');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'drop-in-place with a burst already open must not rewrite the file, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: drop-in-place with a pre-existing burst is byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Round trip ACROSS the header boundary: promote a body row, then drag
+    // it back. The row order is restored, so the file must be too — which
+    // only holds if retagCell() reproduces the ARMED attribute order. The
+    // renderer emits `class` before `style` (see renderer.table in
+    // lib/md2doc.js) and armEditables() appends `contenteditable` last, so
+    // the armed form is `class, style, contenteditable`; a retag that
+    // writes `style, class, contenteditable` restores the ROWS but not the
+    // BYTES, and the zero-edit guard canonicalizes the whole table. The
+    // fixture is deliberately hand-padded AND has an aligned column, so
+    // both a canonical rewrite and a lost alignment show up as a diff.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note  |', '|--------|:-----:|', '| Alice  | a     |', '| Bob    | b     |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // 1) Alice (first body row) -> above the header: she becomes the header.
+        const from1 = await rowGripCoords(page, table0, 0);
+        const to1 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from1, to1);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Alice',
+          {}, table0);
+
+        // 2) Alice back down, just above Bob -> the ORIGINAL order returns.
+        const from2 = await headerGripCoords(page, table0);
+        const to2 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[1].getBoundingClientRect(); // Bob
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from2, to2);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Name',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Name,Alice,Bob', 'sanity: the round trip must restore the original row order');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'a row moved across the header and back must leave the file byte-identical, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: promote-then-demote round trip is byte-identical — OK');
       } finally { tsrv.close(); }
     }
 
