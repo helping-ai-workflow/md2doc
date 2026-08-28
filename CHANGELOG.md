@@ -3,6 +3,27 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.10.2 — 2026-08-29
+
+### Fixed
+
+- **The table row grip is back on the table's border line, and every row uses the
+  same rule.** v2.10.1 moved it fully inside the table's left edge, where a 20px
+  grip sat on top of the first cell's 14px padding and bit ~5px into the cell's
+  text; the header row additionally carried a downward offset that no other row
+  had. Both are gone: every row's grip — header included — is centred on the
+  table's left border, exactly mirroring how the column grip is centred on the
+  top border. The grip now clears the first cell's text by 4.5px at the default
+  layout.
+- **The block gutter has its own room instead of borrowing the sidebar's.** In
+  edit mode the content column now carries 48px of left padding and the ⠿ / ＋
+  buttons live inside it, 8px clear of the row grip. Previously the gutter hung
+  outside the content box on top of the sidebar splitter, and the 6px overlap it
+  created with the row grip was what motivated v2.10.1's inset in the first
+  place — the overlap is now impossible by geometry rather than avoided by a
+  special case. Reader and PDF output are unaffected: the padding is emitted only
+  for edit-mode renders.
+
 ## v2.10.1 — 2026-08-28
 
 ### Added
