@@ -259,6 +259,15 @@ async function clickGutterMenuItem(page, sel, label) {
 // startBurst()). Kept as its own helper (rather than inlining page.click()
 // at every call site) purely so the many pre-existing Task 3/4 scenarios
 // below read the same way they did before the migration.
+// S1: the flat model has no <li> tag left for a selector to be recognised by,
+// so every selector that names a LIST block is minted with its block type
+// spelled out — liSel() below is the only way one is built. openWysiwyg() then
+// keeps recognising list blocks by a pure STRING test on the selector, exactly
+// as it did with 'li.ed-block' before, and does not pay a CDP round-trip.
+const LI_SEL_PREFIX = '.ed-block[data-block-type="li"]';
+function liSel(blockId) { return LI_SEL_PREFIX + '[data-block-id="' + blockId + '"]'; }
+function isLiSel(sel) { return sel.indexOf(LI_SEL_PREFIX) === 0; }
+
 async function openWysiwyg(page, sel) {
   // Task 8 (per-li arch geometry): a li block's box ENCLOSES its nested
   // sublist, so page.click()'s center-of-box coordinate for a parent item
@@ -267,21 +276,23 @@ async function openWysiwyg(page, sel) {
   // the wait below never settles. Click the surface itself for li blocks;
   // identical target for a li with no sublist, and every non-li caller keeps
   // clicking the block box exactly as before.
-  // The li check is deliberately made against the SELECTOR STRING
-  // (listBlockSel() / liBlockSelByText() both return 'li.ed-block[...]') rather
-  // than by asking the page: an extra CDP round-trip here would shift EVERY
+  // The li check is deliberately made against the SELECTOR STRING (every list
+  // selector comes from liSel(), which spells the block type out) rather than
+  // by asking the page: an extra CDP round-trip here would shift EVERY
   // caller's click one round-trip later, which is enough to lose a
   // stale-handle race against a commit's .content swap in the scenarios that
   // click immediately after a commit.
-  const isLi = sel.indexOf('li.ed-block') === 0;
+  const isLi = isLiSel(sel);
   await page.click(isLi ? sel + ' > .ed-li-text' : sel);
   // Wait for the burst to actually have started (native focus landed AND
   // client.js's own async focusin handling settled — see openBlockEditor()'s
   // comment for why a plain contenteditable-true check alone isn't enough:
   // that's already true before the click for an always-on armed block).
+  // S1: a flat list block's FIRST element child is its .ed-li-marker span, so
+  // ' > *' no longer names the editable surface — address it by class.
   await page.waitForFunction(
-    (s) => document.activeElement === document.querySelector(s + ' > *'),
-    {}, sel
+    (s) => document.activeElement === document.querySelector(s),
+    {}, isLi ? sel + ' > .ed-li-text' : sel + ' > *'
   );
 }
 
@@ -412,78 +423,115 @@ async function setupListDoc(rows) {
 }
 
 // Locates a list run by its 0-based position among ALL list runs in document
-// order and returns a CSS selector for the FIRST li of that run. Per-li arch
-// (Task 3+): each <li> is its own .ed-block[data-block-type="li"]; runs are
-// identified by grouping li blocks under the same outermost UL/OL root (whose
-// parent is NOT a <li>). Mirrors tableBlockSel()'s role for lists (fixture
-// docs below deliberately have >1 list so the "untouched sibling list stays
-// byte-identical" requirement is actually exercised).
+// order and returns a CSS selector for the FIRST block of that run. S1: each
+// list item is its own flat `.ed-block[data-block-type="li"]` and there are no
+// <ul>/<ol> containers left, so a run is identified by the renderer's own
+// `data-run-start="1"` marker at indent 0 — which lib/md2doc.js derives from
+// exactly the spec-§3.8 rule list-md.js's serializeBlocks() applies. Mirrors
+// tableBlockSel()'s role for lists (fixture docs below deliberately have >1
+// list so the "untouched sibling list stays byte-identical" requirement is
+// actually exercised).
 async function listBlockSel(page, index) {
   const id = await page.evaluate((i) => {
-    const liEls = Array.prototype.slice.call(
-      document.querySelectorAll('li.ed-block[data-block-type="li"]'));
-    const seenRoots = [];
-    liEls.forEach((li) => {
-      let cur = li.parentElement;
-      let root = null;
-      while (cur) {
-        if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
-            (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
-          root = cur;
-        }
-        cur = cur.parentElement;
-      }
-      if (root && seenRoots.indexOf(root) === -1) seenRoots.push(root);
-    });
-    const targetRoot = seenRoots[i];
-    if (!targetRoot) return null;
-    const firstLi = targetRoot.querySelector('li.ed-block[data-block-type="li"]');
-    return firstLi ? firstLi.getAttribute('data-block-id') : null;
+    const starts = Array.prototype.slice.call(document.querySelectorAll(
+      '.ed-block[data-block-type="li"][data-indent="0"][data-run-start="1"]'));
+    const hit = starts[i];
+    return hit ? hit.getAttribute('data-block-id') : null;
   }, index);
   assert.ok(id, 'list block not found at index ' + index);
-  return 'li.ed-block[data-block-id="' + id + '"]';
+  return liSel(id);
 }
 
-// Task 8: selector for the li.ed-block whose OWN text (its .ed-li-text
-// surface, excluding any nested sublist) trims to exactly `text` — needed by
-// the row-3/5/6 scenarios, which act on a NESTED item that listBlockSel()
-// (first li of a run) cannot address.
+// Task 8: selector for the list block whose OWN text (its .ed-li-text surface)
+// trims to exactly `text` — needed by the row-3/5/6 scenarios, which act on a
+// NESTED item that listBlockSel() (first block of a run) cannot address.
 async function liBlockSelByText(page, text) {
   const id = await page.evaluate((t) => {
     const lis = Array.prototype.slice.call(
-      document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+      document.querySelectorAll('.ed-block[data-block-type="li"]'));
     const hit = lis.find((li) => {
+      // A PROVISIONAL block (splitListItemAtCaret()'s new item, before its
+      // commit re-renders) has no data-block-id, so it cannot be addressed by
+      // one — skipping it makes "not found" the honest answer rather than
+      // returning a selector that matches nothing.
+      if (li.getAttribute('data-block-id') === null) return false;
       const surface = li.querySelector(':scope > .ed-li-text');
       return surface && surface.textContent.trim() === t;
     });
     return hit ? hit.getAttribute('data-block-id') : null;
   }, text);
   assert.ok(id, 'li block with own text "' + text + '" not found');
-  return 'li.ed-block[data-block-id="' + id + '"]';
+  return liSel(id);
 }
+
+// S1: the COMMIT SPAN of the list block `sel` names, as an array of elements in
+// document order — the client's own listRunOf() rule, restated for the test
+// harness: walk back to the shallowest list block still reachable without
+// leaving the contiguous li sequence, take that block's §3.8 run (stop at a
+// shallower block, at a same-depth block of a different data-list-type, at a
+// non-li block, or at a data-list-start — rule (d), the boundary between two
+// adjacent lists; deeper blocks never break it), then extend past the last
+// member to cover its subtree. Evaluated IN the page, so it is inlined as a source
+// string into each page.evaluate() that needs it.
+const RUN_SPAN_FN = `
+  function runSpanOf(blockEl) {
+    const all = Array.prototype.slice.call(document.querySelectorAll('.ed-block'));
+    function at(el) {
+      if (!el || el.getAttribute('data-block-type') !== 'li') return null;
+      return { indent: Number(el.getAttribute('data-indent')) || 0,
+               listType: el.getAttribute('data-list-type') === 'ol' ? 'ol' : 'ul',
+               listStart: el.getAttribute('data-list-start') === '1' };
+    }
+    const self = at(blockEl);
+    const i = all.indexOf(blockEl);
+    if (!self || i < 0) return [];
+    let anchor = i, anchorIndent = self.indent;
+    if (!self.listStart) {
+      for (let k = i - 1; k >= 0 && anchorIndent > 0; k--) {
+        const a = at(all[k]);
+        if (!a) break;
+        if (a.indent < anchorIndent) { anchor = k; anchorIndent = a.indent; }
+        if (a.listStart) break;
+      }
+    }
+    const base = at(all[anchor]);
+    let startIdx = anchor, endIdx = anchor;
+    if (!at(all[anchor]).listStart) {
+      for (let k = anchor - 1; k >= 0; k--) {
+        const a = at(all[k]);
+        if (!a || a.indent < base.indent) break;
+        if (a.indent === base.indent) {
+          if (a.listType !== base.listType) break;
+          startIdx = k;
+        }
+        if (a.listStart) break;
+      }
+    }
+    for (let k = anchor + 1; k < all.length; k++) {
+      const a = at(all[k]);
+      if (!a || a.indent < base.indent || a.listStart) break;
+      if (a.indent === base.indent && a.listType !== base.listType) break;
+      endIdx = k;
+    }
+    return all.slice(startIdx, endIdx + 1);
+  }
+`;
 
 // Task 8: the run's li lines in document order, read back from the SERVER-
 // rendered DOM — `data-indent` and `data-block-id` are produced by
 // blockmap.js from the committed markdown, so this is a faithful (and
 // commit-proving) projection of what actually landed in `lines`.
 async function runShapeOf(page, listSel) {
-  return page.evaluate((sel) => {
+  return page.evaluate(new Function('sel', RUN_SPAN_FN + `
     const liEl = document.querySelector(sel);
-    let root = null;
-    let cur = liEl && liEl.parentElement;
-    while (cur) {
-      if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
-          (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
-        root = cur;
-      }
-      cur = cur.parentElement;
-    }
-    if (!root) return null;
-    return Array.prototype.slice.call(root.querySelectorAll('li.ed-block')).map((li) => {
+    if (!liEl) return null;
+    const span = runSpanOf(liEl);
+    if (!span.length) return null;
+    return span.map(function (li) {
       const surface = li.querySelector(':scope > .ed-li-text');
       return li.getAttribute('data-indent') + ':' + (surface ? surface.textContent.trim() : '');
     }).join(' | ');
-  }, listSel);
+  `), listSel);
 }
 
 // Task 8: true iff the caret is COLLAPSED at the very start of `el` (no text
@@ -512,23 +560,18 @@ async function caretIsAtStartOf(page, elSel) {
 // Per-li arch: `listSel` points at a specific li.ed-block; the root for
 // tree-walking is the outermost UL/OL ancestor (whose parent is NOT a <li>).
 async function placeCaretInListText(page, listSel, text, atStart) {
-  await page.evaluate((sel, t, start) => {
+  await page.evaluate(new Function('sel', 't', 'start', RUN_SPAN_FN + `
     const liEl = document.querySelector(sel);
-    let root = null;
-    let cur = liEl && liEl.parentElement;
-    while (cur) {
-      if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
-          (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
-        root = cur;
+    const span = liEl ? runSpanOf(liEl) : [];
+    if (!span.length) throw new Error('list run not found for: ' + sel);
+    let node = null, idx = -1;
+    for (let bi = 0; bi < span.length && !node; bi++) {
+      const walker = document.createTreeWalker(span[bi], NodeFilter.SHOW_TEXT);
+      let wCur;
+      while ((wCur = walker.nextNode())) {
+        idx = wCur.textContent.indexOf(t);
+        if (idx !== -1) { node = wCur; break; }
       }
-      cur = cur.parentElement;
-    }
-    if (!root) throw new Error('list run root not found for: ' + sel);
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node = null, idx = -1, wCur;
-    while ((wCur = walker.nextNode())) {
-      idx = wCur.textContent.indexOf(t);
-      if (idx !== -1) { node = wCur; break; }
     }
     if (!node) throw new Error('list text not found: ' + t);
     const offset = start ? idx : idx + t.length;
@@ -538,7 +581,7 @@ async function placeCaretInListText(page, listSel, text, atStart) {
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(range);
-  }, listSel, text, !!atStart);
+  `), listSel, text, !!atStart);
 }
 
 // Selects the ENTIRE text node whose trimmed content is exactly `text` (a
@@ -549,29 +592,24 @@ async function placeCaretInListText(page, listSel, text, atStart) {
 // Per-li arch: tree-walks from the outermost UL/OL root (same as
 // placeCaretInListText above) so nested items are reachable.
 async function emptyListItemText(page, listSel, text) {
-  const ownerSel = await page.evaluate((sel, t) => {
+  const ownerSel = await page.evaluate(new Function('sel', 't', RUN_SPAN_FN + `
     const liEl = document.querySelector(sel);
-    let root = null;
-    let cur = liEl && liEl.parentElement;
-    while (cur) {
-      if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
-          (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
-        root = cur;
+    const span = liEl ? runSpanOf(liEl) : [];
+    if (!span.length) throw new Error('list run not found for: ' + sel);
+    let node = null;
+    for (let bi = 0; bi < span.length && !node; bi++) {
+      const walker = document.createTreeWalker(span[bi], NodeFilter.SHOW_TEXT);
+      let wCur;
+      while ((wCur = walker.nextNode())) {
+        if (wCur.textContent.trim() === t) { node = wCur; break; }
       }
-      cur = cur.parentElement;
-    }
-    if (!root) throw new Error('list run root not found for: ' + sel);
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node = null, wCur;
-    while ((wCur = walker.nextNode())) {
-      if (wCur.textContent.trim() === t) { node = wCur; break; }
     }
     if (!node) throw new Error('list item text not found: ' + t);
     // Task 8 (per-li arch): every <li> has its OWN contenteditable
     // .ed-li-text surface, so the native Backspace below is only delivered to
-    // the editing host that actually owns `node` if that host has focus. The
-    // caller may have opened the burst on a DIFFERENT li of the same run
-    // (openWysiwyg() always focuses the run's FIRST li), in which case the
+    // the editing host that actually owns that text node if it has focus. The
+    // caller may have opened the burst on a DIFFERENT item of the same run
+    // (openWysiwyg() always focuses the run's FIRST item), in which case the
     // keystroke would land there and the selection would not be deleted at
     // all. Focus the owning surface first — which is also exactly where a
     // real user's caret would already be.
@@ -585,11 +623,11 @@ async function emptyListItemText(page, listSel, text) {
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(range);
-    const ownerLi = owner && owner.closest && owner.closest('li.ed-block');
+    const ownerLi = owner && owner.closest && owner.closest('.ed-block[data-block-type="li"]');
     return ownerLi
-      ? 'li.ed-block[data-block-id="' + ownerLi.getAttribute('data-block-id') + '"] > .ed-li-text'
+      ? '.ed-block[data-block-id="' + ownerLi.getAttribute('data-block-id') + '"] > .ed-li-text'
       : null;
-  }, listSel, text);
+  `), listSel, text);
   if (ownerSel) {
     await page.waitForFunction((s) => document.activeElement === document.querySelector(s), {}, ownerSel);
   }
@@ -605,29 +643,25 @@ async function emptyListItemText(page, listSel, text) {
 // Per-li arch: tree-walks from the outermost UL/OL root (same as the other
 // list helpers above).
 async function selectAcrossListItems(page, listSel, fromText, toText) {
-  await page.evaluate((sel, fromT, toT) => {
+  await page.evaluate(new Function('sel', 'fromT', 'toT', RUN_SPAN_FN + `
     const liEl = document.querySelector(sel);
-    let root = null;
-    let cur = liEl && liEl.parentElement;
-    while (cur) {
-      if ((cur.nodeName === 'UL' || cur.nodeName === 'OL') &&
-          (!cur.parentElement || cur.parentElement.nodeName !== 'LI')) {
-        root = cur;
-      }
-      cur = cur.parentElement;
-    }
-    if (!root) throw new Error('list run root not found for: ' + sel);
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let fromNode = null, fromIdx = -1, toNode = null, toIdx = -1, wCur;
-    while ((wCur = walker.nextNode())) {
-      if (!fromNode) {
-        const i = wCur.textContent.indexOf(fromT);
-        if (i !== -1) { fromNode = wCur; fromIdx = i; }
-      }
-      if (fromNode && !toNode) {
-        const searchFrom = (wCur === fromNode) ? fromIdx : 0;
-        const j = wCur.textContent.indexOf(toT, searchFrom);
-        if (j !== -1) { toNode = wCur; toIdx = j; }
+    const span = liEl ? runSpanOf(liEl) : [];
+    if (!span.length) throw new Error('list run not found for: ' + sel);
+    let fromNode = null, fromIdx = -1, toNode = null, toIdx = -1;
+    for (let bi = 0; bi < span.length; bi++) {
+      const walker = document.createTreeWalker(span[bi], NodeFilter.SHOW_TEXT);
+      let wCur;
+      while ((wCur = walker.nextNode())) {
+        if (!fromNode) {
+          const i = wCur.textContent.indexOf(fromT);
+          if (i !== -1) { fromNode = wCur; fromIdx = i; }
+        }
+        if (fromNode && !toNode) {
+          const searchFrom = (wCur === fromNode) ? fromIdx : 0;
+          const j = wCur.textContent.indexOf(toT, searchFrom);
+          if (j !== -1) { toNode = wCur; toIdx = j; }
+        }
+        if (fromNode && toNode) break;
       }
       if (fromNode && toNode) break;
     }
@@ -638,7 +672,7 @@ async function selectAcrossListItems(page, listSel, fromText, toText) {
     const s = window.getSelection();
     s.removeAllRanges();
     s.addRange(range);
-  }, listSel, fromText, toText);
+  `), listSel, fromText, toText);
 }
 
 // Real (trusted-ish, coordinate-based) mouse click on whichever TH/TD in
@@ -886,6 +920,13 @@ async function clickInsertMenuItem(page, sel, label) {
     (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
     {}, sel
   );
+  // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+  // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+  // wait above no longer proves the commit landed. The commit fetch is
+  // already in flight by the time the key event returns, so draining it is
+  // deterministic — and it is what makes the next click / save observe the
+  // POST-swap DOM instead of tearing a stale handle out mid-click.
+  await settleEditor(page);
   await page.evaluate((s, l) => {
     const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
       .find((b) => b.textContent === l);
@@ -5186,15 +5227,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Click Bravo item (different li in the same run) without typing —
         // switchAwayFrom() sees unchanged innerHTML and no-ops.
-        const bravoSel = await page.evaluate(() => {
-          const lis = document.querySelectorAll('li.ed-block[data-block-type="li"]');
-          for (let i = 0; i < lis.length; i++) {
-            if (lis[i].textContent.includes('Bravo item')) {
-              return 'li.ed-block[data-block-id="' + lis[i].getAttribute('data-block-id') + '"]';
-            }
-          }
-          return null;
-        });
+        const bravoSel = await liBlockSelByText(page, 'Bravo item');
         assert.ok(bravoSel, 'Bravo item li not found');
         await openWysiwyg(page, bravoSel);
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
@@ -5232,23 +5265,29 @@ async function clickInsertMenuItem(page, sel, label) {
         // the SAME sustained editing session (only empty-Enter ends it).
         assert.strictEqual(
           await page.evaluate((s) => {
-            // Per-li: check that ANY li in the same run still has its .ed-li-text focused
-            const li = document.querySelector(s);
-            const root = li && li.parentElement;
-            return root && root.contains(document.activeElement) &&
-              document.activeElement.classList.contains('ed-li-text');
+            // S1: check that SOME list block still has its .ed-li-text focused
+            // (the split may have moved focus to the new tail block).
+            if (!document.querySelector(s)) return false;
+            const ae = document.activeElement;
+            return !!ae && ae.classList.contains('ed-li-text') &&
+              !!ae.closest('.ed-block[data-block-type="li"]');
           }, list0),
           true,
           'Enter (non-empty item) must keep the burst open, not commit/blur it'
         );
         await page.waitForFunction(
           (s) => {
-            // Per-li: count li.ed-block elements within the same parent UL/OL
-            const li = document.querySelector(s);
-            return li && li.parentElement &&
-              li.parentElement.querySelectorAll('li.ed-block').length === 4;
+            // S1: flat blocks — count every list block in the document.
+            return !!document.querySelector(s) &&
+              document.querySelectorAll('.ed-block[data-block-type="li"]').length === 4;
           }, {}, list0
         );
+        // S1: the provisional block a split creates is now a real .ed-block (the
+        // flat model needs the run scan to see it), so a li-count wait is satisfied
+        // by the LOCAL mutation — pre-S1 the provisional <li> carried no ed-block
+        // class and the count only moved once the commit re-rendered. Drain the
+        // commit so the next click sees the POST-swap DOM.
+        await settleEditor(page);
 
         // Blur (click the heading) to commit, then save.
         const heading = '.ed-block[data-block-type="heading"]';
@@ -5299,15 +5338,22 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForFunction(
           (s) => {
             // Per-li: count top-level items in the run's parent UL/OL
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            const nested = topItems[0] && topItems[0].querySelector('li.ed-block');
-            return topItems.length === 2 && !!nested &&
-              nested.getAttribute('data-indent') === '1' &&
-              nested.textContent.trim() === 'Bravo item';
+            // S1: nesting is data-indent, not DOM containment — two items at
+            // indent 0 and exactly one at indent 1 IS "Bravo nested under Alpha".
+            if (!document.querySelector(s)) return false;
+            const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
+            const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            return tops.length === 2 && nested.length === 1 &&
+              nested[0].textContent.trim() === 'Bravo item';
           }, {}, list0
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
 
         const heading = '.ed-block[data-block-type="heading"]';
         await page.click(heading + ' > *');
@@ -5347,9 +5393,9 @@ async function clickInsertMenuItem(page, sel, label) {
         await new Promise((r) => setTimeout(r, 150));
         assert.strictEqual(
           await page.evaluate((s) => {
-            // Per-li: count li.ed-block in the run's parent UL/OL
-            const li = document.querySelector(s);
-            return li && li.parentElement ? li.parentElement.querySelectorAll('li.ed-block').length : 0;
+            // S1: flat blocks — count every list block in the document.
+            return document.querySelector(s)
+              ? document.querySelectorAll('.ed-block[data-block-type="li"]').length : 0;
           }, list0),
           2,
           'Tab on the first item (no previous sibling) must be a no-op — item count unchanged'
@@ -5388,11 +5434,10 @@ async function clickInsertMenuItem(page, sel, label) {
         // sanity: Bravo starts out nested under Alpha.
         assert.strictEqual(
           await page.evaluate((s) => {
-            // Per-li: 2 top-level items in the run, first item has a nested li.ed-block
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 2 && !!topItems[0].querySelector('li.ed-block');
+            // S1: 2 items at indent 0, one at indent 1 — Bravo nested under Alpha.
+            if (!document.querySelector(s)) return false;
+            return document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]').length === 2 &&
+              document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length === 1;
           }, list0),
           true,
           'sanity: Bravo must start out nested under Alpha'
@@ -5409,14 +5454,20 @@ async function clickInsertMenuItem(page, sel, label) {
         // that window races the .content swap).
         await page.waitForFunction(
           (s) => {
-            // Per-li: 3 flat items after Shift+Tab outdents Bravo
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 3 && Array.prototype.every.call(topItems,
+            // S1: 3 flat items after Shift+Tab outdents Bravo
+            if (!document.querySelector(s)) return false;
+            const items = document.querySelectorAll('.ed-block[data-block-type="li"]');
+            return items.length === 3 && Array.prototype.every.call(items,
               (t) => t.getAttribute('data-indent') === '0');
           }, {}, list0
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
 
         const heading = '.ed-block[data-block-type="heading"]';
         await page.click(heading + ' > *');
@@ -5456,9 +5507,9 @@ async function clickInsertMenuItem(page, sel, label) {
         await new Promise((r) => setTimeout(r, 150));
         assert.strictEqual(
           await page.evaluate((s) => {
-            // Per-li: count li.ed-block in the run's parent UL/OL
-            const li = document.querySelector(s);
-            return li && li.parentElement ? li.parentElement.querySelectorAll('li.ed-block').length : 0;
+            // S1: flat blocks — count every list block in the document.
+            return document.querySelector(s)
+              ? document.querySelectorAll('.ed-block[data-block-type="li"]').length : 0;
           }, list0),
           2,
           'Shift+Tab at top level must be a no-op — item count unchanged'
@@ -5580,15 +5631,21 @@ async function clickInsertMenuItem(page, sel, label) {
         // data-indent="1", which only a real /api/render round trip produces.
         await page.waitForFunction(
           (s) => {
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            if (topItems.length !== 2) return false;
-            const nested = topItems[0].querySelector('li.ed-block');
-            return !!nested && nested.getAttribute('data-indent') === '1' &&
-              nested.textContent.trim() === 'Bravo item';
+            // S1: nesting is data-indent, not DOM containment.
+            if (!document.querySelector(s)) return false;
+            const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
+            const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            return tops.length === 2 && nested.length === 1 &&
+              nested[0].textContent.trim() === 'Bravo item';
           }, {}, list0
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.ok(renderRequestCount > rendersBeforeTab,
           'Tab must COMMIT the structural change (spec §3: one line-range replace of the run), ' +
           'which necessarily round-trips /api/render');
@@ -5599,12 +5656,19 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForFunction(
           (s) => {
             // 3 flat items again after ONE Ctrl+Z reverts the whole Tab-indent
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            return topItems.length === 3 && !topItems[0].querySelector('li.ed-block');
+            if (!document.querySelector(s)) return false;
+            const items = document.querySelectorAll('.ed-block[data-block-type="li"]');
+            return items.length === 3 && Array.prototype.every.call(items,
+              (t) => t.getAttribute('data-indent') === '0');
           }, {}, list0
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
 
         const fileText = await saveAndRead(page, lmdPath);
         assert.strictEqual(fileText, lorig,
@@ -5645,13 +5709,18 @@ async function clickInsertMenuItem(page, sel, label) {
         // structural commit + re-render.
         await page.waitForFunction(
           (s) => {
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const items = li.parentElement.querySelectorAll(':scope > li.ed-block');
+            if (!document.querySelector(s)) return false;
+            const items = document.querySelectorAll('.ed-block[data-block-type="li"]');
             return items.length === 2 &&
               items[0].textContent.trim() === 'a' && items[1].textContent.trim() === 'b';
           }, {}, list0
         );
+        // S1: the provisional block a split creates is now a real .ed-block
+        // (the flat model needs the run scan to see it), so the shape above is
+        // reached by the LOCAL mutation — pre-S1 the provisional <li> carried
+        // no ed-block class. Drain the commit so the id lookup below finds the
+        // SERVER-numbered block rather than the id-less provisional one.
+        await settleEditor(page);
 
         // Focus target: the SECOND li of the run — the run starts at line 3
         // and the serializer emits exactly one line per li in document order,
@@ -5678,7 +5747,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block').length === 1, { timeout: 5000 });
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 1, { timeout: 5000 });
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z after an Enter-split must restore the pre-key lines exactly, got:\n' +
@@ -5712,9 +5781,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await placeCaretInListText(page, list0, 'b', true); // caret in 'b' (start)
         await page.keyboard.press('Tab');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="2"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 2:b1 | 2:b2 | 0:c',
           'Tab must indent the caret item AND its whole subtree, leaving later siblings alone');
 
@@ -5728,9 +5804,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 0,
+          () => document.querySelectorAll('.ed-block[data-indent="2"]').length === 0,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z after a Tab must restore the pre-key lines exactly, got:\n' +
@@ -5766,10 +5849,17 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.keyboard.up('Shift');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block').length === 5 &&
-            document.querySelectorAll('li.ed-block[data-indent="0"]').length === 4,
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 5 &&
+            document.querySelectorAll('.ed-block[data-indent="0"]').length === 4,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 0:b | 0:b1 | 1:b2 | 0:c',
           'row 6: b1 must rise one level and b2 (its former following same-level sibling) must ' +
           'become b1\'s child');
@@ -5784,9 +5874,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 3,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 3,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z after a Shift+Tab must restore the pre-key lines exactly, got:\n' +
@@ -5822,9 +5919,16 @@ async function clickInsertMenuItem(page, sel, label) {
         // committed markdown is proven by the SERVER-rendered data-indent.
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 0:',
           'row 3 press 1: the empty nested li must outdent one level and STAY a li (spec §4)');
 
@@ -5833,10 +5937,16 @@ async function clickInsertMenuItem(page, sel, label) {
         // re-opened, after which Enter would no longer be ours.
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block').length === 1 &&
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 1 &&
             document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: the provisional block a split creates is now a real .ed-block (the
+        // flat model needs the run scan to see it), so a li-count wait is satisfied
+        // by the LOCAL mutation — pre-S1 the provisional <li> carried no ed-block
+        // class and the count only moved once the commit re-rendered. Drain the
+        // commit so the next click sees the POST-swap DOM.
+        await settleEditor(page);
         assert.strictEqual(
           await page.evaluate(() => {
             const ae = document.activeElement;
@@ -5888,10 +5998,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await emptyListItemText(page, list0, 'beta');
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block').length === 1 &&
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 1 &&
             document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: the provisional block a split creates is now a real .ed-block (the
+        // flat model needs the run scan to see it), so a li-count wait is satisfied
+        // by the LOCAL mutation — pre-S1 the provisional <li> carried no ed-block
+        // class and the count only moved once the commit re-rendered. Drain the
+        // commit so the next click sees the POST-swap DOM.
+        await settleEditor(page);
 
         // Ctrl+Z #1: the provisional paragraph is still untouched, so this is
         // the pristine auto-remove — the li removal is NOT reverted with it.
@@ -5911,7 +6027,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block').length === 2, { timeout: 5000 });
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2, { timeout: 5000 });
         // The emptying itself was an UNCOMMITTED burst edit (nothing had
         // reached `lines` before Enter), and the removal's undo op restores the
         // run's ON-DISK "before" — so 'beta' comes back with its text, not as
@@ -5949,9 +6065,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await emptyListItemText(page, list0, 'nested item');
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 0:',
           'sanity: the outdent press committed');
 
@@ -5962,9 +6085,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:alpha | 1:nested item',
           'ONE Ctrl+Z must put the nested item back exactly where it was');
         const undoneText = await saveAndRead(page, lmdPath);
@@ -6003,9 +6133,16 @@ async function clickInsertMenuItem(page, sel, label) {
         // subtree in tow.
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 0: | 1:x',
           'F-Q half A: an EMPTY item that owns a sublist must outdent like any other empty item, ' +
           'carrying its subtree — not split into two empty items');
@@ -6063,22 +6200,32 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('Tab');
         await page.keyboard.up('Shift');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:b | 0:b1 | 1:x | 1:b2',
           'b1 rises one level; x stays its child and b2 is adopted as a child too');
         assert.strictEqual(
           await page.evaluate(() => {
-            const lis = Array.from(document.querySelectorAll('li.ed-block'));
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
             const b2 = lis.find((l) => {
               const s = l.querySelector(':scope > .ed-li-text');
               return s && s.textContent.trim() === 'b2';
             });
-            return b2 ? b2.parentElement.nodeName : null;
+            // S1: there is no list container left to read the type off — the
+            // item carries its OWN data-list-type, which is precisely why the
+            // flat model cannot silently re-marker an adopted item at all.
+            return b2 ? b2.getAttribute('data-list-type') : null;
           }),
-          'UL',
-          'the adopted item must land in an UNORDERED list — the type of the list it came from'
+          'ul',
+          'the adopted item must stay UNORDERED — the type of the list it came from'
         );
         const fileText = await saveAndRead(page, lmdPath);
         assert.strictEqual(fileText, '# List doc\n\n- b\n- b1\n  1. x\n  - b2\n',
@@ -6090,9 +6237,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="2"]').length === 1,
+          () => document.querySelectorAll('.ed-block[data-indent="2"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z must restore the mixed-type nesting exactly, got:\n' + JSON.stringify(undoneText));
@@ -6134,9 +6288,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.type('X');
         await page.keyboard.press('Tab');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         // The typed character must survive: the suppression drops the focusout,
         // not the DOM, and commitListStructure() re-serializes the LIVE run.
         const fileText = await saveAndRead(page, lmdPath);
@@ -6149,9 +6310,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 0,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 0,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z after "type then Tab" must restore the PRE-TYPING bytes — a second, stale ' +
@@ -6238,22 +6406,30 @@ async function clickInsertMenuItem(page, sel, label) {
         await openWysiwyg(page, await liBlockSelByText(page, 'b'));
         await page.keyboard.press('Tab');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:x | 1:b',
           'b must become a child of a, alongside the pre-existing ordered sublist');
         assert.strictEqual(
           await page.evaluate(() => {
-            const lis = Array.from(document.querySelectorAll('li.ed-block'));
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
             const b = lis.find((l) => {
               const surface = l.querySelector(':scope > .ed-li-text');
               return surface && surface.textContent.trim() === 'b';
             });
-            return b ? b.parentElement.nodeName : null;
+            // S1: see the sibling assertion in the Shift+Tab adoption scenario.
+            return b ? b.getAttribute('data-list-type') : null;
           }),
-          'UL',
-          'the indented item must land in an UNORDERED list — the type of the list it came from'
+          'ul',
+          'the indented item must stay UNORDERED — the type of the list it came from'
         );
         const fileText = await saveAndRead(page, lmdPath);
         assert.strictEqual(fileText, '# List doc\n\n- a\n  1. x\n  - b\n',
@@ -6265,9 +6441,16 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="1"]').length === 1,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 1,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const undoneText = await saveAndRead(page, lmdPath);
         assert.strictEqual(undoneText, lorig,
           'ONE Ctrl+Z must restore the mixed-type shape exactly, got:\n' + JSON.stringify(undoneText));
@@ -6303,9 +6486,16 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await page.keyboard.press('Enter');
         await page.waitForFunction(
-          () => document.querySelectorAll('li.ed-block[data-indent="0"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="0"]').length === 2,
           { timeout: 5000 }
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         const fileText = await saveAndRead(page, lmdPath);
         assert.strictEqual(fileText, '# List doc\n\n- a\n-\n',
           'an NBSP-only item must outdent to a BARE "-" — list-md.js only trims trailing space/tab, ' +
@@ -6336,27 +6526,18 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(lurl, { waitUntil: 'networkidle0' });
 
         // Per-li arch: canWysiwygForLi() handles .ed-li-check spans correctly
-        // (serializeList() consumes them without flagging unsupported), so
+        // (serializeBlocks() consumes them without flagging unsupported), so
         // BOTH lis must be individually armed.
         const armedCount = await page.evaluate(() => {
           return document.querySelectorAll(
-            'li.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]'
+            '.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]'
           ).length;
         });
         assert.strictEqual(armedCount, 2,
           'both lis (checkbox and normal) must be individually armed in the per-li arch');
 
         // Editing the normal item commits correctly.
-        const normalLiSel = await page.evaluate(() => {
-          const lis = document.querySelectorAll('li.ed-block[data-block-type="li"]');
-          for (let i = 0; i < lis.length; i++) {
-            if (lis[i].textContent.includes('normal item')) {
-              return 'li.ed-block[data-block-id="' + lis[i].getAttribute('data-block-id') + '"]';
-            }
-          }
-          return null;
-        });
-        assert.ok(normalLiSel, 'normal item li not found');
+        const normalLiSel = await liBlockSelByText(page, 'normal item');
         await openWysiwyg(page, normalLiSel);
         await page.keyboard.type(' EDITED');
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
@@ -6398,7 +6579,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // (i) The unsupported li (contains <video>) must NOT be armed.
         const badLiArmed = await page.evaluate(() => {
-          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+          const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const bad = lis.find((li) => li.querySelector('video'));
           if (!bad) return 'bad li not found';
           const surface = bad.querySelector('.ed-li-text');
@@ -6414,19 +6595,14 @@ async function clickInsertMenuItem(page, sel, label) {
           'the li containing <video> must NOT be armed (contenteditable must not be "true"), got: ' + badLiArmed);
 
         // (ii) The two supported lis must both be individually armed.
-        const armedSel = 'li.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]';
+        const armedSel = '.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]';
         const armedCount = await page.evaluate((s) => document.querySelectorAll(s).length, armedSel);
         assert.strictEqual(armedCount, 2,
           '"ok item" and "also ok" must both be individually armed; expected 2, got ' + armedCount);
 
         // (iii) Edit "ok item", blur, verify partial-run commit: edited line
         //       changes, <video> line stays byte-identical to original.
-        const okLiSel = await page.evaluate(() => {
-          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
-          const ok = lis.find((li) => !li.querySelector('video') && li.textContent.trim() === 'ok item');
-          return ok ? 'li.ed-block[data-block-id="' + ok.getAttribute('data-block-id') + '"]' : null;
-        });
-        assert.ok(okLiSel, '"ok item" li not found');
+        const okLiSel = await liBlockSelByText(page, 'ok item');
         await openWysiwyg(page, okLiSel);
         await page.keyboard.type(' EDITED');
         await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
@@ -6605,9 +6781,14 @@ async function clickInsertMenuItem(page, sel, label) {
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
-        // Per-li: capture the whole UL's innerHTML (parent of all lis in the run)
-        // so the no-op assertion covers all items, not just the first li's surface.
-        const beforeHtml = await page.evaluate((s) => document.querySelector(s).parentElement.innerHTML, list0);
+        // S1: snapshot every block of the run span (there is no container
+        // element left to snapshot) so the no-op assertion covers all items,
+        // not just the first block's surface.
+        const runHtml = (sel) => page.evaluate(new Function('s', RUN_SPAN_FN + `
+          const el = document.querySelector(s);
+          return el ? runSpanOf(el).map(function (b) { return b.outerHTML; }).join('') : null;
+        `), sel);
+        const beforeHtml = await runHtml(list0);
 
         // Mid-"Alpha item" through mid-"Bravo item" — the reviewer's exact
         // probe shape, spanning two different <li> elements.
@@ -6619,13 +6800,14 @@ async function clickInsertMenuItem(page, sel, label) {
           'a cross-item Enter no-op must never surface a banner'
         );
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s).parentElement.innerHTML, list0),
+          await runHtml(list0),
           beforeHtml,
-          'a selection spanning multiple <li>s must leave the DOM byte-for-byte unchanged on Enter — ' +
+          'a selection spanning multiple items must leave the DOM byte-for-byte unchanged on Enter — ' +
           'no partial deletion of the spanned content'
         );
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s).parentElement.querySelectorAll('li.ed-block').length, list0),
+          await page.evaluate(() =>
+            document.querySelectorAll('.ed-block[data-block-type="li"]').length),
           3,
           'item count must stay unchanged (no split, no merge, no item lost)'
         );
@@ -6809,15 +6991,22 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForFunction(
           (s) => {
             // Per-li: 2 top-level items after Tab-indent, first item has Bravo nested
-            const li = document.querySelector(s);
-            if (!li || !li.parentElement) return false;
-            const topItems = li.parentElement.querySelectorAll(':scope > li.ed-block');
-            const nested = topItems[0] && topItems[0].querySelector('li.ed-block');
-            return topItems.length === 2 && !!nested &&
-              nested.getAttribute('data-indent') === '1' &&
-              nested.textContent.trim() === 'Bravo item';
+            // S1: nesting is data-indent, not DOM containment — two items at
+            // indent 0 and exactly one at indent 1 IS "Bravo nested under Alpha".
+            if (!document.querySelector(s)) return false;
+            const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
+            const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            return tops.length === 2 && nested.length === 1 &&
+              nested[0].textContent.trim() === 'Bravo item';
           }, {}, list0
         );
+        // S1: data-indent is now written LOCALLY by a structural key BEFORE its
+        // commit round-trip (pre-S1 only the server ever wrote it), so the shape
+        // wait above no longer proves the commit landed. The commit fetch is
+        // already in flight by the time the key event returns, so draining it is
+        // deterministic — and it is what makes the next click / save observe the
+        // POST-swap DOM instead of tearing a stale handle out mid-click.
+        await settleEditor(page);
         await page.evaluate(() => {
           // Per-li: blur whatever .ed-li-text is currently focused (may be Bravo, not Alpha)
           const ae = document.activeElement;
@@ -7707,7 +7896,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         const lSel = await paragraphSelByText(page, 'List anchor.');
         await clickInsertMenuItem(page, lSel, '清單');
-        await page.waitForSelector('li.ed-block[data-block-type="li"]');
+        await page.waitForSelector('.ed-block[data-block-type="li"]');
         assert.ok(
           await page.evaluate(() =>
             document.querySelector('.ed-block[data-block-type="heading"] > *').textContent === 'New Heading'),
@@ -7716,7 +7905,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => {
             const liTexts = document.querySelectorAll(
-              'li.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]');
+              '.ed-block[data-block-type="li"] > div.ed-li-text[contenteditable="true"]');
             return Array.from(liTexts).some((t) => t === document.activeElement);
           }),
           true, 'caret must land in the freshly-inserted list item'
@@ -7728,7 +7917,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw');
         assert.ok(
           await page.evaluate(() =>
-            document.querySelector('li.ed-block[data-block-type="li"]').textContent === 'New item text'),
+            document.querySelector('.ed-block[data-block-type="li"]').textContent === 'New item text'),
           'the list insert must have been committed by the code insert\'s own switchAwayFrom()'
         );
         // Caret must sit on the blank BODY line between the two fences, not
@@ -7807,7 +7996,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await abandonAndVerify('Paragraph anchor.', '段落', '.ed-block[data-block-type="paragraph"]');
         await abandonAndVerify('Heading anchor.', '標題', '.ed-block[data-block-type="heading"]');
-        await abandonAndVerify('List anchor.', '清單', 'li.ed-block[data-block-type="li"]');
+        await abandonAndVerify('List anchor.', '清單', '.ed-block[data-block-type="li"]');
         await abandonAndVerify('Table anchor.', '表格', '.ed-block[data-block-type="table"]');
         await abandonAndVerify('Code anchor.', '程式碼', '.ed-block[data-block-type="code"]',
           '.ed-block[data-block-type="code"] textarea.ed-raw');
@@ -7888,14 +8077,14 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(lurl, { waitUntil: 'networkidle0' });
 
         // Locate the checkbox span.
-        const checkSel = 'li.ed-block[data-block-type="li"] .ed-li-check';
+        const checkSel = '.ed-block[data-block-type="li"] .ed-li-check';
         await page.waitForSelector(checkSel);
 
         // Click once — should flip unchecked→checked and commit.
         // Capture the li (a CHILD of .content) as the stale handle: when
         // rerenderAll() replaces contentEl.innerHTML the li is detached.
         const staleHandle1 = await page.evaluateHandle(() =>
-          document.querySelector('li.ed-block[data-block-type="li"]'));
+          document.querySelector('.ed-block[data-block-type="li"]'));
         await page.click(checkSel);
         await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle1);
         await staleHandle1.dispose();
@@ -7908,7 +8097,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Click again — should flip checked→unchecked.
         const staleHandle2 = await page.evaluateHandle(() =>
-          document.querySelector('li.ed-block[data-block-type="li"]'));
+          document.querySelector('.ed-block[data-block-type="li"]'));
         await page.click(checkSel);
         await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle2);
         await staleHandle2.dispose();
@@ -7921,7 +8110,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Ctrl+Z — should revert the second toggle (file back to "- [x] todo").
         const staleHandle3 = await page.evaluateHandle(() =>
-          document.querySelector('li.ed-block[data-block-type="li"]'));
+          document.querySelector('.ed-block[data-block-type="li"]'));
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
@@ -7948,12 +8137,12 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(lurl, { waitUntil: 'networkidle0' });
 
-        const checkSel = 'li.ed-block[data-block-type="li"] .ed-li-check';
+        const checkSel = '.ed-block[data-block-type="li"] .ed-li-check';
         await page.waitForSelector(checkSel);
 
         // Capture the li (child of .content) as stale handle — see T9-1 comment.
         const staleHandle = await page.evaluateHandle(() =>
-          document.querySelector('li.ed-block[data-block-type="li"]'));
+          document.querySelector('.ed-block[data-block-type="li"]'));
         await page.click(checkSel);
         await page.waitForFunction((old) => !!old && !old.isConnected, { timeout: 5000 }, staleHandle);
         await staleHandle.dispose();
@@ -7989,7 +8178,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Find the first checkbox (the '- [ ] todo' item).
         const todoCheckSel = await page.evaluate(() => {
-          const lis = Array.from(document.querySelectorAll('li.ed-block[data-block-type="li"]'));
+          const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const todoLi = lis.find((li) => {
             const check = li.querySelector(':scope > .ed-li-check');
             return check && check.getAttribute('data-checked') === '0' &&
@@ -7999,7 +8188,7 @@ async function clickInsertMenuItem(page, sel, label) {
           if (!todoLi) return null;
           const check = todoLi.querySelector(':scope > .ed-li-check');
           const id = todoLi.getAttribute('data-block-id');
-          return id ? 'li.ed-block[data-block-id="' + id + '"] > .ed-li-check' : null;
+          return id ? '.ed-block[data-block-id="' + id + '"] > .ed-li-check' : null;
         });
         assert.ok(todoCheckSel, '"todo" li checkbox not found');
 

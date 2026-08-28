@@ -31,10 +31,16 @@ marked.setOptions({ gfm: true, breaks: false });
 
 // same minimal element stub as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
+  const a = attrs || {};
+  const classes = (a.class || '').split(/\s+/).filter(Boolean);
   return {
     nodeType: 1, nodeName: name.toUpperCase(),
     childNodes: children.map((c) => (typeof c === 'string' ? { nodeType: 3, textContent: c } : c)),
-    getAttribute: (k) => ((attrs || {})[k] !== undefined ? attrs[k] : null),
+    getAttribute: (k) => (a[k] !== undefined ? a[k] : null),
+    // S1: serializeBlocks() token-matches state classes via classList.contains
+    // (never whole-string equality — at runtime .ed-li-text also carries
+    // ed-wys-armed), so the stub has to carry a classList.
+    classList: { contains: (c) => classes.indexOf(c) !== -1 },
     get textContent() {
       return this.childNodes.map((c) => c.textContent).join('');
     },
@@ -46,9 +52,17 @@ function tr(...children) { return el('tr', {}, ...children); }
 function table(headerRow, bodyRows) {
   return el('table', {}, el('colgroup', {}), el('thead', {}, headerRow), el('tbody', {}, ...bodyRows));
 }
-function li(...children) { return el('li', {}, ...children); }
-function ul(...children) { return el('ul', {}, ...children); }
-function ol(...children) { return el('ol', {}, ...children); }
+// S1: edit mode emits one FLAT block per list item — no <ul>/<ol>, no <li>.
+// Same shape helper as test/list-md.test.js's.
+function liBlock({ id = '0', type = 'ul', task = false, checked = null, indent = 0 }, ...inner) {
+  const kids = [el('span', { class: 'ed-li-marker' })];
+  if (task) kids.push(el('span', { class: 'ed-li-check', 'data-checked': checked ? '1' : '0' }));
+  kids.push(el('div', { class: 'ed-li-text' }, ...inner));
+  return el('div', {
+    class: 'ed-block', 'data-block-id': id, 'data-block-type': 'li',
+    'data-list-type': type, 'data-task': task ? '1' : '0', 'data-indent': String(indent),
+  }, ...kids);
+}
 
 // ── gate assertions (the fossilized contract itself) ─────────────────────
 
@@ -235,18 +249,28 @@ function assertGateCompatListRoundTrips(md, label) {
   assertNoTrailingWhitespace(md, 'citation inline content');
 }
 
-// ── representative serializeList() outputs (Task 3 additions) ────────────
+// ── representative serializeBlocks() outputs (Task 3 additions) ──────────
+// S1: the DOM these run against is the FLAT block sequence lib/md2doc.js now
+// emits (data-indent carries the nesting; there is no container element left).
+// The ASSERTIONS and the expected strings are deliberately unchanged — only
+// how the input DOM is built and which serializer entry point is called.
 
 // 9. flat ul / renumbered ol — the common case.
 {
-  const { md } = listMd.serializeList(ul(li('one'), li('two'), li('three')));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'one'), liBlock({ id: '1' }, 'two'), liBlock({ id: '2' }, 'three'),
+  ]);
   assertGateCompatList(md, 'flat ul');
   assertGateCompatListRoundTrips(md, 'flat ul');
 }
 {
   // renumbering matters here regardless of source order/gaps — the gate
   // must always see a clean 1..n sequence, never a stale start value.
-  const { md } = listMd.serializeList(ol(li('a'), li('b'), li('c')));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol' }, 'b'),
+    liBlock({ id: '2', type: 'ol' }, 'c'),
+  ]);
   assertGateCompatList(md, 'renumbered ol');
   assertGateCompatListRoundTrips(md, 'renumbered ol');
   assert.ok(md.startsWith('1. '), 'renumbered ol must start at 1: ' + md);
@@ -255,14 +279,14 @@ function assertGateCompatListRoundTrips(md, label) {
 // 10. deep mixed nesting (ul > ol > ul) — every line, at every depth, must
 // still satisfy the marker/indent contract and the no-blank-line rule.
 {
-  const list = ul(
-    li('top', ol(
-      li('mid a'),
-      li('mid b', ul(li('deep x'), li('deep y')))
-    )),
-    li('top two')
-  );
-  const { md } = listMd.serializeList(list);
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ul', indent: 0 }, 'top'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'mid a'),
+    liBlock({ id: '2', type: 'ol', indent: 1 }, 'mid b'),
+    liBlock({ id: '3', type: 'ul', indent: 2 }, 'deep x'),
+    liBlock({ id: '4', type: 'ul', indent: 2 }, 'deep y'),
+    liBlock({ id: '5', type: 'ul', indent: 0 }, 'top two'),
+  ]);
   assertGateCompatList(md, 'deep mixed nesting');
   assertGateCompatListRoundTrips(md, 'deep mixed nesting');
 }
@@ -273,28 +297,29 @@ function assertGateCompatListRoundTrips(md, label) {
 // under the old flat-2-space indent this de-nests on re-parse into
 // separate top-level list tokens instead of staying nested.
 {
-  const { md } = listMd.serializeList(ol(li('a', ul(li('b'), li('c')))));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ul', indent: 1 }, 'b'),
+    liBlock({ id: '2', type: 'ul', indent: 1 }, 'c'),
+  ]);
   assertGateCompatList(md, 'ol-parent nested ul');
   assertGateCompatListRoundTrips(md, 'ol-parent nested ul');
 }
 
-// 12. ed-li-text DOM shape (Task 4 output): line-shape and round-trip
-// invariants must hold for the new <li> format the editor actually produces.
-// A task item's '- [ ] ' marker is 6 chars wide; the nested item indents by
-// 6 spaces — still satisfies /^ *(-|\d+\.) / and re-lexes as one top-level
-// list token (6 ≥ 2, the parent bullet's actual CommonMark attachment width).
+// 12. task-item DOM shape: line-shape and round-trip invariants must hold for
+// the flat blocks the editor actually produces, checkbox chrome included.
+// §3.4 errata: the checkbox is NOT part of the marker width — a '- [ ] '
+// parent still contributes 2 columns, so its child indents by 2.
 {
-  const edLi1 = el('LI', { 'data-block-id': '0' },
-    el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
-    el('DIV', { class: 'ed-li-text' }, 'todo item'),
-    ul(el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, 'nested item')))
-  );
-  const edLi2 = el('LI', { 'data-block-id': '2' },
-    el('DIV', { class: 'ed-li-text' }, 'plain item')
-  );
-  const { md } = listMd.serializeList(ul(edLi1, edLi2));
-  assertGateCompatList(md, 'ed-li-text shape');
-  assertGateCompatListRoundTrips(md, 'ed-li-text shape');
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', task: true, checked: false, indent: 0 }, 'todo item'),
+    liBlock({ id: '1', indent: 1 }, 'nested item'),
+    liBlock({ id: '2', indent: 0 }, 'plain item'),
+  ]);
+  assertGateCompatList(md, 'flat task-block shape');
+  assertGateCompatListRoundTrips(md, 'flat task-block shape');
+  assert.strictEqual(md, '- [ ] todo item\n  - nested item\n- plain item',
+    'a task item contributes its BULLET width (2), not the checkbox width');
 }
 
 console.log('gate-compat.test.js OK');

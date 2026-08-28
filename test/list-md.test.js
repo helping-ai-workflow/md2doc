@@ -617,4 +617,48 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     'ordered task parent must keep its child nested too');
 }
 
+// 28. S1 / Task 3 regression: ONE BLOCK == ONE PHYSICAL LINE, even when the
+// .ed-li-text surface carries marked's pretty-print whitespace. A LOOSE item is
+// server-rendered as `<div class="ed-li-text">\n<p>text</p>\n</div>`, and
+// inline-md.js's escapeText() has no reason to treat a text node's "\n"
+// specially — so without the isBlankText() filter at the .ed-li-text unwrap ONE
+// item emitted THREE physical lines. That breaks the gate's one-line-per-item
+// contract AND desynchronises lineMeta from md.split('\n'), which the per-li
+// degrade path in client.js indexes by position: the observed symptom was
+// editing the item AFTER a loose blank writing a DIFFERENT item's line into it.
+{
+  const looseBlock = el('div', {
+    class: 'ed-block', 'data-block-id': '0', 'data-block-type': 'li',
+    'data-list-type': 'ul', 'data-task': '0', 'data-indent': '0',
+  },
+    el('span', { class: 'ed-li-marker' }, '\u2022'),
+    el('div', { class: 'ed-li-text' }, text('\n'), el('p', {}, 'loose text'), text('\n'))
+  );
+  const r = serializeBlocks([looseBlock, liBlock({ id: '1' }, 'plain')]);
+  assert.strictEqual(r.md.split('\n').length, 2,
+    'two blocks must emit exactly two physical lines, got:\n' + JSON.stringify(r.md));
+  assert.strictEqual(r.lineMeta.length, 2, 'lineMeta stays parallel to the emitted lines');
+  r.md.split('\n').forEach((line, i) => {
+    assert.ok(/^ *(-|\d+\.) ?/.test(line),
+      'line ' + i + ' must still be a marker line: ' + JSON.stringify(line));
+  });
+  assert.strictEqual(r.md.split('\n')[1], '- plain',
+    'the block AFTER the loose one must still own line index 1');
+  assert.ok(r.unsupported.indexOf('P') !== -1,
+    'the loose <p> is still reported unsupported (T2-B: as a per-block inline name)');
+
+  // A bare ' ' between inline nodes is NOT the artifact and must survive —
+  // this is why isBlankText() (newline-requiring) is the right predicate and
+  // isBlankBlockText() is not.
+  const spaced = el('div', {
+    class: 'ed-block', 'data-block-id': '0', 'data-block-type': 'li',
+    'data-list-type': 'ul', 'data-task': '0', 'data-indent': '0',
+  },
+    el('span', { class: 'ed-li-marker' }, '\u2022'),
+    el('div', { class: 'ed-li-text' }, el('strong', {}, 'a'), text(' '), el('em', {}, 'b'))
+  );
+  assert.strictEqual(serializeBlocks([spaced]).md, '- **a** *b*',
+    'meaningful inter-inline spacing must NOT be swallowed by the artifact filter');
+}
+
 console.log('list-md.test.js OK');
