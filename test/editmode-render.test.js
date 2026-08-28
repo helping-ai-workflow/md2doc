@@ -88,8 +88,8 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   // R1: --ed-indent (Task 5's padding hook) and data-run-start (Task 5's
   // ordered-counter reset hook) are emitted by the renderer even though no
   // CSS consumes them yet.
-  assert(/data-indent="1" data-run-start="1" style="--ed-indent:1"/.test(listHtml),
-    'the nested run\'s first item is a run start and carries --ed-indent');
+  assert(/data-indent="1" data-run-start="1" data-list-start="1" style="--ed-indent:1"/.test(listHtml),
+    'the nested run\'s first item opens its own list token and carries --ed-indent');
   {
     // §3.8 rule (b): a same-depth list-type change opens a NEW run; rule (a):
     // a deeper item never breaks the run it is nested under.
@@ -120,11 +120,44 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
       'a new list token also opens a new run');
   }
   {
-    // ...and a single list must stamp exactly ONE list start, however deeply
-    // it nests.
+    // ...and a single list stamps exactly ONE list start PER LIST TOKEN, at
+    // every depth — a nested sublist is its own marked token and therefore its
+    // own run.
     const h = await renderEdit('- a\n  - b\n    1. c\n- d\n');
-    assert.strictEqual((h.match(/data-list-start="1"/g) || []).length, 1,
-      'one list token = one data-list-start, got:\n' + h);
+    assert.strictEqual((h.match(/data-list-start="1"/g) || []).length, 3,
+      'three list tokens (outer ul, nested ul, nested ol) = three data-list-starts, got:\n' + h);
+  }
+  {
+    // I2: rule (d) is a per-TOKEN boundary, not a per-top-level-token one.
+    // '  1. x' and '  1) y' are two nested list tokens (a delimiter change
+    // starts a new list), so the second must open its own run — otherwise it is
+    // renumbered as a continuation of the first and a commit rewrites '1) y'
+    // the user never touched.
+    const h = await renderEdit('- a\n  1. x\n  1) y\n- d\n');
+    assert.strictEqual((h.match(/data-list-start="1"/g) || []).length, 3,
+      'outer ul + two nested ol tokens = three data-list-starts, got:\n' + h);
+    const nested = h.split('data-block-type="li"').filter((c) => /data-indent="1"/.test(c));
+    assert.strictEqual(nested.length, 2, 'sanity: two nested items');
+    nested.forEach((c, i) => {
+      assert.ok(/data-list-start="1"/.test(c),
+        'nested item ' + i + ' begins its own list token and must be stamped, got:\n' + h);
+    });
+  }
+  {
+    // Same for a bullet-char change at depth 1.
+    const h = await renderEdit('- a\n  - b\n  * c\n- d\n');
+    assert.strictEqual((h.match(/data-list-start="1"/g) || []).length, 3,
+      'outer ul + two nested ul tokens = three data-list-starts, got:\n' + h);
+  }
+  {
+    // A nested token must NOT close the runs of the depths ABOVE it: '- d'
+    // continues the top-level run that '- a' opened, so it is not a run start.
+    const h = await renderEdit('- a\n  1. x\n- d\n');
+    const tops = h.split('data-block-type="li"').filter((c) => /data-indent="0"/.test(c));
+    assert.strictEqual(tops.length, 2, 'sanity: two top-level items');
+    assert.ok(/data-run-start="1"/.test(tops[0]), 'the first top-level item opens the run');
+    assert.ok(!/data-run-start="1"/.test(tops[1]),
+      'a nested sublist between two top-level items must NOT restart the top-level run, got:\n' + h);
   }
 
   // task li renders check chrome between the marker and ed-li-text, and

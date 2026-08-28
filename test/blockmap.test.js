@@ -109,4 +109,43 @@ assert.deepStrictEqual(
     [[1, 1, 0], [2, 2, 1], [3, 3, 2], [4, 4, 0]]);
 }
 
+// I3: every li block's startLine must name that item's OWN MARKER LINE.
+// `ownSpan = totalSpan - childSpan` assumed an item's own lines all PRECEDE its
+// children, so an item with own content AFTER its sublist pushed every child's
+// startLine past the child's real position:
+//   '- a\n  - b\n\n  more text\n- c\n'  ->  b.startLine = 4 ('  more text')
+// In the flat block model startLine is the address every gutter action and every
+// focusBlockAtLine() lookup uses, so a wrong one silently targets another line.
+{
+  const shapes = [
+    '- a\n  - b\n\n  more text\n- c\n',
+    '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n',
+    '- alpha\n  cont\n- bravo\n',
+    '- a\n  1. x\n  1) y\n- d\n',
+    '- a\n  - b\n  * c\n- d\n',
+    '- a\n  - b\n    - c\n- d',
+    '# H\n\n- a\n  - b\n\n  tail\n\npara\n',
+  ];
+  const MARKER = /^ *(?:[-*+]|\d+[.)]) /;
+  shapes.forEach((md) => {
+    const lines = md.split('\n');
+    buildBlockMap(md).blocks.filter((b) => b.type === 'li').forEach((b) => {
+      const line = lines[b.startLine - 1];
+      assert.ok(MARKER.test(line),
+        'li block ' + b.id + ' of ' + JSON.stringify(md) + ' has startLine ' +
+        b.startLine + ' naming ' + JSON.stringify(line) + ', which is not a marker line');
+    });
+  });
+}
+
+// ...and the same shape must not hand an item an endLine that runs past its own
+// contiguous first line into a blank separator or a sibling's territory.
+{
+  const { blocks } = buildBlockMap('- a\n  - b\n\n  more text\n- c\n');
+  assert.deepStrictEqual(blocks.map((b) => [b.startLine, b.endLine, b.indent]),
+    [[1, 1, 0], [2, 2, 1], [5, 5, 0]],
+    "an item whose own content resumes AFTER its sublist keeps only its own " +
+    "contiguous marker line; the trailing own-content line belongs to no block");
+}
+
 console.log('blockmap.test.js OK');

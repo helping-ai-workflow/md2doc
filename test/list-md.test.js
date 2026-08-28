@@ -661,4 +661,67 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     'meaningful inter-inline spacing must NOT be swallowed by the artifact filter');
 }
 
+// 29. C1: ONE BLOCK == ONE PHYSICAL LINE also for a TIGHT item. Case 28 covers
+// the LOOSE shape (blank text nodes around a <p>); a tight item with a lazy
+// continuation renders as a single text node containing a literal '\n'
+// ('- a1\n    cont' -> `<div class="ed-li-text">a1\ncont</div>`), which
+// escapeText() emits verbatim. That desynchronised lineMeta from
+// md.split('\n') exactly as case 28's shape did, and the per-li degrade path
+// then wrote a DIFFERENT item's line into the edited item's range.
+//
+// Spec rule: an item whose own content is not a single contiguous line is
+// UNSUPPORTED. The line is truncated to its first physical line so lineMeta
+// stays parallel (a SIBLING's single-line commit must still land correctly),
+// and 'MULTILINE' is reported per-block so the arm check and the structural
+// gate both refuse it.
+{
+  const multi = el('div', {
+    class: 'ed-block', 'data-block-id': '7', 'data-block-type': 'li',
+    'data-list-type': 'ul', 'data-task': '0', 'data-indent': '1',
+  },
+    el('span', { class: 'ed-li-marker' }, '\u2022'),
+    el('div', { class: 'ed-li-text' }, text('a1\ncont'))
+  );
+  const blocks = [
+    liBlock({ id: '6', indent: 0 }, 'a'),
+    multi,
+    liBlock({ id: '8', indent: 1 }, 'a2'),
+    liBlock({ id: '9', indent: 0 }, 'b'),
+  ];
+  const r = serializeBlocks(blocks);
+  assert.strictEqual(r.md.split('\n').length, 4,
+    'four blocks must emit exactly four physical lines, got:\n' + JSON.stringify(r.md));
+  assert.strictEqual(r.lineMeta.length, 4, 'lineMeta stays parallel to the emitted lines');
+  assert.strictEqual(r.md.split('\n')[2], '  - a2',
+    'the block AFTER the multi-line one must still own its own line index');
+  assert.ok(r.unsupported.indexOf('MULTILINE') !== -1,
+    'a multi-line item must be reported unsupported, got: ' + JSON.stringify(r.unsupported));
+  const byLi = r.unsupportedByLi.filter((u) => u.blockId === '7');
+  assert.strictEqual(byLi.length, 1,
+    'MULTILINE must be attributed to the offending block so the arm check and the ' +
+    'F-W refuse branch can both see it');
+  assert.ok(byLi[0].names.indexOf('MULTILINE') !== -1);
+  // superset invariant: every unsupportedByLi name also appears in unsupported
+  r.unsupportedByLi.forEach((u) => u.names.forEach((n) => {
+    assert.ok(r.unsupported.indexOf(n) !== -1, 'unsupported must stay a superset: ' + n);
+  }));
+}
+
+// 30. I2: data-list-start restarts the ordinal, so two ADJACENT sibling list
+// TOKENS at the same depth ('  1. x' then '  1) y' — a delimiter change starts
+// a new list token) are two runs and both start at 1. Without it the second
+// list is renumbered as a continuation of the first.
+{
+  const y = liBlock({ id: '2', type: 'ol', indent: 1 }, 'y');
+  y.getAttribute = ((orig) => (k) => (k === 'data-list-start' ? '1' : orig(k)))(y.getAttribute);
+  const r = serializeBlocks([
+    liBlock({ id: '0', type: 'ul', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'x'),
+    y,
+    liBlock({ id: '3', type: 'ul', indent: 0 }, 'd'),
+  ]);
+  assert.strictEqual(r.md, '- a\n  1. x\n  1. y\n- d',
+    'a data-list-start block restarts its depth\'s ordinal, got:\n' + JSON.stringify(r.md));
+}
+
 console.log('list-md.test.js OK');

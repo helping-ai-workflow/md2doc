@@ -485,18 +485,17 @@ const RUN_SPAN_FN = `
     const self = at(blockEl);
     const i = all.indexOf(blockEl);
     if (!self || i < 0) return [];
+    // Anchor walk: never skipped and never broken on a list-start — it stops on
+    // its own at indent 0, which is where every token's first item sits.
     let anchor = i, anchorIndent = self.indent;
-    if (!self.listStart) {
-      for (let k = i - 1; k >= 0 && anchorIndent > 0; k--) {
-        const a = at(all[k]);
-        if (!a) break;
-        if (a.indent < anchorIndent) { anchor = k; anchorIndent = a.indent; }
-        if (a.listStart) break;
-      }
+    for (let k = i - 1; k >= 0 && anchorIndent > 0; k--) {
+      const a = at(all[k]);
+      if (!a) break;
+      if (a.indent < anchorIndent) { anchor = k; anchorIndent = a.indent; }
     }
     const base = at(all[anchor]);
     let startIdx = anchor, endIdx = anchor;
-    if (!at(all[anchor]).listStart) {
+    if (!base.listStart) {
       for (let k = anchor - 1; k >= 0; k--) {
         const a = at(all[k]);
         if (!a || a.indent < base.indent) break;
@@ -504,12 +503,13 @@ const RUN_SPAN_FN = `
           if (a.listType !== base.listType) break;
           startIdx = k;
         }
-        if (a.listStart) break;
+        if (a.listStart && a.indent <= base.indent) break;
       }
     }
     for (let k = anchor + 1; k < all.length; k++) {
       const a = at(all[k]);
-      if (!a || a.indent < base.indent || a.listStart) break;
+      if (!a || a.indent < base.indent) break;
+      if (a.listStart && a.indent <= base.indent) break;
       if (a.indent === base.indent && a.listType !== base.listType) break;
       endIdx = k;
     }
@@ -6725,6 +6725,194 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         lsrv.close();
       }
+    }
+
+    // C1: a TIGHT MULTI-LINE li (lazy continuation) desynchronised lineMeta
+    // from the emitted lines — its .ed-li-text holds a literal '\n', which the
+    // inline serializer emits verbatim, so ONE block produced TWO physical
+    // lines. The per-li degrade path indexes runMd by line position, so editing
+    // a LATER sibling wrote the continuation line into that sibling's range:
+    //   before: '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n'
+    //   after : '- a\n\n  - a1\n    cont\ncont\n\n- b\n'   <- '  - a2' clobbered
+    // Rule: an item whose own content is not a single contiguous line is
+    // UNSUPPORTED — the serializer truncates its emitted line (keeping lineMeta
+    // parallel so this sibling's own commit still lands) and flags it, which
+    // also forces the partial-run path so the multi-line item's source bytes
+    // are never rewritten.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc([
+          '# List doc', '',
+          '- a', '',
+          '  - a1',
+          '    cont',
+          '  - a2', '',
+          '- b',
+          '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // The multi-line item must not be armed at all (degrade-never-lose).
+        const a1Armed = await page.evaluate(() => {
+          const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s2 = li.querySelector(':scope > .ed-li-text');
+            return s2 && s2.textContent.indexOf('cont') !== -1;
+          });
+          if (!hit) return 'multi-line li not found';
+          const surface = hit.querySelector(':scope > .ed-li-text');
+          return surface ? String(surface.getAttribute('contenteditable')) : 'no surface';
+        });
+        assert.notStrictEqual(a1Armed, 'multi-line li not found',
+          'fixture must actually produce a multi-line li');
+        assert.notStrictEqual(a1Armed, 'true',
+          'a li whose own content is not a single contiguous line must NOT be armed, got: ' + a1Armed);
+
+        // Edit the SIBLING that follows it, and save.
+        await openWysiwyg(page, await liBlockSelByText(page, 'a2'));
+        await page.keyboard.type('Z');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('a2Z'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText,
+          '# List doc\n\n- a\n\n  - a1\n    cont\n  - a2Z\n\n- b\n',
+          'C1: the multi-line sibling must keep its own source bytes and the edited ' +
+          "item's own line must receive the edit, got:\n" + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('per-li WYSIWYG (C1): a tight multi-line li is unsupported; a sibling edit ' +
+          'lands on its own line — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // C1 (the same rule, off the degrade path): a multi-line li in an otherwise
+    // fully-supported run used to make the WHOLE-run commit rewrite the
+    // untouched continuation line without its indent
+    // ('- alpha\n  cont' -> '- alpha\ncont', which re-lexes as a paragraph).
+    // Flagging it forces the partial path, so the continuation is untouched.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- alpha', '  cont', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
+        await page.keyboard.type('Z');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('bravoZ'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- alpha\n  cont\n- bravoZ\n',
+          "C1: an untouched multi-line sibling's continuation must keep its indent, got:\n" +
+          JSON.stringify(fileText));
+
+        await page.close();
+        console.log('per-li WYSIWYG (C1): a whole-run commit never strips an untouched ' +
+          "continuation's indent — OK");
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // I2: run rule (d) is a per-LIST-TOKEN boundary at EVERY depth, not only at
+    // top level. Two adjacent NESTED sibling lists (a delimiter change starts a
+    // new marked list token) were merged into one run, so the second was
+    // renumbered as a continuation of the first — rewriting an ordinal in a
+    // list the user never touched.
+    //
+    // NOTE on what is NOT asserted: the serializer has always re-emitted every
+    // line inside the committed range in its canonical form ('1)' -> '1.',
+    // '*' -> '-'), pre-S1 included, because the commit unit is the whole run.
+    // The S1 regression is the ORDINAL, and that is what these pin.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- a', '  1. x', '  1) y', '- d', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await openWysiwyg(page, await liBlockSelByText(page, 'a'));
+        await page.keyboard.type('Z');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('aZ'), { timeout: 5000 });
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- aZ\n  1. x\n  1. y\n- d\n',
+          'I2: the second nested ORDERED token opens its own run and restarts at 1 — it must ' +
+          'never be renumbered as "2." , got:\n' + JSON.stringify(fileText));
+        await page.close();
+        console.log('per-li WYSIWYG (I2): adjacent NESTED list tokens are separate runs — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // I2 (depth scoping, both halves at once). The renderer now stamps
+    // data-list-start at every depth, so the client's run scan has to treat it
+    // as a boundary only AT THE SCANNING BLOCK'S OWN DEPTH:
+    //   * a DEEPER list-start must not end the run it is nested inside
+    //     (otherwise '- c' / '- d' fall out of the committed span), and
+    //   * listRunOf() must NOT skip its walk back to the outermost ancestor
+    //     just because the edited block carries one — a nested-only span has no
+    //     ancestor marker widths recorded, so serializeBlocks() emits its first
+    //     line with NO indent and the sublist DE-NESTS on commit
+    //     (observed without the scoping: '    1. pZ' committed as '1. pZ').
+    {
+      const rows = ['# List doc', '', '- a', '  - b', '    1. p', '    1) q', '  - c', '- d', ''];
+      // (i) edit the OUTERMOST item: the whole tree must survive the run commit.
+      {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await openWysiwyg(page, await liBlockSelByText(page, 'a'));
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await page.waitForFunction(
+            () => document.querySelector('.content').textContent.includes('aZ'), { timeout: 5000 });
+          const fileText = await saveAndRead(page, lmdPath);
+          assert.strictEqual(fileText,
+            '# List doc\n\n- aZ\n  - b\n    1. p\n    1. q\n  - c\n- d\n',
+            'I2: a depth-2 list-start must not cut the depth-0 run short, and the depth-2 ' +
+            'tokens each restart at 1, got:\n' + JSON.stringify(fileText));
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      // (ii) edit the first item OF a nested token — the de-nesting probe.
+      {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await openWysiwyg(page, await liBlockSelByText(page, 'p'));
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await page.waitForFunction(
+            () => document.querySelector('.content').textContent.includes('pZ'), { timeout: 5000 });
+          const fileText = await saveAndRead(page, lmdPath);
+          assert.strictEqual(fileText,
+            '# List doc\n\n- a\n  - b\n    1. pZ\n    1. q\n  - c\n- d\n',
+            'I2: editing a nested list-start item must keep its 4-column indent — the span ' +
+            'has to start at the OUTERMOST ancestor or the sublist de-nests, got:\n' +
+            JSON.stringify(fileText));
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      console.log('per-li WYSIWYG (I2): rule (d) is depth-scoped — deep tokens neither cut the ' +
+        'outer run nor de-nest their own — OK');
     }
 
     // F-W (no-regression): a fully-supported TIGHT run (unsupported.length===0)
