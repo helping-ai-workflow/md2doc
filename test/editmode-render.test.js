@@ -192,6 +192,40 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   assert(/<div class="ed-li-text"><p>a<\/p>/.test(looseHtml),
     'loose list keeps <p> in ed-li-text');
 
+  // B1: SAME-LINE NESTING must render. '- - a' and friends put a child list
+  // token on the parent's OWN first line. When blockmap.js failed to emit a
+  // block for such a child, this walk — which consumes blocks[] in lockstep —
+  // ran off the end and threw on `b.task`, so /api/render answered HTTP 500 and
+  // the whole document became unopenable. The biRef.v === blocks.length guard
+  // fires one line too late to help; it would only have changed the message.
+  {
+    const MARKERS = ['-', '*', '+', '1.', '1)'];
+    for (const outer of MARKERS) {
+      for (const inner of MARKERS) {
+        const src = outer + ' ' + inner + ' a\n';
+        let html = null;
+        try {
+          html = await renderEdit(src);
+        } catch (e) {
+          assert.fail('edit-mode render threw on ' + JSON.stringify(src) + ': ' + e.message);
+        }
+        const n = (html.match(/data-block-type="li"/g) || []).length;
+        assert.strictEqual(n, 2,
+          JSON.stringify(src) + ' must render one block per item, got ' + n + ':\n' + html);
+        assert.ok(/data-indent="0"/.test(html) && /data-indent="1"/.test(html),
+          JSON.stringify(src) + ' must render the nesting as data-indent 0 and 1:\n' + html);
+      }
+    }
+  }
+  {
+    // ...and the same family must survive the full page render (the path
+    // /api/render actually takes), not just bodyHtml.
+    const full = await renderMarkdown('- - a\n', fake, { editMode: true });
+    assert.ok(full.html.includes('data-block-type="li"'), 'the full page renders');
+    assert.strictEqual(full.blocks.filter((b) => b.type === 'li').length, 2,
+      'both items are in the returned block map');
+  }
+
   // reader mode untouched
   {
     const { bodyHtml } = await renderMarkdown('- Alpha\n  - Bravo\n', fake, {});

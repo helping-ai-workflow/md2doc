@@ -588,6 +588,34 @@ async function placeCaretInListText(page, listSel, text, atStart) {
   `), listSel, text, !!atStart);
 }
 
+// Places a COLLAPSED caret just before / just after the first occurrence of
+// `text` inside ONE block's own .ed-li-text surface.
+//
+// Deliberately narrower than placeCaretInListText() above, which tree-walks the
+// whole run span: a sibling item may legitimately CONTAIN the target text —
+// a fenced or indented code block reading '- b' next to a real nested '- b' is
+// exactly the B2 shape — and the span-wide walk would then anchor the caret in
+// the lookalike instead of the item under test.
+async function placeCaretInBlockText(page, blockSel, text, atStart) {
+  await page.evaluate((sel, t, start) => {
+    const surface = document.querySelector(sel + ' > .ed-li-text');
+    if (!surface) throw new Error('no .ed-li-text for ' + sel);
+    const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT);
+    let node = null, idx = -1, cur;
+    while ((cur = walker.nextNode())) {
+      idx = cur.textContent.indexOf(t);
+      if (idx !== -1) { node = cur; break; }
+    }
+    if (!node) throw new Error('block text not found: ' + t);
+    const range = document.createRange();
+    range.setStart(node, start ? idx : idx + t.length);
+    range.collapse(true);
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(range);
+  }, blockSel, text, !!atStart);
+}
+
 // Selects the ENTIRE text node whose trimmed content is exactly `text` (a
 // whole list item's own text, no nested sublist) and deletes it via a real
 // Backspace keystroke — used by the empty-Enter scenario below to produce a
@@ -6726,6 +6754,96 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await page.close();
         console.log('per-li WYSIWYG: F-W — loose run, edit li AFTER the blank (offset trap), b committed, blank survives — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // ── Round 3: a nested item's startLine must be the REAL one ────────────
+    // blockmap.js used to LOCATE a child list by matching its text against the
+    // item's lines, so an item containing a fenced or indented code block whose
+    // content reads like the child's first line matched the CODE first. The
+    // child is plain, supported and armed, so it is live: typing into the real
+    // nested item then landed inside the fence, or destroyed the indented code
+    // block. Offsets are now COMPUTED from marked's own token order.
+    {
+      const cases = [
+        {
+          rows: ['# List doc', '', '- a', '', '  ```', '  - b', '  ```', '', '  - b', ''],
+          expect: '# List doc\n\n- a\n\n  ```\n  - b\n  ```\n\n  - bZ\n',
+          why: 'the keystroke must land on the real nested item, not inside the fence',
+        },
+        {
+          rows: ['# List doc', '', '- a', '', '      - b', '', '  - b', ''],
+          expect: '# List doc\n\n- a\n\n      - b\n\n  - bZ\n',
+          why: 'the indented code block must survive untouched',
+        },
+      ];
+      for (const c of cases) {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+          // The only ARMED item whose own text is exactly 'b' is the real
+          // nested one — the code-block lookalike is not a block at all.
+          const bSel = await liBlockSelByText(page, 'b');
+          await openWysiwyg(page, bSel);
+          // Block-scoped, not span-scoped: the sibling item's code block also
+          // reads '- b', and that is the whole point of this shape.
+          await placeCaretInBlockText(page, bSel, 'b', false);
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await page.waitForFunction(
+            () => document.querySelector('.content').textContent.includes('bZ'),
+            { timeout: 5000 }
+          );
+          const fileText = await saveAndRead(page, lmdPath);
+          assert.strictEqual(fileText, c.expect,
+            'B2: ' + c.why + ', got:\n' + JSON.stringify(fileText));
+
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      console.log('per-li WYSIWYG (B2): a nested item next to lookalike code text edits its ' +
+        'OWN line — OK');
+    }
+
+    // Round 3 / B1: SAME-LINE NESTING must open and be editable at all. A child
+    // list on the parent's own first line ('- - a') was skipped by blockmap, so
+    // the render walk ran off the end of blocks[] and the document answered
+    // HTTP 500 — every one of the 25 marker x marker combinations.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- - a', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.waitForSelector('.ed-block[data-block-type="li"]');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          2, 'both items of "- - a" must render as blocks');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length),
+          1, 'the second item is nested');
+
+        const aSel = await liBlockSelByText(page, 'a');
+        await openWysiwyg(page, aSel);
+        await placeCaretInBlockText(page, aSel, 'a', false);
+        await page.keyboard.type('Z');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('aZ'), { timeout: 5000 });
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.ok(fileText.indexOf('aZ') !== -1,
+          'the nested item of a same-line nest must be editable, got:\n' + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('per-li WYSIWYG (B1): same-line nesting opens and edits — OK');
       } finally {
         lsrv.close();
       }
