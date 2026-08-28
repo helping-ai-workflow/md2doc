@@ -782,11 +782,11 @@ async function rowGripCoords(page, tableSel, bodyIndex) {
   return gripCenter(page, '.ed-te-grip-row');
 }
 // Same idea for the HEADER row's own grip (spec §3.10 — the header row is
-// draggable too, since position alone decides header identity). Cannot reuse
-// rowGripCoords()'s "grip centre == row centre" wait: the header grip is
-// deliberately offset DOWN by TE_HEADER_GRIP_DY_PX (16) to stay clear of the
-// column-grip band, so the wait has to expect that offset or it would settle
-// on a stale body-row position.
+// draggable too, since position alone decides header identity). The header
+// grip uses the SAME geometry as every other row's (user acceptance:
+// 「grip 位置都一樣」 — no per-row-type offset any more), so the wait is
+// rowGripCoords()'s "grip centre == row centre" applied to thead's row.
+// It still cannot literally reuse rowGripCoords(), which indexes tBodies.
 async function headerGripCoords(page, tableSel) {
   await hoverHeaderRowCell(page, tableSel);
   await page.waitForFunction((ts) => {
@@ -794,7 +794,7 @@ async function headerGripCoords(page, tableSel) {
     if (!g || g.hidden) return false;
     const hr = document.querySelector(ts + ' table').tHead.rows[0].getBoundingClientRect();
     const gr = g.getBoundingClientRect();
-    return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+    return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2)) <= 2;
   }, { timeout: 3000 }, tableSel);
   return gripCenter(page, '.ed-te-grip-row');
 }
@@ -3568,26 +3568,28 @@ async function clickInsertMenuItem(page, sel, label) {
           const table = document.querySelector(s + ' table');
           const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
           const hr = table.tHead.rows[0].getBoundingClientRect();
-          return { gTop: g.top, gLeft: g.left, gH: g.height,
+          return { gTop: g.top, gLeft: g.left, gH: g.height, gW: g.width,
                    hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
         }, table0);
-        expectApprox(hg.gLeft, hg.tLeft, 'header row grip sits inside the table border like any other row');
-        expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2 + 16,
-          'header row grip is shifted DOWN by TE_HEADER_GRIP_DY_PX, clear of the column grip band');
+        expectApprox(hg.gLeft + hg.gW / 2, hg.tLeft,
+          'header row grip straddles the table border like any other row (centreline ON it)');
+        expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2,
+          'header row grip is centred on its OWN row, exactly like a body row (no header-only offset)');
         // The column grip must still work over the header row's own cells
         // (columns include the header — delete/align both apply to it).
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'hovering the header row must still reveal the COLUMN grip for that column');
 
-        // Position (spec §4.2 衝突 2): row grip sits fully INSIDE the table
-        // — its left edge ON the table's left border, extending inward —
-        // so it no longer straddles the border where the block's own
-        // gutter ⠿ lives. expectApprox(actual, expected) allows ±1px for
-        // subpixel rounding. Re-hover body row 0 first — the header hover
-        // above moved the (shared, singleton) row grip onto the header row,
-        // where it also carries the TE_HEADER_GRIP_DY_PX offset, so reading
-        // it now would measure the wrong row's geometry.
+        // Position (uniform geometry): the row grip STRADDLES the table's
+        // left border — its horizontal centreline ON that border — mirroring
+        // what the column grip does on the top border. The block's own
+        // gutter ⠿ is kept clear of it by the edit-mode-only content padding
+        // in lib/md2doc.js, not by insetting the grip.
+        // expectApprox(actual, expected) allows ±1px for subpixel rounding.
+        // Re-hover body row 0 first — the header hover above moved the
+        // (shared, singleton) row grip onto the header row, so reading it
+        // now would measure the wrong row's geometry.
         await hoverBodyRowCell(page, table0, 0);
         const rowGripRects = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
@@ -3597,16 +3599,18 @@ async function clickInsertMenuItem(page, sel, label) {
           const grip = document.querySelector('.ed-te-grip-row');
           const gr = grip.getBoundingClientRect();
           return {
-            gr: { left: gr.left, top: gr.top, height: gr.height },
+            gr: { left: gr.left, top: gr.top, height: gr.height, width: gr.width },
             tableRect: { left: tableRect.left },
             rowRect: { top: rowRect.top, height: rowRect.height },
           };
         }, table0);
         {
           const { gr, tableRect, rowRect } = rowGripRects;
-          // spec §4.2 衝突 2：row grip 完全落在表格內側，才不會與表格 block
-          // 自己的 ⠿（gutter，[contentLeft−40, contentLeft−4]）重疊。
-          expectApprox(gr.left, tableRect.left, 'row grip left edge sits ON the table border, extending inward');
+          // row grip 的水平中心線落在表格左邊界上——與 colGrip 落在上邊界
+          // 的規則完全一樣；block 自己的 ⠿ 由 edit-mode 專用的 content
+          // padding 讓出空間，不靠把 grip 塞進表格內側。
+          expectApprox(gr.left + gr.width / 2, tableRect.left,
+            'row grip centreline sits ON the table\'s left border (straddling it)');
           expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
             'a body row grip stays vertically centred on its own row');
         }
@@ -3630,10 +3634,10 @@ async function clickInsertMenuItem(page, sel, label) {
         expectApprox(colGripPos.gripLeft, colGripPos.expectedLeft, 'col grip left (centered on column)');
         expectApprox(colGripPos.gripTop, colGripPos.expectedTop, 'col grip top (centerline on table top border)');
 
-        // §4.2 衝突 2：表格 block 自己的 ⠿ 在頁面 gutter，不得吃掉 row grip
-        // 的命中；衝突 3：colGrip 與 rowGrip 同 z-index、後 append 者贏 —
-        // header row grip 的向下偏移（TE_HEADER_GRIP_DY_PX）正是為了避開
-        // 這個 collision，所以 'header' 這一輪才是整個偏移量存在的理由。
+        // 表格 block 自己的 ⠿ 在頁面 gutter，不得吃掉 row grip 的命中；
+        // colGrip 與 rowGrip 同 z-index、後 append 者贏。'header' 這一輪是
+        // 最緊的一格：表頭列的 grip 與 colGrip 的帶狀範圍最接近，而現在兩
+        // 者用的是同一條擺放規則（沒有任何 header 專屬偏移）。
         for (const which of ['body', 'header']) {
           if (which === 'header') {
             await hoverHeaderRowCell(page, table0);
@@ -3643,7 +3647,7 @@ async function clickInsertMenuItem(page, sel, label) {
               const table = document.querySelector(ts + ' table');
               const hr = table.tHead.rows[0].getBoundingClientRect();
               const gr = g.getBoundingClientRect();
-              return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+              return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2)) <= 2;
             }, { timeout: 3000 }, table0);
           } else {
             await hoverBodyRowCell(page, table0, 0);
@@ -3661,7 +3665,47 @@ async function clickInsertMenuItem(page, sel, label) {
         }
 
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); header row grip shifted down; border-centred position — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); one border-straddling position for every row — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // User acceptance (v2.10.2): the row grip must never sit ON the first
+    // cell's TEXT. With the uniform border-straddling geometry the grip's
+    // centreline is the table's left border, so its right edge lands inside
+    // the cell's own left padding — strictly left of where text starts. The
+    // v2.10.1 inside-the-table geometry (grip's LEFT edge flush with the
+    // table's left border, extending 20px inward) covered the whole 14px
+    // padding plus ~6px of the text itself, which is the defect this asserts
+    // against.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await hoverBodyRowCell(page, table0, 0);
+        const m = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const cell = table.tBodies[0].rows[0].cells[0];
+          const cr = cell.getBoundingClientRect();
+          const gr = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return {
+            gripRight: gr.right,
+            textStart: cr.left + parseFloat(getComputedStyle(cell).paddingLeft),
+          };
+        }, table0);
+        assert.ok(m.gripRight <= m.textStart - 3,
+          'the row grip must never overlap the first cell\'s text: grip right edge ' +
+          m.gripRight.toFixed(2) + ' must be at least 3px LEFT of the cell\'s text start ' +
+          m.textStart.toFixed(2) + ' (gap=' + (m.textStart - m.gripRight).toFixed(2) + 'px)');
+
+        await page.close();
+        console.log('table row grip: right edge stays clear of the first cell\'s text — OK');
       } finally {
         tsrv.close();
       }
@@ -4051,15 +4095,12 @@ async function clickInsertMenuItem(page, sel, label) {
     // rAF-throttled hit-test once per intermediate point, to actually
     // exercise the corridor crossing.
     //
-    // ROW grip (spec §4.2 衝突 2, this file's row-grip-inside-table change):
-    // it no longer straddles the border — its left edge sits ON the table's
-    // left border, extending INWARD, fully inside the table. A pointer
-    // travelling from a real cell to the row grip's centre therefore never
-    // leaves the table, so there is no OUTSIDE-the-table corridor left to
-    // cross for the row grip; the row half below instead proves the grip
-    // stays visible across a genuine (non-teleporting) multi-step path fully
-    // within the table, starting well clear of the grip's own ~20px-wide
-    // box so the path isn't already ON the grip at step 0.
+    // ROW grip (uniform geometry): it straddles the table's LEFT border the
+    // same way — half of its ~20px width outside the table — so it crosses
+    // the mirror-image corridor and pointInRowGripZone() has to cover it.
+    // The row half below drives a genuine (non-teleporting) multi-step path
+    // from a real cell to the grip's own centre, starting well clear of the
+    // grip's own box so the path isn't already ON the grip at step 0.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -4070,9 +4111,9 @@ async function clickInsertMenuItem(page, sel, label) {
         const table0 = await tableBlockSel(page, 0);
 
         // Row grip: start on a REAL cell of the anchored row, well inside
-        // the table and clear of the grip's own ~20px-wide box (its left
-        // edge sits ON the table's left border and extends inward — see
-        // rowGripOffsetFor() in lib/editor/client.js) — 40px in from the
+        // the table and clear of the grip's own ~20px-wide box (its
+        // centreline sits ON the table's left border, so it reaches ~10px
+        // into the first cell) — 40px in from the
         // cell's own left edge keeps step 0 on the cell itself rather than
         // already inside the grip's footprint (which would make the
         // "travel" satisfy target.closest('.ed-te-grip-row') for its whole
@@ -7174,6 +7215,15 @@ async function clickInsertMenuItem(page, sel, label) {
         const sel = '.ed-block[data-block-type="heading"]';
         const editEl = sel + ' > *';
         await openWysiwyg(page, sel);
+        // openWysiwyg() clicks the BLOCK BOX's centre, so where the caret
+        // lands depends on how far the heading's text reaches past that
+        // centre — incidental geometry this scenario never cared about (it
+        // is about ⠿->+ on a DIRTY burst). Edit mode's content column got
+        // 48px of left padding for the block gutter (lib/md2doc.js), which
+        // moved the box centre to just INSIDE this particular heading's last
+        // character. Pin the caret to the end explicitly instead of relying
+        // on the click landing past the text.
+        await page.keyboard.press('End');
         await page.keyboard.type(' EDITED');
         assert.strictEqual(
           await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
