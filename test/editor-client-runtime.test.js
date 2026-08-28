@@ -3526,12 +3526,14 @@ async function clickInsertMenuItem(page, sel, label) {
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'hovering the header row must still reveal the COLUMN grip for that column');
 
-        // Position (P0-a): row grip centerline ON the table's left border,
-        // centered on its row — expectApprox(actual, expected) allows ±1px for
-        // subpixel rounding. Re-hover body row 0 first (the header hover above
-        // hides the row grip).
+        // Position (spec §4.2 衝突 2): row grip sits fully INSIDE the table
+        // — its left edge ON the table's left border, extending inward —
+        // so it no longer straddles the border where the block's own
+        // gutter ⠿ lives. expectApprox(actual, expected) allows ±1px for
+        // subpixel rounding. Re-hover body row 0 first (the header hover
+        // above hides the row grip).
         await hoverBodyRowCell(page, table0, 0);
-        const rowGripPos = await page.evaluate((ts) => {
+        const rowGripRects = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
           const tableRect = table.getBoundingClientRect();
           const row = table.tBodies[0].rows[0];
@@ -3539,13 +3541,19 @@ async function clickInsertMenuItem(page, sel, label) {
           const grip = document.querySelector('.ed-te-grip-row');
           const gr = grip.getBoundingClientRect();
           return {
-            gripLeft: gr.left, gripTop: gr.top,
-            expectedLeft: tableRect.left - gr.width / 2,
-            expectedTop: rowRect.top + rowRect.height / 2 - gr.height / 2,
+            gr: { left: gr.left, top: gr.top, height: gr.height },
+            tableRect: { left: tableRect.left },
+            rowRect: { top: rowRect.top, height: rowRect.height },
           };
         }, table0);
-        expectApprox(rowGripPos.gripLeft, rowGripPos.expectedLeft, 'row grip left (centerline on table left border)');
-        expectApprox(rowGripPos.gripTop, rowGripPos.expectedTop, 'row grip top (centered on row)');
+        {
+          const { gr, tableRect, rowRect } = rowGripRects;
+          // spec §4.2 衝突 2：row grip 完全落在表格內側，才不會與表格 block
+          // 自己的 ⠿（gutter，[contentLeft−40, contentLeft−4]）重疊。
+          expectApprox(gr.left, tableRect.left, 'row grip left edge sits ON the table border, extending inward');
+          expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
+            'a body row grip stays vertically centred on its own row');
+        }
 
         // Position (P0-a): col grip centerline ON the table's top border,
         // centered on its column.
@@ -3565,6 +3573,26 @@ async function clickInsertMenuItem(page, sel, label) {
         }, table0);
         expectApprox(colGripPos.gripLeft, colGripPos.expectedLeft, 'col grip left (centered on column)');
         expectApprox(colGripPos.gripTop, colGripPos.expectedTop, 'col grip top (centerline on table top border)');
+
+        // §4.2 衝突 2：表格 block 自己的 ⠿ 在頁面 gutter，不得吃掉 row grip
+        // 的命中；衝突 3：colGrip 與 rowGrip 同 z-index、後 append 者贏。
+        // Only 'body' is exercised here — hovering the header row shows NO
+        // row grip at all yet (asserted above; a header-row grip is a later
+        // task's job), so a 'header' iteration of this same hit-test would
+        // hang waiting for an element this task never shows.
+        for (const which of ['body']) {
+          await hoverBodyRowCell(page, table0, 0);
+          await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+          const hit = await page.evaluate(() => {
+            const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+            const el = document.elementFromPoint(g.left + g.width / 2, g.top + g.height / 2);
+            return el ? (el.closest('.ed-te-grip-row') ? 'row-grip'
+              : el.closest('.ed-te-grip-col') ? 'col-grip'
+              : el.closest('.ed-handle') ? 'block-handle' : el.tagName) : null;
+          });
+          assert.strictEqual(hit, 'row-grip',
+            which + ' row grip centre must hit the row grip itself, not the column grip or the block ⠿');
+        }
 
         await page.close();
         console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip; border-centred position — OK');
