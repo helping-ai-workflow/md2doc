@@ -184,6 +184,38 @@ function req(port, method, p, body) {
     srv.close();
   }
 
+  // EOL preservation: CRLF file
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-'));
+    const mdPath = path.join(dir, 'crlf.md');
+    fs.writeFileSync(mdPath, '# H\r\n\r\npara\r\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const html = await (await fetch(srv.urlFor(mdPath))).text();
+      const m = /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(html);
+      assert.ok(m, '__ED__ payload must be present');
+      const ed = JSON.parse(m[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\r\n', 'a CRLF file must report eol === CRLF');
+      assert.ok(ed.lines.every((l) => l.indexOf('\r') === -1),
+        'lines must never carry a trailing \\r, got: ' + JSON.stringify(ed.lines));
+      assert.deepStrictEqual(ed.lines, ['# H', '', 'para', '']);
+    } finally { srv.close(); }
+    console.log('server: CRLF file splits without \\r and reports eol — OK');
+  }
+  // EOL preservation: LF file
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-lf-'));
+    const mdPath = path.join(dir, 'lf.md');
+    fs.writeFileSync(mdPath, '# H\n\npara\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const html = await (await fetch(srv.urlFor(mdPath))).text();
+      const ed = JSON.parse(/window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(html)[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\n');
+    } finally { srv.close(); }
+    console.log('server: LF file reports eol === LF — OK');
+  }
+
   // Finding 2: createEditorServer with a listenPort already occupied by
   // another server must REJECT the returned promise (a catchable rejection,
   // the same shape bin's --edit `.catch` handles), not crash the process
