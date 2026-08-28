@@ -471,4 +471,88 @@ function assertRoundTrips(listEl, label) {
   ]);
 }
 
+// 23. C1 — the task checkbox is GFM CONTENT, not part of the CommonMark list
+// marker, so a child's content column is the BULLET's width ('- ' 2, '1. ' 3),
+// NOT the full '- [ ] ' 6 / '1. [ ] ' 7. Measured against this repo's marked:
+// a '- [ ] ' parent accepts child indents 2..5 and a '1. [ ] ' parent 3..6, so
+// emitting 6/7 puts the child OUTSIDE the window — marked then absorbs it into
+// the parent item as literal text and the nested list is destroyed on commit.
+{
+  const nestedCount = (md) => {
+    const t = marked.lexer(md);
+    if (!t[0] || t[0].type !== 'list') return 'NO-LIST';
+    return (t[0].items[0].tokens || []).filter((x) => x.type === 'list').length;
+  };
+
+  const ulTask = serializeBlocks([
+    liBlock({ id: '0', type: 'ul', task: true, checked: false }, 'todo'),
+    liBlock({ id: '1', type: 'ul', indent: 1 }, 'child'),
+  ]).md;
+  assert.strictEqual(ulTask, '- [ ] todo\n  - child',
+    "a child under '- [ ] ' indents by the BULLET width (2), not the marker width (6)");
+  assert.strictEqual(nestedCount(ulTask), 1,
+    'the child list must survive the round trip as a NESTED token, got:\n' + ulTask);
+
+  const olTask = serializeBlocks([
+    liBlock({ id: '0', type: 'ol', task: true, checked: true }, 'todo'),
+    liBlock({ id: '1', type: 'ul', indent: 1 }, 'child'),
+  ]).md;
+  assert.strictEqual(olTask, '1. [x] todo\n   - child',
+    "a child under '1. [ ] ' indents by the BULLET width (3), not the marker width (7)");
+  assert.strictEqual(nestedCount(olTask), 1,
+    'the child list must survive the round trip as a NESTED token, got:\n' + olTask);
+
+  // the checkbox must still be emitted, and still re-lex as a task item
+  assert.strictEqual(marked.lexer(olTask)[0].items[0].task, true,
+    'narrowing the child indent must not drop the checkbox itself');
+}
+
+// 24. C2 — run rule (b) compares against the last block AT THAT DEPTH, not
+// against the immediately previous block. A deeper item sitting between two
+// same-depth blocks must not hide a list-type change: without this the ordinal
+// fails to restart, the md re-lexes as <ol start="3">, 3.8 discards `start`,
+// and the next commit renumbers to 1. — the document oscillates forever.
+{
+  const { md } = serializeBlocks([
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'x'),
+    liBlock({ id: '2', type: 'ul', indent: 0 }, 'b'),
+    liBlock({ id: '3', type: 'ol', indent: 1 }, 'y'),
+    liBlock({ id: '4', type: 'ol', indent: 0 }, 'c'),
+  ]);
+  assert.strictEqual(md, '1. a\n   1. x\n- b\n  1. y\n1. c',
+    'the ul@0 broke the ol run at depth 0, so the next ol@0 restarts at 1, got:\n' + md);
+  const lexed = marked.lexer(md);
+  const olTail = lexed[lexed.length - 1];
+  assert.ok(!olTail.start || olTail.start === 1,
+    'the trailing ol must not re-lex with a start offset, got start=' + olTail.start);
+}
+
+// 25. C2 one level down — same bug, depth 1 between depth-2 items
+{
+  const { md } = serializeBlocks([
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'p'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'x'),
+    liBlock({ id: '2', type: 'ol', indent: 2 }, 'd'),
+    liBlock({ id: '3', type: 'ul', indent: 1 }, 'u'),
+    liBlock({ id: '4', type: 'ol', indent: 2 }, 'd2'),
+    liBlock({ id: '5', type: 'ol', indent: 1 }, 'z'),
+  ]);
+  assert.ok(md.endsWith('\n   1. z'),
+    'the ul@1 broke the ol run at depth 1, so the trailing ol@1 restarts at 1, got:\n' + md);
+}
+
+// 26. Minor 2 — 3.8 rule (c): a non-li block is a run terminator, never a
+// silent '- <text>' line. Flag it, never swallow it.
+{
+  const notLi = el('div', {
+    class: 'ed-block', 'data-block-id': '9', 'data-block-type': 'p', 'data-indent': '0',
+  }, el('div', { class: 'ed-li-text' }, 'para'));
+  const r = serializeBlocks([notLi]);
+  assert.deepStrictEqual(r.unsupported, ['P'],
+    'a non-li block must be flagged by its block type, got: ' + JSON.stringify(r.unsupported));
+  assert.strictEqual(r.md, '', 'a non-li block must emit no line, got: ' + JSON.stringify(r.md));
+  assert.deepStrictEqual(r.lineMeta, [], 'a non-li block must contribute no lineMeta');
+}
+
 console.log('list-md.test.js OK');
