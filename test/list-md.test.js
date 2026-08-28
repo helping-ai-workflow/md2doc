@@ -1,7 +1,8 @@
 'use strict';
 const assert = require('assert');
 const { marked } = require('marked');
-const { serializeList, serializeBlocks } = require('../lib/editor/list-md.js');
+const { serializeList, serializeBlocks, STRUCTURAL_ONLY_UNSUPPORTED } =
+  require('../lib/editor/list-md.js');
 
 // minimal element stub — same pattern as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
@@ -661,19 +662,14 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     'meaningful inter-inline spacing must NOT be swallowed by the artifact filter');
 }
 
-// 29. C1: ONE BLOCK == ONE PHYSICAL LINE also for a TIGHT item. Case 28 covers
-// the LOOSE shape (blank text nodes around a <p>); a tight item with a lazy
-// continuation renders as a single text node containing a literal '\n'
-// ('- a1\n    cont' -> `<div class="ed-li-text">a1\ncont</div>`), which
-// escapeText() emits verbatim. That desynchronised lineMeta from
-// md.split('\n') exactly as case 28's shape did, and the per-li degrade path
-// then wrote a DIFFERENT item's line into the edited item's range.
-//
-// Spec rule: an item whose own content is not a single contiguous line is
-// UNSUPPORTED. The line is truncated to its first physical line so lineMeta
-// stays parallel (a SIBLING's single-line commit must still land correctly),
-// and 'MULTILINE' is reported per-block so the arm check and the structural
-// gate both refuse it.
+// 29. The original desync, restated for the RANGE model. A tight item with a
+// lazy continuation renders as one text node holding a literal '\n'
+// ('- a1' / '    cont' -> `<div class="ed-li-text">a1\ncont</div>`), which
+// escapeText() emits verbatim. It legitimately owns TWO physical lines; what
+// was broken was that `lineMeta` only had ONE entry for it, so a caller
+// indexing md.split('\n') by lineMeta position addressed the continuation and
+// overwrote the NEXT item's line. Fixed by making lineMeta per-LINE — not by
+// refusing the item (see case 31 and spec §4.1: 文字編輯不受影響).
 {
   const multi = el('div', {
     class: 'ed-block', 'data-block-id': '7', 'data-block-type': 'li',
@@ -689,18 +685,26 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     liBlock({ id: '9', indent: 0 }, 'b'),
   ];
   const r = serializeBlocks(blocks);
-  assert.strictEqual(r.md.split('\n').length, 4,
-    'four blocks must emit exactly four physical lines, got:\n' + JSON.stringify(r.md));
-  assert.strictEqual(r.lineMeta.length, 4, 'lineMeta stays parallel to the emitted lines');
-  assert.strictEqual(r.md.split('\n')[2], '  - a2',
-    'the block AFTER the multi-line one must still own its own line index');
+  assert.strictEqual(r.md, '- a\n  - a1\n    cont\n  - a2\n- b',
+    'the hard-wrapped item is emitted IN FULL, its continuation at its content ' +
+    'column, got:\n' + JSON.stringify(r.md));
+  assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+    'lineMeta must be parallel to the emitted LINES, which is the invariant the ' +
+    'desync violated');
+  assert.deepStrictEqual(r.lineMeta.map((m) => m.blockId), ['6', '7', '7', '8', '9'],
+    'the hard-wrapped block owns two consecutive entries');
+  // The trap the desync sprang: block 8's own line, located by its lineMeta
+  // range rather than by its position among the blocks.
+  const idx8 = [];
+  r.lineMeta.forEach((m, k) => { if (m.blockId === '8') idx8.push(k); });
+  assert.deepStrictEqual(idx8, [3]);
+  assert.strictEqual(r.md.split('\n')[idx8[0]], '  - a2',
+    "the sibling AFTER the hard-wrapped item must still resolve to its own line");
   assert.ok(r.unsupported.indexOf('MULTILINE') !== -1,
-    'a multi-line item must be reported unsupported, got: ' + JSON.stringify(r.unsupported));
-  const byLi = r.unsupportedByLi.filter((u) => u.blockId === '7');
-  assert.strictEqual(byLi.length, 1,
-    'MULTILINE must be attributed to the offending block so the arm check and the ' +
-    'F-W refuse branch can both see it');
-  assert.ok(byLi[0].names.indexOf('MULTILINE') !== -1);
+    'MULTILINE gates structural ops, got: ' + JSON.stringify(r.unsupported));
+  assert.deepStrictEqual(r.unsupportedByLi, [],
+    'MULTILINE must not be attributed per-li — that channel gates ARMING and the ' +
+    'text-edit refusal');
   // superset invariant: every unsupportedByLi name also appears in unsupported
   r.unsupportedByLi.forEach((u) => u.names.forEach((n) => {
     assert.ok(r.unsupported.indexOf(n) !== -1, 'unsupported must stay a superset: ' + n);
@@ -722,6 +726,166 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   ]);
   assert.strictEqual(r.md, '- a\n  1. x\n  1. y\n- d',
     'a data-list-start block restarts its depth\'s ordinal, got:\n' + JSON.stringify(r.md));
+}
+
+// 31. Round 2: a block may own a contiguous RANGE of lines.
+//
+// Round 1 amputated multi-line items (truncate + mark unsupported), which made
+// 22.4% of this repo's own list items read-only. Spec §4.1 only ever asked for
+// a multi-line item to refuse STRUCTURAL operations — "文字編輯不受影響". So the
+// item is emitted in full: its marker line plus one continuation line per extra
+// physical line, each indented to the item's CONTENT COLUMN
+// (indentPrefix + bullet width — the §3.4 errata width, checkbox excluded).
+//
+// The invariant that the original desync bug violated is now stated directly:
+// lineMeta has ONE ENTRY PER EMITTED LINE, so several consecutive entries may
+// share a blockId and a consumer maps a block to an INDEX RANGE.
+{
+  function multiBlock(opts, textWithNewlines) {
+    const kids = [el('span', { class: 'ed-li-marker' }, '\u2022')];
+    if (opts.task) kids.push(el('span', { class: 'ed-li-check', 'data-checked': '0' }));
+    kids.push(el('div', { class: 'ed-li-text' }, text(textWithNewlines)));
+    return el('div', {
+      class: 'ed-block', 'data-block-id': opts.id, 'data-block-type': 'li',
+      'data-list-type': opts.type || 'ul', 'data-task': opts.task ? '1' : '0',
+      'data-indent': String(opts.indent || 0),
+    }, ...kids);
+  }
+
+  // (a) top-level hard-wrapped item: continuation sits at the content column.
+  {
+    const r = serializeBlocks([
+      multiBlock({ id: '0' }, 'alpha\ncont'),
+      liBlock({ id: '1' }, 'bravo'),
+    ]);
+    assert.strictEqual(r.md, '- alpha\n  cont\n- bravo',
+      'a hard-wrapped item keeps its continuation, indented to its content column, got:\n' +
+      JSON.stringify(r.md));
+    assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+      'lineMeta must carry one entry per EMITTED LINE');
+    assert.deepStrictEqual(r.lineMeta.map((m) => m.blockId), ['0', '0', '1'],
+      'the two lines of block 0 both bear its blockId');
+    assert.strictEqual(r.lineMeta[0].marker, '- ', "the item's first line keeps its marker");
+    assert.strictEqual(r.lineMeta[1].marker, '', 'a continuation line has no marker');
+    assert.strictEqual(r.lineMeta[1].indentPrefix, '  ',
+      'a continuation entry carries the CONTINUATION prefix');
+  }
+
+  // (b) nested under a bullet parent, and under an ordered parent — the
+  //     continuation column follows the same accumulated-width rule as a child
+  //     list's indent, and the checkbox is excluded from it (§3.4 errata).
+  {
+    assert.strictEqual(serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'a'),
+      multiBlock({ id: '1', indent: 1 }, 'a1\ncont'),
+    ]).md, '- a\n  - a1\n    cont');
+    assert.strictEqual(serializeBlocks([
+      liBlock({ id: '0', type: 'ol', indent: 0 }, 'a'),
+      multiBlock({ id: '1', type: 'ol', indent: 1 }, 'x\ncont'),
+    ]).md, '1. a\n   1. x\n      cont');
+    assert.strictEqual(serializeBlocks([
+      multiBlock({ id: '0', task: true }, 'todo\ncont'),
+    ]).md, '- [ ] todo\n  cont',
+      "the checkbox is content, not marker width — a task item's continuation " +
+      'column is still the BULLET width');
+  }
+
+  // (c) MULTILINE is reported for the STRUCTURAL gate only. It must reach
+  //     `unsupported` (which drives listRunSupportsStructuralEdit() and the
+  //     per-li partial commit path) but NOT `unsupportedByLi`, which is what
+  //     the arm check and the F-W text-edit refusal read — text editing a
+  //     hard-wrapped item is explicitly unaffected (spec §4.1).
+  {
+    const r = serializeBlocks([
+      multiBlock({ id: '0' }, 'alpha\ncont'),
+      liBlock({ id: '1' }, 'bravo'),
+    ]);
+    assert.ok(r.unsupported.indexOf('MULTILINE') !== -1,
+      'MULTILINE must be reported so structural ops refuse, got: ' + JSON.stringify(r.unsupported));
+    assert.deepStrictEqual(r.unsupportedByLi, [],
+      'MULTILINE must NOT be attributed per-li: that channel gates ARMING and the ' +
+      'text-edit refusal, and text editing a hard-wrapped item is unaffected');
+    assert.ok(STRUCTURAL_ONLY_UNSUPPORTED.indexOf('MULTILINE') !== -1,
+      'the structural-only name list is exported so the client and the serializer cannot drift');
+  }
+
+  // (d) the emitted continuation must round-trip through marked as part of its
+  //     OWN item — never an indented code block, never a sibling. (Content
+  //     column exactly; content column + 4 would lex as code.)
+  {
+    const shapes = [
+      ['- alpha\ncont', {}],
+      ['a\ncont', { nest: true }],
+    ];
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'a'),
+      multiBlock({ id: '1', indent: 1 }, 'x\ncont'),
+      liBlock({ id: '2', indent: 1 }, 'y'),
+    ]);
+    const lexed = marked.lexer(r.md);
+    assert.strictEqual(lexed.length, 1, 'one top-level list token, got ' + lexed.length + ':\n' + r.md);
+    const sub = (lexed[0].items[0].tokens || []).filter((t) => t.type === 'list');
+    assert.strictEqual(sub.length, 1, 'the sublist survives');
+    assert.strictEqual(sub[0].items.length, 2, 'the continuation must NOT become a third item');
+    assert.ok(/cont/.test(sub[0].items[0].text),
+      "the continuation belongs to its own item's text, got: " + JSON.stringify(sub[0].items[0].text));
+    assert.ok(!/^ {4}/m.test(sub[0].items[0].text || ''),
+      'the continuation must never come back as an indented code block, got:\n' +
+      JSON.stringify(sub[0].items[0].text));
+    void shapes;
+  }
+
+  // (e) lineMeta.length === md.split('\n').length over every shape this task's
+  //     reports discussed — single-line, nested, loose, task, ordered,
+  //     hard-wrapped, and hard-wrapped-next-to-loose.
+  {
+    const shapes = [
+      [liBlock({ id: '0' }, 'one'), liBlock({ id: '1' }, 'two')],
+      [liBlock({ id: '0', type: 'ol' }, 'a'), liBlock({ id: '1', type: 'ol', indent: 1 }, 'x')],
+      [liBlock({ id: '0', task: true, checked: true }, 'todo'), liBlock({ id: '1', indent: 1 }, 'kid')],
+      [multiBlock({ id: '0' }, 'alpha\ncont')],
+      [multiBlock({ id: '0' }, 'a\nb\nc'), liBlock({ id: '1' }, 'z')],
+      [liBlock({ id: '0' }, 'a'), multiBlock({ id: '1', indent: 1 }, 'a1\ncont'),
+       liBlock({ id: '2', indent: 1 }, 'a2'), liBlock({ id: '3' }, 'b')],
+      [el('div', {
+        class: 'ed-block', 'data-block-id': '0', 'data-block-type': 'li',
+        'data-list-type': 'ul', 'data-task': '0', 'data-indent': '0',
+      }, el('span', { class: 'ed-li-marker' }, '\u2022'),
+         el('div', { class: 'ed-li-text' }, text('\n'), el('p', {}, 'loose'), text('\n'))),
+       multiBlock({ id: '1' }, 'alpha\ncont')],
+    ];
+    shapes.forEach((blocks, i) => {
+      const r = serializeBlocks(blocks);
+      assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+        'shape ' + i + ': lineMeta must be parallel to the emitted lines, got ' +
+        r.lineMeta.length + ' vs ' + r.md.split('\n').length + ':\n' + JSON.stringify(r.md));
+      // and every entry must name a block that is actually in the span
+      const ids = blocks.map((b) => b.getAttribute('data-block-id'));
+      r.lineMeta.forEach((m) => assert.ok(ids.indexOf(m.blockId) !== -1,
+        'shape ' + i + ': lineMeta entry names an unknown block ' + JSON.stringify(m.blockId)));
+    });
+  }
+
+  // (f) a SIBLING's own commit range is still exact when a multi-line item sits
+  //     before it — the index RANGE of entries bearing that blockId.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'a'),
+      multiBlock({ id: '1', indent: 1 }, 'a1\ncont'),
+      liBlock({ id: '2', indent: 1 }, 'a2'),
+      liBlock({ id: '3', indent: 0 }, 'b'),
+    ]);
+    const lines = r.md.split('\n');
+    const rangeOf = (id) => {
+      const idx = [];
+      r.lineMeta.forEach((m, k) => { if (m.blockId === id) idx.push(k); });
+      return idx;
+    };
+    assert.deepStrictEqual(rangeOf('1'), [1, 2], 'the multi-line item owns two consecutive lines');
+    assert.deepStrictEqual(rangeOf('2'), [3], 'its sibling owns exactly one');
+    assert.strictEqual(lines[3], '  - a2',
+      "the sibling's own line is still addressable by its range, got:\n" + JSON.stringify(r.md));
+  }
 }
 
 console.log('list-md.test.js OK');

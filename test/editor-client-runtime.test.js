@@ -456,7 +456,11 @@ async function liBlockSelByText(page, text) {
       // returning a selector that matches nothing.
       if (li.getAttribute('data-block-id') === null) return false;
       const surface = li.querySelector(':scope > .ed-li-text');
-      return surface && surface.textContent.trim() === t;
+      if (!surface) return false;
+      // A hard-wrapped item's surface text spans lines, so an exact match on
+      // the whole surface cannot name it — its FIRST physical line can.
+      return surface.textContent.trim() === t ||
+        surface.textContent.split('\n')[0].trim() === t;
     });
     return hit ? hit.getAttribute('data-block-id') : null;
   }, text);
@@ -6727,18 +6731,69 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // C1: a TIGHT MULTI-LINE li (lazy continuation) desynchronised lineMeta
-    // from the emitted lines — its .ed-li-text holds a literal '\n', which the
-    // inline serializer emits verbatim, so ONE block produced TWO physical
-    // lines. The per-li degrade path indexes runMd by line position, so editing
-    // a LATER sibling wrote the continuation line into that sibling's range:
-    //   before: '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n'
-    //   after : '- a\n\n  - a1\n    cont\ncont\n\n- b\n'   <- '  - a2' clobbered
-    // Rule: an item whose own content is not a single contiguous line is
-    // UNSUPPORTED — the serializer truncates its emitted line (keeping lineMeta
-    // parallel so this sibling's own commit still lands) and flags it, which
-    // also forces the partial-run path so the multi-line item's source bytes
-    // are never rewritten.
+    // ── Round 2: a block may own a contiguous RANGE of lines ───────────────
+    // A hard-wrapped list item (lazy continuation) is ordinary markdown — 22.4%
+    // of this repo's own list items are one — so it stays fully TEXT-editable.
+    // Spec §4.1 only withholds STRUCTURAL operations from it. The serializer
+    // emits its marker line plus continuation lines at the item's content
+    // column, and lineMeta carries one entry per EMITTED LINE so a consumer maps
+    // a block to an index RANGE. (Round 1 amputated such items instead, which
+    // made them read-only — the capability is restored here.)
+
+    // (1) The item is ARMED, and a plain text edit of it round-trips: the
+    //     continuation keeps its indent and the untouched sibling is byte-exact.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
+        await setupListDoc(['# List doc', '', '- alpha', '  cont', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const wrappedArmed = await page.evaluate(() => {
+          const hit = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .find((li) => {
+              const s2 = li.querySelector(':scope > .ed-li-text');
+              return s2 && s2.textContent.indexOf('cont') !== -1;
+            });
+          if (!hit) return 'multi-line li not found';
+          const surface = hit.querySelector(':scope > .ed-li-text');
+          return surface ? String(surface.getAttribute('contenteditable')) : 'no surface';
+        });
+        assert.notStrictEqual(wrappedArmed, 'multi-line li not found',
+          'fixture must actually produce a hard-wrapped li');
+        assert.strictEqual(wrappedArmed, 'true',
+          'spec §4.1: a hard-wrapped item refuses STRUCTURAL ops only — text editing is ' +
+          'unaffected, so it must be armed. Got: ' + wrappedArmed);
+
+        const alphaSel = await liBlockSelByText(page, 'alpha');
+        await openWysiwyg(page, alphaSel);
+        // Deterministic caret: End would land at the end of whichever VISUAL
+        // line the click hit, and a hard-wrapped item has two of them.
+        await placeCaretInListText(page, alphaSel, 'alpha', false);
+        await page.keyboard.type('Z');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await page.waitForFunction(
+          () => document.querySelector('.content').textContent.includes('alphaZ'),
+          { timeout: 5000 }
+        );
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- alphaZ\n  cont\n- bravo\n',
+          'a text edit of a hard-wrapped item must commit its whole line RANGE: the ' +
+          'continuation keeps its indent and the sibling is untouched, got:\n' +
+          JSON.stringify(fileText));
+
+        await page.close();
+        console.log('per-li WYSIWYG (round 2): a hard-wrapped item is armed and text-editable — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // (2) Editing a SIBLING of a hard-wrapped item leaves that item BYTE-IDENTICAL.
+    //     This is the shape whose corruption started the whole thread: the
+    //     serializer used to emit two physical lines against one lineMeta entry,
+    //     so the degrade path's line index pointed at the continuation and
+    //     '  - a2' was overwritten by 'cont'.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc([
@@ -6754,24 +6809,9 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(lurl, { waitUntil: 'networkidle0' });
 
-        // The multi-line item must not be armed at all (degrade-never-lose).
-        const a1Armed = await page.evaluate(() => {
-          const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
-          const hit = lis.find((li) => {
-            const s2 = li.querySelector(':scope > .ed-li-text');
-            return s2 && s2.textContent.indexOf('cont') !== -1;
-          });
-          if (!hit) return 'multi-line li not found';
-          const surface = hit.querySelector(':scope > .ed-li-text');
-          return surface ? String(surface.getAttribute('contenteditable')) : 'no surface';
-        });
-        assert.notStrictEqual(a1Armed, 'multi-line li not found',
-          'fixture must actually produce a multi-line li');
-        assert.notStrictEqual(a1Armed, 'true',
-          'a li whose own content is not a single contiguous line must NOT be armed, got: ' + a1Armed);
-
-        // Edit the SIBLING that follows it, and save.
-        await openWysiwyg(page, await liBlockSelByText(page, 'a2'));
+        const a2Sel = await liBlockSelByText(page, 'a2');
+        await openWysiwyg(page, a2Sel);
+        await placeCaretInListText(page, a2Sel, 'a2', false);
         await page.keyboard.type('Z');
         await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
         await page.waitForFunction(
@@ -6781,44 +6821,54 @@ async function clickInsertMenuItem(page, sel, label) {
         const fileText = await saveAndRead(page, lmdPath);
         assert.strictEqual(fileText,
           '# List doc\n\n- a\n\n  - a1\n    cont\n  - a2Z\n\n- b\n',
-          'C1: the multi-line sibling must keep its own source bytes and the edited ' +
-          "item's own line must receive the edit, got:\n" + JSON.stringify(fileText));
+          'the hard-wrapped sibling must stay byte-identical and the edit must land on ' +
+          "the edited item's own range, got:\n" + JSON.stringify(fileText));
 
         await page.close();
-        console.log('per-li WYSIWYG (C1): a tight multi-line li is unsupported; a sibling edit ' +
-          'lands on its own line — OK');
+        console.log('per-li WYSIWYG (round 2): a sibling edit leaves a hard-wrapped item ' +
+          'byte-identical — OK');
       } finally {
         lsrv.close();
       }
     }
 
-    // C1 (the same rule, off the degrade path): a multi-line li in an otherwise
-    // fully-supported run used to make the WHOLE-run commit rewrite the
-    // untouched continuation line without its indent
-    // ('- alpha\n  cont' -> '- alpha\ncont', which re-lexes as a paragraph).
-    // Flagging it forces the partial path, so the continuation is untouched.
+    // (3) ...and the item is STILL refused for structural operations (spec §4.1),
+    //     with the existing banner and no file change. MULTILINE reaches
+    //     `unsupported` (which the structural gate reads) but never
+    //     `unsupportedByLi` (which arming and the text-edit refusal read).
     {
-      const { srv: lsrv, url: lurl, mdPath: lmdPath } =
-        await setupListDoc(['# List doc', '', '- alpha', '  cont', '- bravo', '']);
+      const rows = ['# List doc', '', '- alpha', '  cont', '- bravo', ''];
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
+      const lorig = rows.join('\n');
       try {
         const page = await newPage(browser);
         await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        const beforeShape = await runShapeOf(page, list0);
 
         await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
-        await page.keyboard.type('Z');
-        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
-        await page.waitForFunction(
-          () => document.querySelector('.content').textContent.includes('bravoZ'),
-          { timeout: 5000 }
+        await page.keyboard.press('Tab');
+        await new Promise((r) => setTimeout(r, 250)); // let any (incorrect) commit land
+
+        assert.ok(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')),
+          'a structural key in a run holding a hard-wrapped item must surface the banner'
         );
+        assert.ok(
+          (await page.evaluate(() => document.querySelector('.ed-conflict').textContent))
+            .includes('無法調整結構'),
+          'the banner must be the structural-refusal message (繁體中文)'
+        );
+        assert.strictEqual(await runShapeOf(page, list0), beforeShape,
+          'the refused key must leave the run structurally untouched');
         const fileText = await saveAndRead(page, lmdPath);
-        assert.strictEqual(fileText, '# List doc\n\n- alpha\n  cont\n- bravoZ\n',
-          "C1: an untouched multi-line sibling's continuation must keep its indent, got:\n" +
+        assert.strictEqual(fileText, lorig,
+          'the refused structural key must leave the file byte-identical, got:\n' +
           JSON.stringify(fileText));
 
         await page.close();
-        console.log('per-li WYSIWYG (C1): a whole-run commit never strips an untouched ' +
-          "continuation's indent — OK");
+        console.log('per-li WYSIWYG (round 2): a hard-wrapped item still refuses STRUCTURAL ' +
+          'keys with the banner — OK');
       } finally {
         lsrv.close();
       }
