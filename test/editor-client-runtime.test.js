@@ -1108,6 +1108,12 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyZ');
       await page.keyboard.up('Control');
+      // undo() fires its own /api/render to actually revert A's earlier
+      // switch-triggered commit — a real round trip gated behind a bare
+      // fixed-timeout DOM check below. Wait for __edInflight to drain
+      // first instead of betting that render finishes inside the
+      // waitForFunction's fixed budget (same shape as Finding 6a).
+      await settleEditor(page);
       await page.waitForFunction(
         () => !document.querySelector('.content').innerHTML.includes('SWITCH-COMMIT-A-TEXT'),
         { timeout: 5000 }
@@ -1196,7 +1202,12 @@ async function clickInsertMenuItem(page, sel, label) {
 
       // undo()'s own switchAwayFrom() pre-check auto-commits A first, THEN
       // the undo proceeds and reverts that just-committed op (it's the
-      // newest on the stack) — both must be true by the end.
+      // newest on the stack) — both must be true by the end. That's TWO
+      // chained /api/render round trips before the DOM reflects the
+      // revert; wait for __edInflight to actually drain instead of
+      // betting both finish inside the waitForFunction's fixed budget
+      // (same shape as Finding 6a's original fixed-timeout race).
+      await settleEditor(page);
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('First paragraph.') &&
           !document.querySelector('.content').innerHTML.includes('UNDO-SWITCH-A-TEXT'),
@@ -7254,6 +7265,13 @@ async function clickInsertMenuItem(page, sel, label) {
         const from = await rowGripCoords(page, table0, 2); // "Row3"
         const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1"
         await dragRowTo(page, from, to);
+        // Same shape as Finding 6a above: performRowDrop() awaits
+        // ensureTableBurstOpen(), which must first resolve the OTHER
+        // block's dirty-burst commit (a real /api/render round trip,
+        // tracked by __edInflight) before the row move itself runs. Wait
+        // for that round trip to actually drain rather than betting it
+        // finishes inside the waitForFunction's fixed budget.
+        await settleEditor(page);
 
         await page.waitForFunction(
           (s) => Array.from(document.querySelectorAll(s + ' tbody td:first-child'))
