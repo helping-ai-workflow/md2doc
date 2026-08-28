@@ -7179,8 +7179,21 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Click the table's ＋ column-insert bubble WITHOUT ever blurring
         // the dirty paragraph burst first — ensureTableBurstOpen()'s own
-        // switchAwayFrom() must resolve it.
+        // switchAwayFrom() must resolve it. That resolution is the OTHER
+        // block's full commit round trip (an /api/render fetch, tracked by
+        // window.__edInflight — see newPage()'s comment), and insertColumn()
+        // only runs once it settles. A bare `waitForFunction(..., {timeout:
+        // 5000})` for the 3-column DOM state is betting that round trip
+        // finishes inside 5s; under a full 28-file run on a loaded CI
+        // runner that bet can miss (observed once at this exact line).
+        // settleEditor() waits for the SAME __edInflight counter the
+        // commit itself drives (with its own generous 15s ceiling) instead
+        // of guessing a wall-clock budget, so wait for it deterministically
+        // FIRST — by the time it resolves, insertColumn()'s synchronous DOM
+        // update has already landed and the waitForFunction below is just
+        // a cheap confirmation, not the thing racing the round trip.
         await hoverAndClickColInsert(page, table0, 0);
+        await settleEditor(page);
 
         await page.waitForFunction(
           (s) => document.querySelector(s + ' thead th') &&
@@ -7874,6 +7887,73 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         lsrv.close();
       }
+    }
+
+    // ── Task 10: S0 end-to-end guard — every Task 1-9 gesture in one scene.
+    //    Each task above has its own unit-level scenario and they all pass in
+    //    isolation, but that says nothing about the INTERACTION: does a
+    //    column move survive a subsequent row-driven header swap, does the
+    //    alignment/EOL/undo-stack bookkeeping from separate tasks compose
+    //    correctly, does two structural edits still round-trip through a
+    //    single burst's undo history as exactly two snap()s. This is the
+    //    guard for that gap — CRLF file, column drag, row drag (promotes a
+    //    data row to header), save, then Ctrl+Z twice back to the original.
+    {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s0-e2e-'));
+      const mdPath = path.join(dir, 'doc.md');
+      const original = ['| A | B |', '|:---:|---:|', '| 1 | 2 |', '| 3 | 4 |', ''].join('\r\n');
+      fs.writeFileSync(mdPath, original, 'utf8');
+      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // 1) 欄搬移：B 移到最左
+        const cfrom = await colGripCoords(page, table0, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'B', {}, table0);
+
+        // 2) 列搬移：最後一個資料列升為表頭
+        const rfrom = await rowGripCoords(page, table0, 1);
+        const rto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, rfrom, rto);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '4', {}, table0);
+
+        // 3) 存檔：EOL 仍是 CRLF、對齊跟著欄走、順序正確
+        const saved = await saveAndRead(page, mdPath);
+        assert.ok(saved.indexOf('\r\n') !== -1 && !/[^\r]\n/.test(saved),
+          'a CRLF file must stay CRLF after a structural edit, got: ' + JSON.stringify(saved));
+        assert.strictEqual(saved,
+          ['| 4 | 3 |', '|---:|:---:|', '| B | A |', '| 2 | 1 |', ''].join('\r\n'),
+          'column move + header promotion must both land, with alignment following its column, got:\n' + saved);
+
+        // 4) Ctrl+Z 兩次回到原檔（burst 內的兩個 snap）
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        const back = await saveAndRead(page, mdPath);
+        assert.strictEqual(back, original,
+          'undoing both drags must restore the file byte-for-byte, got:\n' + JSON.stringify(back));
+        await page.close();
+        console.log('S0 e2e: CRLF + column move + header promotion + undo — OK');
+      } finally { srv.close(); }
     }
 
     console.log('editor-client-runtime.test.js OK');
