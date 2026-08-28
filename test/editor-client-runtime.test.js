@@ -4703,15 +4703,45 @@ async function clickInsertMenuItem(page, sel, label) {
     //    cell (it's the cell's own `style`), and the separator row is
     //    synthesized from the header cells at serialize time, so this
     //    exercises the header-row cell move as much as the body row.
+    //
+    // Review fix (Important 3): a single-character-per-cell fixture makes
+    // every column the SAME classifyColumns() grade (lib/md2doc.js), so
+    // `<col>` count alone can't prove reorderColgroup() actually reordered
+    // the right elements — deleting reorderColgroup() entirely still
+    // passes a plain count===3 check. This fixture (reused from the
+    // mixed-column-grade row-drag scenario above, already fixture-verified
+    // there) gives the three columns DIFFERENT grades so the `<col>`
+    // CLASS SEQUENCE after the move is a real, order-sensitive assertion:
+    //   - "Name" (Alice/Bob): short tokens, no whitespace, maxTokenLen<=12
+    //     -> col-narrow -> <col class="col-narrow">.
+    //   - "Note" (hello world/bye now): has whitespace so not narrow;
+    //     avgCellLen ~9 (not >40) and no ". "/"。" sentence marker -> falls
+    //     through to col-default -> renderer.table emits a bare <col> with
+    //     NO class attribute at all (lib/md2doc.js: `c === 'col-default'
+    //     ? '<col>' : ...`).
+    //   - "Detail" ("It is fine. Really."/"Also fine. Truly."): contains
+    //     ". " -> hasSentence -> col-prose -> <col class="col-prose">,
+    //     regardless of its avgCellLen.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
-        '| A | B | C |', '|---|:---:|---:|', '| 1 | 2 | 3 |', '',
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
       ]);
       try {
         const page = await newPage(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
-        const from = await colGripCoords(page, table0, 2); // C
+        // Fixture sanity: confirm the three columns really do land on three
+        // DIFFERENT grades before trusting the move assertion below.
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', null, 'col-prose'],
+          'fixture sanity: Name/Note/Detail must classify as col-narrow/col-default(no class)/col-prose');
+        const from = await colGripCoords(page, table0, 2); // Detail
         const to = await page.evaluate((s) => {
           const table = document.querySelector(s + ' table');
           const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
@@ -4723,17 +4753,31 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.mouse.move(to.x, to.y, { steps: 5 });
         await page.mouse.up();
         await page.waitForFunction((s) =>
-          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'C',
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Detail',
           {}, table0);
         assert.strictEqual(
           await page.evaluate((s) =>
             document.querySelectorAll(s + ' table colgroup col').length, table0),
           3, 'colgroup must still have one <col> per column after a move');
+        // The load-bearing assertion: the <col> CLASS SEQUENCE must follow
+        // the new column order (Detail, Name, Note) — col-prose first, then
+        // col-narrow, then the class-less col-default — not merely three
+        // <col> elements in ANY order (a plain count check can't tell
+        // reorderColgroup() apart from a no-op).
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-prose', 'col-narrow', null],
+          'the <col> class sequence must follow the new column order (Detail, Name, Note), not just keep the count at 3');
         const fileText = await saveAndRead(page, tmdPath);
-        assert.strictEqual(fileText, ['| C | A | B |', '|---:|---|:---:|', '| 3 | 1 | 2 |', ''].join('\n'),
+        assert.strictEqual(fileText,
+          ['| Detail | Name | Note |',
+           '|---|---:|:---:|',
+           '| It is fine. Really. | Alice | hello world |',
+           '| Also fine. Truly. | Bob | bye now |', ''].join('\n'),
           'a column move must carry its alignment with it, got:\n' + fileText);
         await page.close();
-        console.log('table column drag: column moves with its alignment and colgroup entry — OK');
+        console.log('table column drag: column moves with its alignment and the <col> class sequence (mixed grades) — OK');
       } finally { tsrv.close(); }
     }
 
