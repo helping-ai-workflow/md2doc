@@ -3494,8 +3494,12 @@ async function clickInsertMenuItem(page, sel, label) {
           await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), true,
           'the row menu must NOT show the 對齊 button');
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s + ' tbody tr:first-child').classList.contains('ed-te-hl'), table0),
-          true, 'clicking row 0\'s left edge must highlight that row');
+          await page.evaluate((s) => {
+            const cells = document.querySelector(s + ' tbody tr:first-child').cells;
+            return cells.length > 0 &&
+              Array.from(cells).every((c) => c.classList.contains('ed-te-hl'));
+          }, table0),
+          true, 'clicking row 0\'s left edge must highlight that row\'s cells');
 
         await page.click('.ed-te-menu-delete');
         await page.waitForFunction(
@@ -3704,8 +3708,8 @@ async function clickInsertMenuItem(page, sel, label) {
           await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
           'clicking the header grip must NOT open the row menu');
         assert.strictEqual(
-          await page.evaluate((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'), table0),
-          true, 'clicking the header grip highlights the header row');
+          await page.evaluate((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'), table0),
+          true, 'clicking the header grip highlights the header row\'s cells');
         // Click elsewhere -> the highlight must clear.
         const cell = await page.evaluate((s) => {
           const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
@@ -3766,7 +3770,7 @@ async function clickInsertMenuItem(page, sel, label) {
         // scenario above.
         const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y); // highlight
-        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'),
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'),
           { timeout: 3000 }, table0);
 
         const cell = await page.evaluate((s) => {
@@ -3777,12 +3781,18 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
           { timeout: 3000 }, table0);
 
-        // Sanity: the un-highlighted header <tr> must not be left with a
-        // dangling empty `class=""` attribute either.
+        // Sanity: neither the header <tr> nor any of its cells may be left
+        // with a dangling empty `class=""` attribute. (S3 moved the
+        // highlight onto the cells; the <tr> is now never touched at all,
+        // and every armed cell keeps its own 'ed-wys-cell'.)
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s + ' table thead tr').hasAttribute('class'), table0),
+          await page.evaluate((s) => {
+            const tr = document.querySelector(s + ' table thead tr');
+            return tr.hasAttribute('class') ||
+              Array.from(tr.cells).some((c) => c.hasAttribute('class') && c.className === '');
+          }, table0),
           false,
-          'un-highlighting the header row must not leave a dangling class="" attribute on the <tr>');
+          'un-highlighting the header row must not leave a dangling class="" attribute behind');
 
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         const fileText = await saveAndRead(page, tmdPath);
@@ -3827,7 +3837,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
         const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y);
-        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'),
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'),
           { timeout: 3000 }, table0);
 
         await page.keyboard.press('Escape');
@@ -8141,6 +8151,308 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.close();
         console.log('S0 e2e: in-burst Ctrl+Z after a column drag and a header-promoting row drag — OK');
       } finally { srv.close(); }
+    }
+
+    // ── S1 (Critical): a table gesture must never rewrite a DIFFERENT table ──
+    //
+    // ensureTableBurstOpen()'s stale-node recovery used to re-resolve the
+    // live table by `data-block-id`. blockmap.js renumbers ids 0..n-1 in
+    // document order on EVERY render, so the resolution that
+    // ensureTableBurstOpen() itself performs (switchAwayFrom(), committing
+    // whatever dirty editor is open elsewhere) can renumber the id out from
+    // under the capture: a commit that ADDS a block before this table shifts
+    // every later id down by one, and the captured id then names the table's
+    // NEIGHBOUR. `classList.contains('ed-wys-table')` was the only guard and
+    // every table passes it, so the gesture landed on the wrong table.
+    //
+    // The shape below is the smallest reproducer: a raw-edit (MD 原始碼)
+    // textarea left OPEN and DIRTY whose source splits one paragraph into
+    // two, then a column drag on the SECOND table. Nothing resolves the
+    // dirty editor early — the click delegator explicitly skips
+    // '.ed-te-grip', and the grip's own mousedown preventDefault() keeps the
+    // textarea focused — so the commit happens inside ensureTableBurstOpen()
+    // exactly as the bug requires. Pre-fix, the FIRST table came back from
+    // disk with its columns swapped (and canonically re-serialised, losing
+    // its hand padding) although the user never touched it.
+    {
+      const s1Rows = [
+        'Para one.', '',
+        '| Alpha  | Beta |',
+        '|--------|------|',
+        '| 1      | 2    |', '',
+        '| Gamma | Delta |',
+        '|-------|-------|',
+        '| 3     | 4     |', '',
+      ];
+      const tableALines = s1Rows.slice(2, 5).join('\n');
+      const { srv: s1Srv, url: s1Url, mdPath: s1MdPath } = await setupTableDoc(s1Rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s1Url, { waitUntil: 'networkidle0' });
+        const pSel = await paragraphSelByText(page, 'Para one.');
+        const table1 = await tableBlockSel(page, 1);
+
+        // Open the paragraph's raw editor and make it TWO paragraphs — the
+        // commit this produces grows the block count BEFORE both tables.
+        await openBlockEditor(page, pSel);
+        await page.waitForSelector(pSel + ' textarea.ed-raw');
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          ta.value = 'Para one.\n\nPara two.';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, pSel);
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), pSel),
+          true, 'sanity: the raw editor must still be open and dirty before the column drag');
+
+        // Drag the SECOND table's second column to the far left.
+        const cfrom = await colGripCoords(page, table1, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table1);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        // The drop awaits ensureTableBurstOpen(), whose switchAwayFrom() is a
+        // real /api/render round trip — drain __edInflight rather than
+        // betting on a wall-clock budget (same shape as Finding 6a/6b above).
+        await settleEditor(page);
+
+        // Proof the window this test is about was actually entered: only
+        // ensureTableBurstOpen()'s own switchAwayFrom() could have committed
+        // the raw editor, since nothing else was clicked.
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Para two.')),
+          'sanity: the dirty raw editor must have been committed by the drag\'s ' +
+          'ensureTableBurstOpen() — without that commit the bug window never opened');
+
+        // Give any lingering switchAwayFrom()/commit bookkeeping from the
+        // drag a chance to finish BEFORE Ctrl+S: the save handler routes
+        // through switchAwayFrom() too, and a commit still considered
+        // in-flight there makes it skip save() outright.
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        await settleEditor(page);
+        const saved = await saveAndRead(page, s1MdPath);
+        assert.ok(saved.includes('Para two.'),
+          'the raw-edit commit must have reached the file, got:\n' + saved);
+        assert.ok(saved.includes(tableALines),
+          'a gesture on the SECOND table must leave the FIRST table byte-identical, got:\n' + saved);
+
+        await page.close();
+        console.log('S1: a table gesture never rewrites a DIFFERENT table (block ids renumber; ' +
+          'startLine + identity re-resolve) — OK');
+      } finally { s1Srv.close(); }
+    }
+
+    // ── S2 (Important): a REFUSED delete must not canonical-rewrite ────────
+    //
+    // showRowMenu()/showColumnMenu() add '.ed-te-hl' to LIVE cells before any
+    // burst exists; the delete handler then opens the burst, so a raw
+    // innerHTML baseline BAKES THE HIGHLIGHT IN. A refusal only shows a
+    // banner, leaving the highlight standing — and the next click elsewhere
+    // strips it, at which point resolveBurst()'s zero-edit guard can no
+    // longer match and the whole table is re-serialised into table-md.js's
+    // canonical form. Hand padding and hand-written alignment are destroyed
+    // in a table the user never edited. Fixing the refusal path alone cannot
+    // help: stripping the class IS the diff, whoever does it.
+    {
+      const s2Rows = [
+        '| Name   | Note  |',
+        '|--------|:-----:|',
+        '| Alice  | a |', '',
+        'Tail paragraph.', '',
+      ];
+      const s2Original = s2Rows.join('\n');
+      const { srv: s2Srv, url: s2Url, mdPath: s2MdPath } = await setupTableDoc(s2Rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const pSel = await paragraphSelByText(page, 'Tail paragraph.');
+
+        // Row grip -> 刪除列 -> refusal (this IS the only body row).
+        const row0 = await rowGripCoords(page, table0, 0);
+        await pressReleaseAt(page, row0.x, row0.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
+          'sanity: the refusal must leave the row in place');
+        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+
+        // Click a DIFFERENT block — this is what strips the highlight and,
+        // pre-fix, turned the burst into a "changed" one.
+        await openWysiwyg(page, pSel);
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        const saved = await saveAndRead(page, s2MdPath);
+        assert.strictEqual(saved, s2Original,
+          'a REFUSED 刪除列 followed by a click elsewhere must leave the file byte-identical ' +
+          '(hand padding and hand-written alignment intact), got:\n' + saved);
+
+        await page.close();
+        console.log('S2: a refused delete leaves an untouched table byte-identical — OK');
+      } finally { s2Srv.close(); }
+    }
+
+    // ── S3 (Important): the row highlight has to actually PAINT ────────────
+    //
+    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` paints its own
+    // opaque `background: #f6f8fa` and the sticky first column paints
+    // `#ffffff` — both on the CELL, which sits above the row box, and
+    // `!important` does not let a rule on one element beat an opaque
+    // background painted by a different element on top of it. The header
+    // highlight rendered as ZERO pixels changed while the Esc gate still
+    // counted it as an open selection and ate the user's next Escape.
+    // Asserted on the COMPUTED BACKGROUND, never on the class this test
+    // would otherwise just be checking it had written itself.
+    {
+      const { srv: s3Srv, url: s3Url } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const HL = 'rgba(59, 130, 246, 0.15)';
+        const bgOf = (sel) => page.evaluate((s) =>
+          getComputedStyle(document.querySelector(s)).backgroundColor, sel);
+
+        const thSel = table0 + ' table thead th';
+        const thBefore = await bgOf(thSel);
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y);
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead th.ed-te-hl'),
+          { timeout: 3000 }, table0);
+        const thAfter = await bgOf(thSel);
+        assert.notStrictEqual(thAfter, thBefore,
+          'clicking the header grip must CHANGE the header cell\'s painted background — the th\'s ' +
+          'own opaque #f6f8fa sits above the <tr>, so a row-level highlight is invisible ' +
+          '(before=' + thBefore + ', after=' + thAfter + ')');
+        assert.strictEqual(thAfter, HL,
+          'the header cell must paint the selection colour itself, got ' + thAfter);
+
+        // Same trap one row down: the sticky first BODY cell paints #ffffff.
+        const tdSel = table0 + ' table tbody tr:first-child td:first-child';
+        const tdBefore = await bgOf(tdSel);
+        const row0 = await rowGripCoords(page, table0, 0);
+        await pressReleaseAt(page, row0.x, row0.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        const tdAfter = await bgOf(tdSel);
+        assert.notStrictEqual(tdAfter, tdBefore,
+          'a body row\'s FIRST cell must change too — the sticky-first-column rule paints it ' +
+          '#ffffff over any <tr> background (before=' + tdBefore + ', after=' + tdAfter + ')');
+        assert.strictEqual(tdAfter, HL,
+          'the sticky first body cell must paint the selection colour itself, got ' + tdAfter);
+
+        await page.close();
+        console.log('S3: the row highlight paints on the CELLS (header th and sticky first td) — OK');
+      } finally { s3Srv.close(); }
+    }
+
+    // ── S4 (coverage): the TH ↔ TD retag, asserted on ATTRIBUTES ───────────
+    //
+    // Spec §4.6 chose rename-and-rebuild over moving `<tr>`s precisely
+    // because the CSS hangs off th/td, and §5.3 item 14 requires attribute
+    // assertions. Markdown cannot see the difference — table-md.js's
+    // isCell() accepts TH and TD alike — so every existing row-drag scenario
+    // still passes with retagCell() replaced by `return cell;`. These are
+    // the assertions that don't: the promoted row's cells must BE `<th>`,
+    // the demoted header's must BE `<td>`, and both must keep the arm-time
+    // attributes (contenteditable / ed-wys-cell) plus the promoted header's
+    // re-applied alignment `style`. Deliberately NOT asserted: the
+    // `cell-narrow` / `cell-prose` width classes, which classifyColumns()
+    // legitimately re-derives per render.
+    {
+      const { srv: s4Srv, url: s4Url } = await setupTableDoc([
+        '| A | B |', '|:---:|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Promote the LAST body row ('3') to header by dropping it above the
+        // header row — rebuildTableSections()'s retag path in both directions
+        // at once (that row becomes TH, the old 'A' header becomes TD).
+        const from = await rowGripCoords(page, table0, 1);
+        const to = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '3',
+          { timeout: 3000 }, table0);
+
+        const shape = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const describe = (row) => Array.from(row.cells).map((c) => ({
+            tag: c.nodeName,
+            text: c.textContent.trim(),
+            editable: c.getAttribute('contenteditable'),
+            armed: c.classList.contains('ed-wys-cell'),
+            style: c.getAttribute('style'),
+          }));
+          return {
+            headRows: t.tHead.rows.length,
+            head: describe(t.tHead.rows[0]),
+            body: Array.from(t.tBodies[0].rows).map(describe),
+          };
+        }, table0);
+
+        assert.strictEqual(shape.headRows, 1, 'thead must still hold exactly one row');
+        assert.deepStrictEqual(shape.head.map((c) => c.tag), ['TH', 'TH'],
+          'every cell of the PROMOTED row must have been retagged to <th>, got ' +
+          JSON.stringify(shape.head));
+        assert.deepStrictEqual(shape.head.map((c) => c.text), ['3', '4'],
+          'sanity: the promoted row is the one that was dragged');
+        shape.head.forEach((c, i) => {
+          assert.strictEqual(c.editable, 'true',
+            'promoted header cell ' + i + ' must keep contenteditable="true", got ' + JSON.stringify(c));
+          assert.strictEqual(c.armed, true,
+            'promoted header cell ' + i + ' must keep the ed-wys-cell arm class, got ' + JSON.stringify(c));
+        });
+        assert.strictEqual(shape.head[0].style, 'text-align:center',
+          'the column alignment must be re-applied to the NEW header cell verbatim, got ' +
+          JSON.stringify(shape.head[0].style));
+        assert.strictEqual(shape.head[1].style, null,
+          'an unaligned column must get NO style attribute on the new header cell, got ' +
+          JSON.stringify(shape.head[1].style));
+
+        const bodyTags = shape.body.map((row) => row.map((c) => c.tag));
+        assert.deepStrictEqual(bodyTags, [['TD', 'TD'], ['TD', 'TD']],
+          'the DEMOTED header row (and every other body row) must be retagged to <td>, got ' +
+          JSON.stringify(shape.body));
+        assert.deepStrictEqual(shape.body[0].map((c) => c.text), ['A', 'B'],
+          'sanity: the demoted row is the old header');
+        shape.body.forEach((row, r) => row.forEach((c, i) => {
+          assert.strictEqual(c.editable, 'true',
+            'body cell ' + r + ',' + i + ' must keep contenteditable="true", got ' + JSON.stringify(c));
+          assert.strictEqual(c.armed, true,
+            'body cell ' + r + ',' + i + ' must keep the ed-wys-cell arm class, got ' + JSON.stringify(c));
+        }));
+        // The renderer puts the column's alignment style on EVERY cell of an
+        // aligned column, th and td alike — and retagCell() copies each
+        // cell's attributes across verbatim, in their original order. So the
+        // demoted cells must still carry column 0's centring, byte-for-byte,
+        // and column 1 must still carry no style attribute at all.
+        assert.deepStrictEqual(shape.body.map((row) => row.map((c) => c.style)),
+          [['text-align:center', null], ['text-align:center', null]],
+          'retagCell() must copy each cell\'s attributes across verbatim (aligned column keeps its ' +
+          'style, unaligned column gets none), got ' + JSON.stringify(shape.body));
+
+        await page.close();
+        console.log('S4: row promotion retags cells TH↔TD and preserves their arm-time attributes — OK');
+      } finally { s4Srv.close(); }
     }
 
     console.log('editor-client-runtime.test.js OK');
