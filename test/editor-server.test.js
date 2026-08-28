@@ -215,6 +215,46 @@ function req(port, method, p, body) {
     } finally { srv.close(); }
     console.log('server: LF file reports eol === LF — OK');
   }
+  // EOL preservation: MIXED file — the PRIMARY eol wins (final review I3).
+  // The detector used to be `indexOf('\r\n') !== -1 ? '\r\n' : '\n'`, i.e.
+  // "any CRLF anywhere wins": one stray CRLF line in a 10,000-line LF file
+  // rewrote all 10,000 lines to CRLF on the first save, contradicting spec
+  // §3.11 item 4 ("lines outside the commit range keep their bytes"). A
+  // majority vote confines the damage to the minority lines instead.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-mixed-'));
+    const mdPath = path.join(dir, 'mixed.md');
+    // 5 LF terminators vs 1 CRLF terminator -> LF must win.
+    fs.writeFileSync(mdPath, '# H\n\npara one\r\npara two\npara three\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const ed = JSON.parse(
+        /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(
+          await (await fetch(srv.urlFor(mdPath))).text())[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\n',
+        'a mixed file whose MAJORITY terminator is LF must report eol === LF, got: ' +
+        JSON.stringify(ed.eol));
+      assert.ok(ed.lines.every((l) => l.indexOf('\r') === -1),
+        'lines must never carry a trailing \\r even in a mixed file, got: ' + JSON.stringify(ed.lines));
+    } finally { srv.close(); }
+    console.log('server: mixed-EOL file reports the MAJORITY eol — OK');
+  }
+  // ...and the mirror case: a CRLF-majority file with one stray LF line.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-mixed-crlf-'));
+    const mdPath = path.join(dir, 'mixed-crlf.md');
+    fs.writeFileSync(mdPath, '# H\r\n\r\npara one\npara two\r\npara three\r\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const ed = JSON.parse(
+        /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(
+          await (await fetch(srv.urlFor(mdPath))).text())[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\r\n',
+        'a mixed file whose MAJORITY terminator is CRLF must report eol === CRLF, got: ' +
+        JSON.stringify(ed.eol));
+    } finally { srv.close(); }
+    console.log('server: mixed-EOL file with a CRLF majority reports CRLF — OK');
+  }
 
   // Finding 2: createEditorServer with a listenPort already occupied by
   // another server must REJECT the returned promise (a catchable rejection,

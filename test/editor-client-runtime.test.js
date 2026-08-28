@@ -741,8 +741,13 @@ async function hoverBodyRowCell(page, tableSel, bodyIndex) {
     return Math.abs((gr.top + gr.height / 2) - (r.top + r.height / 2)) <= 2;
   }, { timeout: 3000 }, tableSel, bodyIndex);
 }
-// Hovers the HEADER row's first cell WITHOUT waiting for a row grip — used
-// by the "header row shows no grip" scenario below, where none must appear.
+// Hovers the HEADER row's first cell WITHOUT waiting for a row grip. The
+// header row DOES get a grip now (spec §3.10 — it is draggable, since
+// position alone decides header identity), so this raw form is only for the
+// scenarios that must observe the pre-reposition state or assert that no
+// grip appears at all (a header-only table). Everything that wants to PRESS
+// the header grip must use headerGripCoords() below, which waits for the
+// grip to actually reach the header row.
 async function hoverHeaderRowCell(page, tableSel) {
   const box = await page.evaluate((ts) => {
     const table = document.querySelector(ts + ' table');
@@ -3548,8 +3553,13 @@ async function clickInsertMenuItem(page, sel, label) {
           'the row grip must be at least 18x24px, got ' + rowBox.width + 'x' + rowBox.height);
 
         // spec §3.10：表頭列現在也有 grip（可拖曳，位置決定表頭身分）。
-        await hoverHeaderRowCell(page, table0);
-        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        // headerGripCoords() (not a bare waitForSelector) — now that the header
+        // row has a grip of its own, ':not([hidden])' is ALREADY satisfied by
+        // the grip still parked on the PREVIOUS row (the body-row hover just
+        // above showed it), so the selector wait returns immediately and the
+        // read below can race client.js's rAF reposition. headerGripCoords()
+        // waits for the grip to actually REACH the header row.
+        await headerGripCoords(page, table0);
         const hg = await page.evaluate((s) => {
           const table = document.querySelector(s + ' table');
           const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
@@ -3570,8 +3580,10 @@ async function clickInsertMenuItem(page, sel, label) {
         // — its left edge ON the table's left border, extending inward —
         // so it no longer straddles the border where the block's own
         // gutter ⠿ lives. expectApprox(actual, expected) allows ±1px for
-        // subpixel rounding. Re-hover body row 0 first (the header hover
-        // above hides the row grip).
+        // subpixel rounding. Re-hover body row 0 first — the header hover
+        // above moved the (shared, singleton) row grip onto the header row,
+        // where it also carries the TE_HEADER_GRIP_DY_PX offset, so reading
+        // it now would measure the wrong row's geometry.
         await hoverBodyRowCell(page, table0, 0);
         const rowGripRects = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
@@ -3686,9 +3698,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
-        await hoverHeaderRowCell(page, table0);
-        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
-        const g = await gripCenter(page, '.ed-te-grip-row');
+        const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y);
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
@@ -3750,9 +3760,11 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await clickCellWithText(page, table0, 'Alice'); // opens the burst
 
-        await hoverHeaderRowCell(page, table0);
-        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
-        const g = await gripCenter(page, '.ed-te-grip-row');
+        // headerGripCoords(), not waitForSelector — clickCellWithText() above
+        // already showed the grip on a BODY row, so ':not([hidden])' is true
+        // before the grip has moved; see the same note at the geometry
+        // scenario above.
+        const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y); // highlight
         await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'),
           { timeout: 3000 }, table0);
@@ -3779,6 +3791,64 @@ async function clickInsertMenuItem(page, sel, label) {
           'the file byte-identical, got:\n' + fileText);
         await page.close();
         console.log('table header grip: highlight/un-highlight on a col-default table leaves the file byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Final review I1: Esc while a header-grip HIGHLIGHT is showing (and no
+    // menu is open) must dismiss just the highlight — it must NOT fall
+    // through to the focused cell's own Escape branch
+    // (handleTableCellKeydown -> revertTableBurstAndEnd), which throws away
+    // every character typed into the burst so far.
+    //
+    // A header grip click deliberately produces a highlight with NO menu
+    // (the row menu's only item is "delete row", inapplicable to a header),
+    // so `teMenuKind` stays null. The pointerdown dismiss gate was already
+    // widened to `(teMenuKind || teHighlightEls.length)` for exactly that
+    // reason; the global keydown's Escape gate is its sibling and had been
+    // left reading `teMenuKind` alone. With a BODY row's menu open the same
+    // keypress merely closes the menu — so the header row was the one place
+    // where Esc silently destroyed unsaved text.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Open the burst on a body cell and type into it — this is the state
+        // the bug destroys.
+        await clickCellWithText(page, table0, '1');
+        await page.keyboard.type('X');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table tbody tr').cells[0].textContent.trim() === '1X',
+          { timeout: 3000 }, table0);
+
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y);
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        await page.keyboard.press('Escape');
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        // The load-bearing half: the burst must still be alive with the typed
+        // text intact. A revert would have restored the cell to '1'.
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelector(s + ' table tbody tr').cells[0].textContent.trim(), table0),
+          '1X',
+          'Esc dismissing a header-grip highlight must NOT revert the table burst — the typed text must survive');
+
+        // ...and it must survive all the way to disk.
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.ok(/\|\s*1X\s*\|/.test(fileText),
+          'the typed text must still commit after Esc dismissed the highlight, got:\n' + fileText);
+
+        await page.close();
+        console.log('table header grip: Esc clears the highlight without reverting the burst — OK');
       } finally { tsrv.close(); }
     }
 
@@ -7961,16 +8031,115 @@ async function clickInsertMenuItem(page, sel, label) {
           ['| 4 | 3 |', '|---:|:---:|', '| B | A |', '| 2 | 1 |', ''].join('\r\n'),
           'column move + header promotion must both land, with alignment following its column, got:\n' + saved);
 
-        // 4) Ctrl+Z 兩次回到原檔（burst 內的兩個 snap）
+        await page.close();
+        console.log('S0 e2e: CRLF + column move + header promotion + save — OK');
+      } finally { srv.close(); }
+    }
+
+    // Task 10 (final-review M2): the IN-BURST undo half, on its own doc.
+    //
+    // The original version of this ran its two Ctrl+Z presses AFTER
+    // saveAndRead() — but saveAndRead()'s Ctrl+S resolves the burst
+    // (switchAwayFrom -> resolveBurst) and disposes the burst-local history,
+    // so those presses landed on the GLOBAL undo stack where the whole burst
+    // is exactly ONE op. The assertion therefore passed even if neither drop
+    // had ever called history.snap(): it was vacuous. Undo has to be
+    // exercised while the burst is still open, and an INTERMEDIATE state has
+    // to be asserted between the two presses, or a regression that records a
+    // single snapshot for both drags still passes.
+    //
+    // This also closes two coverage gaps the ledger had recorded as closed:
+    // Ctrl+Z after a header-PROMOTING row move (undo #1 below), and an
+    // in-burst Ctrl+Z after a COLUMN drag (undo #2 below).
+    {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s0-e2e-undo-'));
+      const mdPath = path.join(dir, 'doc.md');
+      const original = ['| A | B |', '|:---:|---:|', '| 1 | 2 |', '| 3 | 4 |', ''].join('\r\n');
+      fs.writeFileSync(mdPath, original, 'utf8');
+      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Reads the whole table back as rows of trimmed cell text — the
+        // observable the two intermediate assertions compare against.
+        const gridOf = () => page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const rows = [].concat(
+            Array.prototype.slice.call(t.tHead ? t.tHead.rows : []),
+            Array.prototype.slice.call(t.tBodies[0] ? t.tBodies[0].rows : []));
+          return rows.map((r) => Array.prototype.map.call(r.cells, (c) => c.textContent.trim()));
+        }, table0);
+
+        // 1) 欄搬移：B 移到最左（burst 的第一個 snap）
+        const cfrom = await colGripCoords(page, table0, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'B', {}, table0);
+        const afterCol = await gridOf();
+        assert.deepStrictEqual(afterCol, [['B', 'A'], ['2', '1'], ['4', '3']],
+          'sanity: after the column drag the grid must be B/A, got ' + JSON.stringify(afterCol));
+
+        // 2) 列搬移：最後一個資料列升為表頭（burst 的第二個 snap）
+        const rfrom = await rowGripCoords(page, table0, 1);
+        const rto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, rfrom, rto);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '4', {}, table0);
+        const afterRow = await gridOf();
+        assert.deepStrictEqual(afterRow, [['4', '3'], ['B', 'A'], ['2', '1']],
+          'sanity: after the header-promoting row drag, got ' + JSON.stringify(afterRow));
+
+        // 3) 第一次 Ctrl+Z（burst 還開著）：只退掉列搬移。
+        //    這一步就是 "Ctrl+Z after a header-promoting move" 的覆蓋。
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        // 等「不是 4」而不是「等於 B」：只記了一個 snapshot 的迴歸會直接跳回
+        // 原始狀態，等 'B' 會變成無訊息的 timeout；等「undo 已經生效」才能讓
+        // 下面那個 deepStrictEqual 真的印出它看到的格線。
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() !== '4',
+          { timeout: 3000 }, table0);
+        const undo1 = await gridOf();
+        assert.deepStrictEqual(undo1, afterCol,
+          'the FIRST in-burst Ctrl+Z must land on the intermediate state (column moved, row NOT yet ' +
+          'moved) — landing straight on the original means only one snapshot was ever recorded for ' +
+          'two structural edits, got ' + JSON.stringify(undo1));
+
+        // 4) 第二次 Ctrl+Z：退掉欄搬移，回到原始格線。
+        //    這一步是 "in-burst Ctrl+Z after a COLUMN drag" 的覆蓋。
+        await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'A',
+          { timeout: 3000 }, table0);
+        const undo2 = await gridOf();
+        assert.deepStrictEqual(undo2, [['A', 'B'], ['1', '2'], ['3', '4']],
+          'the SECOND in-burst Ctrl+Z must restore the original grid, got ' + JSON.stringify(undo2));
+
+        // 5) 存檔：兩次 undo 之後檔案必須逐位元組回到原狀（含 CRLF）。
         const back = await saveAndRead(page, mdPath);
         assert.strictEqual(back, original,
-          'undoing both drags must restore the file byte-for-byte, got:\n' + JSON.stringify(back));
+          'undoing both drags in-burst must leave the file byte-for-byte identical, got:\n' +
+          JSON.stringify(back));
         await page.close();
-        console.log('S0 e2e: CRLF + column move + header promotion + undo — OK');
+        console.log('S0 e2e: in-burst Ctrl+Z after a column drag and a header-promoting row drag — OK');
       } finally { srv.close(); }
     }
 
