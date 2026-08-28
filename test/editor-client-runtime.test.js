@@ -4321,6 +4321,85 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally { tsrv.close(); }
     }
 
+    // Same round trip, but over a table whose columns are NOT all graded
+    // the same by classifyColumns() (lib/md2doc.js) — because the ARM-TIME
+    // attribute order differs per grade, and a retag that imposes one fixed
+    // order silently breaks byte-identity for the others:
+    //
+    //   col-narrow / col-prose -> renderer emits `class` (+ `style` when the
+    //     column is aligned), armEditables() then appends `contenteditable`
+    //     -> `class, style, contenteditable`
+    //   col-default            -> renderer emits NO class at all, so
+    //     armEditables()'s setAttribute('contenteditable') lands FIRST and
+    //     classList.add('ed-wys-cell') CREATES the class attribute after it
+    //     -> `style, contenteditable, class`
+    //
+    // Fixture (verified against the real renderer): col 1 "Alice"/"Bob" is
+    // col-narrow and right-aligned; col 2 "hello world"/"bye now" has
+    // whitespace but a short average, so it is col-default and centred —
+    // the hole; col 3 contains ". " so it is col-prose, unaligned. Only a
+    // verbatim, order-preserving attribute copy satisfies all three at once.
+    // Hand-padded so any canonical rewrite is a visible byte diff.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Fixture sanity: the three columns really are graded differently,
+        // and the middle one really has a style but no class. If
+        // classifyColumns()'s heuristic ever shifts, this fails LOUDLY here
+        // rather than leaving the col-default path quietly unexercised.
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelector(s + ' table thead tr').cells)
+            .map((c) => Array.from(c.attributes).map((a) => a.name).join(',')), table0),
+          ['class,style,contenteditable', 'style,contenteditable,class', 'class,contenteditable'],
+          'fixture sanity: the three column grades really do arm with DIFFERENT attribute orders — ' +
+          'the middle (col-default) one gets `class` LAST because the renderer emitted none for it');
+
+        // 1) Alice -> above the header (her cells are retagged TD->TH).
+        const from1 = await rowGripCoords(page, table0, 0);
+        const to1 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from1, to1);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Alice',
+          {}, table0);
+
+        // 2) Alice back down, just above Bob -> the ORIGINAL order returns.
+        const from2 = await headerGripCoords(page, table0);
+        const to2 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[1].getBoundingClientRect(); // Bob
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from2, to2);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Name',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Name,Alice,Bob', 'sanity: the round trip must restore the original row order');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'the round trip must stay byte-identical for EVERY column grade, col-default included, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: round trip is byte-identical across mixed column grades (col-default included) — OK');
+      } finally { tsrv.close(); }
+    }
+
     // Two more axes on the same rebuild: (a) a row created by insertRow()
     // is bare <td> with NO style attribute of its own, so a promoted one
     // can only carry the column alignment if the rebuild re-applies the
