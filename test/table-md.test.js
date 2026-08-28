@@ -151,4 +151,34 @@ function table(headerRow, bodyRows) {
   assert.deepStrictEqual(unsupported, []);
 }
 
+// 空 thead：現行會輸出 "|  |" + "||"，re-lex 成 paragraph，整張表消失
+{
+  const t = el('table', {},
+    el('colgroup', {}),
+    el('thead', {}),
+    el('tbody', {}, tr(td({}, 'A')), tr(td({}, '1')))
+  );
+  const res = serializeTable(t);
+  assert.ok(res.unsupported.includes('TABLE_NO_HEADER'),
+    'a table with no header row must degrade, got: ' + JSON.stringify(res));
+  assert.strictEqual(res.md, '', 'a degraded table must not emit broken rows');
+}
+
+// 非矩形：body 列比表頭寬，序列化後重讀會靜默丟欄
+{
+  const t = table(tr(th({}, 'A')), [tr(td({}, '1'), td({}, '2'))]);
+  const res = serializeTable(t);
+  assert.ok(res.unsupported.includes('TABLE_RAGGED'),
+    'a non-rectangular table must degrade, got: ' + JSON.stringify(res));
+  assert.strictEqual(res.md, '');
+}
+
+// 迴歸：正常表格不受影響
+{
+  const t = table(tr(th({}, 'A'), th({}, 'B')), [tr(td({}, '1'), td({}, '2'))]);
+  const res = serializeTable(t);
+  assert.deepStrictEqual(res.unsupported, []);
+  assert.strictEqual(res.md, '| A | B |\n|---|---|\n| 1 | 2 |');
+}
+
 console.log('table-md.test.js OK');
