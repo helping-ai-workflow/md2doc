@@ -54,9 +54,9 @@ function post(port, p, body) {
     const listTypes = new Set(lis.map((b) => b.listType));
     assert.ok(listTypes.has('ul'), 'fixture must render bullet lis');
     assert.ok(listTypes.has('ol'), 'fixture must render ordered lis');
-    assert.ok(listTypes.has('task'), 'fixture must render task lis');
+    assert.ok(lis.some((b) => b.task === true), 'fixture must render task lis');
     // both a checked and an unchecked task li present
-    const taskChecked = lis.filter((b) => b.listType === 'task').map((b) => b.checked);
+    const taskChecked = lis.filter((b) => b.task === true).map((b) => b.checked);
     assert.ok(taskChecked.includes(true), 'fixture must render a checked task li');
     assert.ok(taskChecked.includes(false), 'fixture must render an unchecked task li');
     // nested lis (indent > 0) prove the mixed-depth type switches segmented

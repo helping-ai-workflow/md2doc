@@ -77,8 +77,25 @@ assert.deepStrictEqual(
 // task list items
 {
   const { blocks } = buildBlockMap('- [ ] todo\n- [x] done');
-  assert.deepStrictEqual(blocks.map((b) => [b.listType, b.checked]),
-    [['task', false], ['task', true]]);
+  assert.deepStrictEqual(blocks.map((b) => [b.listType, b.task, b.checked]),
+    [['ul', true, false], ['ul', true, true]]);
+}
+// ordered × task are independent axes (GFM allows `1. [ ] a`)
+{
+  const { blocks } = buildBlockMap('1. [ ] alpha\n2. [x] beta\n');
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.listType, b.task, b.checked]),
+    [['ol', true, false], ['ol', true, true]],
+    'an ordered task list must keep BOTH its ordered-ness and its task-ness'
+  );
+}
+{
+  const { blocks } = buildBlockMap('- plain\n- [ ] todo\n');
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.listType, b.task]),
+    [['ul', false], ['ul', true]],
+    'a bullet list marks task-ness per item, list type per list'
+  );
 }
 // multi-line li (lazy continuation) spans both lines
 {
