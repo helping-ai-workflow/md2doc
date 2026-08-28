@@ -317,31 +317,48 @@ function assertRoundTrips(listEl, label) {
     'the consumed checkbox span must NOT be reported unsupported');
 }
 
-// 11. task child indent = 6 columns ('- [ ] ' is 6 chars wide; childIndentPrefix
-// derives from marker.length, so the nested item indents by exactly 6 spaces)
-{
+// 11 / 11b. MIGRATED (2026-08-29). These two used to assert a 6-column
+// ('- [ ] ') and 7-column ('1. [x] ') child indent, i.e. the full marker
+// width. That was wrong and shipped: the checkbox is a GFM construct parsed
+// from the item's CONTENT, not part of the CommonMark list marker, so the
+// child's content column is where the BULLET ends (2 and 3). Emitting 6/7 put
+// the child outside marked's acceptance window ('- [ ] ' accepts 2..5,
+// '1. [ ] ' 3..6) and the child list was absorbed into the parent item as
+// literal text — silent data corruption on one commit.
+//
+// These cases are the reason the bug survived three reviews: they asserted
+// the emitted STRING and never fed it back through marked, so they could only
+// ever confirm whatever the serializer already did. The migration therefore
+// keeps both shapes, corrects the expectations, and adds the round-trip
+// assertion that would have caught it. Spec §3.4 carries the matching errata.
+function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   const pli = el('LI', { 'data-block-id': '0' },
-    el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
+    el('SPAN', { class: 'ed-li-check', 'data-checked': pliChecked }),
     el('DIV', { class: 'ed-li-text' }, text('parent')),
     el('UL', {},
       el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, text('kid')))
     )
   );
-  assert.strictEqual(serializeList(el('UL', {}, pli)).md, '- [ ] parent\n      - kid');
+  const md = serializeList(el(listName, {}, pli)).md;
+  assert.strictEqual(md, expectedMd, label);
+  const item = marked.lexer(md)[0].items[0];
+  assert.strictEqual((item.tokens || []).filter((t) => t.type === 'list').length, 1,
+    label + ' — the child must re-lex as a NESTED list token, got item text:\n' +
+    JSON.stringify(item.text));
+  assert.ok(!/^ {4}/m.test(item.text || ''),
+    label + ' — the child must never come back as an indented code block');
 }
 
-// 11b. ORDERED task child indent = 7 columns ('1. [x] ' is 7 chars wide) —
-// the ordered branch must combine BOTH the '1. ' bullet width and the '[x] '
-// checkbox width when deriving childIndentPrefix, not just one of them.
+// 11. unordered task child indent = the BULLET width (2), not the marker's 6
 {
-  const pli = el('LI', { 'data-block-id': '0' },
-    el('SPAN', { class: 'ed-li-check', 'data-checked': '1' }),
-    el('DIV', { class: 'ed-li-text' }, text('parent')),
-    el('UL', {},
-      el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, text('kid')))
-    )
-  );
-  assert.strictEqual(serializeList(el('OL', {}, pli)).md, '1. [x] parent\n       - kid');
+  assertTaskChildNests('UL', '0', '- [ ] parent\n  - kid',
+    "a child under '- [ ] ' indents 2, not 6");
+}
+
+// 11b. ordered task child indent = the BULLET width (3), not the marker's 7
+{
+  assertTaskChildNests('OL', '1', '1. [x] parent\n   - kid',
+    "a child under '1. [x] ' indents 3, not 7");
 }
 
 // 12. per-li attribution: unsupported names carry the li's blockId
@@ -553,6 +570,51 @@ function assertRoundTrips(listEl, label) {
     'a non-li block must be flagged by its block type, got: ' + JSON.stringify(r.unsupported));
   assert.strictEqual(r.md, '', 'a non-li block must emit no line, got: ' + JSON.stringify(r.md));
   assert.deepStrictEqual(r.lineMeta, [], 'a non-li block must contribute no lineMeta');
+}
+
+// 27. TREE serializer (serializeList, NOT serializeBlocks) — same defect as
+// case 23, and this is the path that shipped: a task item's nested child must
+// indent by the BULLET's width. With the full marker width ('- [ ] ' = 6) the
+// child lands outside marked's 2..5 acceptance window, gets absorbed into the
+// parent item as literal text, and its now-4-space indent turns it into an
+// indented CODE BLOCK — silent data corruption on a single commit.
+{
+  const taskParent = el('UL', {},
+    el('LI', { 'data-block-id': '0' },
+      el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
+      el('DIV', { class: 'ed-li-text' }, text('todo')),
+      ul(li('child'))
+    )
+  );
+  const r = serializeList(taskParent);
+  assert.deepStrictEqual(r.unsupported, []);
+  assert.strictEqual(r.md, '- [ ] todo\n  - child',
+    "a nested child under '- [ ] ' indents by the bullet width (2), not 6");
+
+  const lexed = marked.lexer(r.md);
+  const item = lexed[0].items[0];
+  assert.strictEqual((item.tokens || []).filter((t) => t.type === 'list').length, 1,
+    'the child list must survive as a NESTED list token, got item text:\n' +
+    JSON.stringify(item.text));
+  assert.ok(!/^ {4}/m.test(item.text || ''),
+    'the child must never come back as an indented code block, got:\n' +
+    JSON.stringify(item.text));
+  assert.strictEqual(item.task, true, 'the checkbox must survive the narrower indent');
+
+  // ordered task parent: bullet '1. ' contributes 3
+  const olTaskParent = el('OL', {},
+    el('LI', { 'data-block-id': '0' },
+      el('SPAN', { class: 'ed-li-check', 'data-checked': '1' }),
+      el('DIV', { class: 'ed-li-text' }, text('todo')),
+      ul(li('child'))
+    )
+  );
+  const ro = serializeList(olTaskParent);
+  assert.strictEqual(ro.md, '1. [x] todo\n   - child',
+    "a nested child under '1. [ ] ' indents by the bullet width (3), not 7");
+  assert.strictEqual(
+    (marked.lexer(ro.md)[0].items[0].tokens || []).filter((t) => t.type === 'list').length, 1,
+    'ordered task parent must keep its child nested too');
 }
 
 console.log('list-md.test.js OK');
