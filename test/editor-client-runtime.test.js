@@ -3660,6 +3660,117 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally { tsrv.close(); }
     }
 
+    // spec §3.10: the row menu's only applicable item is "delete row", and a
+    // header row can never be deleted -> a plain click on the header grip
+    // must NOT open that (now-empty) menu. Instead it just highlights the
+    // header row; clicking elsewhere must clear that highlight too (the old
+    // dismiss condition at the pointerdown handler gated on teMenuKind, which
+    // stays null for this highlight-only path, so the highlight used to
+    // survive until resolveBurst() — never cleared by another click).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| Name | Note |', '|---|---|', '| Alice | a |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, table0);
+        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        const g = await gripCenter(page, '.ed-te-grip-row');
+        await pressReleaseAt(page, g.x, g.y);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
+          'clicking the header grip must NOT open the row menu');
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'), table0),
+          true, 'clicking the header grip highlights the header row');
+        // Click elsewhere -> the highlight must clear.
+        const cell = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, table0);
+        await pressReleaseAt(page, cell.x, cell.y);
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+        await page.close();
+        console.log('table header grip: click highlights only, and the highlight clears — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Carried finding (found while sweeping Task 6's row-drag residue bug for
+    // this task): clearEdgeHighlight() strips '.ed-te-hl' with
+    // classList.remove(), same as cancelTeDrag()'s row-class cleanup did
+    // before its own fix (see cancelTeDrag()'s own comment). marked's table
+    // renderer emits every `<tr>` with NO `class` attribute at all (lib/
+    // md2doc.js's table renderer builds `<tr>${cells}</tr>` literally), and
+    // armEditables() only ever classes the TH/TD cells, never the row — so
+    // highlightRow()'s classList.add('ed-te-hl') on the header <tr> CREATES
+    // the attribute, and clearEdgeHighlight()'s classList.remove() leaves
+    // `class=""` behind rather than dropping it. That residue is a real
+    // innerHTML diff, so a burst that only highlighted-then-unhighlighted
+    // (never actually edited anything) would still fail resolveBurst()'s
+    // zero-edit guard and get canonically rewritten. Fixture reuses the
+    // exact mixed-grade, hand-padded table from the row-drag byte-identical
+    // scenario above (its middle "Note" column is col-default) so a
+    // canonical rewrite of ANY column's serialization — not just the row
+    // itself — would show up as a visible byte diff too.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Fixture sanity: the header <tr> itself starts with no `class`
+        // attribute at all (armEditables() never classes the row, only its
+        // cells) — this is the node highlightRow()/clearEdgeHighlight()
+        // actually touch, so this is the residue path under test.
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' table thead tr').hasAttribute('class'), table0),
+          false,
+          'fixture sanity: the header <tr> must arm WITHOUT a class attribute of its own');
+
+        await clickCellWithText(page, table0, 'Alice'); // opens the burst
+
+        await hoverHeaderRowCell(page, table0);
+        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        const g = await gripCenter(page, '.ed-te-grip-row');
+        await pressReleaseAt(page, g.x, g.y); // highlight
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr.ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        const cell = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, table0);
+        await pressReleaseAt(page, cell.x, cell.y); // un-highlight
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        // Sanity: the un-highlighted header <tr> must not be left with a
+        // dangling empty `class=""` attribute either.
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' table thead tr').hasAttribute('class'), table0),
+          false,
+          'un-highlighting the header row must not leave a dangling class="" attribute on the <tr>');
+
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'a burst that only highlighted-then-unhighlighted the header row (no real edit) must leave ' +
+          'the file byte-identical, got:\n' + fileText);
+        await page.close();
+        console.log('table header grip: highlight/un-highlight on a col-default table leaves the file byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
     // Review fix (Important): a click aimed at the hover-insert ＋ bubble must
     // NOT be silently eaten by the row/col grip at the same location.
     //
