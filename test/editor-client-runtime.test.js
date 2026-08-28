@@ -36,6 +36,11 @@ const assert = require('assert');
 const puppeteer = require('puppeteer');
 const { createEditorServer } = require('../lib/editor/server.js');
 const { buildBlockMap } = require('../lib/editor/blockmap.js');
+// A PRISTINE parser instance: the shared `marked` singleton is configured by
+// lib/md2doc.js's renderer extensions (heading anchors carry a per-process slug
+// counter), so two parses of the same text are not comparable through it.
+const { Marked } = require('marked');
+const plainMarked = new Marked();
 
 const REPO = path.resolve(__dirname, '..');
 const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'lib', 'editor', 'client.js'), 'utf8');
@@ -6871,6 +6876,148 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         lsrv.close();
       }
+    }
+
+    // ── Round 5: the child of a same-line nest must keep its PARENT ────────
+    // Same-line nesting ('- - b') puts the outer item's marker and the child's
+    // marker on ONE source line, and the outer owns no line of its own
+    // (endLine === startLine - 1, round 4). The per-li degrade path — taken
+    // whenever the run holds a loose or hard-wrapped item — replaces the
+    // EDITED block's own source line range with only the lines lineMeta
+    // attributes to that block. On this shape that range is the SHARED line,
+    // so every ancestor marker standing on it was overwritten and the child
+    // lost its parent:
+    //
+    //   '# D\n\n- a\n\n- - b\n'  --type Z-->  '# D\n\n- a\n\n  - bZ\n'
+    //
+    // That is a semantic change, not a reformat: the child is re-parented onto
+    // the PREVIOUS item ('- a' swallows it), and in the tail case below the
+    // outer's own trailing paragraph is re-parented with it.
+    //
+    // The committed replacement now re-emits each zero-line ancestor's marker
+    // on its own line ahead of the edited block's lines — the same canonical
+    // form the whole-run path already produces for a tight run ('- a\n-\n  - b')
+    // and the one shape the flat model can express, since an ancestor that owns
+    // no line has nowhere else to put its marker. `marked.parse` of the result
+    // is byte-identical to that of the untouched source with the same keystroke
+    // applied in place, which is the real invariant: the nesting is unchanged.
+    {
+      const cases = [
+        {
+          n: 'R5 loose same-line nest',
+          rows: ['# D', '', '- a', '', '- - b', ''],
+          type: 'b',
+          expect: '# D\n\n- a\n\n-\n  - bZ\n',
+          sameAs: '# D\n\n- a\n\n- - bZ\n',
+        },
+        {
+          n: 'R5 same-line nest at depth 3',
+          rows: ['# D', '', '- a', '', '- - - b', ''],
+          type: 'b',
+          expect: '# D\n\n- a\n\n-\n  -\n    - bZ\n',
+          sameAs: '# D\n\n- a\n\n- - - bZ\n',
+        },
+        {
+          n: 'R5 outer carries its own text after the nest',
+          rows: ['# D', '', '- a', '', '- - b', '', '  tail', ''],
+          type: 'b',
+          expect: '# D\n\n- a\n\n-\n  - bZ\n\n  tail\n',
+          sameAs: '# D\n\n- a\n\n- - bZ\n\n  tail\n',
+        },
+        {
+          // The ancestor's marker line is rebuilt from lineMeta's own
+          // indentPrefix/marker, so an ordered outer keeps its 3-column
+          // content offset (a hard-coded two spaces would drop the child out
+          // of the item). The run's ordinal restart (spec §3.8) renumbers the
+          // outer to '2.', which is what the reader already displayed.
+          n: 'R5 ordered outer, same-line nest',
+          rows: ['# D', '', '1. a', '', '1. - b', ''],
+          type: 'b',
+          expect: '# D\n\n1. a\n\n2.\n   - bZ\n',
+          sameAs: '# D\n\n1. a\n\n1. - bZ\n',
+        },
+        {
+          // The re-emitted ancestor line keeps the file's OWN bullet char: the
+          // degrade path rewrites one line and leaves its siblings' bytes
+          // alone, and marked opens a NEW list token at a bullet-char (or
+          // ordinal-delimiter) change — so canonicalising this line to '-'
+          // would split a '*' list in two around an item the user never
+          // touched. Substitutions are single characters, so the marker's
+          // column count, which the child's indent was measured against,
+          // cannot move.
+          n: 'R5 star outer keeps its bullet char',
+          rows: ['# D', '', '* a', '', '* - b', ''],
+          type: 'b',
+          expect: '# D\n\n* a\n\n*\n  - bZ\n',
+          sameAs: '# D\n\n* a\n\n* - bZ\n',
+        },
+        {
+          // The child owns a RANGE of lines (round 2) AND shares its FIRST one
+          // with the outer marker: the prefix must land once, ahead of the
+          // whole range, and the continuation must keep its content column.
+          n: 'R5 hard-wrapped child of a same-line nest',
+          rows: ['# D', '', '- a', '', '- - b one', '    cont', ''],
+          type: 'b one',
+          expect: '# D\n\n- a\n\n-\n  - b oneZ\n    cont\n',
+          sameAs: '# D\n\n- a\n\n- - b oneZ\n    cont\n',
+        },
+      ];
+      for (const c of cases) {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+          // The child of the nest is the deepest item — and the only one of the
+          // nest's members that owns a source line, hence the only armed one.
+          const child = await page.evaluate((t) => {
+            const hit = Array.prototype.slice.call(document.querySelectorAll(
+              '.ed-block[data-block-type="li"]')).find((li) => {
+                const s2 = li.querySelector(':scope > .ed-li-text');
+                if (!s2) return false;
+                // A hard-wrapped item's surface spans lines, so it can only be
+                // named by its first one (same rule as liBlockSelByText).
+                return s2.textContent.trim() === t ||
+                  s2.textContent.split('\n')[0].trim() === t;
+              });
+            if (!hit) return null;
+            const s2 = hit.querySelector(':scope > .ed-li-text');
+            return { id: hit.getAttribute('data-block-id'),
+                     ce: String(s2.getAttribute('contenteditable')) };
+          }, c.type);
+          assert.ok(child, c.n + ': fixture must render the nested child item');
+          assert.strictEqual(child.ce, 'true',
+            c.n + ': the nested child owns its own line and must stay editable');
+
+          const sel = liSel(child.id);
+          await openWysiwyg(page, sel);
+          await placeCaretInBlockText(page, sel, c.type);
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await settleEditor(page);
+          const fileText = await saveAndRead(page, lmdPath);
+
+          assert.strictEqual(plainMarked.parse(fileText), plainMarked.parse(c.sameAs),
+            c.n + ': the edit must not change the nesting — the child must keep a ' +
+            'parent item. Rendered HTML differs from the same keystroke applied to ' +
+            'the untouched source.\n  saved: ' + JSON.stringify(fileText) +
+            '\n  meant: ' + JSON.stringify(c.sameAs));
+          assert.strictEqual(fileText, c.expect,
+            c.n + ': canonical same-line form expected, got:\n' + JSON.stringify(fileText));
+          // Belt: blockmap must now see a WELL-FORMED range for every item on
+          // that line — the canonical form gives each ancestor its own line, so
+          // the zero-line pathology is gone from the saved file.
+          const savedLi = buildBlockMap(fileText).blocks.filter((b) => b.type === 'li');
+          assert.deepStrictEqual(savedLi.filter((b) => b.endLine < b.startLine), [],
+            c.n + ': the saved file must contain no zero-line item any more');
+
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      console.log('per-li WYSIWYG (round 5): editing the child of a same-line nest keeps ' +
+        'every ancestor marker — OK');
     }
 
     // ── Round 3: a nested item's startLine must be the REAL one ────────────
