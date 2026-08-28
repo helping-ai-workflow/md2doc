@@ -4698,6 +4698,45 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── Task 8: 欄拖曳搬移 (spec §4.6 D1) — reorder columns via the column
+    //    grip, reusing the row-drag skeleton. Alignment travels with the
+    //    cell (it's the cell's own `style`), and the separator row is
+    //    synthesized from the header cells at serialize time, so this
+    //    exercises the header-row cell move as much as the body row.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B | C |', '|---|:---:|---:|', '| 1 | 2 | 3 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const from = await colGripCoords(page, table0, 2); // C
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: table.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 5 });
+        await page.mouse.move(to.x, to.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'C',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelectorAll(s + ' table colgroup col').length, table0),
+          3, 'colgroup must still have one <col> per column after a move');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, ['| C | A | B |', '|---:|---|:---:|', '| 3 | 1 | 2 |', ''].join('\n'),
+          'a column move must carry its alignment with it, got:\n' + fileText);
+        await page.close();
+        console.log('table column drag: column moves with its alignment and colgroup entry — OK');
+      } finally { tsrv.close(); }
+    }
+
     // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
     //    a word via the selection toolbar, edit a table cell, Ctrl+S — all
     //    three edits land on disk, and the saved file matches the ORIGINAL
