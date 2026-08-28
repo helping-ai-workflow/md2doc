@@ -3,7 +3,73 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v2.10.1 — 2026-08-28
+
+### Added
+
+- **The table header row now has a drag grip too.** Every row — header included —
+  shows a 6-dot grip at its left edge, and dragging any row to the top makes it
+  the header (the old header becomes a data row). It is a **pure move**: the same
+  cell nodes are re-laid across `<thead>`/`<tbody>`, so nothing is re-serialized
+  and per-column alignment follows its column.
+- **Columns can be dragged to reorder.** The column grip now drags as well as
+  opening its menu; `<colgroup>` is kept in sync so column widths do not shift
+  out from under the move, and alignment travels with the column.
+
+### Fixed
+
+- **Saving no longer rewrites a whole file's line endings.** The file's one EOL is
+  now picked by majority vote when the document loads, instead of "any CRLF
+  anywhere wins" — a 10,000-line LF file with one stray CRLF line used to get all
+  10,000 lines rewritten on the next save. Saving still joins the whole file with
+  that single detected EOL (`lines` is kept `\r`-free throughout; only `/api/save`
+  re-attaches it — spec §3.11); the vote is what keeps the rewrite down to the
+  minority lines instead of all of them.
+- **Clicking the header grip no longer opens an inapplicable menu.** The row
+  menu's only item is "delete row" and a header can never be deleted, so the
+  header grip now just highlights the row instead. Two things were fixed
+  alongside it: the highlight is painted on the row's **cells**, not on the
+  `<tr>` — every `<th>` (and the sticky first column's `<td>`) paints its own
+  opaque background on top of the row box, so a row-level highlight was
+  literally zero pixels of change; and with that highlight showing and no menu
+  open, `Esc` used to fall through to the focused cell's own Escape branch and
+  revert the whole table burst, discarding everything typed into it.
+- **A table gesture can no longer rewrite a DIFFERENT table.** Every table
+  structure op (insert, delete, align, row drag, column drag) first commits
+  whatever editor is open elsewhere, and that commit re-renders the document —
+  which renumbers every block id. The op then re-resolved "its" table by the id
+  it had captured *before* the commit, so a commit that added a block above
+  (splitting a paragraph in the MD 原始碼 editor, say) made that id name the
+  neighbouring table, and the gesture landed there: columns reordered, or a
+  data row promoted to header, in a table the user never touched. The table is
+  now re-resolved by its start line and checked against the identity captured
+  before the commit; a gesture that cannot be matched back is dropped instead.
+- **A refused delete no longer canonically rewrites the table.** "刪除列 /
+  刪除欄" on the last row/column shows a banner and deletes nothing — but the
+  selection highlight it left standing had already been baked into the burst's
+  "nothing changed yet" baseline, so the next click elsewhere (which strips the
+  highlight) registered as an edit and re-serialized the whole table into its
+  minimal form. Hand padding and hand-written alignment vanished from a table
+  the user had only clicked on. That baseline now ignores selection chrome
+  entirely.
+- **A drag can no longer emit a headerless or ragged table.** A column move now
+  abandons the whole operation if any row is too short, instead of skipping that
+  row and reordering the rest — which left the columns misaligned while every row
+  still had its original cell count, so the ragged-table guard could not see it.
+
+### Known behaviours
+
+- After a row or column reorder the caret lands on the same cell **ordinal**
+  rather than following the cell that moved.
+- The leftmost ~20px of the first column is covered by the row grip (it sits just
+  **inside** the table's left border, because the space outside belongs to the
+  block's own ⠿ handle), so a click in that strip does not place the caret.
+
+## v2.10.0 — 2026-08-27
+
+The Phase 3 editor work below shipped across v2.9.0 and v2.10.0; both of those
+releases went out with it still sitting under `## Unreleased`, so neither tag's
+changelog mentioned it. Recorded here after the fact.
 
 ### Added
 
@@ -28,45 +94,6 @@ All notable changes to this project will be documented here. This project adhere
   with the cursor landing in it immediately; the ⠿ menu gained a 刪除 item to
   delete the whole block (absorbing one adjacent blank line, mirroring the
   existing empty-list-removal line math). Both are a single Ctrl+Z step.
-
-## v2.10.1 — 2026-08-28
-
-### Added
-
-- **The table header row now has a drag grip too.** Every row — header included —
-  shows a 6-dot grip at its left edge, and dragging any row to the top makes it
-  the header (the old header becomes a data row). It is a **pure move**: the same
-  cell nodes are re-laid across `<thead>`/`<tbody>`, so nothing is re-serialized
-  and per-column alignment follows its column.
-- **Columns can be dragged to reorder.** The column grip now drags as well as
-  opening its menu; `<colgroup>` is kept in sync so column widths do not shift
-  out from under the move, and alignment travels with the column.
-
-### Fixed
-
-- **Saving no longer rewrites a whole file's line endings.** EOL detection is now
-  a majority vote. Previously a single CRLF line anywhere made the entire file
-  save as CRLF — a 10,000-line LF file with one stray line got all 10,000 lines
-  rewritten. Now only the minority lines are normalized; lines outside the commit
-  range keep their bytes (spec §3.11).
-- **Clicking the header grip no longer opens an inapplicable menu.** The row
-  menu's only item is "delete row" and a header can never be deleted, so the
-  header grip now just highlights the row. Fixed alongside it: with that
-  highlight showing and no menu open, `Esc` used to fall through to the focused
-  cell's own Escape branch and revert the whole table burst, discarding
-  everything typed into it.
-- **A drag can no longer emit a headerless or ragged table.** A column move now
-  abandons the whole operation if any row is too short, instead of skipping that
-  row and reordering the rest — which left the columns misaligned while every row
-  still had its original cell count, so the ragged-table guard could not see it.
-
-### Known behaviours
-
-- After a row or column reorder the caret lands on the same cell **ordinal**
-  rather than following the cell that moved.
-- The leftmost ~20px of the first column is covered by the row grip (it sits just
-  **inside** the table's left border, because the space outside belongs to the
-  block's own ⠿ handle), so a click in that strip does not place the caret.
 
 ## v2.8.1 — 2026-08-24
 
