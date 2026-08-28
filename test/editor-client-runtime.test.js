@@ -4134,6 +4134,115 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── Task 6: 純搬移 + 位置決定表頭身分 (spec §3.10 / §4.6) ─────────────
+    // A row drag is a PURE MOVE: whoever ends up first IS the header (a
+    // markdown table has no separate header attribute — its first row is
+    // the header). Dropping the last data row above the header therefore
+    // promotes it, demotes the old header into the body, and leaves every
+    // other row's relative order untouched. Alignment is a COLUMN property
+    // (the separator row is synthesized from the HEADER cells' styles
+    // alone), so it must survive the header changing identity.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Name | Note |', '|---|:---:|', '| Alice | a |', '| Bob | b |', '| Carol | c |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        // 把最後一個資料列拖到最頂 → 它成為新表頭，其餘順序不變
+        const from = await rowGripCoords(page, table0, 2); // Carol
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Carol',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Carol,Name,Alice,Bob',
+          'pure move: the dragged row becomes the new first row, everything else keeps its order');
+        // 焦點必須還在某個 armed 儲存格上（重建會 detach 原本持有焦點的那格）
+        assert.ok(await page.evaluate(() =>
+          !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          'a rebuild must restore DOM focus to a cell, not drop it to <body>');
+        // 對齊是欄屬性，換了表頭也要留著
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText,
+          ['| Carol | c |', '|---|:---:|', '| Name | Note |', '| Alice | a |', '| Bob | b |', ''].join('\n'),
+          'per-column alignment must survive a header change, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: pure move promotes the dropped row to header, alignment survives — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // 抓起來原地放回 = 位元不動. The guard this protects: retagCell() must
+    // return the SAME element untouched when the tag is already correct —
+    // recreating a cell that did not need recreating changes attribute
+    // order, which changes innerHTML, which makes resolveBurst()'s
+    // zero-edit guard (`burst.editEl.innerHTML === burst.original`) think
+    // the user edited the table, and the whole table gets rewritten into
+    // canonical form (here: the padded column widths collapse).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note |', '|--------|------|', '| Alice  | a    |', '| Bob    | b    |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const from = await rowGripCoords(page, table0, 0);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'dragging a row and dropping it back where it was must not rewrite the file, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: drop-in-place is byte-identical (no canonical rewrite) — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Two more axes on the same rebuild: (a) a row created by insertRow()
+    // is bare <td> with NO style attribute of its own, so a promoted one
+    // can only carry the column alignment if the rebuild re-applies the
+    // aligns read off the OLD header; (b) the release point here is ABOVE
+    // the table's top edge — the coordinate variant the midline test can't
+    // reach (there is no row under the pointer at all).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|:---:|---:|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverAndClickRowInsert(page, table0, 0);           // 插一列（裸 td，無 style）
+        await page.waitForFunction((s) =>
+          document.querySelectorAll(s + ' table tbody tr').length === 2, {}, table0);
+        const from = await rowGripCoords(page, table0, 1);        // 新插入的那列
+        const to = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table').getBoundingClientRect();
+          return { x: t.left + 5, y: t.top - 12 };                // 表格上緣之外
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '', {}, table0);
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, ['|  |  |', '|:---:|---:|', '| A | B |', '| 1 | 2 |', ''].join('\n'),
+          'an inserted (style-less) row promoted to header must still carry the column alignment, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: released above the table edge; alignment survives a style-less new header — OK');
+      } finally { tsrv.close(); }
+    }
+
     // Review fix (Important): the hover-insert bubbles' and grips' own
     // (independent) throttled mousemove listener must not repaint itself on
     // top of the drop indicator during an active drag — a drag that starts
