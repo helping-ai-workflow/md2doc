@@ -3775,18 +3775,30 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // Grip reachability by a REAL (non-teleporting) pointer: the grips now
-    // sit ON the table border (P0-a border-centred geometry), straddling it
-    // by ~10px on each side. A pointer travelling from inside a cell toward
-    // the grip crosses the ~10px corridor OUTSIDE the table (the grip's own
-    // left/top half) on the way there. The original updateTableEdgeGrips()
-    // hid the grip the instant `target` left the table/cell, before the
-    // pointer ever reached the grip itself, so a human moving the mouse
-    // (rather than teleport-clicking, as every OTHER scenario in this file
-    // does via pressReleaseAt/gripCenter) could never actually arrive at it.
-    // travelPointer() above drives a genuine multi-step mousemove sequence,
-    // settling client.js's rAF-throttled hit-test once per intermediate
-    // point, to actually exercise the corridor crossing.
+    // Grip reachability by a REAL (non-teleporting) pointer.
+    //
+    // COLUMN grip (unchanged): it still sits ON the table's top border (P0-a
+    // border-centred geometry), straddling it by ~10px on each side. A
+    // pointer travelling from inside a cell toward the grip crosses the
+    // ~10px corridor OUTSIDE the table (the grip's own top half) on the way
+    // there. The original updateTableEdgeGrips() hid the grip the instant
+    // `target` left the table/cell, before the pointer ever reached the grip
+    // itself, so a human moving the mouse (rather than teleport-clicking, as
+    // every OTHER scenario in this file does via pressReleaseAt/gripCenter)
+    // could never actually arrive at it. travelPointer() below drives a
+    // genuine multi-step mousemove sequence, settling client.js's
+    // rAF-throttled hit-test once per intermediate point, to actually
+    // exercise the corridor crossing.
+    //
+    // ROW grip (spec §4.2 衝突 2, this file's row-grip-inside-table change):
+    // it no longer straddles the border — its left edge sits ON the table's
+    // left border, extending INWARD, fully inside the table. A pointer
+    // travelling from a real cell to the row grip's centre therefore never
+    // leaves the table, so there is no OUTSIDE-the-table corridor left to
+    // cross for the row grip; the row half below instead proves the grip
+    // stays visible across a genuine (non-teleporting) multi-step path fully
+    // within the table, starting well clear of the grip's own ~20px-wide
+    // box so the path isn't already ON the grip at step 0.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -3796,23 +3808,27 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        // Row grip: start just INSIDE the table's own left edge (5px in, at
-        // row 0's vertical center) rather than at the cell's geometric
-        // center — a plain 2-column test table stretches to fill the whole
-        // content width (each cell hundreds of px wide), so starting from
-        // the cell's center and interpolating in only 5-10 steps toward the
-        // grip would stride clean OVER the narrow (~10px) corridor without
-        // ever sampling a point inside it, silently passing on a table this
-        // wide regardless of the bug. Starting right at the boundary the
-        // pointer is about to cross keeps the whole travelled distance
-        // commensurate with the corridor itself, so every step actually
-        // samples it — matching how a real user would approach the edge.
+        // Row grip: start on a REAL cell of the anchored row, well inside
+        // the table and clear of the grip's own ~20px-wide box (its left
+        // edge sits ON the table's left border and extends inward — see
+        // rowGripOffsetFor() in lib/editor/client.js) — 40px in from the
+        // cell's own left edge keeps step 0 on the cell itself rather than
+        // already inside the grip's footprint (which would make the
+        // "travel" satisfy target.closest('.ed-te-grip-row') for its whole
+        // length and never actually exercise anything). travelPointer()
+        // below then drives a genuine multi-step mousemove sequence from
+        // there to the grip's own on-screen center, settling client.js's
+        // rAF-throttled hit-test once per intermediate point — a real
+        // (non-teleporting) pointer path, unlike every OTHER scenario in
+        // this file which teleports straight to the grip via
+        // pressReleaseAt/gripCenter — and the assertion below then confirms
+        // the grip is still visible once that pointer arrives.
         const rowEdgeStart = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
-          const tableRect = table.getBoundingClientRect();
           const row = table.tBodies[0].rows[0];
-          const r = row.getBoundingClientRect();
-          return { x: tableRect.left + 5, y: r.top + r.height / 2 };
+          const cell = row.cells[0];
+          const r = cell.getBoundingClientRect();
+          return { x: r.left + 40, y: r.top + r.height / 2 };
         }, table0);
         await page.mouse.move(rowEdgeStart.x, rowEdgeStart.y);
         await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
@@ -3820,8 +3836,8 @@ async function clickInsertMenuItem(page, sel, label) {
         await travelPointer(page, rowEdgeStart, rowGripTarget, 8);
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
-          'the row grip must still be visible once a REAL travelling pointer reaches it across the ' +
-          'hover corridor (a teleporting click would never catch this)');
+          'the row grip must still be visible once a REAL travelling pointer reaches it, ' +
+          'starting from a real cell well inside the table (not already on the grip itself)');
 
         // Column grip: same shape, starting just inside the table's own top
         // edge (5px down, at column 0's horizontal center) and travelling
