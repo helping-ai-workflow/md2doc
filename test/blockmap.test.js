@@ -211,4 +211,35 @@ assert.deepStrictEqual(
     "contiguous marker line; the trailing own-content line belongs to no block");
 }
 
+// SAME-LINE nesting yields an EMPTY own-range for the outer item, at every
+// marker combination. Asserted explicitly so the shape is a documented output
+// rather than a surprise: lineops.js's replaceLines() turns end < start into an
+// INSERTION, so client.js refuses to arm such a block and no commit can start
+// on it (see canWysiwygForLi's blockOwnsNoLine guard).
+{
+  const MARKERS = ['-', '*', '+', '1.', '1)'];
+  MARKERS.forEach((outer) => {
+    MARKERS.forEach((inner) => {
+      const md = outer + ' ' + inner + ' a\n';
+      const lis = buildBlockMap(md).blocks.filter((b) => b.type === 'li');
+      assert.strictEqual(lis[0].endLine, lis[0].startLine - 1,
+        JSON.stringify(md) + ': the outer item owns NO line of its own, so its range is ' +
+        'empty (endLine === startLine - 1), got [' + lis[0].startLine + '-' + lis[0].endLine + ']');
+      assert.ok(lis[1].endLine >= lis[1].startLine,
+        JSON.stringify(md) + ': the nested item DOES own its line and must keep a ' +
+        'well-formed range');
+    });
+  });
+  // ...and no ordinary shape produces one.
+  ['- a\n- b\n', '- a\n  - b\n', '- alpha\n  cont\n- bravo\n',
+   '- a\n  - b\n\n  more text\n- c\n', '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n',
+  ].forEach((md) => {
+    buildBlockMap(md).blocks.forEach((b) => {
+      assert.ok(b.endLine >= b.startLine,
+        JSON.stringify(md) + ': block ' + b.id + ' must have a well-formed range, got [' +
+        b.startLine + '-' + b.endLine + ']');
+    });
+  });
+}
+
 console.log('blockmap.test.js OK');

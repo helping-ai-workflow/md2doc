@@ -35,6 +35,7 @@ const path = require('path');
 const assert = require('assert');
 const puppeteer = require('puppeteer');
 const { createEditorServer } = require('../lib/editor/server.js');
+const { buildBlockMap } = require('../lib/editor/blockmap.js');
 
 const REPO = path.resolve(__dirname, '..');
 const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'lib', 'editor', 'client.js'), 'utf8');
@@ -6754,6 +6755,119 @@ async function clickInsertMenuItem(page, sel, label) {
 
         await page.close();
         console.log('per-li WYSIWYG: F-W — loose run, edit li AFTER the blank (offset trap), b committed, blank survives — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // ── Round 4: a block with NO OWN LINE must never be armed ──────────────
+    // Under same-line nesting ('- - b') the outer item owns no line of its own:
+    // its content begins with the child, so blockmap gives it
+    // endLine === startLine - 1. That range is not an interval, and the commit
+    // helpers do not treat it as a special case — the per-li degrade path
+    // (taken whenever the run holds a loose or hard-wrapped item) passes it
+    // straight to commitRangeEdit(), whose replaceLines() then INSERTS instead
+    // of replacing:
+    //
+    //   '# D\n\n- a\n\n- - b\n'  --type Z-->  '# D\n\n- a\n\n- Z\n- - b\n'
+    //
+    // The source line survives AND a new one appears. Closed at the ARMING
+    // boundary rather than in each of the commit helpers: a block with no own
+    // line has nothing to edit, so it is never armed and the path is
+    // unreachable — one rule instead of an audit of every consumer.
+    {
+      const cases = [
+        { n: 'loose run (per-li degrade path)', rows: ['# D', '', '- a', '', '- - b', ''] },
+        { n: 'tight run (whole-run path)', rows: ['# D', '', '- x', '- - b', ''] },
+      ];
+      for (const c of cases) {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
+        const lorig = c.rows.join('\n');
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+          // Locate the outer item — the one whose own surface is empty.
+          const empty = await page.evaluate(() => {
+            const hit = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+              .find((li) => {
+                const s2 = li.querySelector(':scope > .ed-li-text');
+                return s2 && s2.textContent === '';
+              });
+            if (!hit) return null;
+            const s2 = hit.querySelector(':scope > .ed-li-text');
+            return { id: hit.getAttribute('data-block-id'),
+                     ce: String(s2.getAttribute('contenteditable')) };
+          });
+          assert.ok(empty, c.n + ': fixture must produce an item with no own content');
+          assert.notStrictEqual(empty.ce, 'true',
+            c.n + ': an item with no own LINE must not be armed — its block range is ' +
+            'endLine < startLine, which commitRangeEdit turns into an insertion. Got ' +
+            'contenteditable=' + empty.ce);
+
+          // Belt: even driving a keystroke at it must not change the file.
+          await page.evaluate((id) => {
+            const el = document.querySelector(
+              '.ed-block[data-block-id="' + id + '"] > .ed-li-text');
+            if (el && el.focus) el.focus();
+          }, empty.id);
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await settleEditor(page);
+          const fileText = await saveAndRead(page, lmdPath);
+          assert.strictEqual(fileText, lorig,
+            c.n + ': the file must be byte-identical — no inserted line, no duplicate, got:\n' +
+            JSON.stringify(fileText));
+          assert.strictEqual(fileText.split('\n').length, lorig.split('\n').length,
+            c.n + ': line count must not change');
+
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      console.log('per-li WYSIWYG (round 4): an item with no own line is never armed, so its ' +
+        'non-interval range can never reach a commit — OK');
+    }
+
+    // ...and the rule holds for EVERY same-line-nesting combination, checked
+    // against blockmap's own answer rather than against a hand-listed set.
+    {
+      const MARKERS = ['-', '*', '+', '1.', '1)'];
+      const rows = ['# D', ''];
+      MARKERS.forEach((o) => MARKERS.forEach((i) => {
+        rows.push(o + ' ' + i + ' a', '', 'sep', '');
+      }));
+      const src = rows.join('\n');
+      const emptyIds = buildBlockMap(src).blocks
+        .filter((b) => b.type === 'li' && b.endLine < b.startLine)
+        .map((b) => String(b.id));
+      assert.strictEqual(emptyIds.length, 25,
+        'all 25 marker combinations produce an outer item with no own line, got ' +
+        emptyIds.length);
+
+      const { srv: lsrv, url: lurl } = await setupListDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const armed = await page.evaluate((ids) => ids.filter((id) => {
+          const el = document.querySelector(
+            '.ed-block[data-block-id="' + id + '"] > .ed-li-text');
+          return el && el.getAttribute('contenteditable') === 'true';
+        }), emptyIds);
+        assert.deepStrictEqual(armed, [],
+          'no block whose endLine < startLine may be armed; these were: ' + armed.join(','));
+        // ...while the NESTED items, which do own their line, stay editable.
+        const nestedArmed = await page.evaluate(() =>
+          document.querySelectorAll(
+            '.ed-block[data-block-type="li"][data-indent="1"] > .ed-li-text[contenteditable="true"]'
+          ).length);
+        assert.strictEqual(nestedArmed, 25,
+          'every nested item still owns its line and must stay armed, got ' + nestedArmed);
+
+        await page.close();
+        console.log('per-li WYSIWYG (round 4): no zero-line block is armed across all 25 ' +
+          'same-line-nesting combinations, and their children still are — OK');
       } finally {
         lsrv.close();
       }
