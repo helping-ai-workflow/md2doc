@@ -730,10 +730,24 @@ async function hoverBodyRowCell(page, tableSel, bodyIndex) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, tableSel, bodyIndex);
   await page.mouse.move(box.x, box.y);
-  await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+  // 不能只等 :not([hidden])：表頭也有 grip 之後，那個條件在 grip 還停在
+  // 上一列時就已經成立。等到 grip 真的重定位到目標列的中線上為止。
+  await page.waitForFunction((ts, bi) => {
+    const g = document.querySelector('.ed-te-grip-row');
+    if (!g || g.hidden) return false;
+    const table = document.querySelector(ts + ' table');
+    const r = table.tBodies[0].rows[bi].getBoundingClientRect();
+    const gr = g.getBoundingClientRect();
+    return Math.abs((gr.top + gr.height / 2) - (r.top + r.height / 2)) <= 2;
+  }, { timeout: 3000 }, tableSel, bodyIndex);
 }
-// Hovers the HEADER row's first cell WITHOUT waiting for a row grip — used
-// by the "header row shows no grip" scenario below, where none must appear.
+// Hovers the HEADER row's first cell WITHOUT waiting for a row grip. The
+// header row DOES get a grip now (spec §3.10 — it is draggable, since
+// position alone decides header identity), so this raw form is only for the
+// scenarios that must observe the pre-reposition state or assert that no
+// grip appears at all (a header-only table). Everything that wants to PRESS
+// the header grip must use headerGripCoords() below, which waits for the
+// grip to actually reach the header row.
 async function hoverHeaderRowCell(page, tableSel) {
   const box = await page.evaluate((ts) => {
     const table = document.querySelector(ts + ' table');
@@ -765,6 +779,23 @@ async function colGripCoords(page, tableSel, colIndex) {
 }
 async function rowGripCoords(page, tableSel, bodyIndex) {
   await hoverBodyRowCell(page, tableSel, bodyIndex);
+  return gripCenter(page, '.ed-te-grip-row');
+}
+// Same idea for the HEADER row's own grip (spec §3.10 — the header row is
+// draggable too, since position alone decides header identity). Cannot reuse
+// rowGripCoords()'s "grip centre == row centre" wait: the header grip is
+// deliberately offset DOWN by TE_HEADER_GRIP_DY_PX (16) to stay clear of the
+// column-grip band, so the wait has to expect that offset or it would settle
+// on a stale body-row position.
+async function headerGripCoords(page, tableSel) {
+  await hoverHeaderRowCell(page, tableSel);
+  await page.waitForFunction((ts) => {
+    const g = document.querySelector('.ed-te-grip-row');
+    if (!g || g.hidden) return false;
+    const hr = document.querySelector(ts + ' table').tHead.rows[0].getBoundingClientRect();
+    const gr = g.getBoundingClientRect();
+    return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+  }, { timeout: 3000 }, tableSel);
   return gripCenter(page, '.ed-te-grip-row');
 }
 // A real press+release with NO intermediate movement AT the grip's own
@@ -1082,6 +1113,12 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyZ');
       await page.keyboard.up('Control');
+      // undo() fires its own /api/render to actually revert A's earlier
+      // switch-triggered commit — a real round trip gated behind a bare
+      // fixed-timeout DOM check below. Wait for __edInflight to drain
+      // first instead of betting that render finishes inside the
+      // waitForFunction's fixed budget (same shape as Finding 6a).
+      await settleEditor(page);
       await page.waitForFunction(
         () => !document.querySelector('.content').innerHTML.includes('SWITCH-COMMIT-A-TEXT'),
         { timeout: 5000 }
@@ -1170,7 +1207,12 @@ async function clickInsertMenuItem(page, sel, label) {
 
       // undo()'s own switchAwayFrom() pre-check auto-commits A first, THEN
       // the undo proceeds and reverts that just-committed op (it's the
-      // newest on the stack) — both must be true by the end.
+      // newest on the stack) — both must be true by the end. That's TWO
+      // chained /api/render round trips before the DOM reflects the
+      // revert; wait for __edInflight to actually drain instead of
+      // betting both finish inside the waitForFunction's fixed budget
+      // (same shape as Finding 6a's original fixed-timeout race).
+      await settleEditor(page);
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('First paragraph.') &&
           !document.querySelector('.content').innerHTML.includes('UNDO-SWITCH-A-TEXT'),
@@ -3452,8 +3494,12 @@ async function clickInsertMenuItem(page, sel, label) {
           await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), true,
           'the row menu must NOT show the 對齊 button');
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelector(s + ' tbody tr:first-child').classList.contains('ed-te-hl'), table0),
-          true, 'clicking row 0\'s left edge must highlight that row');
+          await page.evaluate((s) => {
+            const cells = document.querySelector(s + ' tbody tr:first-child').cells;
+            return cells.length > 0 &&
+              Array.from(cells).every((c) => c.classList.contains('ed-te-hl'));
+          }, table0),
+          true, 'clicking row 0\'s left edge must highlight that row\'s cells');
 
         await page.click('.ed-te-menu-delete');
         await page.waitForFunction(
@@ -3510,28 +3556,40 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.ok(rowBox.width >= 18 && rowBox.height >= 24,
           'the row grip must be at least 18x24px, got ' + rowBox.width + 'x' + rowBox.height);
 
-        // Header row: hovering it must never reveal a row grip (it isn't
-        // deletable/draggable) — give the throttled mousemove/rAF handler a
-        // couple of frames to settle, same "proving an absence needs a
-        // settle window" idiom Task 5's own degraded-table hover-insert test
-        // uses, then assert the row grip stayed hidden.
-        await hoverHeaderRowCell(page, table0);
-        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
-        assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
-          'hovering the header row must never reveal a row grip');
+        // spec §3.10：表頭列現在也有 grip（可拖曳，位置決定表頭身分）。
+        // headerGripCoords() (not a bare waitForSelector) — now that the header
+        // row has a grip of its own, ':not([hidden])' is ALREADY satisfied by
+        // the grip still parked on the PREVIOUS row (the body-row hover just
+        // above showed it), so the selector wait returns immediately and the
+        // read below can race client.js's rAF reposition. headerGripCoords()
+        // waits for the grip to actually REACH the header row.
+        await headerGripCoords(page, table0);
+        const hg = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { gTop: g.top, gLeft: g.left, gH: g.height,
+                   hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
+        }, table0);
+        expectApprox(hg.gLeft, hg.tLeft, 'header row grip sits inside the table border like any other row');
+        expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2 + 16,
+          'header row grip is shifted DOWN by TE_HEADER_GRIP_DY_PX, clear of the column grip band');
         // The column grip must still work over the header row's own cells
         // (columns include the header — delete/align both apply to it).
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'hovering the header row must still reveal the COLUMN grip for that column');
 
-        // Position (P0-a): row grip centerline ON the table's left border,
-        // centered on its row — expectApprox(actual, expected) allows ±1px for
-        // subpixel rounding. Re-hover body row 0 first (the header hover above
-        // hides the row grip).
+        // Position (spec §4.2 衝突 2): row grip sits fully INSIDE the table
+        // — its left edge ON the table's left border, extending inward —
+        // so it no longer straddles the border where the block's own
+        // gutter ⠿ lives. expectApprox(actual, expected) allows ±1px for
+        // subpixel rounding. Re-hover body row 0 first — the header hover
+        // above moved the (shared, singleton) row grip onto the header row,
+        // where it also carries the TE_HEADER_GRIP_DY_PX offset, so reading
+        // it now would measure the wrong row's geometry.
         await hoverBodyRowCell(page, table0, 0);
-        const rowGripPos = await page.evaluate((ts) => {
+        const rowGripRects = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
           const tableRect = table.getBoundingClientRect();
           const row = table.tBodies[0].rows[0];
@@ -3539,13 +3597,19 @@ async function clickInsertMenuItem(page, sel, label) {
           const grip = document.querySelector('.ed-te-grip-row');
           const gr = grip.getBoundingClientRect();
           return {
-            gripLeft: gr.left, gripTop: gr.top,
-            expectedLeft: tableRect.left - gr.width / 2,
-            expectedTop: rowRect.top + rowRect.height / 2 - gr.height / 2,
+            gr: { left: gr.left, top: gr.top, height: gr.height },
+            tableRect: { left: tableRect.left },
+            rowRect: { top: rowRect.top, height: rowRect.height },
           };
         }, table0);
-        expectApprox(rowGripPos.gripLeft, rowGripPos.expectedLeft, 'row grip left (centerline on table left border)');
-        expectApprox(rowGripPos.gripTop, rowGripPos.expectedTop, 'row grip top (centered on row)');
+        {
+          const { gr, tableRect, rowRect } = rowGripRects;
+          // spec §4.2 衝突 2：row grip 完全落在表格內側，才不會與表格 block
+          // 自己的 ⠿（gutter，[contentLeft−40, contentLeft−4]）重疊。
+          expectApprox(gr.left, tableRect.left, 'row grip left edge sits ON the table border, extending inward');
+          expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
+            'a body row grip stays vertically centred on its own row');
+        }
 
         // Position (P0-a): col grip centerline ON the table's top border,
         // centered on its column.
@@ -3566,11 +3630,236 @@ async function clickInsertMenuItem(page, sel, label) {
         expectApprox(colGripPos.gripLeft, colGripPos.expectedLeft, 'col grip left (centered on column)');
         expectApprox(colGripPos.gripTop, colGripPos.expectedTop, 'col grip top (centerline on table top border)');
 
+        // §4.2 衝突 2：表格 block 自己的 ⠿ 在頁面 gutter，不得吃掉 row grip
+        // 的命中；衝突 3：colGrip 與 rowGrip 同 z-index、後 append 者贏 —
+        // header row grip 的向下偏移（TE_HEADER_GRIP_DY_PX）正是為了避開
+        // 這個 collision，所以 'header' 這一輪才是整個偏移量存在的理由。
+        for (const which of ['body', 'header']) {
+          if (which === 'header') {
+            await hoverHeaderRowCell(page, table0);
+            await page.waitForFunction((ts) => {
+              const g = document.querySelector('.ed-te-grip-row');
+              if (!g || g.hidden) return false;
+              const table = document.querySelector(ts + ' table');
+              const hr = table.tHead.rows[0].getBoundingClientRect();
+              const gr = g.getBoundingClientRect();
+              return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+            }, { timeout: 3000 }, table0);
+          } else {
+            await hoverBodyRowCell(page, table0, 0);
+            await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+          }
+          const hit = await page.evaluate(() => {
+            const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+            const el = document.elementFromPoint(g.left + g.width / 2, g.top + g.height / 2);
+            return el ? (el.closest('.ed-te-grip-row') ? 'row-grip'
+              : el.closest('.ed-te-grip-col') ? 'col-grip'
+              : el.closest('.ed-handle') ? 'block-handle' : el.tagName) : null;
+          });
+          assert.strictEqual(hit, 'row-grip',
+            which + ' row grip centre must hit the row grip itself, not the column grip or the block ⠿');
+        }
+
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip; border-centred position — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); header row grip shifted down; border-centred position — OK');
       } finally {
         tsrv.close();
       }
+    }
+
+    // Invariant: thead always has exactly one row. A header-only table (no
+    // body rows) must NOT offer a row grip on its header — dragging its
+    // only row away would empty the thead; serializeTable() would degrade
+    // it (Task 2) and the user's table would vanish from the page.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(['| A | B |', '|---|---|', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, table0);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'a header-only table must not offer a row grip (dragging its only row would empty the thead)');
+        await page.close();
+        console.log('table header grip: header-only table gets no row grip — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // spec §3.10: the row menu's only applicable item is "delete row", and a
+    // header row can never be deleted -> a plain click on the header grip
+    // must NOT open that (now-empty) menu. Instead it just highlights the
+    // header row; clicking elsewhere must clear that highlight too (the old
+    // dismiss condition at the pointerdown handler gated on teMenuKind, which
+    // stays null for this highlight-only path, so the highlight used to
+    // survive until resolveBurst() — never cleared by another click).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| Name | Note |', '|---|---|', '| Alice | a |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
+          'clicking the header grip must NOT open the row menu');
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'), table0),
+          true, 'clicking the header grip highlights the header row\'s cells');
+        // Click elsewhere -> the highlight must clear.
+        const cell = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, table0);
+        await pressReleaseAt(page, cell.x, cell.y);
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+        await page.close();
+        console.log('table header grip: click highlights only, and the highlight clears — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Carried finding (found while sweeping Task 6's row-drag residue bug for
+    // this task): clearEdgeHighlight() strips '.ed-te-hl' with
+    // classList.remove(), same as cancelTeDrag()'s row-class cleanup did
+    // before its own fix (see cancelTeDrag()'s own comment). marked's table
+    // renderer emits every `<tr>` with NO `class` attribute at all (lib/
+    // md2doc.js's table renderer builds `<tr>${cells}</tr>` literally), and
+    // armEditables() only ever classes the TH/TD cells, never the row — so
+    // highlightRow()'s classList.add('ed-te-hl') on the header <tr> CREATES
+    // the attribute, and clearEdgeHighlight()'s classList.remove() leaves
+    // `class=""` behind rather than dropping it. That residue is a real
+    // innerHTML diff, so a burst that only highlighted-then-unhighlighted
+    // (never actually edited anything) would still fail resolveBurst()'s
+    // zero-edit guard and get canonically rewritten. Fixture reuses the
+    // exact mixed-grade, hand-padded table from the row-drag byte-identical
+    // scenario above (its middle "Note" column is col-default) so a
+    // canonical rewrite of ANY column's serialization — not just the row
+    // itself — would show up as a visible byte diff too.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Fixture sanity: the header <tr> itself starts with no `class`
+        // attribute at all (armEditables() never classes the row, only its
+        // cells) — this is the node highlightRow()/clearEdgeHighlight()
+        // actually touch, so this is the residue path under test.
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' table thead tr').hasAttribute('class'), table0),
+          false,
+          'fixture sanity: the header <tr> must arm WITHOUT a class attribute of its own');
+
+        await clickCellWithText(page, table0, 'Alice'); // opens the burst
+
+        // headerGripCoords(), not waitForSelector — clickCellWithText() above
+        // already showed the grip on a BODY row, so ':not([hidden])' is true
+        // before the grip has moved; see the same note at the geometry
+        // scenario above.
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y); // highlight
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        const cell = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, table0);
+        await pressReleaseAt(page, cell.x, cell.y); // un-highlight
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        // Sanity: neither the header <tr> nor any of its cells may be left
+        // with a dangling empty `class=""` attribute. (S3 moved the
+        // highlight onto the cells; the <tr> is now never touched at all,
+        // and every armed cell keeps its own 'ed-wys-cell'.)
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const tr = document.querySelector(s + ' table thead tr');
+            return tr.hasAttribute('class') ||
+              Array.from(tr.cells).some((c) => c.hasAttribute('class') && c.className === '');
+          }, table0),
+          false,
+          'un-highlighting the header row must not leave a dangling class="" attribute behind');
+
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'a burst that only highlighted-then-unhighlighted the header row (no real edit) must leave ' +
+          'the file byte-identical, got:\n' + fileText);
+        await page.close();
+        console.log('table header grip: highlight/un-highlight on a col-default table leaves the file byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Final review I1: Esc while a header-grip HIGHLIGHT is showing (and no
+    // menu is open) must dismiss just the highlight — it must NOT fall
+    // through to the focused cell's own Escape branch
+    // (handleTableCellKeydown -> revertTableBurstAndEnd), which throws away
+    // every character typed into the burst so far.
+    //
+    // A header grip click deliberately produces a highlight with NO menu
+    // (the row menu's only item is "delete row", inapplicable to a header),
+    // so `teMenuKind` stays null. The pointerdown dismiss gate was already
+    // widened to `(teMenuKind || teHighlightEls.length)` for exactly that
+    // reason; the global keydown's Escape gate is its sibling and had been
+    // left reading `teMenuKind` alone. With a BODY row's menu open the same
+    // keypress merely closes the menu — so the header row was the one place
+    // where Esc silently destroyed unsaved text.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Open the burst on a body cell and type into it — this is the state
+        // the bug destroys.
+        await clickCellWithText(page, table0, '1');
+        await page.keyboard.type('X');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table tbody tr').cells[0].textContent.trim() === '1X',
+          { timeout: 3000 }, table0);
+
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y);
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        await page.keyboard.press('Escape');
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        // The load-bearing half: the burst must still be alive with the typed
+        // text intact. A revert would have restored the cell to '1'.
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelector(s + ' table tbody tr').cells[0].textContent.trim(), table0),
+          '1X',
+          'Esc dismissing a header-grip highlight must NOT revert the table burst — the typed text must survive');
+
+        // ...and it must survive all the way to disk.
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.ok(/\|\s*1X\s*\|/.test(fileText),
+          'the typed text must still commit after Esc dismissed the highlight, got:\n' + fileText);
+
+        await page.close();
+        console.log('table header grip: Esc clears the highlight without reverting the burst — OK');
+      } finally { tsrv.close(); }
     }
 
     // Review fix (Important): a click aimed at the hover-insert ＋ bubble must
@@ -3747,18 +4036,30 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // Grip reachability by a REAL (non-teleporting) pointer: the grips now
-    // sit ON the table border (P0-a border-centred geometry), straddling it
-    // by ~10px on each side. A pointer travelling from inside a cell toward
-    // the grip crosses the ~10px corridor OUTSIDE the table (the grip's own
-    // left/top half) on the way there. The original updateTableEdgeGrips()
-    // hid the grip the instant `target` left the table/cell, before the
-    // pointer ever reached the grip itself, so a human moving the mouse
-    // (rather than teleport-clicking, as every OTHER scenario in this file
-    // does via pressReleaseAt/gripCenter) could never actually arrive at it.
-    // travelPointer() above drives a genuine multi-step mousemove sequence,
-    // settling client.js's rAF-throttled hit-test once per intermediate
-    // point, to actually exercise the corridor crossing.
+    // Grip reachability by a REAL (non-teleporting) pointer.
+    //
+    // COLUMN grip (unchanged): it still sits ON the table's top border (P0-a
+    // border-centred geometry), straddling it by ~10px on each side. A
+    // pointer travelling from inside a cell toward the grip crosses the
+    // ~10px corridor OUTSIDE the table (the grip's own top half) on the way
+    // there. The original updateTableEdgeGrips() hid the grip the instant
+    // `target` left the table/cell, before the pointer ever reached the grip
+    // itself, so a human moving the mouse (rather than teleport-clicking, as
+    // every OTHER scenario in this file does via pressReleaseAt/gripCenter)
+    // could never actually arrive at it. travelPointer() below drives a
+    // genuine multi-step mousemove sequence, settling client.js's
+    // rAF-throttled hit-test once per intermediate point, to actually
+    // exercise the corridor crossing.
+    //
+    // ROW grip (spec §4.2 衝突 2, this file's row-grip-inside-table change):
+    // it no longer straddles the border — its left edge sits ON the table's
+    // left border, extending INWARD, fully inside the table. A pointer
+    // travelling from a real cell to the row grip's centre therefore never
+    // leaves the table, so there is no OUTSIDE-the-table corridor left to
+    // cross for the row grip; the row half below instead proves the grip
+    // stays visible across a genuine (non-teleporting) multi-step path fully
+    // within the table, starting well clear of the grip's own ~20px-wide
+    // box so the path isn't already ON the grip at step 0.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -3768,23 +4069,27 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(turl, { waitUntil: 'networkidle0' });
         const table0 = await tableBlockSel(page, 0);
 
-        // Row grip: start just INSIDE the table's own left edge (5px in, at
-        // row 0's vertical center) rather than at the cell's geometric
-        // center — a plain 2-column test table stretches to fill the whole
-        // content width (each cell hundreds of px wide), so starting from
-        // the cell's center and interpolating in only 5-10 steps toward the
-        // grip would stride clean OVER the narrow (~10px) corridor without
-        // ever sampling a point inside it, silently passing on a table this
-        // wide regardless of the bug. Starting right at the boundary the
-        // pointer is about to cross keeps the whole travelled distance
-        // commensurate with the corridor itself, so every step actually
-        // samples it — matching how a real user would approach the edge.
+        // Row grip: start on a REAL cell of the anchored row, well inside
+        // the table and clear of the grip's own ~20px-wide box (its left
+        // edge sits ON the table's left border and extends inward — see
+        // rowGripOffsetFor() in lib/editor/client.js) — 40px in from the
+        // cell's own left edge keeps step 0 on the cell itself rather than
+        // already inside the grip's footprint (which would make the
+        // "travel" satisfy target.closest('.ed-te-grip-row') for its whole
+        // length and never actually exercise anything). travelPointer()
+        // below then drives a genuine multi-step mousemove sequence from
+        // there to the grip's own on-screen center, settling client.js's
+        // rAF-throttled hit-test once per intermediate point — a real
+        // (non-teleporting) pointer path, unlike every OTHER scenario in
+        // this file which teleports straight to the grip via
+        // pressReleaseAt/gripCenter — and the assertion below then confirms
+        // the grip is still visible once that pointer arrives.
         const rowEdgeStart = await page.evaluate((ts) => {
           const table = document.querySelector(ts + ' table');
-          const tableRect = table.getBoundingClientRect();
           const row = table.tBodies[0].rows[0];
-          const r = row.getBoundingClientRect();
-          return { x: tableRect.left + 5, y: r.top + r.height / 2 };
+          const cell = row.cells[0];
+          const r = cell.getBoundingClientRect();
+          return { x: r.left + 40, y: r.top + r.height / 2 };
         }, table0);
         await page.mouse.move(rowEdgeStart.x, rowEdgeStart.y);
         await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
@@ -3792,8 +4097,8 @@ async function clickInsertMenuItem(page, sel, label) {
         await travelPointer(page, rowEdgeStart, rowGripTarget, 8);
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
-          'the row grip must still be visible once a REAL travelling pointer reaches it across the ' +
-          'hover corridor (a teleporting click would never catch this)');
+          'the row grip must still be visible once a REAL travelling pointer reaches it, ' +
+          'starting from a real cell well inside the table (not already on the grip itself)');
 
         // Column grip: same shape, starting just inside the table's own top
         // edge (5px down, at column 0's horizontal center) and travelling
@@ -3977,6 +4282,359 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // spec §4.6：落點門檻 —— clientY <= 表頭中線 → above-header。
+    // nearestRowDropTarget() is internal (no window test hook is exported —
+    // that would be test-only surface in production code); this drives an
+    // ACTUAL drag to each probe coordinate (holding, never releasing) and
+    // reads the singleton `.ed-te-drop-indicator`'s own on-screen `top`
+    // back, which updateDropIndicator() repositions on every pointermove.
+    // Each probe ends with Escape (the existing drag-cancel path, same one
+    // the "Esc mid-drag cancels" scenario above exercises), so no mutation
+    // ever lands — verified at the end via a save/read round-trip.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name | Note |', '|---|---|', '| Alice | a |', '| Bob | b |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const probe = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          const b0 = table.tBodies[0].rows[0].getBoundingClientRect();
+          return {
+            headerTop: hr.top, headerMid: hr.top + hr.height / 2, headerBottom: hr.bottom,
+            body0Top: b0.top, body0Mid: b0.top + b0.height / 2,
+          };
+        }, table0);
+        const lastBodyBottom = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const rows = table.tBodies[0].rows;
+          return rows[rows.length - 1].getBoundingClientRect().bottom;
+        }, table0);
+
+        const from = await rowGripCoords(page, table0, 1); // "Bob" row's own grip
+
+        // Presses the grip, drags (WITHOUT releasing) to `y`, reads the drop
+        // indicator's on-screen top back, then cancels via Escape so no
+        // mutation ever happens — mirrors the "Esc mid-drag cancels"
+        // scenario's own down/move/Escape/up sequence above.
+        const indicatorTopAt = async (y) => {
+          await page.mouse.move(from.x, from.y);
+          await page.mouse.down();
+          await page.mouse.move(from.x, from.y + (y - from.y) / 2, { steps: 5 });
+          await page.mouse.move(from.x, y, { steps: 5 });
+          await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+          const top = await page.evaluate(
+            () => document.querySelector('.ed-te-drop-indicator').getBoundingClientRect().top
+          );
+          await page.keyboard.press('Escape');
+          await page.mouse.up(); // drag state is already gone — inert, same as the Esc-mid-drag scenario
+          return top;
+        };
+
+        expectApprox(await indicatorTopAt(probe.headerMid), probe.headerTop,
+          'releasing at the header row centre must mean "become the new first row" (indicator snaps to the header top)');
+        expectApprox(await indicatorTopAt(probe.headerBottom), probe.body0Top,
+          'releasing at the header BOTTOM keeps the existing body-midline chain (indicator snaps to the first body row top) — ' +
+          'the pre-existing green drag scenario releases exactly here');
+        expectApprox(await indicatorTopAt(probe.body0Mid + 1000), lastBodyBottom,
+          'releasing far below the table must mean append at the end (indicator snaps to the last body row bottom)');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'every probe above was cancelled via Escape — the file must be byte-identical to the original, got:\n' + fileText);
+
+        await page.close();
+        console.log('table drop target: header-midline threshold splits above-header / before-row — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // ── Task 6: 純搬移 + 位置決定表頭身分 (spec §3.10 / §4.6) ─────────────
+    // A row drag is a PURE MOVE: whoever ends up first IS the header (a
+    // markdown table has no separate header attribute — its first row is
+    // the header). Dropping the last data row above the header therefore
+    // promotes it, demotes the old header into the body, and leaves every
+    // other row's relative order untouched. Alignment is a COLUMN property
+    // (the separator row is synthesized from the HEADER cells' styles
+    // alone), so it must survive the header changing identity.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Name | Note |', '|---|:---:|', '| Alice | a |', '| Bob | b |', '| Carol | c |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        // 把最後一個資料列拖到最頂 → 它成為新表頭，其餘順序不變
+        const from = await rowGripCoords(page, table0, 2); // Carol
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Carol',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Carol,Name,Alice,Bob',
+          'pure move: the dragged row becomes the new first row, everything else keeps its order');
+        // 焦點必須還在某個 armed 儲存格上（重建會 detach 原本持有焦點的那格）
+        assert.ok(await page.evaluate(() =>
+          !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell')),
+          'a rebuild must restore DOM focus to a cell, not drop it to <body>');
+        // 對齊是欄屬性，換了表頭也要留著
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText,
+          ['| Carol | c |', '|---|:---:|', '| Name | Note |', '| Alice | a |', '| Bob | b |', ''].join('\n'),
+          'per-column alignment must survive a header change, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: pure move promotes the dropped row to header, alignment survives — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // 抓起來原地放回 = 位元不動. The guard this protects: retagCell() must
+    // return the SAME element untouched when the tag is already correct —
+    // recreating a cell that did not need recreating changes attribute
+    // order, which changes innerHTML, which makes resolveBurst()'s
+    // zero-edit guard (`burst.editEl.innerHTML === burst.original`) think
+    // the user edited the table, and the whole table gets rewritten into
+    // canonical form (here: the padded column widths collapse).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note |', '|--------|------|', '| Alice  | a    |', '| Bob    | b    |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const from = await rowGripCoords(page, table0, 0);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'dragging a row and dropping it back where it was must not rewrite the file, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: drop-in-place is byte-identical (no canonical rewrite) — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Same guarantee, but with the burst ALREADY OPEN before the gesture —
+    // which is the only ordering that can see a `class=""` residue. On the
+    // scenario above, pointerup strips `ed-te-row-dragging` BEFORE
+    // performRowDrop() awaits ensureTableBurstOpen(), so `burst.original`
+    // is captured with the residue already in place and matches at save
+    // time. Click a cell first and the capture predates the drag: the
+    // renderer emits a bare `<tr>`, classList.add()/remove() leaves
+    // `class=""` behind, and resolveBurst()'s zero-edit guard
+    // (`burst.editEl.innerHTML === burst.original`) then sees a diff that
+    // no user edit produced — canonicalizing a hand-padded table on a
+    // gesture that changed nothing.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note |', '|--------|------|', '| Alice  | a    |', '| Bob    | b    |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await clickCellWithText(page, table0, 'Alice'); // burst opens HERE, before any drag
+        const from = await rowGripCoords(page, table0, 0);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' table tbody tr').getAttribute('class'), table0),
+          null,
+          'the drag class must be REMOVED, not left as class="" — an empty attribute still counts as a diff');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'drop-in-place with a burst already open must not rewrite the file, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: drop-in-place with a pre-existing burst is byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Round trip ACROSS the header boundary: promote a body row, then drag
+    // it back. The row order is restored, so the file must be too — which
+    // only holds if retagCell() reproduces the ARMED attribute order. The
+    // renderer emits `class` before `style` (see renderer.table in
+    // lib/md2doc.js) and armEditables() appends `contenteditable` last, so
+    // the armed form is `class, style, contenteditable`; a retag that
+    // writes `style, class, contenteditable` restores the ROWS but not the
+    // BYTES, and the zero-edit guard canonicalizes the whole table. The
+    // fixture is deliberately hand-padded AND has an aligned column, so
+    // both a canonical rewrite and a lost alignment show up as a diff.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note  |', '|--------|:-----:|', '| Alice  | a     |', '| Bob    | b     |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // 1) Alice (first body row) -> above the header: she becomes the header.
+        const from1 = await rowGripCoords(page, table0, 0);
+        const to1 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from1, to1);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Alice',
+          {}, table0);
+
+        // 2) Alice back down, just above Bob -> the ORIGINAL order returns.
+        const from2 = await headerGripCoords(page, table0);
+        const to2 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[1].getBoundingClientRect(); // Bob
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from2, to2);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Name',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Name,Alice,Bob', 'sanity: the round trip must restore the original row order');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'a row moved across the header and back must leave the file byte-identical, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: promote-then-demote round trip is byte-identical — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Same round trip, but over a table whose columns are NOT all graded
+    // the same by classifyColumns() (lib/md2doc.js) — because the ARM-TIME
+    // attribute order differs per grade, and a retag that imposes one fixed
+    // order silently breaks byte-identity for the others:
+    //
+    //   col-narrow / col-prose -> renderer emits `class` (+ `style` when the
+    //     column is aligned), armEditables() then appends `contenteditable`
+    //     -> `class, style, contenteditable`
+    //   col-default            -> renderer emits NO class at all, so
+    //     armEditables()'s setAttribute('contenteditable') lands FIRST and
+    //     classList.add('ed-wys-cell') CREATES the class attribute after it
+    //     -> `style, contenteditable, class`
+    //
+    // Fixture (verified against the real renderer): col 1 "Alice"/"Bob" is
+    // col-narrow and right-aligned; col 2 "hello world"/"bye now" has
+    // whitespace but a short average, so it is col-default and centred —
+    // the hole; col 3 contains ". " so it is col-prose, unaligned. Only a
+    // verbatim, order-preserving attribute copy satisfies all three at once.
+    // Hand-padded so any canonical rewrite is a visible byte diff.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Fixture sanity: the three columns really are graded differently,
+        // and the middle one really has a style but no class. If
+        // classifyColumns()'s heuristic ever shifts, this fails LOUDLY here
+        // rather than leaving the col-default path quietly unexercised.
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelector(s + ' table thead tr').cells)
+            .map((c) => Array.from(c.attributes).map((a) => a.name).join(',')), table0),
+          ['class,style,contenteditable', 'style,contenteditable,class', 'class,contenteditable'],
+          'fixture sanity: the three column grades really do arm with DIFFERENT attribute orders — ' +
+          'the middle (col-default) one gets `class` LAST because the renderer emitted none for it');
+
+        // 1) Alice -> above the header (her cells are retagged TD->TH).
+        const from1 = await rowGripCoords(page, table0, 0);
+        const to1 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from1, to1);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Alice',
+          {}, table0);
+
+        // 2) Alice back down, just above Bob -> the ORIGINAL order returns.
+        const from2 = await headerGripCoords(page, table0);
+        const to2 = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tBodies[0].rows[1].getBoundingClientRect(); // Bob
+          return { x: table.getBoundingClientRect().left + 5, y: r.top + 1 };
+        }, table0);
+        await dragRowTo(page, from2, to2);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Name',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table tr'))
+            .map((r) => r.cells[0].textContent.trim()).join(','), table0),
+          'Name,Alice,Bob', 'sanity: the round trip must restore the original row order');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'the round trip must stay byte-identical for EVERY column grade, col-default included, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: round trip is byte-identical across mixed column grades (col-default included) — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Two more axes on the same rebuild: (a) a row created by insertRow()
+    // is bare <td> with NO style attribute of its own, so a promoted one
+    // can only carry the column alignment if the rebuild re-applies the
+    // aligns read off the OLD header; (b) the release point here is ABOVE
+    // the table's top edge — the coordinate variant the midline test can't
+    // reach (there is no row under the pointer at all).
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| A | B |', '|:---:|---:|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverAndClickRowInsert(page, table0, 0);           // 插一列（裸 td，無 style）
+        await page.waitForFunction((s) =>
+          document.querySelectorAll(s + ' table tbody tr').length === 2, {}, table0);
+        const from = await rowGripCoords(page, table0, 1);        // 新插入的那列
+        const to = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table').getBoundingClientRect();
+          return { x: t.left + 5, y: t.top - 12 };                // 表格上緣之外
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '', {}, table0);
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, ['|  |  |', '|:---:|---:|', '| A | B |', '| 1 | 2 |', ''].join('\n'),
+          'an inserted (style-less) row promoted to header must still carry the column alignment, got:\n' + fileText);
+        await page.close();
+        console.log('table row drag: released above the table edge; alignment survives a style-less new header — OK');
+      } finally { tsrv.close(); }
+    }
+
     // Review fix (Important): the hover-insert bubbles' and grips' own
     // (independent) throttled mousemove listener must not repaint itself on
     // top of the drop indicator during an active drag — a drag that starts
@@ -4129,6 +4787,191 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         tsrv.close();
       }
+    }
+
+    // ── Task 8: 欄拖曳搬移 (spec §4.6 D1) — reorder columns via the column
+    //    grip, reusing the row-drag skeleton. Alignment travels with the
+    //    cell (it's the cell's own `style`), and the separator row is
+    //    synthesized from the header cells at serialize time, so this
+    //    exercises the header-row cell move as much as the body row.
+    //
+    // Review fix (Important 3): a single-character-per-cell fixture makes
+    // every column the SAME classifyColumns() grade (lib/md2doc.js), so
+    // `<col>` count alone can't prove reorderColgroup() actually reordered
+    // the right elements — deleting reorderColgroup() entirely still
+    // passes a plain count===3 check. This fixture (reused from the
+    // mixed-column-grade row-drag scenario above, already fixture-verified
+    // there) gives the three columns DIFFERENT grades so the `<col>`
+    // CLASS SEQUENCE after the move is a real, order-sensitive assertion:
+    //   - "Name" (Alice/Bob): short tokens, no whitespace, maxTokenLen<=12
+    //     -> col-narrow -> <col class="col-narrow">.
+    //   - "Note" (hello world/bye now): has whitespace so not narrow;
+    //     avgCellLen ~9 (not >40) and no ". "/"。" sentence marker -> falls
+    //     through to col-default -> renderer.table emits a bare <col> with
+    //     NO class attribute at all (lib/md2doc.js: `c === 'col-default'
+    //     ? '<col>' : ...`).
+    //   - "Detail" ("It is fine. Really."/"Also fine. Truly."): contains
+    //     ". " -> hasSentence -> col-prose -> <col class="col-prose">,
+    //     regardless of its avgCellLen.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        // Fixture sanity: confirm the three columns really do land on three
+        // DIFFERENT grades before trusting the move assertion below.
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', null, 'col-prose'],
+          'fixture sanity: Name/Note/Detail must classify as col-narrow/col-default(no class)/col-prose');
+        const from = await colGripCoords(page, table0, 2); // Detail
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: table.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 5 });
+        await page.mouse.move(to.x, to.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Detail',
+          {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelectorAll(s + ' table colgroup col').length, table0),
+          3, 'colgroup must still have one <col> per column after a move');
+        // The load-bearing assertion: the <col> CLASS SEQUENCE must follow
+        // the new column order (Detail, Name, Note) — col-prose first, then
+        // col-narrow, then the class-less col-default — not merely three
+        // <col> elements in ANY order (a plain count check can't tell
+        // reorderColgroup() apart from a no-op).
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-prose', 'col-narrow', null],
+          'the <col> class sequence must follow the new column order (Detail, Name, Note), not just keep the count at 3');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText,
+          ['| Detail | Name | Note |',
+           '|---|---:|:---:|',
+           '| It is fine. Really. | Alice | hello world |',
+           '| Also fine. Truly. | Bob | bye now |', ''].join('\n'),
+          'a column move must carry its alignment with it, got:\n' + fileText);
+        await page.close();
+        console.log('table column drag: column moves with its alignment and the <col> class sequence (mixed grades) — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // ── Task 9: insert/delete column must keep <colgroup> in sync (spec
+    //    §4.6) — insertColumn()/deleteColumn() predate the colgroup/
+    //    cell-class rendering entirely, so before this task an insert left
+    //    N+1 columns backed by only N <col> entries (and a class-less new
+    //    cell), while a delete left a stale extra <col> nobody removed.
+    //    reorderColgroup() (Task 8, just above) is the drag counterpart;
+    //    this exercises the other two structural ops the same way.
+    //
+    // Insert: a fresh column is empty content, which is exactly what
+    // classifyColumns() (lib/md2doc.js) itself grades col-narrow — so the
+    // new <col> and new cell both get col-narrow/cell-narrow rather than
+    // any value this editor would have to compute. The next full re-render
+    // re-derives the real grade from the committed content.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverAndClickColInsert(page, table0, 0);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells.length === 3, {}, table0);
+        const shape = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          return {
+            cols: t.querySelectorAll('colgroup col').length,
+            newCol: t.querySelectorAll('colgroup col')[1].getAttribute('class'),
+            // armNewTableCells() (called right after insertColumn() by the
+            // real click handler this scenario drives through
+            // hoverAndClickColInsert()) also stacks 'ed-wys-cell' onto
+            // EVERY table cell, new or old — same as every pre-existing
+            // cell in this armed table — so the class list, not a bare
+            // string, is what the new cell actually carries.
+            newCellClasses: (t.tHead.rows[0].cells[1].getAttribute('class') || '').split(' ').filter(Boolean),
+          };
+        }, table0);
+        assert.strictEqual(shape.cols, 3, 'colgroup must gain a <col> when a column is inserted');
+        assert.strictEqual(shape.newCol, 'col-narrow');
+        assert.ok(shape.newCellClasses.includes('cell-narrow'),
+          'the new cell must carry cell-narrow, got: ' + shape.newCellClasses.join(' '));
+        await page.close();
+        console.log('table insert column: colgroup and cell classes stay in sync — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Delete: reuse the mixed-grade Name(col-narrow)/Note(col-default, no
+    // class)/Detail(col-prose) fixture from the Task 8 drag scenario above
+    // so the assertion is order-sensitive — deleting the MIDDLE column
+    // (Note) must drop exactly that one <col>, leaving the other two
+    // (col-narrow, col-prose) in their original relative order, not merely
+    // shrink the count from 3 to 2.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', null, 'col-prose'],
+          'fixture sanity: Name/Note/Detail must classify as col-narrow/col-default(no class)/col-prose');
+        const noteGrip = await colGripCoords(page, table0, 1); // Note (col-default, middle)
+        await pressReleaseAt(page, noteGrip.x, noteGrip.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells.length === 2, {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelectorAll(s + ' table colgroup col').length, table0),
+          2, 'colgroup must lose exactly one <col> when a column is deleted');
+        // The load-bearing assertion: the SURVIVING <col> class sequence
+        // must be [col-narrow (Name), col-prose (Detail)] — the deleted
+        // middle entry, not merely "count went from 3 to 2" (which a stale
+        // trailing <col> left over from a botched removal would also show
+        // if it happened to be the class-less col-default one).
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', 'col-prose'],
+          'deleting the middle column must remove exactly that <col>, not a different one');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText,
+          ['| Name | Detail |',
+           '|---:|---|',
+           '| Alice | It is fine. Really. |',
+           '| Bob | Also fine. Truly. |', ''].join('\n'),
+          'deleting the middle column must remove it from every row, got:\n' + fileText);
+        await page.close();
+        console.log('table delete column: colgroup loses exactly the deleted <col>, order preserved — OK');
+      } finally { tsrv.close(); }
     }
 
     // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
@@ -6427,8 +7270,21 @@ async function clickInsertMenuItem(page, sel, label) {
 
         // Click the table's ＋ column-insert bubble WITHOUT ever blurring
         // the dirty paragraph burst first — ensureTableBurstOpen()'s own
-        // switchAwayFrom() must resolve it.
+        // switchAwayFrom() must resolve it. That resolution is the OTHER
+        // block's full commit round trip (an /api/render fetch, tracked by
+        // window.__edInflight — see newPage()'s comment), and insertColumn()
+        // only runs once it settles. A bare `waitForFunction(..., {timeout:
+        // 5000})` for the 3-column DOM state is betting that round trip
+        // finishes inside 5s; under a full 28-file run on a loaded CI
+        // runner that bet can miss (observed once at this exact line).
+        // settleEditor() waits for the SAME __edInflight counter the
+        // commit itself drives (with its own generous 15s ceiling) instead
+        // of guessing a wall-clock budget, so wait for it deterministically
+        // FIRST — by the time it resolves, insertColumn()'s synchronous DOM
+        // update has already landed and the waitForFunction below is just
+        // a cheap confirmation, not the thing racing the round trip.
         await hoverAndClickColInsert(page, table0, 0);
+        await settleEditor(page);
 
         await page.waitForFunction(
           (s) => document.querySelector(s + ' thead th') &&
@@ -6489,6 +7345,13 @@ async function clickInsertMenuItem(page, sel, label) {
         const from = await rowGripCoords(page, table0, 2); // "Row3"
         const to = await rowBoundaryCoords(page, table0, -1); // boundary just above "Row1"
         await dragRowTo(page, from, to);
+        // Same shape as Finding 6a above: performRowDrop() awaits
+        // ensureTableBurstOpen(), which must first resolve the OTHER
+        // block's dirty-burst commit (a real /api/render round trip,
+        // tracked by __edInflight) before the row move itself runs. Wait
+        // for that round trip to actually drain rather than betting it
+        // finishes inside the waitForFunction's fixed budget.
+        await settleEditor(page);
 
         await page.waitForFunction(
           (s) => Array.from(document.querySelectorAll(s + ' tbody td:first-child'))
@@ -7122,6 +7985,474 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         lsrv.close();
       }
+    }
+
+    // ── Task 10: S0 end-to-end guard — every Task 1-9 gesture in one scene.
+    //    Each task above has its own unit-level scenario and they all pass in
+    //    isolation, but that says nothing about the INTERACTION: does a
+    //    column move survive a subsequent row-driven header swap, does the
+    //    alignment/EOL/undo-stack bookkeeping from separate tasks compose
+    //    correctly, does two structural edits still round-trip through a
+    //    single burst's undo history as exactly two snap()s. This is the
+    //    guard for that gap — CRLF file, column drag, row drag (promotes a
+    //    data row to header), save, then Ctrl+Z twice back to the original.
+    {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s0-e2e-'));
+      const mdPath = path.join(dir, 'doc.md');
+      const original = ['| A | B |', '|:---:|---:|', '| 1 | 2 |', '| 3 | 4 |', ''].join('\r\n');
+      fs.writeFileSync(mdPath, original, 'utf8');
+      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // 1) 欄搬移：B 移到最左
+        const cfrom = await colGripCoords(page, table0, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'B', {}, table0);
+
+        // 2) 列搬移：最後一個資料列升為表頭
+        const rfrom = await rowGripCoords(page, table0, 1);
+        const rto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, rfrom, rto);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '4', {}, table0);
+
+        // 3) 存檔：EOL 仍是 CRLF、對齊跟著欄走、順序正確
+        const saved = await saveAndRead(page, mdPath);
+        assert.ok(saved.indexOf('\r\n') !== -1 && !/[^\r]\n/.test(saved),
+          'a CRLF file must stay CRLF after a structural edit, got: ' + JSON.stringify(saved));
+        assert.strictEqual(saved,
+          ['| 4 | 3 |', '|---:|:---:|', '| B | A |', '| 2 | 1 |', ''].join('\r\n'),
+          'column move + header promotion must both land, with alignment following its column, got:\n' + saved);
+
+        await page.close();
+        console.log('S0 e2e: CRLF + column move + header promotion + save — OK');
+      } finally { srv.close(); }
+    }
+
+    // Task 10 (final-review M2): the IN-BURST undo half, on its own doc.
+    //
+    // The original version of this ran its two Ctrl+Z presses AFTER
+    // saveAndRead() — but saveAndRead()'s Ctrl+S resolves the burst
+    // (switchAwayFrom -> resolveBurst) and disposes the burst-local history,
+    // so those presses landed on the GLOBAL undo stack where the whole burst
+    // is exactly ONE op. The assertion therefore passed even if neither drop
+    // had ever called history.snap(): it was vacuous. Undo has to be
+    // exercised while the burst is still open, and an INTERMEDIATE state has
+    // to be asserted between the two presses, or a regression that records a
+    // single snapshot for both drags still passes.
+    //
+    // This also closes two coverage gaps the ledger had recorded as closed:
+    // Ctrl+Z after a header-PROMOTING row move (undo #1 below), and an
+    // in-burst Ctrl+Z after a COLUMN drag (undo #2 below).
+    {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s0-e2e-undo-'));
+      const mdPath = path.join(dir, 'doc.md');
+      const original = ['| A | B |', '|:---:|---:|', '| 1 | 2 |', '| 3 | 4 |', ''].join('\r\n');
+      fs.writeFileSync(mdPath, original, 'utf8');
+      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Reads the whole table back as rows of trimmed cell text — the
+        // observable the two intermediate assertions compare against.
+        const gridOf = () => page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const rows = [].concat(
+            Array.prototype.slice.call(t.tHead ? t.tHead.rows : []),
+            Array.prototype.slice.call(t.tBodies[0] ? t.tBodies[0].rows : []));
+          return rows.map((r) => Array.prototype.map.call(r.cells, (c) => c.textContent.trim()));
+        }, table0);
+
+        // 1) 欄搬移：B 移到最左（burst 的第一個 snap）
+        const cfrom = await colGripCoords(page, table0, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'B', {}, table0);
+        const afterCol = await gridOf();
+        assert.deepStrictEqual(afterCol, [['B', 'A'], ['2', '1'], ['4', '3']],
+          'sanity: after the column drag the grid must be B/A, got ' + JSON.stringify(afterCol));
+
+        // 2) 列搬移：最後一個資料列升為表頭（burst 的第二個 snap）
+        const rfrom = await rowGripCoords(page, table0, 1);
+        const rto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, rfrom, rto);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '4', {}, table0);
+        const afterRow = await gridOf();
+        assert.deepStrictEqual(afterRow, [['4', '3'], ['B', 'A'], ['2', '1']],
+          'sanity: after the header-promoting row drag, got ' + JSON.stringify(afterRow));
+
+        // 3) 第一次 Ctrl+Z（burst 還開著）：只退掉列搬移。
+        //    這一步就是 "Ctrl+Z after a header-promoting move" 的覆蓋。
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        // 等「不是 4」而不是「等於 B」：只記了一個 snapshot 的迴歸會直接跳回
+        // 原始狀態，等 'B' 會變成無訊息的 timeout；等「undo 已經生效」才能讓
+        // 下面那個 deepStrictEqual 真的印出它看到的格線。
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() !== '4',
+          { timeout: 3000 }, table0);
+        const undo1 = await gridOf();
+        assert.deepStrictEqual(undo1, afterCol,
+          'the FIRST in-burst Ctrl+Z must land on the intermediate state (column moved, row NOT yet ' +
+          'moved) — landing straight on the original means only one snapshot was ever recorded for ' +
+          'two structural edits, got ' + JSON.stringify(undo1));
+
+        // 4) 第二次 Ctrl+Z：退掉欄搬移，回到原始格線。
+        //    這一步是 "in-burst Ctrl+Z after a COLUMN drag" 的覆蓋。
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'A',
+          { timeout: 3000 }, table0);
+        const undo2 = await gridOf();
+        assert.deepStrictEqual(undo2, [['A', 'B'], ['1', '2'], ['3', '4']],
+          'the SECOND in-burst Ctrl+Z must restore the original grid, got ' + JSON.stringify(undo2));
+
+        // 5) 存檔：兩次 undo 之後檔案必須逐位元組回到原狀（含 CRLF）。
+        const back = await saveAndRead(page, mdPath);
+        assert.strictEqual(back, original,
+          'undoing both drags in-burst must leave the file byte-for-byte identical, got:\n' +
+          JSON.stringify(back));
+        await page.close();
+        console.log('S0 e2e: in-burst Ctrl+Z after a column drag and a header-promoting row drag — OK');
+      } finally { srv.close(); }
+    }
+
+    // ── S1 (Critical): a table gesture must never rewrite a DIFFERENT table ──
+    //
+    // ensureTableBurstOpen()'s stale-node recovery used to re-resolve the
+    // live table by `data-block-id`. blockmap.js renumbers ids 0..n-1 in
+    // document order on EVERY render, so the resolution that
+    // ensureTableBurstOpen() itself performs (switchAwayFrom(), committing
+    // whatever dirty editor is open elsewhere) can renumber the id out from
+    // under the capture: a commit that ADDS a block before this table shifts
+    // every later id down by one, and the captured id then names the table's
+    // NEIGHBOUR. `classList.contains('ed-wys-table')` was the only guard and
+    // every table passes it, so the gesture landed on the wrong table.
+    //
+    // The shape below is the smallest reproducer: a raw-edit (MD 原始碼)
+    // textarea left OPEN and DIRTY whose source splits one paragraph into
+    // two, then a column drag on the SECOND table. Nothing resolves the
+    // dirty editor early — the click delegator explicitly skips
+    // '.ed-te-grip', and the grip's own mousedown preventDefault() keeps the
+    // textarea focused — so the commit happens inside ensureTableBurstOpen()
+    // exactly as the bug requires. Pre-fix, the FIRST table came back from
+    // disk with its columns swapped (and canonically re-serialised, losing
+    // its hand padding) although the user never touched it.
+    {
+      const s1Rows = [
+        'Para one.', '',
+        '| Alpha  | Beta |',
+        '|--------|------|',
+        '| 1      | 2    |', '',
+        '| Gamma | Delta |',
+        '|-------|-------|',
+        '| 3     | 4     |', '',
+      ];
+      const tableALines = s1Rows.slice(2, 5).join('\n');
+      const { srv: s1Srv, url: s1Url, mdPath: s1MdPath } = await setupTableDoc(s1Rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s1Url, { waitUntil: 'networkidle0' });
+        const pSel = await paragraphSelByText(page, 'Para one.');
+        const table1 = await tableBlockSel(page, 1);
+
+        // Open the paragraph's raw editor and make it TWO paragraphs — the
+        // commit this produces grows the block count BEFORE both tables.
+        await openBlockEditor(page, pSel);
+        await page.waitForSelector(pSel + ' textarea.ed-raw');
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          ta.value = 'Para one.\n\nPara two.';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, pSel);
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), pSel),
+          true, 'sanity: the raw editor must still be open and dirty before the column drag');
+
+        // Drag the SECOND table's second column to the far left.
+        const cfrom = await colGripCoords(page, table1, 1);
+        const cto = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const r = t.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: t.getBoundingClientRect().top - 2 };
+        }, table1);
+        await page.mouse.move(cfrom.x, cfrom.y);
+        await page.mouse.down();
+        await page.mouse.move((cfrom.x + cto.x) / 2, cto.y, { steps: 5 });
+        await page.mouse.move(cto.x, cto.y, { steps: 5 });
+        await page.mouse.up();
+        // The drop awaits ensureTableBurstOpen(), whose switchAwayFrom() is a
+        // real /api/render round trip — drain __edInflight rather than
+        // betting on a wall-clock budget (same shape as Finding 6a/6b above).
+        await settleEditor(page);
+
+        // Proof the window this test is about was actually entered: only
+        // ensureTableBurstOpen()'s own switchAwayFrom() could have committed
+        // the raw editor, since nothing else was clicked.
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Para two.')),
+          'sanity: the dirty raw editor must have been committed by the drag\'s ' +
+          'ensureTableBurstOpen() — without that commit the bug window never opened');
+
+        // Give any lingering switchAwayFrom()/commit bookkeeping from the
+        // drag a chance to finish BEFORE Ctrl+S: the save handler routes
+        // through switchAwayFrom() too, and a commit still considered
+        // in-flight there makes it skip save() outright.
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        await settleEditor(page);
+        const saved = await saveAndRead(page, s1MdPath);
+        assert.ok(saved.includes('Para two.'),
+          'the raw-edit commit must have reached the file, got:\n' + saved);
+        assert.ok(saved.includes(tableALines),
+          'a gesture on the SECOND table must leave the FIRST table byte-identical, got:\n' + saved);
+
+        await page.close();
+        console.log('S1: a table gesture never rewrites a DIFFERENT table (block ids renumber; ' +
+          'startLine + identity re-resolve) — OK');
+      } finally { s1Srv.close(); }
+    }
+
+    // ── S2 (Important): a REFUSED delete must not canonical-rewrite ────────
+    //
+    // showRowMenu()/showColumnMenu() add '.ed-te-hl' to LIVE cells before any
+    // burst exists; the delete handler then opens the burst, so a raw
+    // innerHTML baseline BAKES THE HIGHLIGHT IN. A refusal only shows a
+    // banner, leaving the highlight standing — and the next click elsewhere
+    // strips it, at which point resolveBurst()'s zero-edit guard can no
+    // longer match and the whole table is re-serialised into table-md.js's
+    // canonical form. Hand padding and hand-written alignment are destroyed
+    // in a table the user never edited. Fixing the refusal path alone cannot
+    // help: stripping the class IS the diff, whoever does it.
+    {
+      const s2Rows = [
+        '| Name   | Note  |',
+        '|--------|:-----:|',
+        '| Alice  | a |', '',
+        'Tail paragraph.', '',
+      ];
+      const s2Original = s2Rows.join('\n');
+      const { srv: s2Srv, url: s2Url, mdPath: s2MdPath } = await setupTableDoc(s2Rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const pSel = await paragraphSelByText(page, 'Tail paragraph.');
+
+        // Row grip -> 刪除列 -> refusal (this IS the only body row).
+        const row0 = await rowGripCoords(page, table0, 0);
+        await pressReleaseAt(page, row0.x, row0.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
+          'sanity: the refusal must leave the row in place');
+        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+
+        // Click a DIFFERENT block — this is what strips the highlight and,
+        // pre-fix, turned the burst into a "changed" one.
+        await openWysiwyg(page, pSel);
+        await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
+          { timeout: 3000 }, table0);
+
+        const saved = await saveAndRead(page, s2MdPath);
+        assert.strictEqual(saved, s2Original,
+          'a REFUSED 刪除列 followed by a click elsewhere must leave the file byte-identical ' +
+          '(hand padding and hand-written alignment intact), got:\n' + saved);
+
+        await page.close();
+        console.log('S2: a refused delete leaves an untouched table byte-identical — OK');
+      } finally { s2Srv.close(); }
+    }
+
+    // ── S3 (Important): the row highlight has to actually PAINT ────────────
+    //
+    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` paints its own
+    // opaque `background: #f6f8fa` and the sticky first column paints
+    // `#ffffff` — both on the CELL, which sits above the row box, and
+    // `!important` does not let a rule on one element beat an opaque
+    // background painted by a different element on top of it. The header
+    // highlight rendered as ZERO pixels changed while the Esc gate still
+    // counted it as an open selection and ate the user's next Escape.
+    // Asserted on the COMPUTED BACKGROUND, never on the class this test
+    // would otherwise just be checking it had written itself.
+    {
+      const { srv: s3Srv, url: s3Url } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const HL = 'rgba(59, 130, 246, 0.15)';
+        const bgOf = (sel) => page.evaluate((s) =>
+          getComputedStyle(document.querySelector(s)).backgroundColor, sel);
+
+        const thSel = table0 + ' table thead th';
+        const thBefore = await bgOf(thSel);
+        const g = await headerGripCoords(page, table0);
+        await pressReleaseAt(page, g.x, g.y);
+        await page.waitForFunction((s) => !!document.querySelector(s + ' table thead th.ed-te-hl'),
+          { timeout: 3000 }, table0);
+        const thAfter = await bgOf(thSel);
+        assert.notStrictEqual(thAfter, thBefore,
+          'clicking the header grip must CHANGE the header cell\'s painted background — the th\'s ' +
+          'own opaque #f6f8fa sits above the <tr>, so a row-level highlight is invisible ' +
+          '(before=' + thBefore + ', after=' + thAfter + ')');
+        assert.strictEqual(thAfter, HL,
+          'the header cell must paint the selection colour itself, got ' + thAfter);
+
+        // Same trap one row down: the sticky first BODY cell paints #ffffff.
+        const tdSel = table0 + ' table tbody tr:first-child td:first-child';
+        const tdBefore = await bgOf(tdSel);
+        const row0 = await rowGripCoords(page, table0, 0);
+        await pressReleaseAt(page, row0.x, row0.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        const tdAfter = await bgOf(tdSel);
+        assert.notStrictEqual(tdAfter, tdBefore,
+          'a body row\'s FIRST cell must change too — the sticky-first-column rule paints it ' +
+          '#ffffff over any <tr> background (before=' + tdBefore + ', after=' + tdAfter + ')');
+        assert.strictEqual(tdAfter, HL,
+          'the sticky first body cell must paint the selection colour itself, got ' + tdAfter);
+
+        await page.close();
+        console.log('S3: the row highlight paints on the CELLS (header th and sticky first td) — OK');
+      } finally { s3Srv.close(); }
+    }
+
+    // ── S4 (coverage): the TH ↔ TD retag, asserted on ATTRIBUTES ───────────
+    //
+    // Spec §4.6 chose rename-and-rebuild over moving `<tr>`s precisely
+    // because the CSS hangs off th/td, and §5.3 item 14 requires attribute
+    // assertions. Markdown cannot see the difference — table-md.js's
+    // isCell() accepts TH and TD alike — so every existing row-drag scenario
+    // still passes with retagCell() replaced by `return cell;`. These are
+    // the assertions that don't: the promoted row's cells must BE `<th>`,
+    // the demoted header's must BE `<td>`, and both must keep the arm-time
+    // attributes (contenteditable / ed-wys-cell) plus the promoted header's
+    // re-applied alignment `style`. Deliberately NOT asserted: the
+    // `cell-narrow` / `cell-prose` width classes, which classifyColumns()
+    // legitimately re-derives per render.
+    {
+      const { srv: s4Srv, url: s4Url } = await setupTableDoc([
+        '| A | B |', '|:---:|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4Url, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        // Promote the LAST body row ('3') to header by dropping it above the
+        // header row — rebuildTableSections()'s retag path in both directions
+        // at once (that row becomes TH, the old 'A' header becomes TD).
+        const from = await rowGripCoords(page, table0, 1);
+        const to = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const hr = t.tHead.rows[0].getBoundingClientRect();
+          return { x: t.getBoundingClientRect().left + 5, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '3',
+          { timeout: 3000 }, table0);
+
+        const shape = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          const describe = (row) => Array.from(row.cells).map((c) => ({
+            tag: c.nodeName,
+            text: c.textContent.trim(),
+            editable: c.getAttribute('contenteditable'),
+            armed: c.classList.contains('ed-wys-cell'),
+            style: c.getAttribute('style'),
+          }));
+          return {
+            headRows: t.tHead.rows.length,
+            head: describe(t.tHead.rows[0]),
+            body: Array.from(t.tBodies[0].rows).map(describe),
+          };
+        }, table0);
+
+        assert.strictEqual(shape.headRows, 1, 'thead must still hold exactly one row');
+        assert.deepStrictEqual(shape.head.map((c) => c.tag), ['TH', 'TH'],
+          'every cell of the PROMOTED row must have been retagged to <th>, got ' +
+          JSON.stringify(shape.head));
+        assert.deepStrictEqual(shape.head.map((c) => c.text), ['3', '4'],
+          'sanity: the promoted row is the one that was dragged');
+        shape.head.forEach((c, i) => {
+          assert.strictEqual(c.editable, 'true',
+            'promoted header cell ' + i + ' must keep contenteditable="true", got ' + JSON.stringify(c));
+          assert.strictEqual(c.armed, true,
+            'promoted header cell ' + i + ' must keep the ed-wys-cell arm class, got ' + JSON.stringify(c));
+        });
+        assert.strictEqual(shape.head[0].style, 'text-align:center',
+          'the column alignment must be re-applied to the NEW header cell verbatim, got ' +
+          JSON.stringify(shape.head[0].style));
+        assert.strictEqual(shape.head[1].style, null,
+          'an unaligned column must get NO style attribute on the new header cell, got ' +
+          JSON.stringify(shape.head[1].style));
+
+        const bodyTags = shape.body.map((row) => row.map((c) => c.tag));
+        assert.deepStrictEqual(bodyTags, [['TD', 'TD'], ['TD', 'TD']],
+          'the DEMOTED header row (and every other body row) must be retagged to <td>, got ' +
+          JSON.stringify(shape.body));
+        assert.deepStrictEqual(shape.body[0].map((c) => c.text), ['A', 'B'],
+          'sanity: the demoted row is the old header');
+        shape.body.forEach((row, r) => row.forEach((c, i) => {
+          assert.strictEqual(c.editable, 'true',
+            'body cell ' + r + ',' + i + ' must keep contenteditable="true", got ' + JSON.stringify(c));
+          assert.strictEqual(c.armed, true,
+            'body cell ' + r + ',' + i + ' must keep the ed-wys-cell arm class, got ' + JSON.stringify(c));
+        }));
+        // The renderer puts the column's alignment style on EVERY cell of an
+        // aligned column, th and td alike — and retagCell() copies each
+        // cell's attributes across verbatim, in their original order. So the
+        // demoted cells must still carry column 0's centring, byte-for-byte,
+        // and column 1 must still carry no style attribute at all.
+        assert.deepStrictEqual(shape.body.map((row) => row.map((c) => c.style)),
+          [['text-align:center', null], ['text-align:center', null]],
+          'retagCell() must copy each cell\'s attributes across verbatim (aligned column keeps its ' +
+          'style, unaligned column gets none), got ' + JSON.stringify(shape.body));
+
+        await page.close();
+        console.log('S4: row promotion retags cells TH↔TD and preserves their arm-time attributes — OK');
+      } finally { s4Srv.close(); }
     }
 
     console.log('editor-client-runtime.test.js OK');

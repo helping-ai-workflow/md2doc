@@ -210,9 +210,15 @@ for (const needle of ['ed-bar', 'ed-selected', 'openTableEditor', 'runTableStruc
 // means some site got the assignment but not the try/finally).
 {
   const setTrueSites = src.match(/suppressTableFocusout = true;/g) || [];
-  assert.strictEqual(setTrueSites.length, 2,
-    'expected exactly 2 suppressTableFocusout = true sites (tableBurstUndo/tableBurstRedo) — ' +
-    'if a new site is ever added, update this count deliberately and audit it for the same guard');
+  assert.strictEqual(setTrueSites.length, 4,
+    'expected exactly 4 suppressTableFocusout = true sites: tableBurstUndo and tableBurstRedo ' +
+    '(each guarding `tableEl.innerHTML = state`), performRowDrop\'s rebuildTableSections() ' +
+    'call (Task 6 — a row drop is a pure move, so the thead/tbody rebuild detaches the cell that ' +
+    'currently holds focus and Chromium fires a synchronous focusout mid-mutation, exactly the ' +
+    'quirk the other two guard), plus performColDrop\'s per-row cell-reorder loop (Task 8 — a ' +
+    'column drop appends every row\'s moved cell back via appendChild(), which detaches the ' +
+    'currently-focused cell the same way) — if a new site is ever added, update this count ' +
+    'deliberately and audit it for the same guard');
   const guardedSites = src.match(
     /suppressTableFocusout = true;\s*try\s*\{[\s\S]*?\}\s*finally\s*\{\s*suppressTableFocusout = false;\s*\}/g
   ) || [];
