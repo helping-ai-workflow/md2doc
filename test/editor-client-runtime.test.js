@@ -730,7 +730,16 @@ async function hoverBodyRowCell(page, tableSel, bodyIndex) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, tableSel, bodyIndex);
   await page.mouse.move(box.x, box.y);
-  await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+  // 不能只等 :not([hidden])：表頭也有 grip 之後，那個條件在 grip 還停在
+  // 上一列時就已經成立。等到 grip 真的重定位到目標列的中線上為止。
+  await page.waitForFunction((ts, bi) => {
+    const g = document.querySelector('.ed-te-grip-row');
+    if (!g || g.hidden) return false;
+    const table = document.querySelector(ts + ' table');
+    const r = table.tBodies[0].rows[bi].getBoundingClientRect();
+    const gr = g.getBoundingClientRect();
+    return Math.abs((gr.top + gr.height / 2) - (r.top + r.height / 2)) <= 2;
+  }, { timeout: 3000 }, tableSel, bodyIndex);
 }
 // Hovers the HEADER row's first cell WITHOUT waiting for a row grip — used
 // by the "header row shows no grip" scenario below, where none must appear.
@@ -3510,16 +3519,19 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.ok(rowBox.width >= 18 && rowBox.height >= 24,
           'the row grip must be at least 18x24px, got ' + rowBox.width + 'x' + rowBox.height);
 
-        // Header row: hovering it must never reveal a row grip (it isn't
-        // deletable/draggable) — give the throttled mousemove/rAF handler a
-        // couple of frames to settle, same "proving an absence needs a
-        // settle window" idiom Task 5's own degraded-table hover-insert test
-        // uses, then assert the row grip stayed hidden.
+        // spec §3.10：表頭列現在也有 grip（可拖曳，位置決定表頭身分）。
         await hoverHeaderRowCell(page, table0);
-        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
-        assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
-          'hovering the header row must never reveal a row grip');
+        await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        const hg = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { gTop: g.top, gLeft: g.left, gH: g.height,
+                   hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
+        }, table0);
+        expectApprox(hg.gLeft, hg.tLeft, 'header row grip sits inside the table border like any other row');
+        expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2 + 16,
+          'header row grip is shifted DOWN by TE_HEADER_GRIP_DY_PX, clear of the column grip band');
         // The column grip must still work over the header row's own cells
         // (columns include the header — delete/align both apply to it).
         assert.strictEqual(
@@ -3575,14 +3587,24 @@ async function clickInsertMenuItem(page, sel, label) {
         expectApprox(colGripPos.gripTop, colGripPos.expectedTop, 'col grip top (centerline on table top border)');
 
         // §4.2 衝突 2：表格 block 自己的 ⠿ 在頁面 gutter，不得吃掉 row grip
-        // 的命中；衝突 3：colGrip 與 rowGrip 同 z-index、後 append 者贏。
-        // Only 'body' is exercised here — hovering the header row shows NO
-        // row grip at all yet (asserted above; a header-row grip is a later
-        // task's job), so a 'header' iteration of this same hit-test would
-        // hang waiting for an element this task never shows.
-        for (const which of ['body']) {
-          await hoverBodyRowCell(page, table0, 0);
-          await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+        // 的命中；衝突 3：colGrip 與 rowGrip 同 z-index、後 append 者贏 —
+        // header row grip 的向下偏移（TE_HEADER_GRIP_DY_PX）正是為了避開
+        // 這個 collision，所以 'header' 這一輪才是整個偏移量存在的理由。
+        for (const which of ['body', 'header']) {
+          if (which === 'header') {
+            await hoverHeaderRowCell(page, table0);
+            await page.waitForFunction((ts) => {
+              const g = document.querySelector('.ed-te-grip-row');
+              if (!g || g.hidden) return false;
+              const table = document.querySelector(ts + ' table');
+              const hr = table.tHead.rows[0].getBoundingClientRect();
+              const gr = g.getBoundingClientRect();
+              return Math.abs((gr.top + gr.height / 2) - (hr.top + hr.height / 2 + 16)) <= 2;
+            }, { timeout: 3000 }, table0);
+          } else {
+            await hoverBodyRowCell(page, table0, 0);
+            await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+          }
           const hit = await page.evaluate(() => {
             const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
             const el = document.elementFromPoint(g.left + g.width / 2, g.top + g.height / 2);
@@ -3595,10 +3617,30 @@ async function clickInsertMenuItem(page, sel, label) {
         }
 
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); header row shows no row grip; border-centred position — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); header row grip shifted down; border-centred position — OK');
       } finally {
         tsrv.close();
       }
+    }
+
+    // Invariant: thead always has exactly one row. A header-only table (no
+    // body rows) must NOT offer a row grip on its header — dragging its
+    // only row away would empty the thead; serializeTable() would degrade
+    // it (Task 2) and the user's table would vanish from the page.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(['| A | B |', '|---|---|', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, table0);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'a header-only table must not offer a row grip (dragging its only row would empty the thead)');
+        await page.close();
+        console.log('table header grip: header-only table gets no row grip — OK');
+      } finally { tsrv.close(); }
     }
 
     // Review fix (Important): a click aimed at the hover-insert ＋ bubble must
