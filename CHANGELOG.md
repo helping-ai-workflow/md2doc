@@ -29,6 +29,45 @@ All notable changes to this project will be documented here. This project adhere
   delete the whole block (absorbing one adjacent blank line, mirroring the
   existing empty-list-removal line math). Both are a single Ctrl+Z step.
 
+## v2.10.1 — 2026-08-28
+
+### Added
+
+- **The table header row now has a drag grip too.** Every row — header included —
+  shows a 6-dot grip at its left edge, and dragging any row to the top makes it
+  the header (the old header becomes a data row). It is a **pure move**: the same
+  cell nodes are re-laid across `<thead>`/`<tbody>`, so nothing is re-serialized
+  and per-column alignment follows its column.
+- **Columns can be dragged to reorder.** The column grip now drags as well as
+  opening its menu; `<colgroup>` is kept in sync so column widths do not shift
+  out from under the move, and alignment travels with the column.
+
+### Fixed
+
+- **Saving no longer rewrites a whole file's line endings.** EOL detection is now
+  a majority vote. Previously a single CRLF line anywhere made the entire file
+  save as CRLF — a 10,000-line LF file with one stray line got all 10,000 lines
+  rewritten. Now only the minority lines are normalized; lines outside the commit
+  range keep their bytes (spec §3.11).
+- **Clicking the header grip no longer opens an inapplicable menu.** The row
+  menu's only item is "delete row" and a header can never be deleted, so the
+  header grip now just highlights the row. Fixed alongside it: with that
+  highlight showing and no menu open, `Esc` used to fall through to the focused
+  cell's own Escape branch and revert the whole table burst, discarding
+  everything typed into it.
+- **A drag can no longer emit a headerless or ragged table.** A column move now
+  abandons the whole operation if any row is too short, instead of skipping that
+  row and reordering the rest — which left the columns misaligned while every row
+  still had its original cell count, so the ragged-table guard could not see it.
+
+### Known behaviours
+
+- After a row or column reorder the caret lands on the same cell **ordinal**
+  rather than following the cell that moved.
+- The leftmost ~20px of the first column is covered by the row grip (it sits just
+  **inside** the table's left border, because the space outside belongs to the
+  block's own ⠿ handle), so a click in that strip does not place the caret.
+
 ## v2.8.1 — 2026-08-24
 
 ### Fixed
