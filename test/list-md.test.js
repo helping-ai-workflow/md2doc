@@ -1,14 +1,17 @@
 'use strict';
 const assert = require('assert');
 const { marked } = require('marked');
-const { serializeList } = require('../lib/editor/list-md.js');
+const { serializeList, serializeBlocks } = require('../lib/editor/list-md.js');
 
 // minimal element stub — same pattern as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
+  const a = attrs || {};
+  const classes = (a.class || '').split(/\s+/).filter(Boolean);
   return {
     nodeType: 1, nodeName: name.toUpperCase(),
     childNodes: children.map(c => typeof c === 'string' ? { nodeType: 3, textContent: c } : c),
-    getAttribute: (k) => (attrs || {})[k] !== undefined ? attrs[k] : null,
+    getAttribute: (k) => a[k] !== undefined ? a[k] : null,
+    classList: { contains: (c) => classes.indexOf(c) !== -1 },
     get textContent() {
       return this.childNodes.map(c => c.textContent).join('');
     },
@@ -18,6 +21,17 @@ function text(s) { return { nodeType: 3, textContent: s }; }
 function li(...children) { return el('li', {}, ...children); }
 function ul(...children) { return el('ul', {}, ...children); }
 function ol(...children) { return el('ol', {}, ...children); }
+
+// flat block helpers — the shape lib/md2doc.js will emit in Task 3
+function liBlock({ id = '0', type = 'ul', task = false, checked = null, indent = 0, armed = false }, ...inner) {
+  const kids = [el('span', { class: 'ed-li-marker' }, '\u2022')];
+  if (task) kids.push(el('span', { class: 'ed-li-check', 'data-checked': checked ? '1' : '0' }));
+  kids.push(el('div', { class: armed ? 'ed-li-text ed-wys-armed' : 'ed-li-text' }, ...inner));
+  return el('div', {
+    class: 'ed-block', 'data-block-id': id, 'data-block-type': 'li',
+    'data-list-type': type, 'data-task': task ? '1' : '0', 'data-indent': String(indent),
+  }, ...kids);
+}
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -367,6 +381,94 @@ function assertRoundTrips(listEl, label) {
   );
   const looseR = serializeList(el('UL', {}, looseLi));
   assert.ok(looseR.unsupported.includes('P'), 'loose item via ed-li-text must report P unsupported');
+}
+
+// ── S1 Task 2: flat-run serializer (serializeBlocks) ─────────────────────
+// The tree serializeList() above is untouched; these drive the additive
+// linear serializer that Task 3's flat renderer will feed.
+
+// 15. flat serializer: one line per block, indent by accumulated marker widths
+{
+  const blocks = [
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'nine'),
+    liBlock({ id: '1', type: 'ul', indent: 1 }, 'child'),
+  ];
+  const { md, unsupported } = serializeBlocks(blocks);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, '1. nine\n   - child',
+    'a child under a `1. ` marker indents by that marker\'s own width (3), not a flat 2');
+}
+
+// 16. '10. ' is 4 columns wide — the child must follow it, or marked re-parses
+// the child as a separate top-level list.
+{
+  const blocks = [];
+  for (let i = 0; i < 10; i++) blocks.push(liBlock({ id: String(i), type: 'ol', indent: 0 }, 'item' + i));
+  blocks.push(liBlock({ id: '10', type: 'ul', indent: 1 }, 'child'));
+  const { md } = serializeBlocks(blocks);
+  assert.ok(md.endsWith('10. item9\n    - child'),
+    'a child under a two-digit ordinal indents 4 columns, got:\n' + md);
+}
+
+// 17. ordered x task keeps both parts of the marker (RULING F-N)
+{
+  const blocks = [liBlock({ id: '0', type: 'ol', task: true, checked: false }, 'todo')];
+  assert.strictEqual(serializeBlocks(blocks).md, '1. [ ] todo');
+}
+
+// 18. armed surfaces must serialize identically — the class is a token list
+{
+  const plain = serializeBlocks([liBlock({ id: '0' }, 'hello')]).md;
+  const armed = serializeBlocks([liBlock({ id: '0', armed: true }, 'hello')]).md;
+  assert.strictEqual(armed, plain, 'ed-wys-armed on .ed-li-text must not change serialization');
+}
+
+// 19. chrome is skipped, unknown elements are still flagged
+{
+  const withChrome = liBlock({ id: '0' }, 'hi');
+  withChrome.childNodes.unshift(el('button', { class: 'ed-handle' }, '\u283f'));
+  withChrome.childNodes.unshift(el('button', { class: 'ed-insert' }, '\uff0b'));
+  assert.deepStrictEqual(serializeBlocks([withChrome]).unsupported, [],
+    'gutter chrome must be invisible to the serializer');
+  const withAlien = liBlock({ id: '0' }, 'hi');
+  withAlien.childNodes.unshift(el('video', {}));
+  assert.ok(serializeBlocks([withAlien]).unsupported.indexOf('VIDEO') !== -1,
+    'an unknown element must still be flagged, not silently skipped');
+}
+
+// 20. run numbering restarts per run: a shallower li breaks the run (spec 3.8)
+{
+  const blocks = [
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'x'),
+    liBlock({ id: '2', type: 'ol', indent: 0 }, 'b'),
+    liBlock({ id: '3', type: 'ol', indent: 1 }, 'y'),
+  ];
+  const { md } = serializeBlocks(blocks);
+  assert.strictEqual(md, '1. a\n   1. x\n2. b\n   1. y',
+    'each parent starts a fresh nested run at 1, got:\n' + md);
+}
+
+// 21. a same-indent list-type change also breaks the run
+{
+  const blocks = [
+    liBlock({ id: '0', type: 'ul', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 0 }, 'b'),
+    liBlock({ id: '2', type: 'ol', indent: 0 }, 'c'),
+  ];
+  assert.strictEqual(serializeBlocks(blocks).md, '- a\n1. b\n2. c');
+}
+
+// 22. lineMeta carries what 3.4's colDelta needs
+{
+  const { lineMeta } = serializeBlocks([
+    liBlock({ id: '7', type: 'ol', indent: 0 }, 'a'),
+    liBlock({ id: '8', type: 'ul', indent: 1 }, 'b'),
+  ]);
+  assert.deepStrictEqual(lineMeta, [
+    { blockId: '7', indentPrefix: '', marker: '1. ' },
+    { blockId: '8', indentPrefix: '   ', marker: '- ' },
+  ]);
 }
 
 console.log('list-md.test.js OK');
