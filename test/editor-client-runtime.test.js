@@ -4781,6 +4781,108 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally { tsrv.close(); }
     }
 
+    // ── Task 9: insert/delete column must keep <colgroup> in sync (spec
+    //    §4.6) — insertColumn()/deleteColumn() predate the colgroup/
+    //    cell-class rendering entirely, so before this task an insert left
+    //    N+1 columns backed by only N <col> entries (and a class-less new
+    //    cell), while a delete left a stale extra <col> nobody removed.
+    //    reorderColgroup() (Task 8, just above) is the drag counterpart;
+    //    this exercises the other two structural ops the same way.
+    //
+    // Insert: a fresh column is empty content, which is exactly what
+    // classifyColumns() (lib/md2doc.js) itself grades col-narrow — so the
+    // new <col> and new cell both get col-narrow/cell-narrow rather than
+    // any value this editor would have to compute. The next full re-render
+    // re-derives the real grade from the committed content.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '| A | B |', '|---|---|', '| 1 | 2 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await hoverAndClickColInsert(page, table0, 0);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells.length === 3, {}, table0);
+        const shape = await page.evaluate((s) => {
+          const t = document.querySelector(s + ' table');
+          return {
+            cols: t.querySelectorAll('colgroup col').length,
+            newCol: t.querySelectorAll('colgroup col')[1].getAttribute('class'),
+            // armNewTableCells() (called right after insertColumn() by the
+            // real click handler this scenario drives through
+            // hoverAndClickColInsert()) also stacks 'ed-wys-cell' onto
+            // EVERY table cell, new or old — same as every pre-existing
+            // cell in this armed table — so the class list, not a bare
+            // string, is what the new cell actually carries.
+            newCellClasses: (t.tHead.rows[0].cells[1].getAttribute('class') || '').split(' ').filter(Boolean),
+          };
+        }, table0);
+        assert.strictEqual(shape.cols, 3, 'colgroup must gain a <col> when a column is inserted');
+        assert.strictEqual(shape.newCol, 'col-narrow');
+        assert.ok(shape.newCellClasses.includes('cell-narrow'),
+          'the new cell must carry cell-narrow, got: ' + shape.newCellClasses.join(' '));
+        await page.close();
+        console.log('table insert column: colgroup and cell classes stay in sync — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Delete: reuse the mixed-grade Name(col-narrow)/Note(col-default, no
+    // class)/Detail(col-prose) fixture from the Task 8 drag scenario above
+    // so the assertion is order-sensitive — deleting the MIDDLE column
+    // (Note) must drop exactly that one <col>, leaving the other two
+    // (col-narrow, col-prose) in their original relative order, not merely
+    // shrink the count from 3 to 2.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
+        '| Name   | Note        | Detail              |',
+        '|-------:|:-----------:|---------------------|',
+        '| Alice  | hello world | It is fine. Really. |',
+        '| Bob    | bye now     | Also fine. Truly.   |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', null, 'col-prose'],
+          'fixture sanity: Name/Note/Detail must classify as col-narrow/col-default(no class)/col-prose');
+        const noteGrip = await colGripCoords(page, table0, 1); // Note (col-default, middle)
+        await pressReleaseAt(page, noteGrip.x, noteGrip.y);
+        await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-te-menu-delete');
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells.length === 2, {}, table0);
+        assert.strictEqual(
+          await page.evaluate((s) =>
+            document.querySelectorAll(s + ' table colgroup col').length, table0),
+          2, 'colgroup must lose exactly one <col> when a column is deleted');
+        // The load-bearing assertion: the SURVIVING <col> class sequence
+        // must be [col-narrow (Name), col-prose (Detail)] — the deleted
+        // middle entry, not merely "count went from 3 to 2" (which a stale
+        // trailing <col> left over from a botched removal would also show
+        // if it happened to be the class-less col-default one).
+        assert.deepStrictEqual(
+          await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
+            .map((c) => c.getAttribute('class')), table0),
+          ['col-narrow', 'col-prose'],
+          'deleting the middle column must remove exactly that <col>, not a different one');
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText,
+          ['| Name | Detail |',
+           '|---:|---|',
+           '| Alice | It is fine. Really. |',
+           '| Bob | Also fine. Truly. |', ''].join('\n'),
+          'deleting the middle column must remove it from every row, got:\n' + fileText);
+        await page.close();
+        console.log('table delete column: colgroup loses exactly the deleted <col>, order preserved — OK');
+      } finally { tsrv.close(); }
+    }
+
     // ── Task 7: one end-to-end flow — open a doc, type in a paragraph, bold
     //    a word via the selection toolbar, edit a table cell, Ctrl+S — all
     //    three edits land on disk, and the saved file matches the ORIGINAL
