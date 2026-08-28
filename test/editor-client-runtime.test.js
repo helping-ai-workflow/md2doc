@@ -4063,6 +4063,77 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // spec §4.6：落點門檻 —— clientY <= 表頭中線 → above-header。
+    // nearestRowDropTarget() is internal (no window test hook is exported —
+    // that would be test-only surface in production code); this drives an
+    // ACTUAL drag to each probe coordinate (holding, never releasing) and
+    // reads the singleton `.ed-te-drop-indicator`'s own on-screen `top`
+    // back, which updateDropIndicator() repositions on every pointermove.
+    // Each probe ends with Escape (the existing drag-cancel path, same one
+    // the "Esc mid-drag cancels" scenario above exercises), so no mutation
+    // ever lands — verified at the end via a save/read round-trip.
+    {
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: torig } = await setupTableDoc([
+        '| Name | Note |', '|---|---|', '| Alice | a |', '| Bob | b |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const probe = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          const b0 = table.tBodies[0].rows[0].getBoundingClientRect();
+          return {
+            headerTop: hr.top, headerMid: hr.top + hr.height / 2, headerBottom: hr.bottom,
+            body0Top: b0.top, body0Mid: b0.top + b0.height / 2,
+          };
+        }, table0);
+        const lastBodyBottom = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const rows = table.tBodies[0].rows;
+          return rows[rows.length - 1].getBoundingClientRect().bottom;
+        }, table0);
+
+        const from = await rowGripCoords(page, table0, 1); // "Bob" row's own grip
+
+        // Presses the grip, drags (WITHOUT releasing) to `y`, reads the drop
+        // indicator's on-screen top back, then cancels via Escape so no
+        // mutation ever happens — mirrors the "Esc mid-drag cancels"
+        // scenario's own down/move/Escape/up sequence above.
+        const indicatorTopAt = async (y) => {
+          await page.mouse.move(from.x, from.y);
+          await page.mouse.down();
+          await page.mouse.move(from.x, from.y + (y - from.y) / 2, { steps: 5 });
+          await page.mouse.move(from.x, y, { steps: 5 });
+          await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+          const top = await page.evaluate(
+            () => document.querySelector('.ed-te-drop-indicator').getBoundingClientRect().top
+          );
+          await page.keyboard.press('Escape');
+          await page.mouse.up(); // drag state is already gone — inert, same as the Esc-mid-drag scenario
+          return top;
+        };
+
+        expectApprox(await indicatorTopAt(probe.headerMid), probe.headerTop,
+          'releasing at the header row centre must mean "become the new first row" (indicator snaps to the header top)');
+        expectApprox(await indicatorTopAt(probe.headerBottom), probe.body0Top,
+          'releasing at the header BOTTOM keeps the existing body-midline chain (indicator snaps to the first body row top) — ' +
+          'the pre-existing green drag scenario releases exactly here');
+        expectApprox(await indicatorTopAt(probe.body0Mid + 1000), lastBodyBottom,
+          'releasing far below the table must mean append at the end (indicator snaps to the last body row bottom)');
+
+        const fileText = await saveAndRead(page, tmdPath);
+        assert.strictEqual(fileText, torig,
+          'every probe above was cancelled via Escape — the file must be byte-identical to the original, got:\n' + fileText);
+
+        await page.close();
+        console.log('table drop target: header-midline threshold splits above-header / before-row — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
     // Review fix (Important): the hover-insert bubbles' and grips' own
     // (independent) throttled mousemove listener must not repaint itself on
     // top of the drop indicator during an active drag — a drag that starts
