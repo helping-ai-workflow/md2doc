@@ -988,4 +988,83 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
 }
 
+// ── Case 32: §3.4's bystander rule — a hard-wrapped li is REPLAYED, not
+//    re-serialized, when the caller hands over its source lines. ───────────
+{
+  // (a) attribution: MULTILINE now names its owner, so a caller can ask the
+  //     narrow §4.1 question ("is my TARGET hard-wrapped") instead of the
+  //     run-wide one that made Tab unusable on real documents.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, text('single')),
+      liBlock({ id: '1', indent: 0 }, text('wrapped\ntail')),
+    ]);
+    assert.deepStrictEqual(r.multiLineBlockIds, ['1'],
+      'only the hard-wrapped block is named');
+    assert.ok(r.unsupported.indexOf('MULTILINE') !== -1,
+      'the flat channel is unchanged — existing callers keep working');
+  }
+
+  // (b) the replay is byte-for-byte when nothing about the marker moved.
+  //     Deliberately uses content the inline round trip would MANGLE: a
+  //     bare '~' comes back escaped, which is the concrete defect measured
+  //     on this repo's own CHANGELOG.md.
+  {
+    const src = ['- bit ~5px into the cell', '  and a **second** line'];
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, text('bit ~5px into the cell\nand a second line')),
+      liBlock({ id: '1', indent: 0 }, text('other')),
+    ], { carryOver: { 0: src } });
+    assert.strictEqual(r.md, src.join('\n') + '\n- other',
+      'the replayed item keeps its own bytes, got:\n' + JSON.stringify(r.md));
+    assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+      'lineMeta stays one entry per emitted line');
+    assert.deepStrictEqual(r.lineMeta.map((m) => m.blockId), ['0', '0', '1']);
+  }
+
+  // (c) colDelta: an ordinal that widens from 3 columns to 4 must move the
+  //     continuation line with it, or the continuation falls out of the item.
+  //     (spec §3.4, "重編號造成的 marker 寬度變化本身就是必須套用的欄位差")
+  {
+    const blocks = [];
+    for (let i = 0; i < 9; i++) {
+      blocks.push(liBlock({ id: String(i), type: 'ol', indent: 0 }, text('x' + i)));
+    }
+    blocks.push(liBlock({ id: '9', type: 'ol', indent: 0 }, text('ten\ncont')));
+    const r = serializeBlocks(blocks, { carryOver: { 9: ['9. ten', '   cont'] } });
+    const out = r.md.split('\n');
+    assert.strictEqual(out[9], '10. ten', 'the marker is re-stated, got: ' + out[9]);
+    assert.strictEqual(out[10], '    cont',
+      'the continuation moves by the same one column, got: ' + JSON.stringify(out[10]));
+  }
+
+  // (d) a nested bystander picks up its ancestor's indent prefix.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, text('parent')),
+      liBlock({ id: '1', indent: 1 }, text('kid\ncont')),
+    ], { carryOver: { 1: ['- kid', '  cont'] } });
+    assert.strictEqual(r.md, '- parent\n  - kid\n    cont',
+      'colDelta +2 shifts both of the replayed lines, got:\n' + JSON.stringify(r.md));
+  }
+
+  // (e) declined when the arithmetic would be a guess: no marker on the
+  //     source's first line means there is no old prefix to measure.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, text('a\nb')),
+    ], { carryOver: { 0: ['a', 'b'] } });
+    assert.strictEqual(r.md, '- a\n  b',
+      'falls back to the ordinary path rather than doubling the marker, got:\n' + r.md);
+  }
+
+  // (f) a block NOT named in carryOver is untouched by the feature.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, text('a\nb')),
+    ], { carryOver: { 7: ['- z'] } });
+    assert.strictEqual(r.md, '- a\n  b');
+  }
+}
+
 console.log('list-md.test.js OK');

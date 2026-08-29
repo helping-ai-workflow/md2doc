@@ -5812,8 +5812,15 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
-    // Row 5: Tab indents the caret item AND its whole subtree; the following
-    // same-level sibling ('- c') is untouched.
+    // Spec §3.5 (清單項 / Tab): Tab indents ONLY the caret item. Its children
+    // keep their own indent and thereby become its SIBLINGS; the following
+    // same-level sibling ('- c') is untouched either way.
+    //
+    // MIGRATED (Task 6, authorised by spec §3.5 + the controller's T3-B note):
+    // this scenario previously pinned '0:a | 1:b | 2:b1 | 2:b2 | 0:c' and
+    // '- a\n  - b\n    - b1\n    - b2\n- c' — v2.10.0's subtree-follows
+    // behaviour, which was an artifact of Tab re-parenting the <li> rather than
+    // a decision. The user picked "children do not follow" after seeing both.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc([
@@ -5831,8 +5838,11 @@ async function clickInsertMenuItem(page, sel, label) {
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'b', true); // caret in 'b' (start)
         await page.keyboard.press('Tab');
+        // Three blocks at indent 1 — b (which moved) plus b1/b2 (which did
+        // NOT, and are now its siblings). Waiting on indent 2 would hang
+        // forever now: nothing in this fixture ever reaches that depth.
         await page.waitForFunction(
-          () => document.querySelectorAll('.ed-block[data-indent="2"]').length === 2,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 3,
           { timeout: 5000 }
         );
         // S1: data-indent is now written LOCALLY by a structural key BEFORE its
@@ -5842,20 +5852,20 @@ async function clickInsertMenuItem(page, sel, label) {
         // deterministic — and it is what makes the next click / save observe the
         // POST-swap DOM instead of tearing a stale handle out mid-click.
         await settleEditor(page);
-        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 2:b1 | 2:b2 | 0:c',
-          'Tab must indent the caret item AND its whole subtree, leaving later siblings alone');
+        assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 1:b1 | 1:b2 | 0:c',
+          'Tab must indent ONLY the caret item — b1/b2 keep their indent and become its siblings');
 
         const fileText = await saveAndRead(page, lmdPath);
-        assert.strictEqual(fileText, '# List doc\n\n- a\n  - b\n    - b1\n    - b2\n- c\n',
-          'row 5: Tab must move b + its subtree one level in (accumulated marker-width indent) and ' +
-          'leave c untouched, got:\n' + JSON.stringify(fileText));
+        assert.strictEqual(fileText, '# List doc\n\n- a\n  - b\n  - b1\n  - b2\n- c\n',
+          'spec §3.5: Tab moves b one level in (accumulated marker-width indent), leaves b1/b2 ' +
+          'where they were and c untouched, got:\n' + JSON.stringify(fileText));
 
         await reopenWysiwyg(page, await liBlockSelByText(page, 'b'));
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
         await page.waitForFunction(
-          () => document.querySelectorAll('.ed-block[data-indent="2"]').length === 0,
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 2,
           { timeout: 5000 }
         );
         // S1: data-indent is now written LOCALLY by a structural key BEFORE its
@@ -5871,7 +5881,7 @@ async function clickInsertMenuItem(page, sel, label) {
           JSON.stringify(undoneText));
 
         await page.close();
-        console.log('list WYSIWYG (row 5): Tab moves the item + its subtree only, one undo op — OK');
+        console.log('list WYSIWYG (§3.5): Tab moves ONLY the caret item, one undo op — OK');
       } finally {
         lsrv.close();
       }
@@ -7356,9 +7366,15 @@ async function clickInsertMenuItem(page, sel, label) {
     }
 
     // (3) ...and the item is STILL refused for structural operations (spec §4.1),
-    //     with the existing banner and no file change. MULTILINE reaches
-    //     `unsupported` (which the structural gate reads) but never
-    //     `unsupportedByLi` (which arming and the text-edit refusal read).
+    //     with the existing banner and no file change — but ONLY as the
+    //     operation TARGET.
+    //
+    // MIGRATED (Task 6). This scenario used to press Tab on 'bravo' — the
+    // SINGLE-line sibling — and assert the banner, because the MULTILINE flag
+    // reached the run-wide gate and one hard-wrapped item refused the whole
+    // run. Spec §4.1 splits the roles (target refuses / bystander is carried
+    // through), and the run-wide reading is what made Tab refuse on 100% of
+    // this repo's own CHANGELOG.md items. Both halves are now asserted here.
     {
       const rows = ['# List doc', '', '- alpha', '  cont', '- bravo', ''];
       const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
@@ -7369,13 +7385,23 @@ async function clickInsertMenuItem(page, sel, label) {
         const list0 = await listBlockSel(page, 0);
         const beforeShape = await runShapeOf(page, list0);
 
-        await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
-        await page.keyboard.press('Tab');
+        // (3a) TARGET: a CONTENT-REWRITING structural key on the hard-wrapped
+        //      item itself is still refused. Enter (split) is the canonical
+        //      one — it has to cut the item's text in two, which has no
+        //      defined answer when that text spans several source lines.
+        //      (Tab is deliberately NOT the probe here any more: it is
+        //      column-only, so it is allowed on a hard-wrapped target — see
+        //      listRunSupportsStructuralEdit()'s deviation note and the
+        //      CHANGELOG.md acceptance scenario below.)
+        const alphaSel = await liBlockSelByText(page, 'alpha');
+        await openWysiwyg(page, alphaSel);
+        await placeCaretInBlockText(page, alphaSel, 'alpha', false);
+        await page.keyboard.press('Enter');
         await new Promise((r) => setTimeout(r, 250)); // let any (incorrect) commit land
 
         assert.ok(
           await page.evaluate(() => !!document.querySelector('.ed-conflict')),
-          'a structural key in a run holding a hard-wrapped item must surface the banner'
+          'a content-rewriting structural key ON a hard-wrapped item must surface the banner'
         );
         assert.ok(
           (await page.evaluate(() => document.querySelector('.ed-conflict').textContent))
@@ -7384,16 +7410,273 @@ async function clickInsertMenuItem(page, sel, label) {
         );
         assert.strictEqual(await runShapeOf(page, list0), beforeShape,
           'the refused key must leave the run structurally untouched');
+        assert.strictEqual(await saveAndRead(page, lmdPath), lorig,
+          'the refused structural key must leave the file byte-identical');
+
+        await page.close();
+        console.log('per-li WYSIWYG (§4.1): a hard-wrapped item refuses a content-rewriting ' +
+          'structural key as the TARGET, with the banner — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // (3b) BYSTANDER: the same run, the same hard-wrapped item — but the key
+    //      lands on its single-line sibling. The operation must go through,
+    //      and the bystander's own lines must come out byte-identical (spec
+    //      §3.4: replayed with the column delta, never re-serialized).
+    {
+      const rows = ['# List doc', '', '- alpha', '  cont', '- bravo', ''];
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-indent="1"]').length === 1,
+          { timeout: 5000 }
+        );
+        await settleEditor(page);
+
+        assert.strictEqual(await runShapeOf(page, list0), '0:alpha\ncont | 1:bravo',
+          'Tab on the single-line sibling must land, with the hard-wrapped item as a bystander');
+        assert.ok(
+          await page.evaluate(() => !document.querySelector('.ed-conflict')),
+          'a bystander hard-wrapped item must NOT raise the refusal banner'
+        );
         const fileText = await saveAndRead(page, lmdPath);
-        assert.strictEqual(fileText, lorig,
-          'the refused structural key must leave the file byte-identical, got:\n' +
+        assert.strictEqual(fileText,
+          '# List doc\n\n- alpha\n  cont\n  - bravo\n',
+          "the bystander's own two lines must come through byte-identical, got:\n" +
           JSON.stringify(fileText));
 
         await page.close();
-        console.log('per-li WYSIWYG (round 2): a hard-wrapped item still refuses STRUCTURAL ' +
-          'keys with the banner — OK');
+        console.log('per-li WYSIWYG (§3.4): a hard-wrapped BYSTANDER is carried through a ' +
+          'structural key byte-identically — OK');
       } finally {
         lsrv.close();
+      }
+    }
+
+    // (3c) The other direction, and the other sign of colDelta: Shift+Tab on a
+    //      hard-wrapped item. Every line it owns must move LEFT by the same
+    //      two columns — moving only the marker line would leave the
+    //      continuation four columns deep after a top-level bullet, i.e.
+    //      re-lexed as an indented code block.
+    {
+      const rows = ['# List doc', '', '- alpha', '  - bravo', '    cont', ''];
+      const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]').length === 2,
+          { timeout: 5000 }
+        );
+        await settleEditor(page);
+
+        const fileText = await saveAndRead(page, lmdPath);
+        assert.strictEqual(fileText, '# List doc\n\n- alpha\n- bravo\n  cont\n',
+          'Shift+Tab must move the marker line AND its continuation by the same two ' +
+          'columns, got:\n' + JSON.stringify(fileText));
+        assert.deepStrictEqual(
+          plainMarked.lexer('- alpha\n- bravo\n  cont\n').map((t) => t.type), ['list'],
+          'sanity: the committed shape is still one list, not a list plus a code block');
+
+        await page.close();
+        console.log('per-li WYSIWYG (§3.4): Shift+Tab on a hard-wrapped item moves its whole ' +
+          'line range by one negative colDelta — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // ── Task 6 / spec §3.5: the other two Tab rows ─────────────────────────
+    // Heading: Tab demotes one level, Shift+Tab promotes one, both clamped to
+    // H1..H6 (the same source-level transform the ⠿ menu's ± buttons use).
+    // Paragraph: Tab is a TRUE no-op — consumed, not "unhandled". Letting it
+    // fall through is not neutral: the browser's own focus traversal walks the
+    // caret out of the block, which fires focusout and resolves the burst.
+    {
+      const rows = ['## Heading two', '', 'A paragraph.', ''];
+      const { srv: hsrv, url: hurl, mdPath: hmdPath } = await setupListDoc(rows);
+      const headingSel = '.ed-block[data-block-type="heading"]';
+      const headingTag = (page) => page.evaluate((s) => {
+        const el = document.querySelector(s + ' > *');
+        return el ? el.tagName : null;
+      }, headingSel);
+      try {
+        const page = await newPage(browser);
+        await page.goto(hurl, { waitUntil: 'networkidle0' });
+
+        assert.strictEqual(await headingTag(page), 'H2', 'sanity: the fixture starts at H2');
+
+        await openWysiwyg(page, headingSel);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction((s) => !!document.querySelector(s + ' h3'),
+          { timeout: 5000 }, headingSel);
+        await settleEditor(page);
+        assert.strictEqual(await headingTag(page), 'H3', 'Tab must demote the heading one level');
+
+        // Three Shift+Tabs from H3: H2, H1, then the H1 clamp holds.
+        for (let k = 0; k < 3; k++) {
+          await reopenWysiwyg(page, headingSel);
+          await page.keyboard.down('Shift');
+          await page.keyboard.press('Tab');
+          await page.keyboard.up('Shift');
+          await settleEditor(page);
+        }
+        assert.strictEqual(await headingTag(page), 'H1',
+          'Shift+Tab must promote and then clamp at H1, never past it');
+
+        // Paragraph: Tab changes nothing at all, and does not surrender focus.
+        const paraSel = await paragraphSelByText(page, 'A paragraph');
+        await reopenWysiwyg(page, paraSel);
+        const before = await page.evaluate(() => document.querySelector('.content').innerHTML);
+        await page.keyboard.press('Tab');
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(await page.evaluate(() => document.querySelector('.content').innerHTML),
+          before, 'Tab on a paragraph must do nothing at all');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'),
+            paraSel),
+          true, 'Tab on a paragraph must not hand the caret to the browser\'s focus traversal');
+
+        const fileText = await saveAndRead(page, hmdPath);
+        assert.strictEqual(fileText, '# Heading two\n\nA paragraph.\n',
+          'only the heading level may have moved, got:\n' + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('§3.5: Tab re-levels a heading (clamped H1..H6) and is a no-op on a ' +
+          'paragraph — OK');
+      } finally {
+        hsrv.close();
+      }
+    }
+
+    // ── Task 6 acceptance: Tab must work on this repo's own CHANGELOG.md ───
+    // The measurement this whole half of the task turns on. 58 of that file's
+    // 72 list items are hard-wrapped, and — this is the part that decides the
+    // design — NOT ONE of the 14 single-line items shares a run with a
+    // hard-wrapped one. So the bystander half of §3.4 alone changes nothing
+    // here (14/72 accept Tab before, 14/72 after); what makes Tab usable is
+    // letting a column-only key TARGET a hard-wrapped item, carrying its own
+    // lines across with the same colDelta the bystander rule uses.
+    //
+    // Asserted against the real file, not a fixture: the accept rate, the key
+    // actually landing, and — the property the replay exists for — that no
+    // byte outside the target item's own line range moves.
+    {
+      const changelog = fs.readFileSync(path.join(REPO, 'CHANGELOG.md'), 'utf8');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-changelog-'));
+      const cmdPath = path.join(dir, 'CHANGELOG.md');
+      fs.writeFileSync(cmdPath, changelog, 'utf8');
+      const csrv = await createEditorServer({ files: [cmdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(csrv.urlFor(cmdPath), { waitUntil: 'networkidle0' });
+
+        // (1) The accept rate, computed the way client.js's own gate computes
+        //     it. `columnOnly` (Tab / Shift+Tab) must accept EVERY item;
+        //     without it the answer collapses back to the single-line items.
+        const rate = await page.evaluate(new Function(RUN_SPAN_FN + `
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          let hardWrapped = 0, columnOnlyAccepts = 0, targetOnlyAccepts = 0;
+          lis.forEach(function (el) {
+            const res = window.md2docListMd.serializeBlocks(runSpanOf(el));
+            const multi = res.multiLineBlockIds || [];
+            const other = res.unsupported.filter(function (n) { return n !== 'MULTILINE'; });
+            if (multi.indexOf(el.getAttribute('data-block-id')) !== -1) hardWrapped++;
+            if (other.length === 0) columnOnlyAccepts++;
+            if (other.length === 0 &&
+                multi.indexOf(el.getAttribute('data-block-id')) === -1) targetOnlyAccepts++;
+          });
+          return { total: lis.length, hardWrapped: hardWrapped,
+                   columnOnlyAccepts: columnOnlyAccepts, targetOnlyAccepts: targetOnlyAccepts };
+        `));
+        assert.ok(rate.total > 20 && rate.hardWrapped / rate.total > 0.5,
+          'precondition: CHANGELOG.md must still be mostly hard-wrapped list items, got ' +
+          JSON.stringify(rate));
+        assert.strictEqual(rate.columnOnlyAccepts, rate.total,
+          'Tab must be accepted on EVERY list item of the real CHANGELOG.md, got ' +
+          JSON.stringify(rate));
+
+        // (2) A real Tab, on a HARD-WRAPPED item — which on this document is
+        //     the ordinary case, not the exotic one.
+        const target = await page.evaluate(() => {
+          const all = Array.prototype.slice.call(document.querySelectorAll('.ed-block'));
+          for (let i = 1; i < all.length; i++) {
+            const el = all[i], prev = all[i - 1];
+            if (el.getAttribute('data-block-type') !== 'li') continue;
+            if (prev.getAttribute('data-block-type') !== 'li') continue;
+            if (el.getAttribute('data-list-start') === '1') continue;
+            if (Number(el.getAttribute('data-indent')) !== Number(prev.getAttribute('data-indent'))) continue;
+            const t = el.querySelector(':scope > .ed-li-text');
+            if (!t || !/\n/.test(t.textContent)) continue; // must be hard-wrapped
+            return { id: el.getAttribute('data-block-id'),
+                     lines: t.textContent.split('\n').length };
+          }
+          return null;
+        });
+        assert.ok(target,
+          'CHANGELOG.md must contain a hard-wrapped item with a same-level sibling above it');
+        assert.ok(target.lines > 1, 'sanity: the chosen target really spans several lines');
+
+        const targetSel = '.ed-block[data-block-type="li"][data-block-id="' + target.id + '"]';
+        await openWysiwyg(page, targetSel);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          (s) => { const el = document.querySelector(s); return !!el && el.getAttribute('data-indent') === '1'; },
+          { timeout: 5000 }, targetSel);
+        await settleEditor(page);
+
+        assert.ok(await page.evaluate(() => !document.querySelector('.ed-conflict')),
+          'Tab on CHANGELOG.md must not raise the structural-refusal banner');
+
+        const after = await saveAndRead(page, cmdPath);
+        const a = changelog.split('\n');
+        const b = after.split('\n');
+        assert.strictEqual(a.length, b.length, 'a Tab must not add or remove lines');
+        const moved = [];
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) moved.push(i);
+        assert.strictEqual(moved.length, target.lines,
+          'exactly the target item\'s own lines may differ — every other item in the run, ' +
+          'hard-wrapped ones included, must come through byte-identical; differing lines: ' +
+          JSON.stringify(moved.map((i) => i + 1)));
+        // Contiguous, and every one of them moved by the SAME two columns —
+        // §3.4's "只改 marker 那行會讓續行被讀成程式碼區塊".
+        moved.forEach((i, k) => {
+          assert.strictEqual(i, moved[0] + k, 'the moved lines must be one contiguous block');
+          assert.strictEqual(b[i], '  ' + a[i],
+            'line ' + (i + 1) + ' must move by exactly the parent marker\'s two columns, got:\n' +
+            JSON.stringify(b[i]));
+        });
+        // And the file must still lex the same shape — a continuation left
+        // behind at the old column would re-lex as an INDENTED CODE BLOCK,
+        // which shows up here as the list token splitting in two.
+        assert.deepStrictEqual(
+          plainMarked.lexer(after).map((t) => t.type),
+          plainMarked.lexer(changelog).map((t) => t.type),
+          'the indent must not change the document\'s top-level token shape — a ' +
+          'continuation line stranded at its old column lexes as a code block');
+
+        await page.close();
+        console.log('§3.4/§3.5 acceptance: Tab works on this repo\'s real CHANGELOG.md — ' +
+          rate.hardWrapped + '/' + rate.total + ' items hard-wrapped, ' +
+          rate.columnOnlyAccepts + '/' + rate.total + ' accept Tab (was ' +
+          rate.targetOnlyAccepts + '/' + rate.total + ' with bystander-only), ' +
+          moved.length + ' lines moved — OK');
+      } finally {
+        csrv.close();
       }
     }
 
