@@ -9822,29 +9822,117 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // A two-digit ordinal must not move its own row's text. The marker box is
+    // FIXED width, so "10." overflows LEFT into the gutter the way a real <ol>
+    // does; a min-width would let the column grow and start items 10+ a few px
+    // right of items 1-9 (measured before the fix: 96,96,...,96,99,98,99). A
+    // plain bullet shares that same left edge for the same reason (its marker
+    // box is the same fixed 1.2em).
+    //
+    // A TASK item is NOT part of that shared edge: its checkbox (16px, plus
+    // one column-gap after the now-0-width marker) is narrower than the
+    // marker box other items use (18px), so its own text lands a few px
+    // further right — measured here at 100 vs 96. That offset predates this
+    // fix (confirmed by stashing this diff and re-measuring: identical 78/100
+    // before and after), so it is a separate, pre-existing cosmetic gap, not
+    // a regression this fix owns. What this DOES have to keep proving is the
+    // thing the width:0 override on the bulleted-task rule is actually FOR:
+    // the marker box stays collapsed to 0 width, and the checkbox sits
+    // exactly one column-gap after it — not two (which is what `min-width: 0`
+    // would silently reintroduce once the base rule became a fixed `width`,
+    // since a fixed width on the base rule is no longer overridden by a
+    // min-width on the task rule).
     {
-      // D6: ＋ immediately left of ⠿, same row, no gap
-      const { srv: psrv, url: purl } = await setupListDoc(['A paragraph.', '']);
+      const { srv: wsrv, url: wurl } = await setupListDoc(
+        Array.from({ length: 12 }, (_, i) => (i + 1) + '. item ' + (i + 1))
+          .concat(['', '- bullet', '- [ ] task', '']));
+      try {
+        const page = await newPage(browser);
+        await page.goto(wurl, { waitUntil: 'networkidle0' });
+        const measured = await page.evaluate(() => {
+          const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const plainTextLefts = [];
+          let task = null;
+          lis.forEach((li) => {
+            const marker = li.querySelector(':scope > .ed-li-marker');
+            const check = li.querySelector(':scope > .ed-li-check');
+            const text = li.querySelector(':scope > .ed-li-text');
+            if (check) {
+              const markerRect = marker.getBoundingClientRect();
+              const checkRect = check.getBoundingClientRect();
+              task = {
+                markerWidth: markerRect.width,
+                gap: checkRect.left - markerRect.right,
+                columnGap: parseFloat(getComputedStyle(li).columnGap) || 0,
+              };
+            } else {
+              plainTextLefts.push(Math.round(text.getBoundingClientRect().left));
+            }
+          });
+          return { plainTextLefts, task };
+        });
+        assert.strictEqual(measured.plainTextLefts.length, 13, 'sanity: 12 ordered + 1 plain bullet');
+        assert.strictEqual(new Set(measured.plainTextLefts).size, 1,
+          'a wide ordinal must overflow into the gutter, not shift its row\'s text — got ' +
+          JSON.stringify(measured.plainTextLefts));
+        assert.ok(measured.task, 'sanity: the task item was found');
+        assert.strictEqual(measured.task.markerWidth, 0,
+          'the bulleted-task marker box must stay collapsed to width:0, got ' + measured.task.markerWidth);
+        assert.ok(Math.abs(measured.task.gap - measured.task.columnGap) <= 1,
+          'the checkbox must sit exactly one column-gap after the collapsed marker (no double gap) — got ' +
+          JSON.stringify(measured.task));
+        await page.close();
+        console.log('S1: two-digit ordinals keep every item\'s text on one left edge; task checkbox collapse intact — OK');
+      } finally {
+        wsrv.close();
+      }
+    }
+
+    {
+      // D6: ＋ immediately left of ⠿, same row, no gap — for EVERY block type
+      // that owns a ＋, not just a paragraph. `.ed-insert` is deliberately
+      // absent on li until S2, so the guard is scoped by exclusion rather than
+      // by listing types: whatever grows a ＋ next has to satisfy this too.
+      const { srv: psrv, url: purl } = await setupListDoc([
+        '# Heading', '', 'A paragraph.', '', '> quote', '',
+        '| a | b |', '|---|---|', '| 1 | 2 |', '',
+        '```', 'code', '```', '',
+      ]);
       try {
         const page = await newPage(browser);
         await page.goto(purl, { waitUntil: 'networkidle0' });
-        const g = await page.evaluate(() => {
-          const b = document.querySelector('.ed-block[data-block-type="paragraph"]');
-          const plus = b.querySelector(':scope > .ed-insert').getBoundingClientRect();
-          const handle = b.querySelector(':scope > .ed-handle').getBoundingClientRect();
-          return { plusRight: plus.right, plusLeft: plus.left, handleLeft: handle.left,
-            plusMidY: plus.top + plus.height / 2, handleMidY: handle.top + handle.height / 2 };
+        const geo = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block:not([data-block-type="li"])')).map((b) => {
+            const p = b.querySelector(':scope > .ed-insert');
+            const h = b.querySelector(':scope > .ed-handle');
+            const plus = p ? p.getBoundingClientRect() : null;
+            const handle = h ? h.getBoundingClientRect() : null;
+            return {
+              type: b.getAttribute('data-block-type'),
+              plusRight: plus && plus.right, plusLeft: plus && plus.left,
+              handleLeft: handle && handle.left,
+              plusMidY: plus && plus.top + plus.height / 2,
+              handleMidY: handle && handle.top + handle.height / 2,
+            };
+          }));
+        assert.strictEqual(geo.length, 5,
+          'sanity: heading, paragraph, blockquote, table, code — got ' + JSON.stringify(geo.map((g) => g.type)));
+        assert.strictEqual(geo.filter((g) => g.plusRight === null || g.handleLeft === null).length, 0,
+          'sanity: every non-li block owns both gutter buttons, got ' + JSON.stringify(geo));
+        geo.forEach((g) => {
+          assert.ok(Math.abs(g.plusRight - g.handleLeft) <= 1,
+            '＋ must sit immediately left of ⠿ with no gap on a ' + g.type +
+            ', got plusRight=' + g.plusRight + ' handleLeft=' + g.handleLeft);
+          assert.ok(Math.abs(g.plusMidY - g.handleMidY) <= 1,
+            '＋ and ⠿ share one baseline on a ' + g.type);
+          // Both must stay ON the page. The whole gutter hangs outside the
+          // content box, so widening it without widening the room it hangs in
+          // pushes ＋ to a negative viewport x, where it is unclickable — the
+          // exact reason the pre-D6 layout stacked ＋ above ⠿ instead.
+          assert.ok(g.plusLeft >= 0, '＋ must stay on the page on a ' + g.type + ', got left=' + g.plusLeft);
         });
-        assert.ok(Math.abs(g.plusRight - g.handleLeft) <= 1,
-          '＋ must sit immediately left of ⠿ with no gap, got plusRight=' + g.plusRight + ' handleLeft=' + g.handleLeft);
-        assert.ok(Math.abs(g.plusMidY - g.handleMidY) <= 1, '＋ and ⠿ share one baseline');
-        // Both must stay ON the page. The whole gutter hangs outside the
-        // content box, so widening it without widening the room it hangs in
-        // pushes ＋ to a negative viewport x, where it is unclickable — the
-        // exact reason the pre-D6 layout stacked ＋ above ⠿ instead.
-        assert.ok(g.plusLeft >= 0, '＋ must stay on the page, got left=' + g.plusLeft);
         await page.close();
-        console.log('D6: ＋ sits immediately left of ⠿ — OK');
+        console.log('D6: ＋ sits immediately left of ⠿ on every non-li block — OK');
       } finally {
         psrv.close();
       }
