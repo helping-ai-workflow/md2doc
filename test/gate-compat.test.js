@@ -429,4 +429,41 @@ function assertGateCompatListRoundTrips(md, label) {
     'a continuation attributed to a DIFFERENT block must be rejected');
 }
 
+// 14. spec §3.12: a HARD BREAK must clear the gate in both emission contexts.
+// This is the assertion that decided the backslash form. The two-space form is
+// markdown's other hard-break spelling and it FAILS here — trailing whitespace
+// is the one thing this fossilized contract has never allowed, and the contract
+// covers serializeInline()'s output as well as list emissions, so the paragraph
+// case is bound by it too. Both halves are pinned: the form that is used, and
+// the form that cannot be.
+{
+  const hardBr = () => el('br', { 'data-hard-break': '1' });
+  // (a) paragraph context
+  const para = inlineMd.serializeInline(el('p', {}, 'one', hardBr(), 'two')).md;
+  assert.strictEqual(para, 'one\\\ntwo');
+  assertNoTrailingWhitespace(para, 'hard break in a paragraph');
+  // (b) list context — line shape, continuation column and re-lex all hold
+  const { md, lineMeta } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'one', hardBr(), 'two'),
+    liBlock({ id: '1' }, 'plain'),
+  ]);
+  assert.strictEqual(md, '- one\\\n  two\n- plain',
+    'the continuation lands on the item\'s content column, exactly as a lazy one does');
+  assertGateCompatList(md, 'hard break in a list item', lineMeta);
+  assertGateCompatListRoundTrips(md, 'hard break in a list item');
+  // (c) and it is still a hard break after the round trip, not a literal
+  //     backslash and not a literal '<br>'
+  const item = marked.lexer(md)[0].items[0];
+  assert.ok(item.tokens[0].tokens.some((t) => t.type === 'br'),
+    'the re-lexed item must contain a `br` token, got: ' +
+    JSON.stringify(item.tokens[0].tokens.map((t) => t.type)));
+  assert.ok(md.indexOf('<br>') === -1, 'no literal <br> may be emitted for a hard break');
+  // (d) THE CONTROL: the two-space spelling is rejected by this very contract.
+  //     Without this, "we chose backslash" reads as a preference rather than
+  //     the forced move it is.
+  assert.throws(() => assertNoTrailingWhitespace('one  \ntwo', 'two-space form'),
+    /ends in whitespace/,
+    'the two trailing spaces form is gate-illegal — that is why §3.12 mandates backslash');
+}
+
 console.log('gate-compat.test.js OK');

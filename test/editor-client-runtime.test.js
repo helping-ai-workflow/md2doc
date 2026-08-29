@@ -10632,9 +10632,17 @@ async function clickInsertMenuItem(page, sel, label) {
       const fixture = fs.readFileSync(
         path.join(__dirname, 'fixtures', 'roundtrip-lists.md'), 'utf8');
       const liBlocks = buildBlockMap(fixture).blocks.filter((b) => b.type === 'li');
-      assert.strictEqual(liBlocks.length, 15,
-        'fixture sanity: the per-li matrix is 15 items (ordered / task / ordered-task / ' +
-        'loose / two mixed-depth nests), got ' + liBlocks.length);
+      assert.strictEqual(liBlocks.length, 17,
+        'fixture sanity: the per-li matrix is 17 items (ordered / task / ordered-task / ' +
+        'loose / two mixed-depth nests / a HARD-BREAK item and its neighbour), got ' +
+        liBlocks.length);
+      // T8 review: the hard-break item is why pass 2 below is discriminating at
+      // all. Without it the fixture had no multi-line item and passed on the
+      // pre-§3.12 build, where editing one collapsed its two source lines into
+      // '- hard break one<br>hard break two' and the file lost a line — measured
+      // as 7 diffs, every later line shifted up by one.
+      assert.ok(liBlocks.some((b) => b.endLine > b.startLine),
+        'fixture sanity: at least one item must own more than one source line');
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-t8a-'));
       const mdPath = path.join(dir, 'lists.md');
       fs.writeFileSync(mdPath, fixture, 'utf8');
@@ -10649,7 +10657,7 @@ async function clickInsertMenuItem(page, sel, label) {
               return { i, armed: !!t && t.classList.contains('ed-wys-armed'),
                 text: t ? t.textContent.trim() : null };
             }));
-        assert.strictEqual(info.length, 15, 'every li block must render as a li element');
+        assert.strictEqual(info.length, 17, 'every li block must render as a li element');
         assert.deepStrictEqual(info.filter((x) => !x.armed).map((x) => x.text),
           ['loose one', 'loose two'],
           'the ONLY unarmable items are the two LOOSE ones (list-md.js reports them ' +
@@ -10669,8 +10677,8 @@ async function clickInsertMenuItem(page, sel, label) {
           await settleEditor(page);
           walked++;
         }
-        assert.strictEqual(walked, 13,
-          'pass 1 must actually have focused and blurred 13 items, got ' + walked);
+        assert.strictEqual(walked, 15,
+          'pass 1 must actually have focused and blurred 15 items, got ' + walked);
         assert.strictEqual(await saveAndRead(page, mdPath), fixture,
           'focus+blur with nothing typed must leave the file byte-identical, trailing-space ' +
           'line and missing EOF newline included');
@@ -10709,8 +10717,8 @@ async function clickInsertMenuItem(page, sel, label) {
           'a one-character edit must change exactly the edited item\'s own source line:\n  ' +
           problems.join('\n  '));
         await page.close();
-        console.log('T8-A: serializer byte-stability over the per-li matrix — 13 armable items ' +
-          'focus/blur clean, 13 real commits change only their own line — OK');
+        console.log('T8-A: serializer byte-stability over the per-li matrix — 15 armable items ' +
+          'focus/blur clean, 15 real commits change only their own line — OK');
       } finally { srv.close(); }
     }
 
@@ -10939,6 +10947,116 @@ async function clickInsertMenuItem(page, sel, label) {
         console.log('T8-E: a list Tab on a CRLF file keeps CRLF inside the rewritten range ' +
           'and every byte outside it — OK');
       } finally { srv.close(); }
+    }
+
+    // ── T8-F: spec §3.12 — a hard break survives an edit of its own block ──
+    //
+    // THE DEFECT this closes, measured on the parent commit, in BOTH block
+    // types (it is inline-md.js's, not the list serializer's):
+    //   '- a  ' / '  b ~t'           --type Z-->  '- a<br>b \~tZ'
+    //   'para one  ' / 'para two ~t' --type Z-->  'para one<br>para two \~tZ'
+    // Two source lines collapsed into one, the break degraded to a LITERAL
+    // '<br>', and the file lost a line. T8-A's fixture now carries a hard-break
+    // item so its whole-file oracle covers the list case; this scenario covers
+    // what that oracle deliberately cannot state uniformly — the TWO-SPACE
+    // source form, whose bytes legitimately change.
+    //
+    // §3.12's stated cost is asserted here rather than described: a user's two
+    // trailing spaces come back as a backslash. Same meaning, same line count,
+    // and the alternative is the data loss above. The backslash is not a style
+    // preference — it is the only spelling that clears list-md.js's four
+    // unconditional trailing-whitespace trims AND gate-compat.test.js's
+    // assertNoTrailingWhitespace fossil, which also applies to serializeInline's
+    // output and therefore to the paragraph case.
+    //
+    // The '\~' in the expectations is NOT part of this fix. escapeText() has
+    // always escaped a tilde in a re-serialized block, hard break or not; it is
+    // written out so nobody reads it as a new regression.
+    {
+      const cases = [
+        {
+          name: 'list item',
+          rows: ['# HB', '', '- a  ', '  b ~t', '- other', ''],
+          want: '# HB\n\n- a\\\n  b \\~tZ\n- other\n',
+          pick: async (page) => {
+            const el = await page.evaluate(() => {
+              const li = document.querySelector('.ed-block[data-block-type="li"]');
+              return li ? '.ed-block[data-block-type="li"][data-block-id="' +
+                li.getAttribute('data-block-id') + '"]' : null;
+            });
+            assert.ok(el, 'fixture: the hard-break list item must be on screen');
+            await openWysiwyg(page, el);
+          },
+        },
+        {
+          name: 'paragraph',
+          rows: ['# HB', '', 'para one  ', 'para two ~t', '', 'tail', ''],
+          want: '# HB\n\npara one\\\npara two \\~tZ\n\ntail\n',
+          pick: async (page) => {
+            const el = await paragraphSelByText(page, 'para one');
+            await openWysiwyg(page, el);
+          },
+        },
+      ];
+      for (const c of cases) {
+        const { srv: hsrv, url: hurl, mdPath: hmdPath } = await setupListDoc(c.rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(hurl, { waitUntil: 'networkidle0' });
+          await c.pick(page);
+          await page.keyboard.press('End');
+          await page.keyboard.type('Z');
+          await settleEditor(page);
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await settleEditor(page);
+          const after = await saveAndRead(page, hmdPath);
+          assert.strictEqual(after, c.want,
+            c.name + ': the hard break must survive as a hard break (backslash form) and ' +
+            'the file must keep both lines; got:\n' + JSON.stringify(after));
+          assert.strictEqual(after.split('\n').length, c.rows.length,
+            c.name + ': the line count must not change — losing one is what the literal ' +
+            "'<br>' degradation did");
+          assert.ok(after.indexOf('<br>') === -1,
+            c.name + ': no literal <br> may reach the file');
+          await page.close();
+        } finally { hsrv.close(); }
+      }
+      console.log('T8-F (§3.12): a hard break survives an edit of its own block, in a list ' +
+        'item AND a paragraph, normalised to the backslash form — OK');
+    }
+
+    // ── T8-F2: …and Shift+Enter's literal <br> is untouched by that ───────
+    //
+    // The two are separable only because marked routes them through different
+    // renderers, so this asserts the separation at the point it is made rather
+    // than trusting it. A Shift+Enter <br> carries no marker and must still
+    // serialize to a literal '<br>'; a source that spells '<br>' out by hand
+    // must round-trip unchanged through a re-serialization. The runtime
+    // Shift+Enter scenario earlier in this file pins the gesture end to end;
+    // this pins the source-form half, which that scenario never re-reads.
+    {
+      const rows = ['# Mixed', '', 'literal<br>break here', '', 'hard  ', 'break here', ''];
+      const { srv: msrv, url: murl, mdPath: mmdPath } = await setupListDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(murl, { waitUntil: 'networkidle0' });
+        const litSel = await paragraphSelByText(page, 'literal');
+        await openWysiwyg(page, litSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type('Z');
+        await settleEditor(page);
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await settleEditor(page);
+        const after = await saveAndRead(page, mmdPath);
+        assert.strictEqual(after, '# Mixed\n\nliteral<br>break hereZ\n\nhard  \nbreak here\n',
+          'a LITERAL <br> re-serializes as a literal <br> — it is an inline html token, ' +
+          'never a br token, so the §3.12 marker never lands on it. The untouched ' +
+          'two-space paragraph below it keeps its bytes by the bystander rule; got:\n' +
+          JSON.stringify(after));
+        await page.close();
+        console.log('T8-F2 (§3.12): a literal <br> stays literal — the Shift+Enter ' +
+          'round-trip contract is unmoved — OK');
+      } finally { msrv.close(); }
     }
 
     // ── Task 7 fix round 1: the hard-break sweep ──────────────────────────
