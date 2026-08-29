@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit, commitRangeRemoval } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -322,32 +322,253 @@ assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal
 }
 
 // -- T7 fix round 1 (LOW-2): insertBlockBelow() must refuse a zero-line block --
-// commitBlockInsertion() inserts at `endLine + 1` and samples `lines[endLine]`
-// to decide the trailing blank. For a block that owns NO source line the range
-// is INVERTED (endLine === startLine - 1, see blockOwnsNoLine()), so both of
-// those address a line belonging to whatever precedes it — the insert lands
-// ABOVE the block it was anchored to. deleteBlockViaGutter() has refused this
-// since Task 4; insertBlockBelow() did not.
+// The SOURCE-GREP version of this check lived here and has been REPLACED by a
+// runtime scenario in test/editor-client-runtime.test.js ("T8: Enter on an
+// emptied item after a same-line nest ..."). It was written on the premise
+// that no gesture could reach the branch, so only the guard's spelling could
+// be asserted. The premise was wrong: row 3's top-level Enter reaches it
+// through convertEmptyTopLevelLiToParagraph() ->
+// blockElAtLine(precedingBlock.startLine), which returns the FIRST block
+// starting at that line — the zero-line outer item of a same-line nest. A
+// grep test cannot tell a guard that works from one that is merely present;
+// the runtime one measures the ghost paragraph the unguarded path inserts.
 //
-// Asserted at the SOURCE level, not through the runtime: the only element that
-// can own no source line is a li (same-line nesting), and a li grows no ＋
-// button until S2, so today there is no gesture that reaches this branch. That
-// is exactly why the guard needs a test that does not depend on one — a latent
-// guard with no test is a guard that gets deleted by the next refactor.
+// commitBlockInsertion() now refuses an inverted anchor range itself as well
+// (see the T8 item 1 block above), so this is guarded twice on purpose: the
+// call site because it can show the user a banner, the helper because the next
+// call site will not remember to.
+
+// -- T8 item 1: the range helpers refuse an INVERTED range themselves -------
+// ROOT CAUSE, five call sites deep. A block that owns no source line has
+// endLine === startLine - 1 (blockOwnsNoLine()), and both range helpers were
+// written assuming endLine >= startLine. Handed an inverted range they do not
+// fail — they do something plausible and WRONG:
+//   - commitRangeEdit(): `lines.slice(startLine-1, endLine)` is [], so the
+//     "unchanged?" test compares '' against the new text, and
+//     ops.replaceLines() splices at startLine-1 without removing anything —
+//     an INSERT where the caller asked for a replace.
+//   - commitRangeRemoval(): the blank-line absorption reads `lines[el]`,
+//     which for an inverted range is the range's OWN first line, and
+//     `lines[sl-2]`, which is a line belonging to whatever precedes — so it
+//     deletes a separator nobody asked it to touch.
+// Both were fixed five times at five call sites (T3 arming, T3 same-line
+// child commit, T4 gutter delete, T4 raw edit, T7 insertBlockBelow). The
+// helpers now refuse, and the call-site guards stay as the first line of
+// defence. Refusal shape = the existing "nothing changed" shape (`op: null`,
+// state handed straight back), because every call site already has a correct
+// abort path for it; a throw would have to be caught in five async handlers
+// that today have none.
 {
-  const at = src.indexOf('async function insertBlockBelow(');
-  assert.ok(at > 0, 'insertBlockBelow() must exist in client.js');
-  // The function body up to its first commit call — the guard has to stand
-  // BEFORE the commit, not merely somewhere in the file.
-  const commitAt = src.indexOf('commitBlockInsertion({', at);
-  assert.ok(commitAt > at, 'insertBlockBelow() must call commitBlockInsertion()');
-  const body = src.slice(at, commitAt);
-  assert.ok(/blockOwnsNoLine\(liveBlockEl\)/.test(body),
-    'insertBlockBelow() must refuse a block that owns no source line, checked against ' +
-    'the LIVE block and BEFORE commitBlockInsertion() — same guard, same placement, ' +
-    'as deleteBlockViaGutter()');
-  assert.ok(/refuseStructuralListEdit\(/.test(body),
-    'that refusal must go through the shared banner helper, not return silently');
+  // The refusal is meant to be FINDABLE in a real session, so it logs. Capture
+  // the log here rather than letting it scroll past: it keeps the suite's
+  // output clean AND turns "it logged" into an assertion instead of a hope.
+  const logged = [];
+  const realError = console.error;
+  console.error = (...a) => { logged.push(a.join(' ')); };
+  const invLines = ['# Doc', '', '- a', '', '- - b', ''];
+  const invBlocks = [
+    { id: 0, type: 'heading', startLine: 1, endLine: 1 },
+    { id: 1, type: 'li', startLine: 3, endLine: 3 },
+    // the same-line nest: the OUTER item owns no line of its own
+    { id: 2, type: 'li', startLine: 5, endLine: 4 },
+    { id: 3, type: 'li', startLine: 5, endLine: 5 },
+  ];
+  // --- commitRangeEdit ---
+  {
+    const st = new UndoStack();
+    const state = { lines: invLines.slice(), blocks: invBlocks.slice(), stack: st };
+    const before = state.lines.slice();
+    const r = commitRangeEdit(state, 5, 4, 'ZZZ');
+    assert.strictEqual(r.op, null,
+      'an inverted range must be refused with the same op===null shape a no-op commit uses');
+    assert.strictEqual(r.refused, 'inverted-range',
+      'the refusal must be identifiable, not indistinguishable from "text unchanged"');
+    assert.deepStrictEqual(r.lines, before,
+      'MEASURED pre-guard symptom: commitRangeEdit(5, 4, "ZZZ") INSERTED a line — ' +
+      "'# Doc\\n\\n- a\\n\\n- - b\\n' + 'ZZZ' -> '# Doc\\n\\n- a\\n\\nZZZ\\n- - b\\n'");
+    assert.strictEqual(r.lines, state.lines, 'the caller\'s own array is handed back untouched');
+    assert.strictEqual(r.blocks, state.blocks, 'and so is the block array');
+    assert.strictEqual(st._done.length, 0, 'a refused range must never push an undo op');
+  }
+  // --- commitRangeRemoval ---
+  {
+    const st = new UndoStack();
+    const state = { lines: invLines.slice(), blocks: invBlocks.slice(), stack: st };
+    const before = state.lines.slice();
+    const r = commitRangeRemoval(state, 5, 4);
+    assert.strictEqual(r.op, null, 'inverted range: refused, no op');
+    assert.strictEqual(r.refused, 'inverted-range', 'and identifiably so');
+    assert.deepStrictEqual(r.lines, before,
+      'MEASURED pre-guard symptom: commitRangeRemoval(5, 4) absorbed the blank line at ' +
+      "index sl-2 — '# Doc\\n\\n- a\\n\\n- - b\\n' -> '# Doc\\n\\n- a\\n- - b\\n', a separator " +
+      'belonging to a DIFFERENT block, with nothing visible on screen to show for it');
+    assert.strictEqual(st._done.length, 0, 'a refused range must never push an undo op');
+  }
+  // --- the wrappers inherit the refusal (they are the real call sites) ---
+  {
+    const st = new UndoStack();
+    const state = { lines: invLines.slice(), blocks: invBlocks.slice(), stack: st };
+    const before = state.lines.slice();
+    const e = commitEdit(state, 2, 'ZZZ');           // block id 2 owns no line
+    assert.strictEqual(e.refused, 'inverted-range', 'commitEdit() inherits the refusal');
+    assert.deepStrictEqual(e.lines, before, 'and changes nothing');
+    const d = commitListBlockRemoval(state, 2);
+    assert.strictEqual(d.refused, 'inverted-range', 'commitListBlockRemoval() inherits it too');
+    assert.deepStrictEqual(d.lines, before, 'and changes nothing');
+    assert.strictEqual(st._done.length, 0, 'neither wrapper pushed an undo op');
+  }
+  // --- commitBlockInsertion(): SAME root cause, third helper. It inserts at
+  //     `block.endLine + 1` and samples `state.lines[block.endLine]` to decide
+  //     the trailing blank — for an inverted range both address a line inside
+  //     whatever PRECEDES the block, so the new block lands ABOVE the one it
+  //     was anchored to. insertBlockBelow() guards this at its call site
+  //     (test below), and now the helper refuses it as well. Enumerated by the
+  //     same cross-axis pass that produced the two above: it is the only other
+  //     helper in this file that reads a block's line range as an interval.
+  {
+    const st = new UndoStack();
+    const state = { lines: invLines.slice(), blocks: invBlocks.slice(), stack: st };
+    const before = state.lines.slice();
+    const r = commitBlockInsertion(state, 2, ['NEW']);
+    assert.strictEqual(r.op, null, 'inverted anchor: refused, no op');
+    assert.strictEqual(r.refused, 'inverted-range', 'and identifiably so');
+    assert.deepStrictEqual(r.lines, before,
+      'MEASURED pre-guard symptom: anchoring an insert to a block that owns no source ' +
+      'line put the new block ABOVE it — the paragraph appeared before the list');
+    assert.strictEqual(st._done.length, 0, 'a refused insertion must never push an undo op');
+    // A well-formed anchor still inserts, so the guard is not a blanket veto.
+    const ok = commitBlockInsertion(state, 1, ['NEW']);
+    assert.strictEqual(ok.refused, undefined, 'a block that owns its line is a valid anchor');
+    assert.deepStrictEqual(ok.lines, ['# Doc', '', '- a', '', 'NEW', '', '- - b', '']);
+  }
+  // --- a WELL-FORMED range is completely unaffected (the guard must not
+  //     also refuse endLine === startLine, the single-line case that is 90%
+  //     of every commit in this file) ---
+  {
+    const st = new UndoStack();
+    const state = { lines: invLines.slice(), blocks: invBlocks.slice(), stack: st };
+    const r = commitRangeEdit(state, 3, 3, '- A');
+    assert.strictEqual(r.refused, undefined, 'a single-line range is not inverted');
+    assert.deepStrictEqual(r.lines, ['# Doc', '', '- A', '', '- - b', '']);
+    assert.strictEqual(st._done.length, 1);
+  }
+  console.error = realError;
+  // Every refusal announced itself, and nothing else did.
+  // 5 = commitRangeEdit + commitRangeRemoval direct, the two wrappers that
+  // delegate to them, and commitBlockInsertion. The well-formed calls must
+  // contribute nothing, which is what makes this a count and not a >0 check.
+  assert.strictEqual(logged.length, 5,
+    'each of the 5 refusals above must log exactly once; got ' + logged.length + ':\n' +
+    logged.join('\n'));
+  assert.ok(logged.every((l) => /refused an inverted line range/.test(l)),
+    'the log must name the refusal, got:\n' + logged.join('\n'));
+  assert.ok(logged.some((l) => /commitRangeEdit/.test(l)) &&
+            logged.some((l) => /commitRangeRemoval/.test(l)) &&
+            logged.some((l) => /commitBlockInsertion/.test(l)),
+    'all three helpers must identify themselves by name in the log, got:\n' + logged.join('\n'));
+}
+
+// -- T8 item 4: mechanical duplicate-function-declaration check ------------
+// WHY THIS EXISTS. `grep` classifies lib/editor/client.js as BINARY (it
+// carries two literal control bytes, U+0001 and U+0000, as table-fingerprint
+// separators — asserted below so the reason stays visible), so a plain
+// `grep pattern lib/editor/client.js` prints "Binary file matches" or, with
+// the wrong flags, nothing at all. That false negative has already shipped one
+// defect on this plan: a reviewer grepped for a helper, saw no match, and
+// wrote a SECOND function of the same name into the same closure. JavaScript
+// function declarations do not collide loudly the way `const` does — the later
+// declaration silently wins — and the result was 46 lines of dead code and a
+// banner showing the wrong text. The rule "always grep -a" is a thing a human
+// has to remember; this check is not.
+//
+// SCOPE PROXY: leading indentation, not brace depth. Every source here is one
+// IIFE with a house style of two spaces per level, so "same indent" is "same
+// nesting level", and unlike a brace counter it cannot be fooled by the regex
+// literals and template strings these files are full of. It only looks at
+// `function name(` / `async function name(` at the START of a line, so a
+// mention inside a comment or a string is not a declaration. Deliberately NOT
+// extended to `const name = ...`: a duplicate `const` in one scope is a
+// SyntaxError the very first time the file is loaded, i.e. already loud.
+function duplicateFunctionDeclarations(source) {
+  const seen = new Map();
+  const dups = [];
+  source.split('\n').forEach((line, i) => {
+    const m = /^(\s*)(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/.exec(line);
+    if (!m) return;
+    const key = m[1].length + ':' + m[2];
+    if (seen.has(key)) {
+      dups.push(m[2] + '() declared at line ' + seen.get(key) + ' and again at line ' +
+        (i + 1) + ' (same nesting level) — the second silently replaces the first');
+    } else {
+      seen.set(key, i + 1);
+    }
+  });
+  return dups;
+}
+{
+  // (a) The detector must FIRE. Two same-name declarations in one closure —
+  //     the exact shape of the shipped defect.
+  const bad = [
+    '(function () {',
+    '  function refuse(msg) { return 1; }',
+    '  function other() { return 2; }',
+    '  function refuse(msg) { return 3; }',
+    '})();',
+  ].join('\n');
+  const hits = duplicateFunctionDeclarations(bad);
+  assert.strictEqual(hits.length, 1, 'the detector must find the duplicate, got: ' + hits.join('; '));
+  assert.ok(/refuse\(\) declared at line 2 and again at line 4/.test(hits[0]), hits[0]);
+
+  // (b) It must NOT fire on the three shapes that are legitimate and common
+  //     in these files, or it would be turned off within a week.
+  const good = [
+    '(function () {',
+    '  function outer() {',
+    '    function helper() { return 1; }',
+    '  }',
+    '  function helper() { return 2; }',
+    '  // function helper() {}  <- a comment, not a declaration',
+    "  const s = 'function helper(';",
+    '})();',
+  ].join('\n');
+  assert.deepStrictEqual(duplicateFunctionDeclarations(good), [],
+    'the detector must not fire on nested / commented / quoted look-alikes');
+
+  // (c) The real sources. `src` (client.js) is already read above; the rest
+  //     are the other files server.js inlines into the same page, plus the
+  //     renderer, because the hazard is the language's, not this file's.
+  const scanned = {
+    'client.js': src,
+    'lineops.js': lineopsSrc,
+    'inline-md.js': inlineMdSrc,
+    'table-md.js': tableMdSrc,
+    'list-md.js': listMdSrc,
+    'history.js': historySrc,
+    'blockmap.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'blockmap.js'), 'utf8'),
+    'indent-clamp.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'indent-clamp.js'), 'utf8'),
+    'server.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'server.js'), 'utf8'),
+    'md2doc.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8'),
+  };
+  Object.keys(scanned).forEach((name) => {
+    const found = duplicateFunctionDeclarations(scanned[name]);
+    assert.deepStrictEqual(found, [],
+      name + ' declares the same function twice at the same nesting level:\n  ' +
+      found.join('\n  '));
+  });
+
+  // The premise of all of the above: client.js really does contain the control
+  // bytes that make grep call it binary. If a future edit removes them the
+  // "always grep -a" rule stops being load-bearing — and this comment stops
+  // being true — so the fact is pinned rather than described. Written with
+  // charCodeAt rather than a literal, so this test file itself stays text.
+  const ctrl = [];
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charCodeAt(i);
+    if (c < 32 && c !== 10 && c !== 9 && c !== 13) ctrl.push(c);
+  }
+  assert.ok(ctrl.length > 0,
+    'client.js is expected to contain literal control bytes (the table fingerprint ' +
+    'separators) — that is WHY grep needs -a on it and why this check exists');
 }
 
 console.log('editor-client.test.js OK');
