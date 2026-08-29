@@ -310,6 +310,27 @@ function req(port, method, p, body) {
     console.log('server: block-map/lines range invariant is enforced — OK');
   }
 
+  // T7 fix round 1 (LOW-3): a CR/CRLF TIE goes to LF. The majority-vote
+  // comment promises "平手時取 LF"; `crlfCount >= bareCr` handed the tie to
+  // CRLF and contradicted it. Nothing else moves — a pure-CRLF file has
+  // bareCr === 0, so the strict comparison is still true there.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-tie-'));
+    const mdPath = path.join(dir, 'tie.md');
+    // 2 CRLF, 2 bare CR, 0 bare LF.
+    fs.writeFileSync(mdPath, '# H\r\n\rpara\r\n\rx', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const ed = JSON.parse(
+        /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(
+          await (await fetch(srv.urlFor(mdPath))).text())[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\n',
+        'a CR/CRLF tie must fall through to LF, as the majority-vote comment says, got: ' +
+        JSON.stringify(ed.eol));
+    } finally { srv.close(); }
+    console.log('server: a CR/CRLF terminator tie falls through to LF — OK');
+  }
+
   // Finding 2: createEditorServer with a listenPort already occupied by
   // another server must REJECT the returned promise (a catchable rejection,
   // the same shape bin's --edit `.catch` handles), not crash the process

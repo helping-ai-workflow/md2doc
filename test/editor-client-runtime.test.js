@@ -49,6 +49,11 @@ const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'lib', 'editor', 'client.js')
 // the click-bar tests below to exercise the "lightbox targets stay excluded
 // from the edit bar" rule. Appended as a NEW, trailing paragraph block so it
 // never shifts the block indices the other scenarios below rely on.
+// Two trailing spaces: a markdown HARD BREAK. Spelled as a named constant so
+// no editor, formatter, or careless diff can silently strip it — the T7 sweep
+// below is meaningless without it.
+const HB = '  ';
+
 const PNG_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
@@ -10503,6 +10508,139 @@ async function clickInsertMenuItem(page, sel, label) {
         console.log('T7: an unresolvable ⠿ gesture is dropped WITH a banner, not silently — OK');
       } finally { nsrv.close(); }
     }
+    // ── Task 7 fix round 1: the hard-break sweep ──────────────────────────
+    //
+    // WHY A SWEEP, AND WHY THIS FIXTURE. Round 0 offered the real
+    // CHANGELOG.md as evidence that "a line the user did not touch is never
+    // rewritten" holds. It is not discriminating: `grep -c '  $'` on this
+    // repo's CHANGELOG.md and README.md returns 0 and 0, so neither file
+    // contains a single markdown HARD BREAK, and every tilde-bearing item in
+    // them is a LAZY continuation — which the pre-fix `multiLineBlockIds`
+    // path already carried. The sweep passed on the parent commit too.
+    //
+    // The shapes that discriminate are the ones below, and they are swept
+    // exhaustively (every ITEM x every GESTURE) rather than sampled, because
+    // the bug class is "one commit path was missed": a single fixture proves
+    // one path, and there were six.
+    //
+    // THE ORACLE is the property itself, stated as prefix/suffix rather than
+    // as a line-by-line diff: everything BEFORE the target block's first
+    // source line, and everything AFTER its last, must come back byte-for-
+    // byte. Deliberately NOT "the file has the same number of lines" — a
+    // text edit is allowed to rewrite the TARGET's own range however the
+    // serializer sees fit (spec §4.1: 文字編輯不受影響), and on a hard-break
+    // item that legitimately collapses two lines into one. The suffix is
+    // therefore matched from the END of the file, so the target's own range
+    // may grow or shrink without moving the goalposts.
+    {
+      // TWO RUNS, and the split is load-bearing. resolveBurst()'s li branch
+      // takes the WHOLE-RUN commit only when `unsupported` is empty; a LAZY
+      // continuation anywhere in the run pushes 'MULTILINE' and diverts every
+      // commit in that run to the per-li PARTIAL path, which was already safe.
+      // A first draft of this fixture mixed the two and measured 0 violations
+      // on the BROKEN build — the lazy item was hiding the bug for all six of
+      // its neighbours. Run 1 is hard-break-only (whole-run path, where the
+      // defect lives); run 2 keeps a lazy item so the partial path is swept
+      // too. A paragraph between them is what makes them two runs.
+      const SWEEP_ROWS = [
+        '# Sweep doc', '',
+        '- alpha one' + HB,
+        '  alpha two ~t',
+        '- bravo one' + HB,
+        '  bravo two ~u',
+        '- charlie ~v',
+        '- delta `code` one' + HB,
+        '  delta two _under_',
+        '  - echo nested' + HB,
+        '    echo two ~w',
+        '  - foxtrot nested ~x', '',
+        'Divider paragraph.', '',
+        '- golf lazy wrap',
+        '  lazy continuation ~y',
+        '- hotel ~z',
+        '',
+      ];
+      const sweepOriginal = SWEEP_ROWS.join('\n');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-t7-sweep-'));
+      const mdPath = path.join(dir, 'sweep.md');
+      fs.writeFileSync(mdPath, sweepOriginal, 'utf8');
+      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        // blockmap.js emits one li block per item in document order, and
+        // lib/md2doc.js's render walk consumes that array in lockstep — so the
+        // k-th `.ed-block[data-block-type="li"]` on screen is the k-th li block
+        // here, which is what makes a DOM index addressable as a line range.
+        const liBlocks = buildBlockMap(sweepOriginal).blocks.filter((b) => b.type === 'li');
+        assert.strictEqual(liBlocks.length, 8,
+          'fixture sanity: 8 list items over two runs (4 hard-break, 1 lazy, 3 single-line), got ' +
+          liBlocks.length);
+        assert.strictEqual(SWEEP_ROWS.filter((r) => /  $/.test(r)).length, 4,
+          'fixture sanity: exactly 4 rows must end in a real hard break — the shape the ' +
+          'real CHANGELOG.md does not have and therefore could not test');
+        const page = await newPage(browser);
+        const violations = [];
+        const gestures = ['type', 'tab', 'shift-tab'];
+        for (let k = 0; k < liBlocks.length; k++) {
+          for (const gesture of gestures) {
+            // Restore the file and reload, so every cell of the sweep starts
+            // from the same bytes. One server and one page for the whole
+            // sweep; only the navigation is repeated.
+            fs.writeFileSync(mdPath, sweepOriginal, 'utf8');
+            await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+            const sel = await page.evaluate((i) => {
+              const lis = document.querySelectorAll('.ed-block[data-block-type="li"]');
+              const el = lis[i];
+              return el ? '.ed-block[data-block-type="li"][data-block-id="' +
+                el.getAttribute('data-block-id') + '"]' : null;
+            }, k);
+            assert.ok(sel, 'sweep: no li at DOM index ' + k);
+            await openWysiwyg(page, sel);
+            if (gesture === 'type') {
+              await page.keyboard.press('End');
+              await page.keyboard.type('Z');
+            } else {
+              if (gesture === 'shift-tab') await page.keyboard.down('Shift');
+              await page.keyboard.press('Tab');
+              if (gesture === 'shift-tab') await page.keyboard.up('Shift');
+            }
+            await settleEditor(page);
+            // Blur so a still-open burst resolves (that IS the commit path
+            // 'type' is here to exercise) before Ctrl+S measures the file.
+            await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+            await settleEditor(page);
+            const after = await saveAndRead(page, mdPath);
+            const a = sweepOriginal.split('\n');
+            const b = after.split('\n');
+            const own = liBlocks[k];
+            const label = 'item#' + k + '(' + own.startLine + '-' + own.endLine + ') ' + gesture;
+            const preLen = own.startLine - 1;
+            const sufLen = a.length - own.endLine;
+            for (let i = 0; i < preLen; i++) {
+              if (a[i] !== b[i]) {
+                violations.push(label + ' rewrote line ' + (i + 1) + ' BEFORE its own range: ' +
+                  JSON.stringify(a[i]) + ' -> ' + JSON.stringify(b[i]));
+              }
+            }
+            for (let i = 0; i < sufLen; i++) {
+              const av = a[a.length - sufLen + i];
+              const bv = b[b.length - sufLen + i];
+              if (av !== bv) {
+                violations.push(label + ' rewrote a line AFTER its own range: ' +
+                  JSON.stringify(av) + ' -> ' + JSON.stringify(bv));
+              }
+            }
+          }
+        }
+        console.log('T7 sweep: ' + violations.length + ' violations over ' +
+          (liBlocks.length * gestures.length) + ' (item x gesture) runs');
+        assert.deepStrictEqual(violations, [],
+          'every line outside the gesture target\'s own source range must come back ' +
+          'byte-identical; violations:\n  ' + violations.join('\n  '));
+        await page.close();
+        console.log('T7 sweep: no gesture on any item rewrites a line outside its own range — OK');
+      } finally { srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();

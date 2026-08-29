@@ -321,4 +321,33 @@ assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal
     'a no-op commit must NOT push onto the undo stack (depth unchanged)');
 }
 
+// -- T7 fix round 1 (LOW-2): insertBlockBelow() must refuse a zero-line block --
+// commitBlockInsertion() inserts at `endLine + 1` and samples `lines[endLine]`
+// to decide the trailing blank. For a block that owns NO source line the range
+// is INVERTED (endLine === startLine - 1, see blockOwnsNoLine()), so both of
+// those address a line belonging to whatever precedes it — the insert lands
+// ABOVE the block it was anchored to. deleteBlockViaGutter() has refused this
+// since Task 4; insertBlockBelow() did not.
+//
+// Asserted at the SOURCE level, not through the runtime: the only element that
+// can own no source line is a li (same-line nesting), and a li grows no ＋
+// button until S2, so today there is no gesture that reaches this branch. That
+// is exactly why the guard needs a test that does not depend on one — a latent
+// guard with no test is a guard that gets deleted by the next refactor.
+{
+  const at = src.indexOf('async function insertBlockBelow(');
+  assert.ok(at > 0, 'insertBlockBelow() must exist in client.js');
+  // The function body up to its first commit call — the guard has to stand
+  // BEFORE the commit, not merely somewhere in the file.
+  const commitAt = src.indexOf('commitBlockInsertion({', at);
+  assert.ok(commitAt > at, 'insertBlockBelow() must call commitBlockInsertion()');
+  const body = src.slice(at, commitAt);
+  assert.ok(/blockOwnsNoLine\(liveBlockEl\)/.test(body),
+    'insertBlockBelow() must refuse a block that owns no source line, checked against ' +
+    'the LIVE block and BEFORE commitBlockInsertion() — same guard, same placement, ' +
+    'as deleteBlockViaGutter()');
+  assert.ok(/refuseStructuralListEdit\(/.test(body),
+    'that refusal must go through the shared banner helper, not return silently');
+}
+
 console.log('editor-client.test.js OK');
