@@ -5381,8 +5381,12 @@ async function clickInsertMenuItem(page, sel, label) {
             if (!document.querySelector(s)) return false;
             const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
             const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            // Task 4: the block now also holds the ⠿ handle, so its own
+            // textContent is no longer the item's text — read the .ed-li-text
+            // surface, which is the only node that carries content.
+            const surface = nested[0] && nested[0].querySelector(':scope > .ed-li-text');
             return tops.length === 2 && nested.length === 1 &&
-              nested[0].textContent.trim() === 'Bravo item';
+              !!surface && surface.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
         // S1: data-indent is now written LOCALLY by a structural key BEFORE its
@@ -5673,8 +5677,12 @@ async function clickInsertMenuItem(page, sel, label) {
             if (!document.querySelector(s)) return false;
             const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
             const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            // Task 4: the block now also holds the ⠿ handle, so its own
+            // textContent is no longer the item's text — read the .ed-li-text
+            // surface, which is the only node that carries content.
+            const surface = nested[0] && nested[0].querySelector(':scope > .ed-li-text');
             return tops.length === 2 && nested.length === 1 &&
-              nested[0].textContent.trim() === 'Bravo item';
+              !!surface && surface.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
         // S1: data-indent is now written LOCALLY by a structural key BEFORE its
@@ -5749,8 +5757,13 @@ async function clickInsertMenuItem(page, sel, label) {
           (s) => {
             if (!document.querySelector(s)) return false;
             const items = document.querySelectorAll('.ed-block[data-block-type="li"]');
-            return items.length === 2 &&
-              items[0].textContent.trim() === 'a' && items[1].textContent.trim() === 'b';
+            // Task 4: read each item's .ed-li-text surface — a block's own
+            // textContent now also carries its ⠿ handle.
+            const own = Array.prototype.map.call(items, (li) => {
+              const sf = li.querySelector(':scope > .ed-li-text');
+              return sf ? sf.textContent.trim() : null;
+            });
+            return items.length === 2 && own[0] === 'a' && own[1] === 'b';
           }, {}, list0
         );
         // S1: the provisional block a split creates is now a real .ed-block
@@ -7744,8 +7757,12 @@ async function clickInsertMenuItem(page, sel, label) {
             if (!document.querySelector(s)) return false;
             const tops = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="0"]');
             const nested = document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]');
+            // Task 4: the block now also holds the ⠿ handle, so its own
+            // textContent is no longer the item's text — read the .ed-li-text
+            // surface, which is the only node that carries content.
+            const surface = nested[0] && nested[0].querySelector(':scope > .ed-li-text');
             return tops.length === 2 && nested.length === 1 &&
-              nested[0].textContent.trim() === 'Bravo item';
+              !!surface && surface.textContent.trim() === 'Bravo item';
           }, {}, list0
         );
         // S1: data-indent is now written LOCALLY by a structural key BEFORE its
@@ -8665,7 +8682,10 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw');
         assert.ok(
           await page.evaluate(() =>
-            document.querySelector('.ed-block[data-block-type="li"]').textContent === 'New item text'),
+            // Task 4: read the .ed-li-text surface — the block itself now
+            // also holds the ⠿ handle.
+            document.querySelector('.ed-block[data-block-type="li"] > .ed-li-text')
+              .textContent === 'New item text'),
           'the list insert must have been committed by the code insert\'s own switchAwayFrom()'
         );
         // Caret must sit on the blank BODY line between the two fences, not
@@ -9440,6 +9460,101 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.close();
         console.log('S4: row promotion retags cells TH↔TD and preserves their arm-time attributes — OK');
       } finally { s4Srv.close(); }
+    }
+
+    // ── S1 Task 4: li gutter chrome ─────────────────────────────────────
+    // S1: every block type gets the ⠿ handle — list items included, at every
+    // indent depth. The ＋ stays hidden for li until S2 (insertBlockBelow has
+    // no indent awareness yet: it writes a bare skeleton line at endLine + 1,
+    // which on a parent item orphans its children), and 'MD 原始碼' is hidden
+    // for li permanently (RULING F-O: injecting a textarea into a list item
+    // corrupts it).
+    {
+      const { srv: lsrv, url: lurl } = await setupListDoc(['# List doc', '', '- Alpha', '  - Bravo', '- Charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        const handles = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((b) => ({
+              indent: b.getAttribute('data-indent'),
+              hasHandle: !!b.querySelector(':scope > .ed-handle'),
+              hasInsert: !!b.querySelector(':scope > .ed-insert'),
+            })));
+        assert.strictEqual(handles.length, 3, 'three items');
+        assert.deepStrictEqual(handles.map((h) => h.indent), ['0', '1', '0'],
+          'sanity: the fixture must render one nested item between two top-level ones');
+        assert.deepStrictEqual(handles.map((h) => h.hasHandle), [true, true, true],
+          'EVERY list item gets a ⠿, including the nested one');
+        // S2 unhides this; until insertBlockBelow() is indent-aware a ＋ on a
+        // parent item writes a bare skeleton line at endLine + 1 and orphans
+        // the children, so the button must not exist on a li at all yet.
+        assert.deepStrictEqual(handles.map((h) => h.hasInsert), [false, false, false],
+          'the ＋ stays out of a list item until S2 gives insertBlockBelow indent awareness');
+        // the serializer must still see a clean document with the chrome present
+        const clean = await page.evaluate(() => {
+          const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          return window.md2docListMd.serializeBlocks(blocks).unsupported;
+        });
+        assert.deepStrictEqual(clean, [],
+          'gutter chrome must stay invisible to the serializer — otherwise the whole document degrades read-only');
+
+        // RULING F-O: the ⠿ menu on a li must hide 'MD 原始碼' permanently —
+        // openRawEditor() replaces the block's innerHTML with a textarea, and
+        // a list item that owns one source line of a shared run cannot host
+        // one. Every other item stays visible.
+        const liSel = await page.evaluate(() =>
+          '.ed-block[data-block-id="' +
+          document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id') + '"]');
+        await page.hover(liSel);
+        await page.click(liSel + ' .ed-handle');
+        await page.waitForSelector('.ed-handle-menu');
+        const liMenu = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
+        assert.strictEqual(liMenu, '刪除,✕'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show only 刪除 / ✕ — no heading ±, and no MD 原始碼 (RULING F-O), got " +
+          JSON.stringify(liMenu));
+        await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
+          btn.click();
+        });
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
+
+        // ...and the hiding must be per-type, not sticky: the SAME singleton
+        // menu reopened on a paragraph/heading must show MD 原始碼 again
+        // (test/editor-reader-rebind.test.js drives raw-edit through exactly
+        // that button, by its exact text).
+        const headSel = await page.evaluate(() => {
+          const h = document.querySelector('.ed-block[data-block-type="heading"]') ||
+            document.querySelector('.ed-block[data-block-type="paragraph"]');
+          return h ? '.ed-block[data-block-id="' + h.getAttribute('data-block-id') + '"]' : null;
+        });
+        if (headSel) {
+          await page.hover(headSel);
+          await page.click(headSel + ' .ed-handle');
+          await page.waitForSelector('.ed-handle-menu');
+          assert.strictEqual(
+            await page.evaluate(() => {
+              const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+                .find((x) => x.textContent === 'MD 原始碼');
+              return b ? b.hidden : null;
+            }),
+            false,
+            'MD 原始碼 must be visible again on a non-li block — the hide is per-type, not sticky'
+          );
+          await page.evaluate(() => {
+            const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
+            btn.click();
+          });
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
+        }
+
+        await page.close();
+        console.log('S1: every list item gets a ⠿ handle, serializer unaffected — OK');
+      } finally {
+        lsrv.close();
+      }
     }
 
     console.log('editor-client-runtime.test.js OK');
