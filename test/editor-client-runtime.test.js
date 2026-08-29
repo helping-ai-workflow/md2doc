@@ -9713,6 +9713,142 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── S1 Task 5: equal-width blocks, one gutter axis, indent on the TEXT ──
+    // The user-visible promise of the flat block model: whatever a block's
+    // type or depth, its BOX is the same box — same left edge, same width — so
+    // every hover outline matches and every ⠿ sits on one vertical line. Depth
+    // shows up ONLY on the item's own marker + text.
+    //
+    // Measured in a real layout on purpose: a source-regex assertion would
+    // pass on a ruleset the cascade never actually applies, and the whole
+    // failure mode this guards (per-item padding on the BOX, which drags the
+    // absolutely-positioned ⠿ origin along with it) is invisible until
+    // something is laid out.
+    {
+      const { srv: gsrv, url: gurl } = await setupListDoc([
+        '# Heading', '', 'A paragraph.', '', '- Alpha', '  - Bravo', '    - Charlie', '', '> quote', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(gurl, { waitUntil: 'networkidle0' });
+        const geo = await page.evaluate(() => {
+          const blocks = Array.from(document.querySelectorAll('.ed-block'));
+          return blocks.map((b) => {
+            const r = b.getBoundingClientRect();
+            const h = b.querySelector(':scope > .ed-handle');
+            const hr = h ? h.getBoundingClientRect() : null;
+            return {
+              type: b.getAttribute('data-block-type'), indent: b.getAttribute('data-indent'),
+              left: Math.round(r.left), width: Math.round(r.width),
+              handleLeft: hr ? Math.round(hr.left) : null,
+            };
+          });
+        });
+        assert.strictEqual(geo.length, 6,
+          'sanity: heading + paragraph + 3 flat li + blockquote, got ' + JSON.stringify(geo));
+        assert.strictEqual(geo.filter((g) => g.handleLeft === null).length, 0,
+          'sanity (Task 4): every block owns a ⠿, got ' + JSON.stringify(geo));
+        const lefts = new Set(geo.map((g) => g.left));
+        const widths = new Set(geo.map((g) => g.width));
+        const handleLefts = new Set(geo.map((g) => g.handleLeft));
+        assert.strictEqual(lefts.size, 1, 'every block starts at the same x, got ' + JSON.stringify([...lefts]));
+        assert.strictEqual(widths.size, 1, 'every block is the same width, got ' + JSON.stringify([...widths]));
+        assert.strictEqual(handleLefts.size, 1, 'every ⠿ sits on one vertical axis, got ' + JSON.stringify([...handleLefts]));
+        // indent shows on the TEXT, not the box
+        const textLefts = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"] > .ed-li-text'))
+            .map((t) => Math.round(t.getBoundingClientRect().left)));
+        assert.ok(textLefts[0] < textLefts[1] && textLefts[1] < textLefts[2],
+          'deeper items indent their TEXT, got ' + JSON.stringify(textLefts));
+        // ...and the marker is drawn by CSS, not by markup: the renderer emits
+        // an EMPTY span precisely so renumbering never has to touch the DOM.
+        const bullet = await page.evaluate(() => {
+          const m = document.querySelector('.ed-block[data-list-type="ul"] > .ed-li-marker');
+          return { html: m.innerHTML, before: getComputedStyle(m, '::before').content };
+        });
+        assert.strictEqual(bullet.html, '', 'the marker span stays empty in the DOM');
+        assert.ok(/•/.test(bullet.before),
+          'a bullet item draws its • from CSS, got ' + JSON.stringify(bullet.before));
+        await page.close();
+        console.log('S1: all blocks equal width, gutter icons on one axis, indent on the text — OK');
+      } finally {
+        gsrv.close();
+      }
+    }
+
+    // The flat DOM lost the one thing a real <ol> gave for free: a counter
+    // SCOPE per nesting level. All the li blocks are siblings now, so a single
+    // shared counter would let a nested run clobber the outer run's number
+    // ("1. / 1. / 2. / 2." renders as "... / 3."). The fix is one counter per
+    // depth, keyed off data-indent, reset on data-run-start.
+    //
+    // The resolved ordinal cannot be read back: pseudo-element text is not in
+    // the DOM and Chromium's getComputedStyle leaves counter() unresolved in
+    // `content`. So assert the counter WIRING instead — which is exactly the
+    // property that separates the correct per-depth design from the broken
+    // shared one.
+    {
+      const { srv: csrv, url: curl } = await setupListDoc([
+        '1. one', '   1. sub a', '   1. sub b', '1. two', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(curl, { waitUntil: 'networkidle0' });
+        const ctr = await page.evaluate(() => {
+          const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          return blocks.map((b) => {
+            const cs = getComputedStyle(b);
+            return {
+              indent: b.getAttribute('data-indent'),
+              runStart: b.getAttribute('data-run-start'),
+              inc: cs.counterIncrement, reset: cs.counterReset,
+            };
+          });
+        });
+        assert.strictEqual(ctr.length, 4, 'sanity: 4 flat li blocks, got ' + JSON.stringify(ctr));
+        assert.ok(ctr[0].inc && ctr[0].inc !== 'none', 'every li advances a counter, got ' + JSON.stringify(ctr));
+        assert.notStrictEqual(ctr[0].inc, ctr[1].inc,
+          'depth 0 and depth 1 must advance DIFFERENT counters, got ' + JSON.stringify(ctr));
+        assert.ok(ctr[0].reset !== 'none' && ctr[1].reset !== 'none',
+          'a run start resets its own depth counter, got ' + JSON.stringify(ctr));
+        assert.strictEqual(ctr[3].reset, 'none',
+          'returning to depth 0 must NOT reset depth 0 again, got ' + JSON.stringify(ctr));
+        assert.strictEqual(ctr[3].inc, ctr[0].inc,
+          'the outer run keeps advancing its own counter after the nested run, got ' + JSON.stringify(ctr));
+        await page.close();
+        console.log('S1: ordered ordinals use one counter per depth, reset at run starts — OK');
+      } finally {
+        csrv.close();
+      }
+    }
+
+    {
+      // D6: ＋ immediately left of ⠿, same row, no gap
+      const { srv: psrv, url: purl } = await setupListDoc(['A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(purl, { waitUntil: 'networkidle0' });
+        const g = await page.evaluate(() => {
+          const b = document.querySelector('.ed-block[data-block-type="paragraph"]');
+          const plus = b.querySelector(':scope > .ed-insert').getBoundingClientRect();
+          const handle = b.querySelector(':scope > .ed-handle').getBoundingClientRect();
+          return { plusRight: plus.right, plusLeft: plus.left, handleLeft: handle.left,
+            plusMidY: plus.top + plus.height / 2, handleMidY: handle.top + handle.height / 2 };
+        });
+        assert.ok(Math.abs(g.plusRight - g.handleLeft) <= 1,
+          '＋ must sit immediately left of ⠿ with no gap, got plusRight=' + g.plusRight + ' handleLeft=' + g.handleLeft);
+        assert.ok(Math.abs(g.plusMidY - g.handleMidY) <= 1, '＋ and ⠿ share one baseline');
+        // Both must stay ON the page. The whole gutter hangs outside the
+        // content box, so widening it without widening the room it hangs in
+        // pushes ＋ to a negative viewport x, where it is unclickable — the
+        // exact reason the pre-D6 layout stacked ＋ above ⠿ instead.
+        assert.ok(g.plusLeft >= 0, '＋ must stay on the page, got left=' + g.plusLeft);
+        await page.close();
+        console.log('D6: ＋ sits immediately left of ⠿ — OK');
+      } finally {
+        psrv.close();
+      }
+    }
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
