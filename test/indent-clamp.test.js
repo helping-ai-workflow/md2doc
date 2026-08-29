@@ -156,16 +156,24 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
   const path = require('path');
   const clientSrc = fs.readFileSync(
     path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
-  const calls = clientSrc.match(/clampIndents\(/g) || [];
-  assert.strictEqual(calls.length, 1,
-    'S1 has exactly ONE production call into clampIndents(); found ' + calls.length +
-    '. If S2 added another, update this note — do not just bump the number.');
-  const at = clientSrc.indexOf('clampIndents(');
-  const call = clientSrc.slice(at, clientSrc.indexOf('\n', at));
-  assert.ok(/clampIndents\([^\n]*,\s*\{\s*\}\s*\)/.test(call),
+  // T8 review LOW-1: comment lines are dropped BEFORE counting, and the line
+  // that is checked for the empty options object is the matched CALL line —
+  // not `indexOf`'s first textual hit, which a mention in a comment would win.
+  // A source check that counts its own explanation produces a failure message
+  // asserting a defect that is not there.
+  const callLines = clientSrc.split('\n').filter((l) => {
+    const t = l.trim();
+    if (t === '' || t.indexOf('//') === 0 || t.indexOf('*') === 0) return false;
+    return t.indexOf('clampIndents(') !== -1;
+  });
+  assert.strictEqual(callLines.length, 1,
+    'S1 has exactly ONE production call into clampIndents(); found ' + callLines.length +
+    ':\n  ' + callLines.join('\n  ') +
+    '\nIf S2 added another, update this note — do not just bump the number.');
+  assert.ok(/clampIndents\([^\n]*,\s*\{\s*\}\s*\)/.test(callLines[0]),
     'that call passes an EMPTY options object, which is what makes `removed` and ' +
     '`operatedBecomes` unreachable in production and this file insurance rather than ' +
-    'coverage; got: ' + JSON.stringify(call));
+    'coverage; got: ' + JSON.stringify(callLines[0]));
 }
 
 console.log('indent-clamp: spec §3.4 shift-then-clamp — OK');

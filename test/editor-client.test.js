@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit, commitRangeRemoval } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -383,6 +383,14 @@ assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal
       'an inverted range must be refused with the same op===null shape a no-op commit uses');
     assert.strictEqual(r.refused, 'inverted-range',
       'the refusal must be identifiable, not indistinguishable from "text unchanged"');
+    // T8 review LOW-2: `refused` has NO production consumer today, and that is
+    // deliberate. Every call site's correct reaction to a refusal is the same
+    // as its reaction to "nothing changed" — abort, or (via
+    // rollbackFailedRender) decline to roll back — so branching on the tag
+    // would add a path with no distinct behaviour behind it. The tag exists so
+    // a TEST can tell the two apart, and so console.error has something to
+    // name. If a caller ever does need to react differently, this is the hook;
+    // until then, do not add a branch just to consume it.
     assert.deepStrictEqual(r.lines, before,
       'MEASURED pre-guard symptom: commitRangeEdit(5, 4, "ZZZ") INSERTED a line — ' +
       "'# Doc\\n\\n- a\\n\\n- - b\\n' + 'ZZZ' -> '# Doc\\n\\n- a\\n\\nZZZ\\n- - b\\n'");
@@ -481,20 +489,38 @@ assert.ok(!/<\/script/i.test(historySrc), 'history.js must not contain a literal
 // banner showing the wrong text. The rule "always grep -a" is a thing a human
 // has to remember; this check is not.
 //
-// SCOPE PROXY: leading indentation, not brace depth. Every source here is one
-// IIFE with a house style of two spaces per level, so "same indent" is "same
-// nesting level", and unlike a brace counter it cannot be fooled by the regex
-// literals and template strings these files are full of. It only looks at
-// `function name(` / `async function name(` at the START of a line, so a
-// mention inside a comment or a string is not a declaration. Deliberately NOT
-// extended to `const name = ...`: a duplicate `const` in one scope is a
-// SyntaxError the very first time the file is loaded, i.e. already loud.
-function duplicateFunctionDeclarations(source) {
+// SCOPE PROXY: leading indentation. Every file below is ONE IIFE with a
+// two-space house style, so "same indent" is "same nesting level" there.
+//
+// LIMITS — read these before extending the file list (T8 review MEDIUM-2).
+//   * It is NOT a scope analysis. Indentation is a proxy, and it is only sound
+//     where one indent level really is one scope. It holds for lib/editor/*.js
+//     (single IIFE each). It does NOT hold for lib/md2doc.js, which embeds the
+//     whole reader runtime inside a template literal: its indent-2 bucket
+//     holds 77 declarations from unrelated scopes — isExternalRef() inside
+//     renderMarkdown() and openLightbox() inside the template string sit in
+//     the same bucket. That file is therefore scanned at INDENT 0 ONLY, which
+//     is genuinely one scope (module top level). An earlier revision of this
+//     comment claimed the proxy "cannot be fooled" the way a brace counter
+//     can; that was wrong in the direction that matters, and the correction is
+//     the scoping above.
+//   * KNOWN FALSE POSITIVE: two same-named nested helpers in DIFFERENT parent
+//     functions at the same indent are reported as a duplicate. There are none
+//     in the scanned set today (this file is green), and the failure message
+//     names line numbers, so the reader can see in one look whether the two
+//     share a parent. If a legitimate pair ever appears, rename one or narrow
+//     the scan — do not delete the check.
+//   * It only looks at `function name(` / `async function name(` at the START
+//     of a line, so a mention inside a comment or a string is not a
+//     declaration. Deliberately not extended to `const name = ...`: a
+//     duplicate `const` in one scope is a SyntaxError at load, already loud.
+function duplicateFunctionDeclarations(source, onlyIndent) {
   const seen = new Map();
   const dups = [];
   source.split('\n').forEach((line, i) => {
     const m = /^(\s*)(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/.exec(line);
     if (!m) return;
+    if (onlyIndent !== undefined && m[1].length !== onlyIndent) return;
     const key = m[1].length + ':' + m[2];
     if (seen.has(key)) {
       dups.push(m[2] + '() declared at line ' + seen.get(key) + ' and again at line ' +
@@ -534,6 +560,24 @@ function duplicateFunctionDeclarations(source) {
   assert.deepStrictEqual(duplicateFunctionDeclarations(good), [],
     'the detector must not fire on nested / commented / quoted look-alikes');
 
+  // (b2) The KNOWN false positive, asserted rather than described: two nested
+  //      helpers of the same name in DIFFERENT parents share an indent and are
+  //      reported. Pinning it means the next person to hit it recognises it
+  //      from this test instead of rediscovering it from a confusing failure.
+  const falsePositive = [
+    '(function () {',
+    '  function first() {',
+    '    function pick() { return 1; }',
+    '  }',
+    '  function second() {',
+    '    function pick() { return 2; }',
+    '  }',
+    '})();',
+  ].join('\n');
+  assert.strictEqual(duplicateFunctionDeclarations(falsePositive).length, 1,
+    'KNOWN LIMIT: same-named nested helpers under different parents are reported. ' +
+    'Indentation is a proxy for scope, not a scope analysis.');
+
   // (c) The real sources. `src` (client.js) is already read above; the rest
   //     are the other files server.js inlines into the same page, plus the
   //     renderer, because the hazard is the language's, not this file's.
@@ -547,7 +591,6 @@ function duplicateFunctionDeclarations(source) {
     'blockmap.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'blockmap.js'), 'utf8'),
     'indent-clamp.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'indent-clamp.js'), 'utf8'),
     'server.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'server.js'), 'utf8'),
-    'md2doc.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8'),
   };
   Object.keys(scanned).forEach((name) => {
     const found = duplicateFunctionDeclarations(scanned[name]);
@@ -555,6 +598,23 @@ function duplicateFunctionDeclarations(source) {
       name + ' declares the same function twice at the same nesting level:\n  ' +
       found.join('\n  '));
   });
+  // lib/md2doc.js at TOP LEVEL ONLY — see the LIMITS note above for why its
+  // indented buckets are not one scope and must not be scanned.
+  {
+    const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8');
+    const found = duplicateFunctionDeclarations(rendererSrc, 0);
+    assert.deepStrictEqual(found, [],
+      'md2doc.js declares the same top-level function twice:\n  ' + found.join('\n  '));
+    // The scoping is load-bearing, so the fact it rests on is pinned: that file
+    // really does mix scopes at indent 2, and an unscoped scan there would be
+    // green by luck rather than by construction.
+    const allTwo = rendererSrc.split('\n')
+      .filter((l) => /^ {2}(?:async )?function [A-Za-z_$]/.test(l)).length;
+    assert.ok(allTwo > 40,
+      'md2doc.js is expected to hold many indent-2 declarations across UNRELATED ' +
+      'scopes (renderMarkdown\'s body and the reader-runtime template literal); found ' +
+      allTwo + '. If this collapsed, re-check whether the exclusion is still needed.');
+  }
 
   // The premise of all of the above: client.js really does contain the control
   // bytes that make grep call it binary. If a future edit removes them the
@@ -569,6 +629,115 @@ function duplicateFunctionDeclarations(source) {
   assert.ok(ctrl.length > 0,
     'client.js is expected to contain literal control bytes (the table fingerprint ' +
     'separators) — that is WHY grep needs -a on it and why this check exists');
+}
+
+// -- T8 review MEDIUM-1: a REFUSED commit must not roll back somebody else --
+// The refusal added above returns `op: null` and pushes nothing. Two of the
+// five call sites — insertBlockBelow() and deleteBlockViaGutter() — never
+// inspected `result.op`; they assigned `lines = result.lines` (harmless, it is
+// the same array back) and, on a render failure, ran `stack.undo(lines)`.
+// UndoStack.undo() pops `_done` UNCONDITIONALLY (lib/editor/lineops.js), and
+// before the refusal existed an op was always pushed, so that rollback was
+// correct. After it, a refusal followed by a failed render pops and reverses
+// the user's PREVIOUS, UNRELATED edit. Latent today only because the
+// blockOwnsNoLine() guard returns before the commit at both sites; S2 gives li
+// blocks a ＋ and it goes live.
+//
+// The fix is one shared helper rather than two `if (result.op === null) return;`
+// lines, because the "optimistically assign, roll back if the render failed"
+// idiom is copy-pasted at six sites and the next one added will not remember
+// either. It lives in the pure core (above the node module.exports) precisely
+// so it can be tested here: the branch is unreachable through a gesture today,
+// which is exactly the situation that produced a source-grep test last round.
+{
+  const mkState = () => {
+    const st = new UndoStack();
+    // the user's previous, unrelated edit — already committed and on the stack
+    const prevOp = { startLine: 1, endLine: 1, before: ['a'], after: ['A'] };
+    const ln = ['A', 'b', 'c'];
+    st.push(prevOp);
+    return { lines: ln, stack: st };
+  };
+  // (a) THE HAZARD, stated as a fact about UndoStack rather than as prose:
+  //     undo() pops whatever is on top, and does not care that the thing that
+  //     just "failed" never pushed anything.
+  {
+    const s0 = mkState();
+    const popped = s0.stack.undo(s0.lines);
+    assert.deepStrictEqual(popped.lines, ['a', 'b', 'c'],
+      "UndoStack.undo() pops unconditionally — this is the user's earlier edit being " +
+      'reversed by a rollback that had nothing of its own to reverse');
+    assert.strictEqual(s0.stack._done.length, 0);
+  }
+  // (b) The helper declines to roll back a commit that pushed nothing.
+  {
+    const s1 = mkState();
+    const prevLines = s1.lines;
+    const refused = { lines: s1.lines, blocks: [], op: null, refused: 'inverted-range' };
+    const out = rollbackFailedRender(s1, refused, prevLines);
+    assert.deepStrictEqual(out, ['A', 'b', 'c'],
+      "a refused commit's failed render must leave the user's earlier edit standing");
+    assert.strictEqual(s1.stack._done.length, 1,
+      'and must leave the undo stack exactly as it found it');
+  }
+  // (c) …and still rolls back a commit that DID push, or it would be a
+  //     regression in the other direction — the optimistic `lines` would keep
+  //     an edit the server never rendered.
+  {
+    const s2 = mkState();
+    const prevLines = s2.lines;
+    const real = commitRangeEdit(
+      { lines: s2.lines, blocks: [{ id: 0, startLine: 2, endLine: 2 }], stack: s2.stack },
+      2, 2, 'B');
+    assert.notStrictEqual(real.op, null, 'sanity: this commit really did push');
+    s2.lines = real.lines;
+    assert.strictEqual(s2.stack._done.length, 2);
+    const out = rollbackFailedRender(s2, real, prevLines);
+    assert.deepStrictEqual(out, ['A', 'b', 'c'], 'the failed render is reversed');
+    assert.strictEqual(s2.stack._done.length, 1,
+      "and only the failed op is popped — the user's earlier edit stays on the stack");
+  }
+  // (d) An exhausted stack falls back to the caller's snapshot, same contract
+  //     the inlined idiom had (`rollback ? rollback.lines : prevLines`).
+  {
+    const s3 = { lines: ['x'], stack: new UndoStack() };
+    assert.deepStrictEqual(
+      rollbackFailedRender(s3, { op: { startLine: 1, endLine: 1 } }, ['snapshot']),
+      ['snapshot'], 'nothing left to undo -> the caller\'s prevLines');
+  }
+}
+
+// -- T8 review MEDIUM-1 (mechanical): every rollback goes through the helper --
+// The helper only helps if it is the only route. `stack.undo(lines)` is
+// legitimate in exactly two places — undo() itself, and redo()'s reversal of a
+// failed redo — and nowhere else. A third occurrence means somebody re-inlined
+// the idiom and re-created the hazard above.
+// `codeLines()` drops comment-only lines before any source-level count. A
+// mechanical check that counts its OWN explanatory comment is a check whose
+// failure message asserts a defect that is not there — which is precisely the
+// misdirection this round's review flagged in indent-clamp.test.js. It is not
+// a full lexer (a `//` inside a string literal on an otherwise-code line still
+// counts, as it should — that IS code), just the one distinction that matters.
+function codeLines(source) {
+  return source.split('\n').filter((l) => {
+    const t = l.trim();
+    return t !== '' && t.indexOf('//') !== 0 && t.indexOf('*') !== 0 && t.indexOf('/*') !== 0;
+  });
+}
+function countInCode(source, needle) {
+  return codeLines(source).filter((l) => l.indexOf(needle) !== -1).length;
+}
+{
+  const undoCalls = countInCode(src, 'stack.undo(lines)');
+  assert.strictEqual(undoCalls, 2,
+    'stack.undo(lines) may appear on exactly two CODE lines in client.js — inside ' +
+    'undo() (the gesture itself) and inside redo()\'s failure path (reversing a ' +
+    'redo). Every OTHER rollback must go through rollbackFailedRender(), which ' +
+    'declines when the commit pushed nothing; found ' + undoCalls);
+  const helperCalls = countInCode(src, 'rollbackFailedRender(');
+  assert.strictEqual(helperCalls, 8,
+    'the helper must be DECLARED once, EXPORTED once, and used at all six ' +
+    'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
 console.log('editor-client.test.js OK');
