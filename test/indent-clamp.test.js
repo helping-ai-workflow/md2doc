@@ -134,4 +134,38 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
     'a legal shape is unchanged — the clamp is a safety net, not a rewriter');
 }
 
+// ── T8 item 5: what this module's coverage IS, and what it is NOT ────────
+//
+// INSURANCE, NOT COVERAGE. Every case above is a unit test of a pure
+// function. None of them proves that any USER GESTURE reaches the behaviour
+// being asserted, and in S1 none does: clampIndents() is a provable no-op for
+// every gesture the editor can currently produce. Tab/Shift+Tab move exactly
+// one item by exactly one level and re-anchor it themselves, so the span they
+// hand the clamp is already legal and case 12's fixed-point result is the
+// answer every time (measured over an exhaustive item x gesture simulation of
+// this plan's fixtures: 1091 gestures, zero indent changed by the clamp).
+//
+// The two option branches — `removed` and `operatedBecomes` — have NO
+// production caller at all. That is asserted mechanically below rather than
+// asserted in prose, because the whole point of writing it down is to be told
+// when it stops being true: S2's §3.3 conversion is what wires them up, and
+// on the day it does, this check fails and whoever is holding the branch has
+// to come back and re-read this note instead of inheriting a stale one.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const clientSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const calls = clientSrc.match(/clampIndents\(/g) || [];
+  assert.strictEqual(calls.length, 1,
+    'S1 has exactly ONE production call into clampIndents(); found ' + calls.length +
+    '. If S2 added another, update this note — do not just bump the number.');
+  const at = clientSrc.indexOf('clampIndents(');
+  const call = clientSrc.slice(at, clientSrc.indexOf('\n', at));
+  assert.ok(/clampIndents\([^\n]*,\s*\{\s*\}\s*\)/.test(call),
+    'that call passes an EMPTY options object, which is what makes `removed` and ' +
+    '`operatedBecomes` unreachable in production and this file insurance rather than ' +
+    'coverage; got: ' + JSON.stringify(call));
+}
+
 console.log('indent-clamp: spec §3.4 shift-then-clamp — OK');

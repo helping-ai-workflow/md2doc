@@ -105,10 +105,64 @@ function assertGateCompatTable(md, label) {
 // emitted block never contains a blank line (list-md.js's loose-list
 // decision is to degrade to unsupported rather than emit blank-line-
 // separated markdown — see lib/editor/list-md.js's module header).
-function assertGateCompatList(md, label) {
-  md.split('\n').forEach((line, i) => {
-    assert.ok(/^ *(-|\d+\.) /.test(line),
-      label + ': line ' + i + ' fails the list marker/indent contract: ' + JSON.stringify(line));
+// T8 item 5, CONTRACT UPDATE. The original rule here was "every emitted line
+// is a marker line". That was true when a block owned exactly one source line
+// and stopped being true the moment the serializer learned to emit
+// CONTINUATION lines for a hard-wrapped item (see case 13 below). Restated:
+//
+//   * a MARKER line is /^ *(-|\d+\.) / at some accumulated-width indent, as
+//     before;
+//   * a CONTINUATION line carries no marker and must sit EXACTLY on the
+//     content column of the marker line it continues — `indent + marker
+//     width`, the same accumulated-width rule §3.4 pins for a child list.
+//     Not a range: one column too few and marked lexes it as a sibling item
+//     or as a lazy line of the wrong item, four too many and it lexes as an
+//     indented code block. Both failures are silent in the markdown and
+//     catastrophic in the document.
+//   * a continuation line can never come FIRST — there is nothing for it to
+//     continue.
+//
+// `lineMeta` is optional and, when passed, is the serializer's OWN
+// line -> block attribution; it is checked for the invariant every caller of
+// serializeBlocks() relies on (`lineMeta.length === md.split('\n').length`)
+// and cross-checked against the column arithmetic derived from the text, so
+// the two independent accounts of "which line is a continuation" have to
+// agree.
+function assertGateCompatList(md, label, lineMeta) {
+  const lines = md.split('\n');
+  if (lineMeta) {
+    assert.strictEqual(lineMeta.length, lines.length,
+      label + ': lineMeta must carry exactly one entry per emitted line, got ' +
+      lineMeta.length + ' for ' + lines.length + ' lines');
+  }
+  let contentCol = -1;
+  lines.forEach((line, i) => {
+    const m = /^( *)(-|\d+\.) /.exec(line);
+    if (m) {
+      contentCol = m[1].length + m[2].length + 1;
+      if (lineMeta) {
+        assert.notStrictEqual(lineMeta[i].marker, '',
+          label + ': line ' + i + ' carries a marker but lineMeta calls it a continuation: ' +
+          JSON.stringify(line));
+      }
+      return;
+    }
+    assert.notStrictEqual(contentCol, -1,
+      label + ': line ' + i + ' has no marker and nothing precedes it to continue: ' +
+      JSON.stringify(line));
+    const lead = /^ */.exec(line)[0].length;
+    assert.strictEqual(lead, contentCol,
+      label + ': line ' + i + ' is a continuation and must sit on its item\'s content ' +
+      'column ' + contentCol + ', got ' + lead + ': ' + JSON.stringify(line));
+    if (lineMeta) {
+      assert.strictEqual(lineMeta[i].marker, '',
+        label + ': line ' + i + ' is a continuation but lineMeta gives it a marker: ' +
+        JSON.stringify(line));
+      assert.strictEqual(lineMeta[i].blockId, lineMeta[i - 1].blockId,
+        label + ': line ' + i + ' continues the previous line, so it must belong to the ' +
+        'SAME block — a continuation attributed to a different block is exactly how a ' +
+        'caller\'s line index once overwrote another item\'s source');
+    }
   });
   assertNoTrailingWhitespace(md, label);
   assert.ok(!md.includes('\n\n'), label + ': emitted block must not contain a blank line, got:\n' + md);
@@ -320,6 +374,59 @@ function assertGateCompatListRoundTrips(md, label) {
   assertGateCompatListRoundTrips(md, 'flat task-block shape');
   assert.strictEqual(md, '- [ ] todo item\n  - nested item\n- plain item',
     'a task item contributes its BULLET width (2), not the checkbox width');
+}
+
+// 13. T8 item 5: a MULTI-LINE list item. The "every emitted line is a marker
+// line" half of the contract above was written when a block owned exactly one
+// source line. It stopped being true when the serializer learned to emit
+// CONTINUATION lines: a hard-wrapped ("lazy continuation") item is 22% of this
+// repo's own list items, its .ed-li-text holds a real newline, and
+// serializeBlocks() re-indents every line after the first to the item's own
+// CONTENT column. The contract is therefore restated, not relaxed — a
+// continuation line has a column requirement of its own, and it is the strict
+// one: one column too few and it lexes as a sibling item or as a lazy line of
+// the WRONG item; four too many and it lexes as an indented code block.
+{
+  const { md, lineMeta, unsupported } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'alpha one\ncontinued two'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'child'),
+    liBlock({ id: '2' }, 'plain'),
+  ]);
+  assert.strictEqual(md, '- alpha one\n  continued two\n  1. child\n- plain',
+    'fixture sanity: the continuation must land on the item\'s content column');
+  assertGateCompatList(md, 'multi-line item', lineMeta);
+  assertGateCompatListRoundTrips(md, 'multi-line item');
+  // The emission is still gate-compatible, and the item is still reported as
+  // MULTILINE — that flag is about which STRUCTURAL operations a caller may
+  // run, not about whether the markdown is well-formed. Conflating the two is
+  // what once made a fifth of every real document read-only.
+  assert.ok(unsupported.indexOf('MULTILINE') !== -1,
+    'a multi-line item is still reported for structural gating, got: ' + JSON.stringify(unsupported));
+}
+
+// 13b. The restated contract must still BITE. A gate assertion that accepts
+// everything is worse than none — it reads as coverage. Each shape below is
+// one of the three ways a continuation line goes wrong, and each must be
+// rejected; the correct one must be accepted.
+{
+  const rejects = (md, why) => {
+    assert.throws(() => assertGateCompatList(md, 'negative'), /content column|nothing precedes/,
+      'assertGateCompatList must reject ' + why + ': ' + JSON.stringify(md));
+  };
+  // one column short: marked lexes this as a LAZY line of the wrong item
+  rejects('- alpha\n continued\n- plain', 'a continuation one column short');
+  // four columns long: marked lexes this as an INDENTED CODE BLOCK
+  rejects('- alpha\n      continued\n- plain', 'a continuation four columns too far');
+  // no marker line yet
+  rejects('  orphan\n- alpha', 'a continuation with nothing before it');
+  // and the correct shape is accepted, including under a 3-column '1. ' parent
+  assertGateCompatList('1. alpha\n   continued\n2. plain', 'positive control');
+  // lineMeta disagreement is caught even when the columns happen to be right
+  assert.throws(
+    () => assertGateCompatList('- alpha\n  continued', 'meta mismatch',
+      [{ blockId: '0', marker: '- ' }, { blockId: '1', marker: '' }]),
+    /SAME block/,
+    'a continuation attributed to a DIFFERENT block must be rejected');
 }
 
 console.log('gate-compat.test.js OK');
