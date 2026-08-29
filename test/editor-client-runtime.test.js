@@ -9512,6 +9512,23 @@ async function clickInsertMenuItem(page, sel, label) {
         // betting on a wall-clock budget (same shape as Finding 6a/6b above).
         await settleEditor(page);
 
+        // T7: the commit this drag triggers moves BOTH tables' start lines, so
+        // there is nothing left to re-resolve against and the drag is dropped
+        // — the right answer, and one that used to happen in complete silence
+        // (the column simply did not move and nothing said why). A dropped
+        // gesture must announce itself.
+        assert.ok(
+          await page.evaluate(() => {
+            const el = document.querySelector('.ed-conflict');
+            return !!el && el.textContent.indexOf('請重試') !== -1;
+          }),
+          'a table gesture dropped because its block could not be re-resolved must ' +
+          'surface a retry banner, got: ' +
+          JSON.stringify(await page.evaluate(() => {
+            const el = document.querySelector('.ed-conflict');
+            return el ? el.textContent : null;
+          })));
+
         // Proof the window this test is about was actually entered: only
         // ensureTableBurstOpen()'s own switchAwayFrom() could have committed
         // the raw editor, since nothing else was clicked.
@@ -10219,6 +10236,272 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally {
         psrv.close();
       }
+    }
+    // ── Task 7: a line the user did not touch must never be rewritten ──────
+    //
+    // §3.4's bystander replay used to be keyed on `multiLineBlockIds`, which
+    // list-md.js derives from `/\n/.test(itemMd)` — the item's serialized
+    // inline text. A markdown HARD BREAK is two trailing spaces rendered as
+    // <br>, and inline-md.js emits <br> as the literal string '<br>' on ONE
+    // line, so such an item never reported multi-line, never reached the
+    // carryOver map, and was re-serialized: its two source lines collapsed
+    // into one '<br>'-bearing line (the file lost a line) in an item the
+    // gesture never touched. A single-line bystander was rewritten too — a
+    // bare '~' comes back '\~' from escapeText(), which marked never treats
+    // as markup.
+    {
+      const bystanderRows = [
+        '# List doc', '',
+        '- hard wrapped one  ',
+        '  second line ~tilde',
+        '- plain tilde ~5px',
+        '- target item', '',
+      ];
+      const { srv: bsrv, url: burl, mdPath: bmdPath, original: bOriginal } =
+        await setupListDoc(bystanderRows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(burl, { waitUntil: 'networkidle0' });
+        const targetSel = await liBlockSelByText(page, 'target item');
+        await openWysiwyg(page, targetSel);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(
+          (s) => { const el = document.querySelector(s); return !!el && el.getAttribute('data-indent') === '1'; },
+          { timeout: 5000 }, targetSel);
+        await settleEditor(page);
+        const after = await saveAndRead(page, bmdPath);
+        const a = bOriginal.split('\n');
+        const b = after.split('\n');
+        assert.strictEqual(b.length, a.length,
+          'a Tab must not add or remove lines — a hard-wrapped bystander collapsing onto ' +
+          'one <br> line is how the count drops; got:\n' + JSON.stringify(after));
+        const moved = [];
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) moved.push(i + 1);
+        assert.deepStrictEqual(moved, [6],
+          'ONLY the Tab target\'s own line may differ; got changed lines ' +
+          JSON.stringify(moved) + ' in:\n' + JSON.stringify(after));
+        assert.strictEqual(b[5], '  - target item',
+          'the target must move by exactly the parent marker\'s two columns, got: ' +
+          JSON.stringify(b[5]));
+        await page.close();
+        console.log('T7: Tab leaves every bystander byte-identical — hard break kept, ' +
+          '~ not escaped — OK');
+      } finally { bsrv.close(); }
+    }
+
+    // ── Task 7: a checkbox toggle is a COLUMN-ONLY operation ───────────────
+    // '[ ]' -> '[x]' changes no content, no line count and no column: by
+    // §4.1's own criterion it is the same class as Tab, so a multi-line task
+    // item must accept it as the TARGET. Both shapes of multi-line are
+    // covered, because they failed differently: the LAZY one reported
+    // MULTILINE and was refused outright ("此清單含不支援的格式，無法調整結
+    // 構"), while the HARD-BREAK one was not even detected and so was
+    // accepted and rewritten — '- [x] task<br>continued \~tilde', two source
+    // lines collapsed into one.
+    {
+      const taskRows = [
+        '# Task doc', '',
+        '- [ ] hard break  ',
+        '  continued ~tilde',
+        '- [ ] lazy wrap',
+        '  wrapped ~5px',
+        '- [ ] other', '',
+      ];
+      const { srv: tsrv, url: turl, mdPath: tmdPath, original: tOriginal } =
+        await setupListDoc(taskRows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const checkSelFor = async (lead) => {
+          const sel = await page.evaluate((t) => {
+            const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+              .find((el) => {
+                const s = el.querySelector(':scope > .ed-li-text');
+                return !!s && s.textContent.indexOf(t) === 0;
+              });
+            return li ? '.ed-block[data-block-id="' + li.getAttribute('data-block-id') +
+              '"] > .ed-li-check' : null;
+          }, lead);
+          assert.ok(sel, 'fixture: no task item starting with ' + JSON.stringify(lead));
+          return sel;
+        };
+        const toggle = async (lead) => {
+          const sel = await checkSelFor(lead);
+          await page.click(sel);
+          // Settles on EITHER outcome so a refusal shows up as the assertion
+          // below rather than as an opaque waitForFunction timeout.
+          await page.waitForFunction((s) => {
+            if (document.querySelector('.ed-conflict')) return true;
+            const el = document.querySelector(s);
+            return !!el && el.getAttribute('data-checked') === '1';
+          }, { timeout: 5000 }, sel);
+          await settleEditor(page);
+          assert.ok(await page.evaluate(() => !document.querySelector('.ed-conflict')),
+            'toggling ' + JSON.stringify(lead) + ' must not raise the structural-refusal banner');
+        };
+        await toggle('hard break');
+        await toggle('lazy wrap');
+        const after = await saveAndRead(page, tmdPath);
+        assert.strictEqual(after,
+          tOriginal.replace('- [ ] hard break', '- [x] hard break')
+            .replace('- [ ] lazy wrap', '- [x] lazy wrap'),
+          'exactly the two checkbox characters may change — hard break, lazy continuation ' +
+          'and both ~ must survive byte-for-byte; got:\n' + JSON.stringify(after));
+        await page.close();
+        console.log('T7: a multi-line task item\'s checkbox toggles (hard break AND lazy ' +
+          'continuation), byte-clean — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // ── Task 7: a HARD-BREAK item refuses Enter, like any other multi-line ──
+    // §4.1 refuses split/convert/delete on a multi-line TARGET because no
+    // caller knows how to rewrite its line range. list-md.js decided
+    // "multi-line" from a '\n' in the surface text, which a hard break does
+    // not produce — so Enter was accepted on one and re-serialized its two
+    // source lines into a single line bearing the literal text '<br>'.
+    {
+      const rows = ['# L', '', '- hard wrapped one  ', '  second line ~tilde', '- other', ''];
+      const { srv: esrv, url: eurl, mdPath: emdPath, original: eOriginal } =
+        await setupListDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(eurl, { waitUntil: 'networkidle0' });
+        const sel = await page.evaluate(() => {
+          const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .find((el) => {
+              const t = el.querySelector(':scope > .ed-li-text');
+              return !!t && t.textContent.indexOf('hard wrapped') === 0;
+            });
+          return li ? '.ed-block[data-block-type="li"][data-block-id="' +
+            li.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(sel, 'fixture: the hard-wrapped item must be on screen');
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+        const banner = await page.evaluate(() => {
+          const el = document.querySelector('.ed-conflict');
+          return el ? el.textContent : null;
+        });
+        assert.ok(banner && banner.indexOf('無法調整結構') !== -1,
+          'Enter on a hard-break item must REFUSE (spec §4.1), got banner: ' +
+          JSON.stringify(banner));
+        const after = await saveAndRead(page, emdPath);
+        assert.strictEqual(after, eOriginal,
+          'a refused Enter must leave the file byte-identical, got:\n' + JSON.stringify(after));
+        await page.close();
+        console.log('T7: Enter refuses a HARD-BREAK item, exactly as it does a lazy one — OK');
+      } finally { esrv.close(); }
+    }
+
+    // ── Task 7: ⠿ / ＋ must not act on the block an id shift landed on ─────
+    // Same root cause the S1 table fix closed (blockmap renumbers ids 0..n-1
+    // on EVERY render): insertBlockBelow()/deleteBlockViaGutter() re-resolved
+    // their target by `data-block-id` AFTER switchAwayFrom() had committed a
+    // dirty editor elsewhere. A commit that changes the BLOCK COUNT without
+    // changing the LINE COUNT — a fenced code block raw-edited into two
+    // paragraphs — shifts every later id by one while every later startLine
+    // stays put, so the captured id names the target's neighbour exactly.
+    {
+      const fenceRows = ['# Doc', '', '```', 'x', '```', '', 'Bravo', '', 'Charlie', ''];
+      const { srv: dsrv, url: durl, mdPath: dmdPath } = await setupBlockOpsDoc(fenceRows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(durl, { waitUntil: 'networkidle0' });
+        const codeSel = await page.evaluate(() => {
+          const el = document.querySelector('.ed-block[data-block-type="code"]');
+          return el ? '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(codeSel, 'fixture: the fenced code block must be on screen');
+        const charlieSel = await paragraphSelByText(page, 'Charlie');
+        await openBlockEditor(page, codeSel);
+        await page.waitForSelector(codeSel + ' textarea.ed-raw');
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          ta.value = 'x\n\ny';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, codeSel);
+        await clickGutterMenuItem(page, charlieSel, '刪除');
+        await settleEditor(page);
+        const after = await saveAndRead(page, dmdPath);
+        assert.ok(/(^|\n)Bravo(\n|$)/.test(after),
+          'the ⠿ delete must not fall on the block the id shift landed on (Bravo), got:\n' + after);
+        assert.ok(!/(^|\n)Charlie(\n|$)/.test(after),
+          'the block the ⠿ was pressed on (Charlie) must be the one deleted, got:\n' + after);
+        assert.strictEqual(after, '# Doc\n\nx\n\ny\n\nBravo\n',
+          'exact bytes after the raw-edit commit + the delete, got:\n' + JSON.stringify(after));
+        await page.close();
+        console.log('T7: ⠿ delete re-resolves its block by startLine across an id renumber — OK');
+      } finally { dsrv.close(); }
+    }
+    {
+      const fenceRows = ['# Doc', '', '```', 'x', '```', '', 'Bravo', '', 'Charlie', ''];
+      const { srv: isrv, url: iurl, mdPath: imdPath } = await setupBlockOpsDoc(fenceRows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(iurl, { waitUntil: 'networkidle0' });
+        const codeSel = await page.evaluate(() => {
+          const el = document.querySelector('.ed-block[data-block-type="code"]');
+          return el ? '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]' : null;
+        });
+        const charlieSel = await paragraphSelByText(page, 'Charlie');
+        await openBlockEditor(page, codeSel);
+        await page.waitForSelector(codeSel + ' textarea.ed-raw');
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          ta.value = 'x\n\ny';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, codeSel);
+        await clickInsertMenuItem(page, charlieSel, '段落');
+        await settleEditor(page);
+        await page.keyboard.type('Inserted');
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        await settleEditor(page);
+        const after = await saveAndRead(page, imdPath);
+        assert.strictEqual(after, '# Doc\n\nx\n\ny\n\nBravo\n\nCharlie\n\nInserted\n',
+          '＋ must insert below the block it was pressed on, not below the one the id ' +
+          'shift landed on; got:\n' + JSON.stringify(after));
+        await page.close();
+        console.log('T7: ＋ insert re-resolves its block by startLine across an id renumber — OK');
+      } finally { isrv.close(); }
+    }
+
+    // ── Task 7: a gesture that CANNOT be re-resolved must say so ───────────
+    // When the intervening commit moves the target's own start line there is
+    // nothing left to re-resolve against, and the conservative answer is to
+    // drop the gesture — which is right, and which used to happen in total
+    // silence: the menu closed, nothing changed, no banner.
+    {
+      const rows = ['# Doc', '', 'Alpha', '', 'Bravo', '', 'Charlie', ''];
+      const { srv: nsrv, url: nurl, mdPath: nmdPath } = await setupBlockOpsDoc(rows);
+      try {
+        const page = await newPage(browser);
+        await page.goto(nurl, { waitUntil: 'networkidle0' });
+        const alphaSel = await paragraphSelByText(page, 'Alpha');
+        const charlieSel = await paragraphSelByText(page, 'Charlie');
+        await openBlockEditor(page, alphaSel);
+        await page.waitForSelector(alphaSel + ' textarea.ed-raw');
+        await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          ta.value = 'Alpha1\n\nAlpha2';
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, alphaSel);
+        await clickGutterMenuItem(page, charlieSel, '刪除');
+        await settleEditor(page);
+        const bannerText = await page.evaluate(() => {
+          const el = document.querySelector('.ed-conflict');
+          return el ? el.textContent : null;
+        });
+        assert.ok(bannerText && bannerText.indexOf('請重試') !== -1,
+          'a dropped ⠿ gesture must surface a banner asking for a retry, got: ' +
+          JSON.stringify(bannerText));
+        const after = await saveAndRead(page, nmdPath);
+        assert.ok(/(^|\n)Bravo(\n|$)/.test(after) && /(^|\n)Charlie(\n|$)/.test(after),
+          'a dropped delete must delete NOTHING — neither the target nor its neighbour, got:\n' + after);
+        await page.close();
+        console.log('T7: an unresolvable ⠿ gesture is dropped WITH a banner, not silently — OK');
+      } finally { nsrv.close(); }
     }
     console.log('editor-client-runtime.test.js OK');
   } finally {
