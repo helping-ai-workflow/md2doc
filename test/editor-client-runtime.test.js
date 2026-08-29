@@ -7020,6 +7020,137 @@ async function clickInsertMenuItem(page, sel, label) {
         'every ancestor marker — OK');
     }
 
+    // ── Round 6: a TASK ancestor keeps the same-line form ──────────────────
+    // Round 5 re-emits a same-line nest's zero-line ancestors ahead of the
+    // edited child, each on a line of its own. For a TASK ancestor that form
+    // is not available: marked reads '[ ]' / '[x]' as a checkbox only when
+    // content follows ON THE SAME LINE, so '- [ ] - b' committed as
+    // '- [ ]\n  - bZ' lexes as '<li>[ ]<ul>…' — the checkbox becomes literal
+    // text and its state stops being machine-readable. It is a smaller loss
+    // than round 5's (the child keeps a parent) but it is still a semantic one.
+    //
+    // Such an item is therefore carried as a PREFIX on its child's line, which
+    // is the source's own form and the brief's other accepted outcome. The
+    // decision lives in lib/editor/list-md.js (see its round-6 note), so BOTH
+    // commit paths inherit it: the tight run below goes through the whole-run
+    // path and the loose one through the per-li degrade path.
+    //
+    // Ancestors decide independently, so a mixed chain interleaves both forms.
+    {
+      const cases = [
+        {
+          n: 'R6 task outer, loose run (per-li degrade path)',
+          rows: ['# D', '', '- [ ] a', '', '- [ ] - b', ''],
+          type: 'b',
+          expect: '# D\n\n- [ ] a\n\n- [ ] - bZ\n',
+          sameAs: '# D\n\n- [ ] a\n\n- [ ] - bZ\n',
+        },
+        {
+          n: 'R6 task outer, tight run (whole-run path)',
+          rows: ['# D', '', '- [ ] a', '- [ ] - b', ''],
+          type: 'b',
+          expect: '# D\n\n- [ ] a\n- [ ] - bZ\n',
+          sameAs: '# D\n\n- [ ] a\n- [ ] - bZ\n',
+        },
+        {
+          n: 'R6 checked outer keeps its state',
+          rows: ['# D', '', '- [x] a', '', '- [x] - b', ''],
+          type: 'b',
+          expect: '# D\n\n- [x] a\n\n- [x] - bZ\n',
+          sameAs: '# D\n\n- [x] a\n\n- [x] - bZ\n',
+        },
+        {
+          // A '1. [ ] ' parent is a THREE-column parent (bullet width; the
+          // checkbox is content, spec §3.4 errata) — and §3.8's ordinal
+          // restart renumbers the run, which is what the reader already shows.
+          n: 'R6 ordered task outer',
+          rows: ['# D', '', '1. [ ] a', '', '1. [ ] - b', ''],
+          type: 'b',
+          expect: '# D\n\n1. [ ] a\n\n2. [ ] - bZ\n',
+          sameAs: '# D\n\n1. [ ] a\n\n1. [ ] - bZ\n',
+        },
+        {
+          n: 'R6 mixed chain: task ancestor above a plain one',
+          rows: ['# D', '', '- [ ] a', '', '- [ ] - - b', ''],
+          type: 'b',
+          expect: '# D\n\n- [ ] a\n\n- [ ] -\n    - bZ\n',
+          sameAs: '# D\n\n- [ ] a\n\n- [ ] - - bZ\n',
+        },
+        {
+          n: 'R6 mixed chain: plain ancestor above a task child',
+          rows: ['# D', '', '- a', '', '- - [ ] b', ''],
+          type: 'b',
+          expect: '# D\n\n- a\n\n-\n  - [ ] bZ\n',
+          sameAs: '# D\n\n- a\n\n- - [ ] bZ\n',
+        },
+        {
+          n: 'R6 task outer, hard-wrapped child',
+          rows: ['# D', '', '- [ ] a', '', '- [ ] - b one', '    cont', ''],
+          type: 'b one',
+          expect: '# D\n\n- [ ] a\n\n- [ ] - b oneZ\n    cont\n',
+          sameAs: '# D\n\n- [ ] a\n\n- [ ] - b oneZ\n    cont\n',
+        },
+      ];
+      const cbStats = (html) => ({
+        boxes: (html.match(/type="checkbox"/g) || []).length,
+        checked: (html.match(/checked=""/g) || []).length,
+      });
+      for (const c of cases) {
+        const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+          const child = await page.evaluate((t) => {
+            const hit = Array.prototype.slice.call(document.querySelectorAll(
+              '.ed-block[data-block-type="li"]')).find((li) => {
+                const s2 = li.querySelector(':scope > .ed-li-text');
+                if (!s2) return false;
+                return s2.textContent.trim() === t ||
+                  s2.textContent.split('\n')[0].trim() === t;
+              });
+            if (!hit) return null;
+            const s2 = hit.querySelector(':scope > .ed-li-text');
+            return { id: hit.getAttribute('data-block-id'),
+                     ce: String(s2.getAttribute('contenteditable')) };
+          }, c.type);
+          assert.ok(child, c.n + ': fixture must render the nested child item');
+          assert.strictEqual(child.ce, 'true',
+            c.n + ': the nested child owns its own line and must stay editable');
+
+          const sel = liSel(child.id);
+          await openWysiwyg(page, sel);
+          await placeCaretInBlockText(page, sel, c.type);
+          await page.keyboard.type('Z');
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await settleEditor(page);
+          const fileText = await saveAndRead(page, lmdPath);
+
+          const gotHtml = plainMarked.parse(fileText);
+          const wantHtml = plainMarked.parse(c.sameAs);
+          const got = cbStats(gotHtml);
+          const want = cbStats(wantHtml);
+          assert.deepStrictEqual(got, want,
+            c.n + ': every checkbox in the source must still BE a checkbox after the save, ' +
+            'with its checked state intact — a marker on a line of its own degrades to the ' +
+            'literal text "[ ]".\n  saved: ' + JSON.stringify(fileText) +
+            '\n  html:  ' + JSON.stringify(gotHtml));
+          assert.ok(got.boxes > 0, c.n + ': fixture must actually contain a checkbox');
+          assert.strictEqual(gotHtml, wantHtml,
+            c.n + ': the edit must not change the tree.\n  saved: ' + JSON.stringify(fileText) +
+            '\n  meant: ' + JSON.stringify(c.sameAs));
+          assert.strictEqual(fileText, c.expect,
+            c.n + ': expected form, got:\n' + JSON.stringify(fileText));
+
+          await page.close();
+        } finally {
+          lsrv.close();
+        }
+      }
+      console.log('per-li WYSIWYG (round 6): a task ancestor of a same-line nest keeps its ' +
+        'checkbox through a child edit, on both commit paths — OK');
+    }
+
     // ── Round 3: a nested item's startLine must be the REAL one ────────────
     // blockmap.js used to LOCATE a child list by matching its text against the
     // item's lines, so an item containing a fenced or indented code block whose

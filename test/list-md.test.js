@@ -888,4 +888,104 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
 }
 
+// 32. Round 6 — a CONTENT-FREE TASK item cannot take a line of its own.
+// marked reads '[ ]' / '[x]' as a checkbox only when content follows ON THE
+// SAME LINE, so the canonical '- [ ]\n  - b' form (which is right for a plain
+// content-free item) downgrades the checkbox to the literal text '[ ]' and the
+// state stops being machine-readable. Such an item is therefore carried as a
+// PREFIX onto its child's line, restoring the source's own same-line form.
+{
+  // (a) task ancestor + child: one emitted line, carrying both markers. The
+  // line belongs to the CHILD (the only one of the two that can be edited),
+  // and its lineMeta indentPrefix is what physically precedes its marker.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', task: true, checked: false, indent: 0 }),
+      liBlock({ id: '1', indent: 1 }, 'b'),
+    ]);
+    assert.deepStrictEqual(r.unsupported, [], 'nothing unsupported here');
+    assert.strictEqual(r.md, '- [ ] - b',
+      'a content-free task item must prefix its child rather than take a line, got:\n' +
+      JSON.stringify(r.md));
+    assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+      'lineMeta must stay parallel to the emitted lines');
+    assert.deepStrictEqual(r.lineMeta, [
+      { blockId: '1', indentPrefix: '- [ ] ', marker: '- ' },
+    ]);
+    const lexed = marked.lexer(r.md);
+    assert.strictEqual(lexed[0].items[0].task, true, 'the outer item is still a TASK item');
+    assert.strictEqual(lexed[0].items[0].checked, false, 'unchecked state preserved');
+    assert.strictEqual(
+      (lexed[0].items[0].tokens || []).filter((t) => t.type === 'list').length, 1,
+      'and the child is still nested inside it');
+  }
+
+  // (b) checked state and an ORDERED task parent (3-column bullet, checkbox
+  // excluded from the width — spec §3.4 errata).
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', type: 'ol', task: true, checked: true, indent: 0 }),
+      liBlock({ id: '1', indent: 1 }, 'b'),
+    ]);
+    assert.strictEqual(r.md, '1. [x] - b', 'ordered task parent keeps its checkbox, got:\n' + r.md);
+    const lexed = marked.lexer(r.md);
+    assert.strictEqual(lexed[0].items[0].checked, true, 'checked state preserved');
+  }
+
+  // (c) a task ancestor ABOVE a plain one: the plain item takes its own line,
+  // with the task prefix standing in front of it, and the child follows at the
+  // serializer's own column. marked reads the same tree as the source form.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', task: true, checked: false, indent: 0 }),
+      liBlock({ id: '1', indent: 1 }),
+      liBlock({ id: '2', indent: 2 }, 'b'),
+    ]);
+    assert.strictEqual(r.md, '- [ ] -\n    - b',
+      'mixed chain: task prefixes, plain takes a line, got:\n' + JSON.stringify(r.md));
+    assert.strictEqual(r.lineMeta.length, r.md.split('\n').length,
+      'lineMeta parallel across a merged line');
+    assert.strictEqual(r.lineMeta[0].indentPrefix, '- [ ] ',
+      "the merged line's indentPrefix is what physically precedes its marker");
+    assert.strictEqual(marked.parse(r.md), marked.parse('- [ ] - - b'),
+      'the mixed chain must be the same tree as the source same-line form');
+  }
+
+  // (d) NO child to attach to: the prefix is flushed onto a line of its own
+  // rather than merged into a SIBLING, which would invent nesting. The
+  // checkbox degrades to literal text there — but that is what a task item
+  // with no content and no child already meant.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', task: true, checked: false, indent: 0 }),
+      liBlock({ id: '1', indent: 0 }, 'b'),
+    ]);
+    assert.strictEqual(r.md, '- [ ]\n- b',
+      'an empty task item with no child must not swallow its sibling, got:\n' +
+      JSON.stringify(r.md));
+    assert.strictEqual(r.lineMeta.length, 2, 'both items still own a line');
+    assert.deepStrictEqual(r.lineMeta.map((m) => m.blockId), ['0', '1']);
+  }
+
+  // (e) trailing flush: an empty task item as the LAST block of the run.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'a'),
+      liBlock({ id: '1', task: true, checked: true, indent: 0 }),
+    ]);
+    assert.strictEqual(r.md, '- a\n- [x]', 'a trailing empty task item still emits, got:\n' + r.md);
+    assert.strictEqual(r.lineMeta.length, r.md.split('\n').length, 'parallel');
+  }
+
+  // (f) a PLAIN content-free item is unchanged by all of the above — it still
+  // takes the canonical line of its own (round 5).
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }),
+      liBlock({ id: '1', indent: 1 }, 'b'),
+    ]);
+    assert.strictEqual(r.md, '-\n  - b', 'plain content-free item keeps its own line, got:\n' + r.md);
+  }
+}
+
 console.log('list-md.test.js OK');
