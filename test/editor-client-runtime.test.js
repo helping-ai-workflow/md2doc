@@ -9557,6 +9557,162 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── S1 Task 4, fix round 1: the ZERO-LINE outer of a same-line nest ────
+    // `- - b` gives the outer item `endLine = startLine - 1` — it owns no
+    // source line at all (blockmap hands back an INVERTED range). It is never
+    // ARMED (canWysiwygForLi refuses via blockOwnsNoLine), but Task 4 gave it
+    // a ⠿ like every other block, which turned two range-taking paths from
+    // unreachable into one click away. Neither commitRangeRemoval() nor
+    // commitRangeEdit() guards `endLine >= startLine`, so both corrupt:
+    //
+    //   刪除        -> commitRangeRemoval(state, 5, 4); the blank-line
+    //                 absorption reads lines[sl-2], which for an inverted
+    //                 range is a blank belonging to a DIFFERENT block, and
+    //                 deletes it. Silent: no error, no banner, block count
+    //                 unchanged. Measured: '# Doc\n\n- a\n\n- - b\n' became
+    //                 '# Doc\n\n- a\n- - b\n'.
+    //   body click  -> the degraded-block branch opens a RAW TEXTAREA inside
+    //                 the list item (RULING F-O forbids exactly this), seeded
+    //                 with '' because extractBlockSource() of an inverted
+    //                 range is empty; committing it runs commitRangeEdit(5, 4)
+    //                 which INSERTS rather than replaces. Measured: typing
+    //                 'ZZZ' produced '# Doc\n\n- a\n\nZZZ\n- - b\n' with the
+    //                 clicked item still sitting there untouched.
+    //
+    // Both are refused at the source now, on the same blockOwnsNoLine()
+    // predicate canWysiwygForLi() already uses, and both surface the existing
+    // refusal banner rather than dying silently. The handle itself stays —
+    // every block gets one (Task 4's requirement); it is the ACTIONS that are
+    // gated.
+    {
+      const { srv: zsrv, url: zurl, mdPath: zmdPath, original: zorig } =
+        await setupListDoc(['# Doc', '', '- a', '', '- - b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(zurl, { waitUntil: 'networkidle0' });
+
+        // The zero-line outer is the indent-0 li whose own .ed-li-text is
+        // empty (its content is its child, which starts on its line).
+        const zeroSel = await page.evaluate(() => {
+          const b = Array.prototype.slice.call(document.querySelectorAll(
+            '.ed-block[data-block-type="li"][data-indent="0"]'))
+            .find((x) => {
+              const s = x.querySelector(':scope > .ed-li-text');
+              return s && s.textContent.trim() === '';
+            });
+          return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(zeroSel, 'sanity: the same-line nest must render a content-free outer block');
+
+        // Task 4's own requirement still holds for THIS block too.
+        assert.strictEqual(
+          await page.evaluate((s) => !!document.querySelector(s + ' > .ed-handle'), zeroSel),
+          true, 'the zero-line outer still gets a ⠿ — the fix gates the ACTIONS, not the handle');
+
+        const blocksBefore = await page.evaluate(() => document.querySelectorAll('.ed-block').length);
+
+        // ── path 1: 刪除 ──
+        await page.hover(zeroSel);
+        await page.click(zeroSel + ' .ed-handle');
+        await page.waitForSelector('.ed-handle-menu');
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
+          '刪除,✕'.split(',').sort().join(','),
+          'sanity: 刪除 is the only range-taking action the menu offers on a li');
+        await page.evaluate(() => {
+          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '刪除').click();
+        });
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')), true,
+          '刪除 on a block that owns no line must REFUSE VISIBLY (banner), not fail silently');
+        // Round-1 fix-of-a-fix: refuseStructuralListEdit() used to be declared
+        // TWICE in this closure (function declarations are last-wins for the
+        // whole scope), so both blockOwnsNoLine() guards silently called the
+        // OLD run-level '此清單含不支援的格式，無法調整結構' banner instead of
+        // the no-source-line wording — a banner appeared, so a presence-only
+        // check like the one above passed while showing the WRONG message.
+        // Assert the text itself so a future shadowing cannot pass silently.
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
+          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          '刪除 on a block that owns no line must show the NO-SOURCE-LINE banner text, ' +
+          'not the run-level structural-refusal message');
+        await page.evaluate(() => {
+          const d = document.querySelector('.ed-conflict button');
+          if (d) d.click();
+        });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-block').length), blocksBefore,
+          'a refused 刪除 must not change the block count');
+        assert.strictEqual(await saveAndRead(page, zmdPath), zorig,
+          '刪除 on the zero-line outer of a same-line nest must leave the file BYTE-IDENTICAL — ' +
+          'commitRangeRemoval(5, 4) otherwise eats a blank line belonging to another block');
+
+        // ── path 2: a plain click on its body ──
+        await page.click(zeroSel + ' > .ed-li-text');
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0,
+          'clicking a list item that owns no line must NOT open a raw textarea — RULING F-O forbids ' +
+          'a textarea inside a li, and extractBlockSource() of an inverted range seeds it empty');
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')), true,
+          'the refused body click must REFUSE VISIBLY (banner), not fail silently');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
+          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          'the refused body click must show the NO-SOURCE-LINE banner text, ' +
+          'not the run-level structural-refusal message');
+        await page.evaluate(() => {
+          const d = document.querySelector('.ed-conflict button');
+          if (d) d.click();
+        });
+        assert.strictEqual(await saveAndRead(page, zmdPath), zorig,
+          'the file must still be byte-identical after the refused body click');
+
+        await page.close();
+        console.log('S1 fix: a li that owns no source line refuses 刪除 and raw-edit, file untouched — OK');
+      } finally {
+        zsrv.close();
+      }
+    }
+
+    // Guard-rail for the fix above: a NORMAL list item's 刪除 must still
+    // delete exactly its own line, and nothing else. MIDDLE item of three, so
+    // neither neighbour is blank and commitRangeRemoval()'s one-adjacent-blank
+    // absorption stays out of the picture — this is purely "did the guard
+    // accidentally refuse a supported block?".
+    {
+      const { srv: nsrv, url: nurl, mdPath: nmdPath } =
+        await setupListDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(nurl, { waitUntil: 'networkidle0' });
+        const bravoSel = await liBlockSelByText(page, 'bravo');
+        await page.hover(bravoSel);
+        await page.click(bravoSel + ' .ed-handle');
+        await page.waitForSelector('.ed-handle-menu');
+        await page.evaluate(() => {
+          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '刪除').click();
+        });
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')), false,
+          'a supported list item must NOT be refused by the owns-no-line guard');
+        assert.strictEqual(await saveAndRead(page, nmdPath),
+          ['# Doc', '', '- alpha', '- charlie', ''].join('\n'),
+          'a normal li\'s 刪除 must still remove exactly its own line');
+        await page.close();
+        console.log('S1 fix: a normal list item\'s 刪除 still deletes exactly its own item — OK');
+      } finally {
+        nsrv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
