@@ -152,6 +152,15 @@ assert.deepStrictEqual(
   const cases = [
     ['- a\n\n  ```\n  - b\n  ```\n\n  - b\n', 7],
     ['- a\n\n      - b\n\n  - b\n', 5],
+    // Branch review, BLOCKING 2: the INLINE-CODE-SPAN shape, which is the one
+    // that actually exercises indexOfAtLineStart(). Both fixtures above pass
+    // on the monotonic `pos` advance alone — the `code` token claims the
+    // lookalike bytes before the `list` token is searched for — so neither of
+    // them reacts to dropping the line-start requirement. An inline span has
+    // no token of its own to consume: `- b` sits INSIDE the parent's `text`
+    // raw, which this walk deliberately skips, so a plain indexOf() from
+    // pos=0 finds the parent's OWN line and the child is placed on it.
+    ['- text with `- b` inline\n  - b\n', 2],
   ];
   cases.forEach(([md, expected]) => {
     const nested = buildBlockMap(md).blocks.filter((b) => b.type === 'li' && b.indent === 1);
@@ -161,6 +170,33 @@ assert.deepStrictEqual(
       ', not the identical text inside the code block — got ' + nested[0].startLine +
       ' (' + JSON.stringify(md.split('\n')[nested[0].startLine - 1]) + ')');
   });
+
+  // Branch review, BLOCKING 2 — the DIRECT assertion on the whole map, not
+  // just on the nested item's startLine.
+  //
+  // indexOfAtLineStart() had no test of any kind: grep across lib/ and test/
+  // found its definition and its single call site and nothing else. What the
+  // shape below costs when the line-start requirement is dropped is not one
+  // wrong startLine, it is BOTH ranges at once, and neither of them
+  // announces itself:
+  //
+  //   correct: [{1,1},{2,2}]   broken: [{1,0},{1,1}]
+  //
+  // The parent's range INVERTS (endLine < startLine), which
+  // blockOwnsNoLine() silently disarms rather than reports, and the child
+  // now points at the parent's source line — so one real keystroke in the
+  // child saves a DUPLICATED line ('  - bZ' alongside the untouched
+  // '  - b'). Stated as the full [startLine, endLine] pair for every block
+  // so an inverted parent cannot pass by having the right startLine.
+  {
+    const md = '- text with `- b` inline\n  - b\n';
+    assert.deepStrictEqual(
+      buildBlockMap(md).blocks.map((b) => [b.type, b.startLine, b.endLine, b.indent]),
+      [['li', 1, 1, 0], ['li', 2, 2, 1]],
+      'a `- b` inside an INLINE CODE SPAN is not a line start, so the child list token ' +
+      'must be located at line 2. Getting [[li,1,0],[li,1,1]] means the search stopped ' +
+      'requiring a line start: the parent owns no line and the child owns the parent\'s.');
+  }
 }
 
 // I3 (re-asserted) + the durable invariant, over the whole corpus this task has
