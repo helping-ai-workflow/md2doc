@@ -230,10 +230,10 @@ async function openBlockEditor(page, sel) {
   }
 }
 
-// Hovers a block to reveal its ⠿ handle, opens its small menu, and clicks
-// the menu item whose exact textContent is `label` ('−' / '+' /
-// 'MD 原始碼' / '✕'). Mirrors the old clickBarButton() helper's role for
-// the retired paragraph/heading bar buttons.
+// Hovers a block to reveal its ⠿ handle, opens its menu, and clicks the menu
+// item whose exact textContent is `label` — S2 §3.7's four: '轉換成 ›' /
+// '複製' / '刪除' / 'MD 原始碼'. Mirrors the old clickBarButton() helper's
+// role for the retired paragraph/heading bar buttons.
 async function clickGutterMenuItem(page, sel, label) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -262,6 +262,51 @@ async function clickGutterMenuItem(page, sel, label) {
       if (attempt >= 3 || !STALE_NODE_RE.test(String(err && err.message))) throw err;
     }
   }
+}
+
+// S2 Task 2: hovers a block, clicks its ⠿ handle and waits for the menu to be
+// on screen. Sibling to clickGutterMenuItem() above — that one opens the menu
+// as a side effect of clicking an item in it; this one is for the scenarios
+// that inspect the OPEN menu without pressing anything in it.
+async function openGutterMenu(page, sel) {
+  await settleEditor(page);
+  const menuOpen = await page.evaluate(
+    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0, sel);
+  if (menuOpen) return;
+  await page.hover(sel);
+  await page.click(sel + ' .ed-handle');
+  await page.waitForFunction(
+    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+    { timeout: 5000 }, sel);
+}
+
+// S2 Task 2: the whole 轉換成 gesture — open the ⠿ menu on `sel`, open its
+// 轉換成 submenu, click the target whose exact label is `targetLabel`, and
+// wait for the menu to tear itself down (which is what proves the conversion
+// actually fired rather than the submenu merely toggling).
+async function convertVia(page, sel, targetLabel) {
+  await clickGutterMenuItem(page, sel, '轉換成 ›');
+  await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+  await page.evaluate((label) => {
+    const b = Array.from(document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+      .find((x) => x.textContent === label);
+    if (!b) throw new Error('no submenu item labelled ' + label);
+    b.click();
+  }, targetLabel);
+  await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+  await settleEditor(page);
+}
+
+// S2 Task 2: selector for the FIRST block of `type` in document order. Block
+// ids are re-minted on every render, so a conversion scenario must re-resolve
+// between steps rather than hold one selector across a commit.
+async function blockSelByType(page, type) {
+  const id = await page.evaluate((t) => {
+    const el = document.querySelector('.ed-block[data-block-type="' + t + '"]');
+    return el ? el.getAttribute('data-block-id') : null;
+  }, type);
+  assert.ok(id !== null, 'no block of type ' + type + ' on the page');
+  return '.ed-block[data-block-id="' + id + '"]';
 }
 
 // Opens the WYSIWYG editor on a block — Phase 3 Task 2: paragraph/heading
@@ -1557,17 +1602,18 @@ async function clickInsertMenuItem(page, sel, label) {
         return !lb || lb.hidden;
       }, { timeout: 3000 });
 
-      // ⠿ handle: hover reveals it, click opens the small menu (heading ±
-      // for a heading, MD 原始碼, close) — replaces the old bar's ✎/MD combo.
+      // ⠿ handle: hover reveals it, click opens the menu — replaces the old
+      // bar's ✎/MD combo. S2 §5.4 fallout: the heading ± pair moved to Tab /
+      // Shift+Tab (§3.5) and ✕ is gone (§3.7 closes by Esc / outside click),
+      // so the four items are now 轉換成 › / 複製 / 刪除 / MD 原始碼.
       await page.hover(selHeading);
       await page.click(selHeading + ' .ed-handle');
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
           .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-        // §10-gap fix: the ⠿ menu also gained a 刪除 (delete block) item.
-        '+,MD 原始碼,−,✕,刪除'.split(',').sort().join(','),
-        'the ⠿ menu on a heading must show ± / MD 原始碼 / 刪除 / ✕'
+        '轉換成 ›,複製,刪除,MD 原始碼'.split(',').sort().join(','),
+        'the ⠿ menu on a heading must show 轉換成 › / 複製 / 刪除 / MD 原始碼'
       );
       // The MD escape hatch forces raw-edit even on a WYSIWYG-eligible block
       // — the direct migration of the old bar's MD button.
@@ -1585,26 +1631,229 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selHeading);
 
-      // A non-heading block's ⠿ menu must hide ± (only MD 原始碼 / ✕ visible).
+      // §5.4 fallout: a non-heading block used to be the case that HID the
+      // heading ± pair. There is no ± any more and no per-type hiding left on
+      // a paragraph at all — 轉換成 is offered on every block except a table
+      // (§7) — so the migrated assertion is that a paragraph really does get
+      // 轉換成, and Esc (not a ✕ button) is what closes the menu.
       await page.hover(selA);
       await page.click(selA + ' .ed-handle');
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
-          return minus ? minus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
-        true,
-        'a non-heading block\'s ⠿ menu must hide the heading ± buttons'
+        false,
+        'a paragraph block\'s ⠿ menu must offer 轉換成 ›'
       );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
       await page.close();
       console.log('always-on: click = caret/focus, lightbox-exempt, ⠿ handle opens menu + MD escape hatch — OK');
+    }
+
+    // ── S2 Task 2: the ⠿ menu is VERTICAL and carries a 轉換成 submenu ──────
+    //    Spec §3.7 fixes the item list to 轉換成 › / 複製 / 刪除 / MD 原始碼
+    //    (no ✕, no heading ±); §3.2 fixes the submenu's twelve targets; §7
+    //    excludes a table block from 轉換成 and RULING F-O excludes a list
+    //    item from MD 原始碼. setupTableDoc() is used purely as the generic
+    //    "isolated doc + server" helper (it is byte-identical to
+    //    setupListDoc()) so none of these scenarios can leak undo/save state
+    //    into another.
+    {
+      const { srv: s2srv, url: s2url } = await setupTableDoc(['# Heading', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2url, { waitUntil: 'networkidle0' });
+
+        const headingSel = await blockSelByType(page, 'heading');
+        await openGutterMenu(page, headingSel);
+        const items = await page.evaluate(() => {
+          const menu = document.querySelector('.ed-handle-menu');
+          const btns = Array.from(menu.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden);
+          return {
+            labels: btns.map((b) => b.textContent),
+            // Stacked, not in a row: every button shares a left edge and each
+            // sits strictly below the previous one.
+            lefts: Array.from(new Set(btns.map((b) => Math.round(b.getBoundingClientRect().left)))),
+            monotonicTop: btns.every((b, i, a) => i === 0 ||
+              b.getBoundingClientRect().top >= a[i - 1].getBoundingClientRect().bottom - 1),
+            flexDir: getComputedStyle(menu).flexDirection,
+          };
+        });
+        assert.deepStrictEqual(items.labels, ['轉換成 ›', '複製', '刪除', 'MD 原始碼'],
+          'spec 3.7 names these four, in this order, and no ✕');
+        assert.strictEqual(items.lefts.length, 1,
+          'a vertical menu has one left edge, got ' + JSON.stringify(items.lefts));
+        assert.strictEqual(items.monotonicTop, true, 'each item must sit below the previous one');
+        assert.strictEqual(items.flexDir, 'column', 'flex-direction must be column');
+
+        // No ✕ any more; Esc and an outside click both close.
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .some((b) => b.textContent === '✕')),
+          false, 'spec 3.7 removes ✕');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+        await openGutterMenu(page, headingSel);
+        await page.mouse.click(5, 5);
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+
+        // 轉換成 grows a submenu to the RIGHT carrying the twelve §3.2 targets.
+        await clickGutterMenuItem(page, headingSel, '轉換成 ›');
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+        const sub = await page.evaluate(() => {
+          const s = document.querySelector('.ed-handle-submenu');
+          const parent = document.querySelector('.ed-handle-menu').getBoundingClientRect();
+          return {
+            labels: Array.from(s.querySelectorAll('.ed-handle-menu-btn')).map((b) => b.textContent),
+            left: Math.round(s.getBoundingClientRect().left),
+            parentRight: Math.round(parent.right),
+          };
+        });
+        assert.deepStrictEqual(sub.labels,
+          ['文字', '標題 1', '標題 2', '標題 3', '標題 4', '標題 5', '標題 6',
+            '項目符號列表', '編號列表', '待辦清單', '程式碼', '引用'],
+          'spec 3.2 v1 list — 折疊列表 is explicitly NOT in this version');
+        assert.ok(sub.left >= sub.parentRight - 2,
+          'the submenu grows to the right of the menu, got left=' + sub.left +
+          ' vs right=' + sub.parentRight);
+
+        await page.keyboard.press('Escape');
+        await page.close();
+        console.log('S2 ⠿ menu: vertical, four §3.7 items, 轉換成 submenu of twelve §3.2 targets — OK');
+      } finally {
+        s2srv.close();
+      }
+    }
+
+    // ── S2 Task 2: 轉換成 on a block that owns its own lines (paragraph ↔
+    //    heading ↔ quote ↔ code). List sources and list targets land in
+    //    Tasks 3-5 and refuse until then. ────────────────────────────────
+    {
+      const { srv: s2bSrv, url: s2bUrl, mdPath: s2bMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 2');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const els = document.querySelectorAll('.ed-block[data-block-type="heading"]');
+            return els.length === 2 ? els[1].querySelector('*').tagName : null;
+          }),
+          'H2', 'the converted block is an H2 now');
+        assert.strictEqual(await saveAndRead(page, s2bMdPath), '# Doc\n\n## A paragraph.\n',
+          'exact bytes: one gesture, one heading, nothing else touched');
+
+        await page.close();
+        console.log('S2 轉換成 › 標題 2: a paragraph becomes an H2 and saves byte-exactly — OK');
+      } finally {
+        s2bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2cSrv, url: s2cUrl, mdPath: s2cMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '引用');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\n> A paragraph.\n', 'to quote');
+        await convertVia(page, await blockSelByType(page, 'blockquote'), '程式碼');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\n```\nA paragraph.\n```\n', 'to code');
+        await convertVia(page, await blockSelByType(page, 'code'), '文字');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\nA paragraph.\n',
+          'back to text, byte-identical');
+
+        await page.close();
+        console.log('S2 轉換成: 引用 / 程式碼 round-trip through 文字, byte-identical — OK');
+      } finally {
+        s2cSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2dSrv, url: s2dUrl, mdPath: s2dMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 3');
+        await page.waitForFunction(() => !!document.querySelector('.content h3'), { timeout: 5000 });
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        // Wait for the undo to land, but let the WAIT fail silently and assert
+        // afterwards: a bare waitForFunction reports a bare TimeoutError, which
+        // says nothing about what this scenario is guarding.
+        await page.waitForFunction(() => !document.querySelector('.content h3'), { timeout: 5000 })
+          .catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.content h3')), false,
+          'one Ctrl+Z must undo the whole conversion — spec 3.4, one gesture is one op');
+        assert.strictEqual(await saveAndRead(page, s2dMdPath), '# Doc\n\nA paragraph.\n',
+          'one Ctrl+Z restores the file exactly — spec 3.4, one gesture is one op');
+
+        await page.close();
+        console.log('S2 轉換成: one conversion is exactly one undo op — OK');
+      } finally {
+        s2dSrv.close();
+      }
+    }
+
+    // ── S2 Task 2: the two per-type visibility rules, re-applied on every
+    //    open because the menu is a SINGLETON node moved between blocks ───
+    {
+      const { srv: s2eSrv, url: s2eUrl } =
+        await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2eUrl, { waitUntil: 'networkidle0' });
+
+        await openGutterMenu(page, await tableBlockSel(page, 0));
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).includes('轉換成 ›')),
+          false, 'spec 7: no 轉換成 for a table block');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: a table block offers no 轉換成 (spec 7) — OK');
+      } finally {
+        s2eSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2fSrv, url: s2fUrl } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2fUrl, { waitUntil: 'networkidle0' });
+
+        await openGutterMenu(page, await liBlockSelByText(page, 'alpha'));
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent)),
+          ['轉換成 ›', '複製', '刪除'],
+          'RULING F-O forbids openRawEditor on a list item, permanently');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: a list item still offers no MD 原始碼 (RULING F-O) — OK');
+      } finally {
+        s2fSrv.close();
+      }
     }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
@@ -1747,9 +1996,13 @@ async function clickInsertMenuItem(page, sel, label) {
       console.log('degrade block click->textarea: image paragraph opens raw-edit immediately on click — OK');
     }
 
-    // ── Migrated + Phase 3 Task 2 RED scenario "⠿ menu heading ±": the ⠿
-    //    handle's small menu shows ± only for heading blocks; clicking +
-    //    changes the '#' count in the source after commit ────────────────
+    // ── §5.4 fallout, migrated from "⠿ menu heading ±": §3.5 moved the ±
+    //    pair onto Tab / Shift+Tab and §3.7 replaced it with 轉換成 › 標題 N,
+    //    so the same three facts are asserted through the new gesture — the
+    //    item is offered on a heading AND on a paragraph (only a table is
+    //    excluded, §7), the menu closes without a ✕ button, and the source's
+    //    '#' count really does change after commit. The expected file bytes
+    //    are unchanged from the ± version: '# Heading' -> '## Heading'. ────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -1763,24 +2016,15 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-          return plus ? plus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
         false,
-        'heading block: the ⠿ menu\'s + button must be visible'
+        'heading block: the ⠿ menu\'s 轉換成 › item must be visible'
       );
-      assert.strictEqual(
-        await page.evaluate(() => {
-          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
-          return minus ? minus.hidden : null;
-        }),
-        false,
-        'heading block: the ⠿ menu\'s − button must be visible'
-      );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      // No ✕ any more — a click outside the menu is what closes it (§3.7).
+      await page.mouse.click(5, 5);
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
       const nonHeadingId = await page.evaluate(() =>
@@ -1791,25 +2035,18 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-          return plus ? plus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
-        true,
-        'non-heading block: the ⠿ menu\'s + button must stay hidden'
+        false,
+        'non-heading block: 轉換成 › is offered here too — unlike the ± pair it replaced'
       );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      // …and Esc is the other way to close it.
+      await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
-      await page.hover(sel);
-      await page.click(sel + ' .ed-handle');
-      await page.waitForSelector('.ed-handle-menu');
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-        btn.click();
-      });
+      await convertVia(page, sel, '標題 2');
       await page.waitForFunction(
         (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
         {}, sel
@@ -1817,7 +2054,7 @@ async function clickInsertMenuItem(page, sel, label) {
       assert.strictEqual(
         await page.evaluate(() => !document.querySelector('.ed-handle-menu')),
         true,
-        'the ⠿ menu must close itself once a heading-depth op is clicked'
+        'the ⠿ menu must close itself once a conversion is clicked'
       );
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
@@ -1825,10 +2062,11 @@ async function clickInsertMenuItem(page, sel, label) {
       await awaitSaveSettled(page);
       const fileText2 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/^## Heading/m.test(fileText2),
-        'heading ±: clicking + must increase the heading depth in the source (# -> ##)');
+        '轉換成 › 標題 2 must rewrite the heading depth in the source (# -> ##)');
 
       await page.close();
-      console.log('⠿ menu heading ±: shown only for headings, + increases depth and persists to file — OK');
+      console.log('⠿ menu 轉換成: offered on heading and paragraph, Esc/outside-click close it, ' +
+        '標題 2 persists to file — OK');
     }
 
     // ── Task 3: Shift+Enter inserts <br> instead of committing; a later
@@ -8016,10 +8254,13 @@ async function clickInsertMenuItem(page, sel, label) {
         // eliminate) the window for a stale-handle race in what follows.
         await new Promise((r) => setTimeout(r, 150));
 
-        // 2) heading ± via the ⠿ handle menu's '+' — a direct commitEdit(),
-        // never a burst (see changeHeadingDepth()'s own comment).
+        // 2) heading depth via the ⠿ handle menu — a direct commitRangeEdit(),
+        // never a burst. §5.4 fallout: this used to press the menu's '+', which
+        // §3.5 moved onto Tab and §3.7 replaced with 轉換成 › 標題 N. Same
+        // resulting bytes ('# Heading One' -> '## Heading One'), asserted
+        // against `expectedLines[0]` further down, unchanged.
         const selHeading = '.ed-block[data-block-type="heading"]';
-        await clickGutterMenuItem(page, selHeading, '+');
+        await convertVia(page, selHeading, '標題 2');
         await page.waitForFunction(
           (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
           {}, selHeading
@@ -8500,18 +8741,44 @@ async function clickInsertMenuItem(page, sel, label) {
           { timeout: 2000 }, sel
         );
 
-        // Click the menu's '+' — resolves (commits) the dirty burst via
-        // switchAwayFrom() first, THEN bumps the heading depth.
+        // §5.4 fallout: the ± pair the original scenario drove is gone (§3.5
+        // moved it to Tab, §3.7 replaced the menu row with 轉換成 › 標題 N).
+        // The 5a/5c contract is unchanged and is what this still asserts —
+        // opening the submenu and clicking 標題 2 resolves (commits) the dirty
+        // burst via switchAwayFrom() first, THEN rewrites the heading. 5c is
+        // if anything harder through this path: the burst's own commit
+        // rewrites THIS block's source, so the re-resolve cannot lean on
+        // reresolveBlockEl()'s source fingerprint.
         await page.evaluate((s) => {
           const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
-            .find((b) => b.textContent === '+' && !b.hidden);
-          if (!btn) throw new Error('+ button not found');
+            .find((b) => b.textContent === '轉換成 ›' && !b.hidden);
+          if (!btn) throw new Error('轉換成 › button not found');
           btn.click();
         }, sel);
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+        await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+            .find((b) => b.textContent === '標題 2');
+          if (!btn) throw new Error('標題 2 submenu item not found');
+          btn.click();
+        });
 
+        // Let the wait fail silently and assert afterwards: 5c's failure mode
+        // is a gesture that is DROPPED (the block's own burst commit rewrote
+        // its source, so the re-resolve's fingerprint misses), and a bare
+        // TimeoutError names none of that.
         await page.waitForFunction(
           (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
           { timeout: 5000 }, sel
+        ).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const h = document.querySelector(s + ' > *');
+            return h ? h.tagName : null;
+          }, sel),
+          'H2',
+          '5c: the conversion must re-resolve the LIVE block after its own dirty burst ' +
+          'committed — a dropped gesture leaves the heading at H1'
         );
 
         await page.keyboard.down('Control');
@@ -9817,13 +10084,13 @@ async function clickInsertMenuItem(page, sel, label) {
         const liMenu = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
-        assert.strictEqual(liMenu, '刪除,✕'.split(',').sort().join(','),
-          "a list item's ⠿ menu must show only 刪除 / ✕ — no heading ±, and no MD 原始碼 (RULING F-O), got " +
+        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 複製,
+        // so a li now shows three of the four items — everything except
+        // MD 原始碼, which RULING F-O forbids on a list item permanently.
+        assert.strictEqual(liMenu, '轉換成 ›,複製,刪除'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show 轉換成 › / 複製 / 刪除 — no MD 原始碼 (RULING F-O), got " +
           JSON.stringify(liMenu));
-        await page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-          btn.click();
-        });
+        await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
         // ...and the hiding must be per-type, not sticky: the SAME singleton
@@ -9848,10 +10115,7 @@ async function clickInsertMenuItem(page, sel, label) {
             false,
             'MD 原始碼 must be visible again on a non-li block — the hide is per-type, not sticky'
           );
-          await page.evaluate(() => {
-            const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-            btn.click();
-          });
+          await page.keyboard.press('Escape');
           await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
         }
 
@@ -9923,8 +10187,9 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-          '刪除,✕'.split(',').sort().join(','),
-          'sanity: 刪除 is the only range-taking action the menu offers on a li');
+          '轉換成 ›,複製,刪除'.split(',').sort().join(','),
+          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 複製; ' +
+          '刪除 is still the item this scenario drives');
         await page.evaluate(() => {
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .find((b) => b.textContent === '刪除').click();

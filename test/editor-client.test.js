@@ -590,6 +590,7 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
     'history.js': historySrc,
     'blockmap.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'blockmap.js'), 'utf8'),
     'indent-clamp.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'indent-clamp.js'), 'utf8'),
+    'convert-md.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'convert-md.js'), 'utf8'),
     'server.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'server.js'), 'utf8'),
   };
   Object.keys(scanned).forEach((name) => {
@@ -735,8 +736,10 @@ function countInCode(source, needle) {
     'redo). Every OTHER rollback must go through rollbackFailedRender(), which ' +
     'declines when the commit pushed nothing; found ' + undoCalls);
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
-  assert.strictEqual(helperCalls, 8,
-    'the helper must be DECLARED once, EXPORTED once, and used at all six ' +
+  // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
+  // so the expected total is DECLARED once + EXPORTED once + 7 uses = 9.
+  assert.strictEqual(helperCalls, 9,
+    'the helper must be DECLARED once, EXPORTED once, and used at all seven ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
