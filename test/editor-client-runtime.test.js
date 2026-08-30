@@ -16427,6 +16427,370 @@ async function gutterGeometry(page, sel) {
     }
 
 
+    // ── S3 Task 6: batch convert / duplicate / delete ──────────────────────
+    // The plan's central constraint, re-measured on this branch:
+    // convertListItemAway() split its run at `run.indexOf(liEl)` and
+    // deleteListItemViaGutter() did `run.filter((el) => el !== liEl)` — both
+    // hard-coded EXACTLY ONE operated item. Batching means rewriting them to
+    // take a contiguous index RANGE, never calling them in a loop: a loop
+    // re-renders between items and invalidates every id in between, which is
+    // the defect class recorded twice in client.js (a fenced block raw-edited
+    // into two paragraphs changes the BLOCK count without changing the LINE
+    // count, so an id-indexed delete hit the wrong block; and the same shape
+    // silently rewrote a neighbouring table).
+    //
+    // Every scenario below states its preconditions before the gesture: what
+    // the file held, that the selection really existed with the members it
+    // claims, and — for a refusal — that the fixture really is in the state
+    // that triggers the refusal. A refusal test whose fixture cannot express
+    // the shape under test is green on a build that refuses everything.
+    {
+      const t6Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t6Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Every block's identity as the batch machinery sees it: the id the DOM
+      // addresses it by, its type, its indent, and the source line range off
+      // `blocks`. A phantom (the outer item of a same-line nest) shows up here
+      // with an INVERTED range, which is how the gap scenario proves its own
+      // fixture rather than asserting a gap it merely believes in.
+      const t6Blocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b, i) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return {
+            i: i,
+            type: el ? el.getAttribute('data-block-type') : null,
+            indent: el ? el.getAttribute('data-indent') : null,
+            lines: [b.startLine, b.endLine],
+          };
+        }));
+      const t6Undo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+      const t6Sel3 = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+
+      // §3.6 「整批轉換」 + §4.3 rule 1. Three list items out of a four-item
+      // run become three paragraphs in ONE commit. The ⠿ is pressed on the
+      // MIDDLE member, which is what separates "operates on the set" from
+      // "operates on the block you clicked".
+      await s3Scenario('a batch convert rewrites every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]], ['li', [5, 5]],
+              ['li', [6, 6]]],
+            'fixture shape: a heading and a four-item run on lines 3..6');
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [4, 4], [5, 5]],
+              domSelectedLines: [[3, 3], [4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: a real THREE-member selection stands — model and paint — before '
+            + 'the menu is touched. Got ' + JSON.stringify(before));
+
+          await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+
+          // Captured BEFORE the save: the collapse is what the operation declared,
+          // and nothing a Ctrl+S does should be able to stand in for it.
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\n- delta\n',
+            'all THREE members convert in one commit, each its own paragraph, and the '
+            + 'fourth item is left as a list. A one-item-short range leaves a member '
+            + 'behind or duplicates it. Got ' + JSON.stringify(after));
+          // MEASURED, not reasoned: marked emits a `space` token for each blank
+          // separator, and the heading's own trailing newline is absorbed into it.
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'paragraph', 'space', 'paragraph', 'space', 'paragraph', 'space',
+              'list'],
+            'and the saved bytes re-lex as three separate paragraphs plus the surviving '
+            + 'list — not as a lazy continuation of the item above (§4.3 rule 1)');
+
+          assert.deepStrictEqual(sel,
+            { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]],
+              domSelectedLines: [[3, 3], [5, 5], [7, 7]], focusHolderId: '3' },
+            '§3.3: 操作後集合塌縮為操作結果所涵蓋的行區間 — the three CONVERTED blocks, '
+            + 'not the whole commit range (which is the entire run, bystander included). '
+            + 'Got ' + JSON.stringify(sel));
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op. Three ops would leave this '
+            + 'partially converted after a single Ctrl+Z');
+        }, 'T6');
+
+      // §3.6 「Delete 整批刪」. Two members out of a four-item run.
+      await s3Scenario('a batch delete removes every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 4, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: bravo and charlie really are the set. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'charlie'), '刪除');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'both members leave in one commit and the survivors are re-serialized as one '
+            + 'run. Got ' + JSON.stringify(after));
+          assert.strictEqual(sel, null,
+            '§3.3 + §4.4: a delete produces no lines, so the collapse range does not '
+            + 'resolve and the set is CLEARED rather than left standing over lines that '
+            + 'now belong to somebody else');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T6');
+
+      // §3.6 「建立副本」 over a set, on an ORDERED run so §3.8's renumbering
+      // has to run across the copies too.
+      await s3Scenario('a batch duplicate copies the whole set, renumbered, in one undo op',
+        '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+              domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+            'precondition: alpha and bravo really are the set. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after,
+            '# Doc\n\n1. alpha\n2. bravo\n3. alpha\n4. bravo\n5. charlie\n',
+            'BOTH members are copied, in their own order, after everything the set owns — '
+            + 'and §3.8 renumbers the whole run over the copies. Got ' +
+            JSON.stringify(after));
+
+          assert.deepStrictEqual(sel,
+            { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+              domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+            '§3.3: the copies land BELOW everything the set owns, so the collapse range is '
+            + 'the originals\' own lines. Got ' + JSON.stringify(sel));
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T6');
+
+      // §3.4's clamp under a BATCH delete: the whole operand set is handed to
+      // clampIndents() as one array of operated indices, so the survivors that
+      // lost their parent form ONE segment and move by ONE delta. Clamping them
+      // item-by-item is what adopts sibling #2 into sibling #1 (§3.4 rule 3's
+      // own worked example).
+      await s3Scenario('a batch delete re-anchors every survivor that lost its parent',
+        '# Doc\n\n- a\n  - a1\n  - a2\n  - a3\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '1', [6, 6]]],
+            'fixture shape: one indent-0 parent with three indent-1 children — deleting '
+            + 'the parent AND the first child is what leaves a2/a3 with no anchor');
+
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: a and a1 really are the set. Got ' + JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'a1'), '刪除');
+          await settleEditor(page);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- a2\n- a3\n',
+            'both survivors move left TOGETHER. Two columns of dangling indent after a '
+            + 'heading is not a display glitch — at four it lexes as an indented code '
+            + 'block, and at two it is a list whose items the file and the screen '
+            + 'disagree about. Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(lexTypes(after), ['heading', 'list'],
+            'and nothing was left dangling for marked to read as something else');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op');
+        }, 'T6');
+
+      // §3.4 rule 3, the batch ANCHOR. 「多 block 操作的錨點 = 選取集合中最小的
+      // 舊 indent，不是第一個成員」. The set here runs DEEP → SHALLOW (b at
+      // indent 1, then c at indent 0), so the two answers differ, and the
+      // survivors d and e are same-level siblings whose relationship is what
+      // the rule protects: with the minimum anchor they form ONE segment and
+      // move together; with the first member's anchor they are segmented one
+      // at a time and `e` gets ADOPTED by `d`.
+      await s3Scenario('the batch anchor is the set\'s minimum old indent, not its first member',
+        '# Doc\n\n- a\n  - b\n- c\n  - d\n  - e\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '0', [5, 5]], ['li', '1', [6, 6]], ['li', '1', [7, 7]]],
+            'fixture shape: the set (lines 4-5) runs indent 1 then indent 0, so its '
+            + 'minimum old indent (0) is NOT its first member\'s (1) — that is the whole '
+            + 'point of this fixture and a set that does not have that shape cannot '
+            + 'express the defect');
+
+          await t6Sel3(page, 4, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5]],
+            'precondition: b and c really are the set. Got ' + JSON.stringify(before));
+
+          await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- a\n\nb\n\nc\n\n- d\n- e\n',
+            '§3.4 rule 3: d and e lost the same anchor at the same time, so ONE delta '
+            + 'applies to the whole segment and they stay SIBLINGS. Anchoring on the '
+            + 'first member (indent 1) segments them separately — d moves to 0, e\'s '
+            + 'bound is then 1 so it keeps indent 1 and is adopted as d\'s child, which '
+            + 'is a restructure of content the user never selected. Got ' +
+            JSON.stringify(after));
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'list', 'space', 'paragraph', 'space', 'paragraph', 'space', 'list'],
+            'and no dangling indent lexed as an indented code block');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op');
+        }, 'T6');
+
+      // §3.3's second membership rule: 「grip 在集合外 → 先把集合換成該單一
+      // block 再作用」. The bytes are what prove it — a build that answered
+      // 'batch' here would duplicate alpha and bravo as well.
+      await s3Scenario('a grip OUTSIDE the set operates on that block alone and becomes the set',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: alpha and bravo are the set, and delta is NOT in it. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'delta'), '建立副本');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n- delta\n',
+            'only DELTA is duplicated — the standing selection over alpha/bravo is '
+            + 'discarded, not operated on. Got ' + JSON.stringify(after));
+
+          assert.deepStrictEqual(sel.memberLines, [[6, 6]],
+            '§3.3: 先把集合換成該單一 block 再作用 — the set is now delta alone, not the '
+            + 'two blocks the user had selected. Got ' + JSON.stringify(sel));
+        }, 'T6');
+
+      // Task 1 carry 2: a gap in `blocks` is NOT only what a disjoint
+      // selection produces. A no-line PHANTOM (the outer item of a same-line
+      // nest) sits between two real members, so an entirely natural line range
+      // cannot be expressed as one contiguous index range.
+      await s3Scenario('a set with a phantom between its members refuses, byte-identical',
+        '# Doc\n\n- a\n- - b\n- c\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t6Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 3]], ['li', [4, 4]],
+              ['li', [5, 5]]],
+            'fixture shape: the same-line nest `- - b` emits a PHANTOM at index 2 whose '
+            + 'range is INVERTED ({startLine:4, endLine:3} — it owns no source line), '
+            + 'sitting BETWEEN the two real members. Got ' + JSON.stringify(shape));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4], [5, 5]],
+            'precondition: three real members — the phantom is excluded from the set '
+            + '(membersOf() drops a block that owns no line) but it is still THERE, at '
+            + 'index 2, which is exactly the gap. Got ' + JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'c'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page), '選取範圍不連續，無法整批操作',
+            'the gap must refuse with its OWN banner — "nothing selected" and "a set with '
+            + 'a hole in it" are different states and spanIsContiguous([]) is true, so '
+            + 'they cannot share a gate');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and a refusal must not touch one byte');
+        }, 'T6');
+
+      // §4.3's run-wide gate under a batch: every member is a target, so a run
+      // that cannot be structurally edited refuses the whole gesture. The
+      // degradation is asserted through the serializer itself, not assumed
+      // from the fixture's shape.
+      await s3Scenario('a batch over a degraded run refuses, byte-identical',
+        '# Doc\n\n- alpha\n\n- bravo\n\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const degraded = await page.evaluate(() => {
+            const lis = [].slice.call(
+              document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return window.md2docListMd.serializeBlocks(lis).unsupported;
+          });
+          assert.ok(degraded.length > 0 && degraded.indexOf('P') !== -1,
+            'precondition: the blank lines make this ONE LOOSE list, so every item renders '
+            + 'as a <p> and serializeBlocks() reports it unsupported — that is what makes '
+            + 'the run structurally un-editable. Got unsupported = ' +
+            JSON.stringify(degraded));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: a real two-member selection stands over the degraded run. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'bravo'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page), '此清單含不支援的格式，無法調整結構',
+            '§4.1/§4.3: the run-wide gate answers before any mutation');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T6');
+
+      // Scope boundary, stated as a refusal rather than guessed at: a span
+      // holding BOTH list items and non-list blocks is neither a run
+      // re-serialization nor a plain line splice, and the blank-line policy at
+      // the seam between them has no ruling in the spec.
+      await s3Scenario('a set mixing list items and other blocks refuses, byte-identical',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t6Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['li', [5, 5]], ['li', [6, 6]]],
+            'fixture shape: a paragraph immediately above a two-item run, adjacent in '
+            + '`blocks` so the span is contiguous and the refusal is about the KINDS, not '
+            + 'about a gap. Got ' + JSON.stringify(shape));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really holds the paragraph AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'bravo'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            'the mixed span refuses with its own banner, distinct from the gap one');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T6');
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
