@@ -14356,7 +14356,10 @@ async function clickInsertMenuItem(page, sel, label) {
     // setupTableDoc()/setupListDoc() above (no undo-stack or save state can
     // leak between them, and the shared setup() doc's fixed block indices
     // stay undisturbed).
-    const s3Scenario = async (label, md, fn) => {
+    // `tag` names the task the scenario belongs to (T3 reuses this helper
+    // unchanged); it defaults to T2 so every pre-existing call site keeps the
+    // exact console line it had.
+    const s3Scenario = async (label, md, fn, tag) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-s3-'));
       const mdPath = path.join(dir, 'doc.md');
       fs.writeFileSync(mdPath, md, 'utf8');
@@ -14367,7 +14370,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await settleEditor(page);
         await fn(page, mdPath);
         await page.close();
-        console.log('S3 T2 ' + label + ' — OK');
+        console.log('S3 ' + (tag || 'T2') + ' ' + label + ' — OK');
       } finally { ssrv.close(); }
     };
 
@@ -14498,6 +14501,166 @@ async function clickInsertMenuItem(page, sel, label) {
           'the tint is the selection affordance; the default focus ring is suppressed, got ' +
           got.outline);
       });
+
+    // ── S3 Task 3: the keydown dispatch priority prologue ────────────────
+    // Spec §4.4: Escape is `drag > menu > selection > burst`. Before this task
+    // the two target-based short-circuits in the global keydown listener
+    // (.ed-wys-cell / .ed-wys-armed) sat ABOVE the gutter menu's own Escape
+    // branch and returned for EVERY key, so a burst that held focus owned
+    // every keystroke unconditionally. Two measured consequences, both of
+    // which these scenarios pin.
+
+    // Defect A. The ⠿ handle's mousedown deliberately preventDefault()s (see
+    // wireBlockSelection() — it stops a dirty burst's own ⠿ click from racing
+    // its blur-commit), so opening the menu leaves the burst focused and open.
+    // Escape then reached handleBurstKeydown() → revertBurstAndEnd(): measured
+    // on 2026-08-30, the paragraph went from "alpha EDITED" back to "alpha"
+    // AND the menu stayed on screen. The user's uncommitted edit was destroyed
+    // by the keystroke they pressed to dismiss a menu.
+    await s3Scenario('Escape with the ⠿ menu open closes the menu and KEEPS the edit',
+      '# Doc\n\nalpha\n', async (page) => {
+        const psel = await blockSelByType(page, 'paragraph');
+        await openWysiwyg(page, psel);
+        await page.keyboard.type(' EDITED');
+        // Anti-vacuity: if the typing never landed, "the edit survived" below
+        // could only fail — but "the menu closed" would still be trivially
+        // green if the menu never opened at all. Both preconditions are
+        // asserted here, before the keystroke under test.
+        const typed = await page.evaluate((s) => document.querySelector(s).textContent, psel);
+        assert.ok(/EDITED/.test(typed), 'precondition: the burst must hold the typed text, got ' +
+          JSON.stringify(typed));
+        await page.hover(psel);
+        await page.click(psel + ' .ed-handle');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 5000 }, psel);
+        const preState = await page.evaluate(() => ({
+          menu: !!document.querySelector('.ed-handle-menu'),
+          // The ⠿ mousedown preventDefault() is what makes this scenario the
+          // one the spec cares about: focus is STILL inside the burst while
+          // the menu is up, which is exactly when the old dispatch misrouted.
+          armed: !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-wys-armed')),
+        }));
+        assert.deepStrictEqual(preState, { menu: true, armed: true },
+          'precondition: the menu is open AND the burst still holds focus, got ' +
+          JSON.stringify(preState));
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-handle-menu')), false,
+          'spec §4.4: menu beats burst, so Escape closes the menu');
+        const text = await page.evaluate(() => {
+          const el = document.querySelector('.ed-block[data-block-type="paragraph"]');
+          return el ? el.textContent : null;
+        });
+        assert.ok(/EDITED/.test(text),
+          'the uncommitted edit must SURVIVE — before this task Escape reached ' +
+          'revertBurstAndEnd() and destroyed it. Got ' + JSON.stringify(text));
+      }, 'T3');
+
+    // Escape's `selection` rung. No gesture creates a selection until Task 4,
+    // so the state is driven through client.js's own test-only hook.
+    await s3Scenario('Escape with a selection clears the selection, not the burst',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        // Anti-vacuity: "zero tinted blocks after Escape" is trivially true if
+        // the selection never painted in the first place.
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 2,
+          'precondition: lines 3..5 must actually select both paragraphs');
+        await page.keyboard.press('Escape');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 0,
+          'spec §4.4: selection is cleared by Escape');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-block[tabindex]').length), 0,
+          'the roving tabindex goes with it — no focus holder without a selection');
+      }, 'T3');
+
+    // Defect B — pre-existing on main, fixed here because it lives in the same
+    // dispatch. MEASURED CORRECTION to this task's plan: the plan says "after a
+    // save the surface stays focused and .ed-wys-armed". That is only true when
+    // the burst was CLEAN at save time. A DIRTY burst's Ctrl+S commits, and the
+    // commit's rerenderAll() replaces .content, so the focused surface is
+    // detached and document.activeElement falls back to <body> — measured, and
+    // the plan's own literal test shape is therefore GREEN before the fix.
+    // The state that actually triggers the bug is `.ed-wys-armed` (or
+    // `.ed-wys-cell`) holding native focus while `currentBurst` is null, which
+    // is what resolveBurst()'s zero-edit path leaves behind: it calls
+    // endBurstWithoutResolve() and returns WITHOUT re-rendering, so a second
+    // Ctrl+S on an untouched burst — an ordinary habit keystroke — arms the
+    // trap. The next Ctrl+Z then matched the short-circuit, reached
+    // handleBurstKeydown()/handleTableCellKeydown(), and was swallowed by their
+    // `!currentBurst` bail on the very first line: a silent no-op.
+    await s3Scenario('Ctrl+S then Ctrl+Z undoes the save, for every block type',
+      '# Doc\n\nalpha\n\n- item\n\n| A |\n| --- |\n| one |\n', async (page, mdPath) => {
+        // Blurs whatever holds focus, then re-opens a burst on the FIRST block
+        // of `type` through the same surface a user would click. Re-resolved
+        // per call: every commit re-mints block ids.
+        const focusSurfaceOf = async (type) => {
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await page.waitForFunction(() => document.activeElement === document.body,
+            { timeout: 5000 });
+          await settleEditor(page);
+          const id = await page.evaluate((t) => {
+            const el = document.querySelector('.ed-block[data-block-type="' + t + '"]');
+            return el ? el.getAttribute('data-block-id') : null;
+          }, type);
+          assert.ok(id !== null, 'no block of type ' + type + ' on the page');
+          const bsel = '.ed-block[data-block-id="' + id + '"]';
+          if (type === 'table') {
+            // A table's editable surface is a CELL (.ed-wys-cell), not the
+            // block box — the other half of the short-circuit pair under test.
+            const box = await page.evaluate((s) => {
+              const c = document.querySelector(s + ' table tbody td');
+              const r = c.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }, bsel);
+            await page.mouse.click(box.x, box.y);
+            await page.waitForFunction((s) => !!(document.activeElement.closest &&
+              document.activeElement.closest(s + ' .ed-wys-cell')), { timeout: 5000 }, bsel);
+          } else {
+            await openWysiwyg(page, type === 'li' ? liSel(id) : bsel);
+          }
+          return bsel;
+        };
+        for (const type of ['paragraph', 'li', 'table']) {
+          const before = fs.readFileSync(mdPath, 'utf8');
+          await focusSurfaceOf(type);
+          await page.keyboard.type('Z');
+          const afterEdit = await saveAndRead(page, mdPath);
+          // The anti-vacuity line the plan calls out: without it the Ctrl+Z
+          // assertion below is green whenever the typing silently failed.
+          assert.notStrictEqual(afterEdit, before,
+            'the edit must have landed first (' + type + '), file is still ' +
+            JSON.stringify(before));
+          // Arm the trap: a SECOND Ctrl+S on the now-untouched surface.
+          await focusSurfaceOf(type);
+          await saveAndRead(page, mdPath);
+          const held = await page.evaluate(() => ({
+            armed: !!(document.activeElement.closest &&
+              document.activeElement.closest('.ed-wys-armed')),
+            cell: !!(document.activeElement.closest &&
+              document.activeElement.closest('.ed-wys-cell')),
+          }));
+          assert.ok(held.armed || held.cell,
+            'precondition for ' + type + ': the surface must still hold focus and its ' +
+            'armed/cell class after a clean Ctrl+S — otherwise the short-circuit under ' +
+            'test is never reached and this scenario proves nothing. Got ' +
+            JSON.stringify(held));
+          await page.keyboard.down('Control');
+          await page.keyboard.press('KeyZ');
+          await page.keyboard.up('Control');
+          await settleEditor(page);
+          const afterUndo = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterUndo, before,
+            'Ctrl+S then Ctrl+Z was a SILENT no-op for ' + type + ' — the surface stays ' +
+            'focused and armed with currentBurst null, so the keydown short-circuit ' +
+            'swallowed the key before the global undo() was reached. Got ' +
+            JSON.stringify(afterUndo) + ', expected ' + JSON.stringify(before));
+        }
+      }, 'T3');
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
