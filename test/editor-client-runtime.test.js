@@ -329,6 +329,32 @@ function lexLoose(md) {
   return plainMarked.lexer(md).filter((t) => t.type === 'list').map((t) => t.loose);
 }
 
+// S2 Task 7: the same flag for EVERY list in the file, nested ones included,
+// in document order. MEASURED, and it is why lexLoose() alone is not enough
+// here: inserting a blank-line-separated sibling under a NESTED item leaves
+// the TOP-level list tight and makes only the nested one loose —
+// '# Doc\n\n- alpha\n  - child\n\n  -\n' reports [false] from lexLoose()
+// and [false, true] from this. The degrade is identical either way (every
+// item of the loose list grows a <p>, serializeBlocks() pushes 'P', the run
+// freezes read-only), so a li scenario that only checks the top level is
+// green for the wrong reason.
+function lexLooseDeep(md) {
+  const out = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'list') {
+        out.push(t.loose);
+        (t.items || []).forEach((i) => walk(i.tokens));
+        return;
+      }
+      // A list nested inside an item arrives as a child of that item's `text`
+      // token, not at the item's own top level.
+      if (t.type === 'text' && t.tokens) walk(t.tokens);
+    });
+  })(plainMarked.lexer(md));
+  return out;
+}
+
 // S2 Task 2: selector for the FIRST block of `type` in document order. Block
 // ids are re-minted on every render, so a conversion scenario must re-resolve
 // between steps rather than hold one selector across a commit.
@@ -3154,6 +3180,366 @@ async function clickInsertMenuItem(page, sel, label) {
         } finally {
           s6hSrv.close();
         }
+      }
+    }
+
+    // ── S2 Task 7: the ＋ comes back to a list item ─────────────────────────
+    //
+    // §6's S1 note item 3 — 「＋ 對 li 在 S1 隱藏，S2 解除」 — with the three
+    // preconditions it names now met: §4.3's blank-line rules (Tasks 4–5), the
+    // run-wide gate (S1), and an insertion point that inherits the anchor's
+    // indent (this task).
+    {
+      const bannerNow = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Banners hang on document.body, never time out and survive
+      // rerenderAll() — a leftover one makes the NEXT scenario's read a lie.
+      const clearBanner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        if (b) b.remove();
+      });
+      // The run's own health, asked of the serializer rather than inferred:
+      // `unsupported` non-empty IS the read-only degrade (every structural op
+      // on the run then refuses). Stronger than a loose-flag check, and it is
+      // what the ⚠ in §4.3 rule 2 is actually about.
+      const runUnsupported = (page) => page.evaluate(() =>
+        window.md2docListMd.serializeBlocks(
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+
+      // 5.3 item 3c. Chrome and geometry only — nothing is written to the
+      // file, so RED-first is the whole bar here (no mutation transcript).
+      {
+        const { srv: t7aSrv, url: t7aUrl } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '', '## Tail', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7aUrl, { waitUntil: 'networkidle0' });
+          const geo = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('.ed-block')).map((b) => {
+              const ins = b.querySelector(':scope > .ed-insert');
+              const h = b.querySelector(':scope > .ed-handle');
+              const ir = ins && ins.getBoundingClientRect();
+              const hr = h && h.getBoundingClientRect();
+              return {
+                type: b.getAttribute('data-block-type'),
+                indent: b.getAttribute('data-indent'),
+                hasInsert: !!ins, hasHandle: !!h,
+                insLeft: ir && Math.round(ir.left), insRight: ir && Math.round(ir.right),
+                hLeft: hr && Math.round(hr.left),
+                sameY: !!(ir && hr) && Math.abs(ir.top - hr.top) < 1,
+              };
+            }));
+          assert.deepStrictEqual(geo.map((g) => g.type + '@' + g.indent),
+            ['heading@null', 'li@0', 'li@1', 'heading@null'],
+            'FIXTURE SANITY: two block types and two list depths must be on screen, or the ' +
+            '"one X for all types and depths" assertions below are about one shape');
+          assert.ok(geo.every((g) => g.hasInsert && g.hasHandle),
+            'S2 un-hides ＋ on a li at EVERY depth, alongside the ⠿ S1 gave it — got ' +
+            JSON.stringify(geo.map((g) => g.type + ':' + g.hasInsert + '/' + g.hasHandle)));
+          assert.strictEqual(new Set(geo.map((g) => g.insLeft)).size, 1,
+            'one ＋ X for all types and depths, got ' + JSON.stringify(geo.map((g) => g.insLeft)));
+          assert.strictEqual(new Set(geo.map((g) => g.hLeft)).size, 1,
+            'one ⠿ X for all types and depths, got ' + JSON.stringify(geo.map((g) => g.hLeft)));
+          assert.ok(geo.every((g) => g.sameY),
+            '＋ and ⠿ share a Y on every row, got ' + JSON.stringify(geo));
+          assert.ok(geo.every((g) => g.insRight === g.hLeft),
+            '5.3 item 3c: ＋ sits immediately left of ⠿ with no gap, got ' +
+            JSON.stringify(geo.map((g) => g.insRight + '|' + g.hLeft)));
+          await page.close();
+          console.log('S2 Task 7: a list item has a ＋, aligned with its ⠿ — OK');
+        } finally { t7aSrv.close(); }
+      }
+
+      // ＋ 清單 on a NESTED item: a sibling at the same depth, and the run
+      // stays TIGHT. This is the fork Task 6 measured for 複製, re-opened
+      // here: commitBlockInsertion() ALWAYS writes a leading blank line, and
+      // measured on this very fixture that gives
+      // '# Doc\n\n- alpha\n  - child\n\n  -\n' — whose NESTED list marked
+      // reports loose === true, so every item grows a <p>, serializeBlocks()
+      // pushes 'P' and the run degrades read-only with no banner. The li path
+      // therefore goes through the run's own re-serialization instead.
+      {
+        const { srv: t7bSrv, url: t7bUrl, mdPath: t7bMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7bUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new item must actually be on screen — everything below is vacuous otherwise');
+          assert.strictEqual(await bannerNow(page), null, 'no refusal banner');
+          // Asked BEFORE the save, because this is the assertion the leading
+          // blank line kills: with commitBlockInsertion()'s blank in place the
+          // nested list is LOOSE, every item of it renders as <p>, and
+          // serializeBlocks() answers ['P','P','P'] — the run is frozen
+          // read-only with no banner, which is §4.3 rule 2's whole subject.
+          assert.deepStrictEqual(await runUnsupported(page), [],
+            'the run must still be structurally editable — a loose run answers P per item');
+          const out = await saveAndRead(page, t7bMd);
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n  -\n',
+            'the new sibling inherits the anchor indent — 2 columns, taken from the ' +
+            'serializer\'s own marker-width stack, not from indent * 2');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false],
+            '§4.3 rule 2: BOTH lists — the outer one and the nested one the new item ' +
+            'joins — must stay tight. lexLoose() alone only sees the outer one.');
+          await page.close();
+          console.log('S2 Task 7: ＋ 清單 on a nested li inserts a tight sibling — OK');
+        } finally { t7bSrv.close(); }
+      }
+
+      // ＋ on a PARENT: the insertion point is the end of its SUBTREE, which
+      // is the ruling §4.3 already made for 複製 (「副本插在該 block 整棵子樹
+      // 之後」) and for the same reason — inserting between a parent and its
+      // children leaves the children with no anchor.
+      {
+        const { srv: t7cSrv, url: t7cUrl, mdPath: t7cMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7cUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.deepStrictEqual(await runUnsupported(page), [],
+            'the run must still be structurally editable, i.e. TIGHT, before it is saved');
+          const out = await saveAndRead(page, t7cMd);
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n-\n',
+            'the new item is alpha\'s SIBLING and lands after alpha\'s whole subtree, so ' +
+            'child keeps its parent');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'both lists stay tight');
+          await page.close();
+          console.log('S2 Task 7: ＋ on a parent inserts after its whole subtree — OK');
+        } finally { t7cSrv.close(); }
+      }
+
+      // §3.4's marker-width stack, which is the WHOLE of carry 2: under a
+      // '1. ' parent the child column is THREE, not indent * 2. The fixture is
+      // chosen so a fixed two-columns-per-level would emit '  -' and be
+      // measurably wrong (marked reads a 2-column line under a 3-column marker
+      // as a SIBLING of the parent, not a child).
+      {
+        const { srv: t7dSrv, url: t7dUrl, mdPath: t7dMd } =
+          await setupTableDoc(['# Doc', '', '1. alpha', '   - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7dUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          const out = await saveAndRead(page, t7dMd);
+          assert.strictEqual(out, '# Doc\n\n1. alpha\n   - child\n   -\n',
+            '§3.4: the indent prefix under a "1. " marker is 3 columns. ' +
+            "' '.repeat(indent * 2) would emit '  -' here, which re-lexes as a SIBLING " +
+            'of alpha rather than a child of it');
+          assert.deepStrictEqual(
+            await page.evaluate(() =>
+              Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+                .map((el) => el.getAttribute('data-list-type') + el.getAttribute('data-indent'))),
+            ['ol0', 'ul1', 'ul1'],
+            'and the new item is a sibling of child (ul, indent 1), not of alpha');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'both lists stay tight');
+          await page.close();
+          console.log('S2 Task 7: the new item\'s indent comes from the marker-width stack — OK');
+        } finally { t7dSrv.close(); }
+      }
+
+      // The new item inherits the anchor's list TYPE (§3.8 rule (b): a
+      // different data-list-type ENDS the run, so a bullet dropped into an
+      // ordered run would split it in two), and §3.8's renumbering falls out
+      // of the run re-serialization for free. Plus: exactly one undo op.
+      {
+        const { srv: t7eSrv, url: t7eUrl, mdPath: t7eMd } =
+          await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7eUrl, { waitUntil: 'networkidle0' });
+          const t7eBefore = fs.readFileSync(t7eMd, 'utf8');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new ordered item must have landed');
+          assert.strictEqual(await saveAndRead(page, t7eMd), '# Doc\n\n1. alpha\n2.\n3. bravo\n',
+            'the new item is an ORDINAL, and §3.8 renumbers the run 1..n');
+          // Blur, not Escape. MEASURED, and it is a pre-existing quirk rather
+          // than anything this task introduced: the Ctrl+S above ENDS the
+          // burst but leaves the new item's surface focused and still
+          // `.ed-wys-armed`, so the document keydown listener hands Ctrl+Z to
+          // handleBurstKeydown() -> burstUndo(), which returns immediately
+          // because `currentBurst` is null. The undo never reaches the
+          // document stack. (Same for a second Escape: revertBurstAndEnd()
+          // has no burst to revert.) Blurring puts the target back on <body>,
+          // which is where a real user's next click would put it too.
+          await page.evaluate(() => {
+            if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+          });
+          await settleEditor(page);
+          await page.keyboard.down('Control');
+          await page.keyboard.press('KeyZ');
+          await page.keyboard.up('Control');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await saveAndRead(page, t7eMd), t7eBefore,
+            'ONE Ctrl+Z restores the file — §3.4, one gesture is one undo op');
+          await page.close();
+          console.log('S2 Task 7: ＋ 清單 inherits the ordered type and renumbers, one undo — OK');
+        } finally { t7eSrv.close(); }
+      }
+
+      // A NON-list kind under a li. The measured danger is a descendant at 4
+      // columns, and it is one level down from the parent: measured against
+      // the pure core, commitBlockInsertion() anchored on `child` gives
+      // '# Doc\n\n- alpha\n  - child\n\n​\n\n    - grand\n', and marked
+      // lexes '    - grand' after a paragraph as an INDENTED CODE BLOCK — the
+      // item's content is gone. Anchoring on the end of the subtree is what
+      // removes the hazard entirely.
+      {
+        const { srv: t7fSrv, url: t7fUrl, mdPath: t7fMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grand', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7fUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '段落');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+            { timeout: 5000 }).catch(() => {});
+          // Anti-vacuous: a REFUSED insert would also leave no 'code' token.
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            1, 'the paragraph must actually have landed');
+          assert.strictEqual(await bannerNow(page), null, 'and it must not have been refused');
+          // The skeleton paragraph is a `pristineInsert`: left untouched, the
+          // very Ctrl+S below resolves its burst and DISCARDS it again (a
+          // pre-existing contract — see resolveBurst()'s pristineInsert
+          // branch — and measured here: the save came back without it).
+          // Typing into it is what a real user does, and it is what makes the
+          // byte assertion below about the insertion rather than about that
+          // discard. focusInsertedBlock() has already selected the ZWSP, so
+          // the keystrokes replace it.
+          await settleEditor(page);
+          assert.strictEqual(
+            await page.evaluate(() => !!(document.activeElement &&
+              document.activeElement.classList.contains('ed-wys-armed'))),
+            true, 'the new paragraph must be focused before anything is typed into it');
+          await page.keyboard.type('para');
+          const out = await saveAndRead(page, t7fMd);
+          assert.strictEqual(lexTypes(out).includes('code'), false,
+            'the 4-column grandchild must not end up after a paragraph — that is an ' +
+            'INDENTED CODE BLOCK and the item\'s content is lost. Got ' +
+            JSON.stringify(lexTypes(out)) + ' for ' + JSON.stringify(out));
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n    - grand\n\npara\n',
+            'the paragraph lands after the anchor\'s whole subtree, so nothing is orphaned');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false, false],
+            'and the list it was inserted after is untouched and still tight');
+          await page.close();
+          console.log('S2 Task 7: ＋ 段落 under a li orphans no descendant — OK');
+        } finally { t7fSrv.close(); }
+      }
+
+      // §4.3's run-wide gate, on the ＋ path. The fixture is PROVEN degraded
+      // first: '- a' + blank + '- b' is ONE loose list (measured in Task 5's
+      // scenarios), so serializeBlocks() reports P,P for it and every
+      // structural op on that run must refuse.
+      {
+        const { srv: t7gSrv, url: t7gUrl, mdPath: t7gMd } =
+          await setupTableDoc(['# Doc', '', '- a', '', '- b', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7gUrl, { waitUntil: 'networkidle0' });
+          const t7gBefore = fs.readFileSync(t7gMd, 'utf8');
+          assert.deepStrictEqual(await runUnsupported(page), ['P', 'P'],
+            'FIXTURE SANITY: this run must really be degraded, or the refusal below is ' +
+            'green for the wrong reason');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'a'), '清單');
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), '此清單含不支援的格式，無法調整結構',
+            '§4.3: the ＋ goes through the same run-wide gate as 轉換／複製／刪除');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            2, 'the refusal must be a refusal — no new item on screen');
+          assert.strictEqual(await saveAndRead(page, t7gMd), t7gBefore, 'nothing written');
+          await clearBanner(page);
+          await page.close();
+          console.log('S2 Task 7: ＋ on a li in a degraded run refuses — OK');
+        } finally { t7gSrv.close(); }
+      }
+
+      // The FOURTH and last call site of the dirty-burst hole 轉換 / 刪除 /
+      // 複製 already closed. Finding 5a's mousedown preventDefault() covers
+      // '.ed-insert' too (client.js's delegated mousedown listener names both
+      // buttons), so the burst is still open and dirty when insertBlockBelow()
+      // runs — and switchAwayFrom() then commits a rewrite of this very
+      // block's source, which is exactly what reresolveBlockEl()'s source
+      // fingerprint cannot survive.
+      {
+        const { srv: t7hSrv, url: t7hUrl, mdPath: t7hMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7hUrl, { waitUntil: 'networkidle0' });
+          const sel = await liBlockSelByText(page, 'alpha');
+          const editEl = sel + ' > .ed-li-text';
+          await page.click(editEl);
+          await page.keyboard.press('End');
+          await page.keyboard.type(' EDITED');
+          assert.strictEqual(
+            await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+            true, 'sanity: the burst must be open and DIRTY before the ＋ is pressed');
+          await page.hover(sel);
+          const box = await page.evaluate((s) => {
+            const r = document.querySelector(s + ' .ed-insert').getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }, sel);
+          await page.mouse.move(box.x, box.y);
+          await page.mouse.down();
+          await new Promise((r) => setTimeout(r, 250));
+          assert.strictEqual(
+            await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+            true, '5a: the mousedown on ＋ must NOT blur the still-open dirty burst');
+          await page.mouse.up();
+          await page.waitForFunction(
+            (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
+            { timeout: 5000 }, sel);
+          await settleEditor(page);
+          await page.evaluate((s) => {
+            const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
+              .find((b) => b.textContent === '清單');
+            if (!btn) throw new Error('insert menu item not found: 清單');
+            btn.click();
+          }, sel);
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the gesture must not be DROPPED with 文件已更新，請重試這個操作: WE are the ' +
+            'reason the source changed, so the narrowed re-resolve (startLine + type) applies');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new item must land on top of our own burst\'s commit');
+          assert.strictEqual(await saveAndRead(page, t7hMd),
+            '# Doc\n\n- alpha EDITED\n-\n- bravo\n',
+            'both the typed edit and the insertion land');
+          await page.close();
+          console.log('S2 Task 7: ＋ on a li works with a dirty burst open on that li — OK');
+        } finally { t7hSrv.close(); }
       }
     }
 
@@ -11359,11 +11745,17 @@ async function clickInsertMenuItem(page, sel, label) {
           'sanity: the fixture must render one nested item between two top-level ones');
         assert.deepStrictEqual(handles.map((h) => h.hasHandle), [true, true, true],
           'EVERY list item gets a ⠿, including the nested one');
-        // S2 unhides this; until insertBlockBelow() is indent-aware a ＋ on a
-        // parent item writes a bare skeleton line at endLine + 1 and orphans
-        // the children, so the button must not exist on a li at all yet.
-        assert.deepStrictEqual(handles.map((h) => h.hasInsert), [false, false, false],
-          'the ＋ stays out of a list item until S2 gives insertBlockBelow indent awareness');
+        // S2 Task 7 INVERTED this. It used to assert [false, false, false] with
+        // the note "the ＋ stays out of a list item until S2 gives
+        // insertBlockBelow indent awareness" — that is now delivered (the li
+        // path re-serializes the run, so the new item's indent prefix comes
+        // from the serializer's own marker-width stack, and the insertion
+        // point is the end of the anchor's subtree so no child is orphaned).
+        // The assertion is inverted rather than deleted: it is the only place
+        // that pins the ＋'s presence at EVERY depth in the same breath as the
+        // ⠿'s, which is 5.3 item 3b and 3c side by side.
+        assert.deepStrictEqual(handles.map((h) => h.hasInsert), [true, true, true],
+          'S2 gives every list item a ＋, at every indent depth (§6 S1 note item 3)');
         // the serializer must still see a clean document with the chrome present
         const clean = await page.evaluate(() => {
           const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
@@ -11825,9 +12217,12 @@ async function clickInsertMenuItem(page, sel, label) {
 
     {
       // D6: ＋ immediately left of ⠿, same row, no gap — for EVERY block type
-      // that owns a ＋, not just a paragraph. `.ed-insert` is deliberately
-      // absent on li until S2, so the guard is scoped by exclusion rather than
-      // by listing types: whatever grows a ＋ next has to satisfy this too.
+      // that owns a ＋, not just a paragraph. The `:not(li)` scoping is a
+      // leftover from S1, when a li carried no ＋ at all; S2 Task 7 gives it
+      // one and pins the same geometry across both list depths in its own
+      // scenario (which is 5.3 item 3c). This fixture holds no li, so the
+      // exclusion changes nothing here — it is kept so the two scenarios stay
+      // one-fixture-one-question rather than merged.
       const { srv: psrv, url: purl } = await setupListDoc([
         '# Heading', '', 'A paragraph.', '', '> quote', '',
         '| a | b |', '|---|---|', '| 1 | 2 |', '',
@@ -11943,8 +12338,8 @@ async function clickInsertMenuItem(page, sel, label) {
         });
         assert.ok(geo, 'fixture sanity: this page must actually have a sidebar splitter');
         assert.ok(geo.plusRects.length >= 3,
-          'fixture sanity: at least three ＋ buttons must be on screen (headings and ' +
-          'paragraphs own one; li deliberately does not until S2), got ' +
+          'fixture sanity: at least three ＋ buttons must be on screen (S2 Task 7 gives ' +
+          'the two li rows one as well, so the probe now sweeps their bands too), got ' +
           geo.plusRects.length);
         assert.ok(Math.abs(geo.splitter.right - geo.contentBoxLeft) <= 1,
           'fixture sanity: the splitter and .content must still be adjacent — this whole ' +

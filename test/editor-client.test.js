@@ -745,6 +745,14 @@ function countInCode(source, needle) {
   // commitBlockInsertion() — the li path goes through commitListStructure()
   // and reuses ITS site, so 複製 adds exactly one). The expected total is
   // therefore DECLARED once + EXPORTED once + 10 uses = 12.
+  //
+  // S2 Task 7 (li ＋) adds NONE, and that was checked rather than assumed:
+  // its 清單 path splices the new item into the run and commits through
+  // commitListStructure() — the same site 複製's li path already reuses —
+  // and every other kind goes down insertBlockBelow()'s existing
+  // commitBlockInsertion() tail, which was already one of the ten. If a
+  // future task grows an eleventh, migrate this number WITH the reason;
+  // never relax the assertion.
   assert.strictEqual(helperCalls, 12,
     'the helper must be DECLARED once, EXPORTED once, and used at all ten ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
