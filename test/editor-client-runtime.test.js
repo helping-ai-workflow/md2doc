@@ -2766,6 +2766,396 @@ async function clickInsertMenuItem(page, sel, label) {
         s5iSrv.close();
       }
     }
+    // ── S2 Task 6: 複製 (duplicate) — §4.3 ────────────────────────────────
+    //
+    //    TWO commit paths, chosen by MEASUREMENT rather than by symmetry, and
+    //    the measurement is the whole point of this group:
+    //
+    //    * a NON-li block goes through commitBlockInsertion(), which IS
+    //      "insert these lines below that block" and already owns the
+    //      blank-line policy. Measured against the pure export:
+    //        commitBlockInsertion(['# Doc','','alpha',''], paragraph, ['alpha'])
+    //        -> '# Doc\n\nalpha\n\nalpha\n'
+    //    * a li does NOT, and this is the trap. commitBlockInsertion() ALWAYS
+    //      inserts a leading blank line (client.js:170-179). Measured against
+    //      the same pure export, on ['# Doc','','- a','- b',''] with body
+    //      ['- a']:
+    //        -> '# Doc\n\n- a\n\n- a\n\n- b\n'
+    //        marked.lexer(...) -> ONE list, loose === TRUE
+    //      Every item of a loose list renders as <p>, serializeBlocks()
+    //      reports 'P' for each of them and the whole run degrades read-only
+    //      with NO banner — §4.3 rule 2's exact defect, re-opened by a
+    //      duplicate instead of by a conversion. So a li duplicates through
+    //      the RUN's own re-serialization (commitListStructure), which emits
+    //      no blank at all and renumbers the run per §3.8 on the way. Every
+    //      li scenario below asserts `loose === false` directly, because the
+    //      bytes and the token types look identical either way.
+    {
+      const { srv: s6aSrv, url: s6aUrl, mdPath: s6aMdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6aUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+          2, 'the copy must exist as its own block, not merge into the original');
+        assert.strictEqual(await saveAndRead(page, s6aMdPath), '# Doc\n\nalpha\n\nalpha\n',
+          'one copy, blank-separated — commitBlockInsertion()’s own contract');
+
+        await page.close();
+        console.log('S2 複製: a paragraph gets a copy directly below it — OK');
+      } finally {
+        s6aSrv.close();
+      }
+    }
+
+    {
+      // §4.3, and the spec records the MEASUREMENT that forces it: the copy
+      // goes after the block's whole SUBTREE, not after its own line.
+      //   after the subtree: '- a\n  - a1\n- a\n- b\n'
+      //     -> items ['- a\n  - a1\n', '- a\n', '- b']  (a keeps its child)
+      //   after a's own line: '- a\n- a\n  - a1\n- b\n'
+      //     -> items ['- a\n', '- a\n  - a1\n', '- b']  (the COPY got a1)
+      // Both lex cleanly and both are tight, so only the item boundaries tell
+      // them apart — which is why the byte string is asserted, not the shape.
+      const { srv: s6bSrv, url: s6bUrl, mdPath: s6bMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - a1', '- b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6bUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 4,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          4, 'the duplicate must have landed before the bytes mean anything');
+        const s6bOut = await saveAndRead(page, s6bMdPath);
+        assert.strictEqual(s6bOut, '# Doc\n\n- a\n  - a1\n- a\n- b\n',
+          '§4.3: after the SUBTREE. Inserting after a’s own line moves a1 into the copy');
+        assert.deepStrictEqual(
+          plainMarked.lexer(s6bOut).filter((t) => t.type === 'list')[0].items.map((it) => it.raw),
+          ['- a\n  - a1\n', '- a\n', '- b'],
+          'a1 stays the ORIGINAL a’s child — the byte string alone reads the same either way ' +
+          'to a careless eye, the item boundaries do not');
+        assert.deepStrictEqual(lexLoose(s6bOut), [false],
+          'no leading blank: commitBlockInsertion()’s always-on one measures loose === true');
+
+        await page.close();
+        console.log('S2 複製: the copy goes after the whole subtree — OK');
+      } finally {
+        s6bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s6cSrv, url: s6cUrl, mdPath: s6cMdPath } =
+        await setupTableDoc(['# Doc', '', '- [x] done', '- [ ] todo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6cUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'done'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"] > .ed-li-check'))
+            .map((b) => b.getAttribute('data-checked')).join(',')),
+          '1,1,0', '§4.3 names 勾選狀態 as preserved — the copy is checked too');
+        const s6cOut = await saveAndRead(page, s6cMdPath);
+        assert.strictEqual(s6cOut, '# Doc\n\n- [x] done\n- [x] done\n- [ ] todo\n',
+          '§4.3 names 型態 / 縮排 / 勾選狀態 as preserved');
+        assert.deepStrictEqual(lexLoose(s6cOut), [false], 'the run stays tight');
+
+        await page.close();
+        console.log('S2 複製: type, indent and checked state are preserved — OK');
+      } finally {
+        s6cSrv.close();
+      }
+    }
+
+    {
+      // §3.8: the run is re-serialized and renumbered 1..n. A pure line
+      // insertion would leave '1. alpha\n1. alpha\n2. bravo\n' — which lexes
+      // to the same three items and renders 1,2,3 in both modes, so nothing
+      // would LOOK wrong; it just leaves the user a diff they did not ask for
+      // on the next structural gesture. Going through the run's own
+      // re-serialization is what makes §3.8 true here rather than merely
+      // harmless.
+      const { srv: s6dSrv, url: s6dUrl, mdPath: s6dMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6dUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        const s6dOut = await saveAndRead(page, s6dMdPath);
+        assert.strictEqual(s6dOut, '# Doc\n\n1. alpha\n2. alpha\n3. bravo\n', 'spec 3.8');
+        assert.deepStrictEqual(lexLoose(s6dOut), [false], 'the run stays tight');
+
+        await page.close();
+        console.log('S2 複製: an ordered item’s copy renumbers the run — OK');
+      } finally {
+        s6dSrv.close();
+      }
+    }
+    {
+      // The copy's CONTENT is never re-serialized. bystanderCarryOver(span)
+      // is called with NO `mutatedEl` — naming a block EXCLUDES it from the
+      // replay map, which is what sends its content back through
+      // inline-md.js's escapeText(); measured on the conversion paths,
+      // serializeInline('~5px') === '\\~5px'. The copy shares the original's
+      // block id, so the ONE map entry covers both and list-md.js replays the
+      // file's own bytes for each while re-stating only the marker.
+      const { srv: s6eSrv2, url: s6eUrl2, mdPath: s6eMdPath2 } =
+        await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6eUrl2, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'gap is ~5px'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          3, 'the duplicate must have landed before the bytes mean anything');
+        assert.strictEqual(await saveAndRead(page, s6eMdPath2),
+          '# Doc\n\n- gap is ~5px\n- gap is ~5px\n- bravo\n',
+          'neither the original NOR the copy may be re-escaped — a `~5px` stays `~5px`');
+
+        await page.close();
+        console.log('S2 複製: the copy is not re-escaped, and neither is the original — OK');
+      } finally {
+        s6eSrv2.close();
+      }
+    }
+
+    {
+      // §4.3: 複製與刪除均為單一 undo. Both commit paths are asserted, because
+      // they are different functions — the paragraph's commitBlockInsertion()
+      // and the li's commitListStructure() — and only one of them can be
+      // covered by any single fixture.
+      const { srv: s6eSrv, url: s6eUrl, mdPath: s6eMdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '', '- a', '- b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6eUrl, { waitUntil: 'networkidle0' });
+        const s6eBefore = fs.readFileSync(s6eMdPath, 'utf8');
+
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        // Assert the duplicate LANDED before undoing it. Without this the
+        // byte comparison after the Ctrl+Z is vacuous: a REFUSED duplicate
+        // leaves the file untouched and the assertion passes for exactly the
+        // wrong reason.
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+          2, 'the paragraph duplicate must have landed');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s6eMdPath), s6eBefore,
+          'ONE Ctrl+Z restores the file — §3.4, one gesture is one undo op');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          3, 'the li duplicate must have landed');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s6eMdPath), s6eBefore,
+          'the li path is one undo op too — a different commit function, same rule');
+
+        await page.close();
+        console.log('S2 複製: one duplicate is exactly one undo op, on both paths — OK');
+      } finally {
+        s6eSrv.close();
+      }
+    }
+
+    {
+      // §4.1 修訂 2: a duplicate is NOT column-only — it adds the item's lines
+      // over again — so a multi-line li refuses as a TARGET, with §4.1's
+      // run-wide banner and not convert-md.js's per-block one.
+      const { srv: s6fSrv, url: s6fUrl, mdPath: s6fMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6fUrl, { waitUntil: 'networkidle0' });
+        const s6fBefore = fs.readFileSync(s6fMdPath, 'utf8');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }),
+          '此清單含不支援的格式，無法調整結構',
+          '§4.1: a duplicate rewrites line COUNT, so a multi-line li refuses as a target');
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          2, 'the refusal must be a refusal — no copy on screen either');
+        assert.strictEqual(await saveAndRead(page, s6fMdPath), s6fBefore,
+          'a refused duplicate must not touch a single byte');
+
+        await page.close();
+        console.log('S2 複製: a multi-line li refuses with the §4.1 banner — OK');
+      } finally {
+        s6fSrv.close();
+      }
+    }
+
+    // ── Finding 5a, the half that was never closed: 複製 and 刪除 with a
+    //    DIRTY burst open on the block being operated on.
+    //
+    //    5a's mousedown preventDefault() deliberately keeps that burst alive
+    //    across the ⠿ press, so the commit that lands inside switchAwayFrom()
+    //    is a rewrite of THIS block's own source lines — and
+    //    reresolveBlockEl()'s fingerprint is the block's SOURCE, so it is
+    //    guaranteed to miss. The gesture is then dropped with
+    //    '文件已更新，請重試這個操作' and nothing happens.
+    //
+    //    Task 2 closed this for 轉換 with ownsOpenSession() +
+    //    reresolveBlockElAfterSelfCommit() (startLine + type, no fingerprint,
+    //    used ONLY when we are the reason the source changed). 刪除 shares the
+    //    hole and was never migrated; 複製 would have inherited it.
+    //
+    //    The press is a REAL human-speed one (mousedown, gap, mouseup), the
+    //    same shape the Finding 5 scenario above uses — that gap is what makes
+    //    the pre-fix behaviour deterministic instead of racy.
+    {
+      async function pressHandleWithDirtyBurst(page, sel, typed) {
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(typed);
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true, 'sanity: the burst must be open and DIRTY before the ⠿ is pressed');
+        await page.hover(sel);
+        const box = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' .ed-handle').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, sel);
+        await page.mouse.move(box.x, box.y);
+        await page.mouse.down();
+        await new Promise((r) => setTimeout(r, 250));
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true, '5a: the mousedown on ⠿ must NOT blur the still-open dirty burst');
+        await page.mouse.up();
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 5000 }, sel);
+      }
+      async function clickOpenMenuItem(page, sel, label) {
+        await page.evaluate((s, l) => {
+          const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+            .find((b) => b.textContent === l && !b.hidden);
+          if (!btn) throw new Error('gutter menu item not found: ' + l);
+          btn.click();
+        }, sel, label);
+      }
+      const bannerNow = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+
+      {
+        const { srv: s6gSrv, url: s6gUrl, mdPath: s6gMdPath } =
+          await setupTableDoc(['# Doc', '', 'alpha', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(s6gUrl, { waitUntil: 'networkidle0' });
+
+          const sel = await blockSelByType(page, 'paragraph');
+          await pressHandleWithDirtyBurst(page, sel, ' EDITED');
+          await clickOpenMenuItem(page, sel, '複製');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the gesture must not be DROPPED: we are the reason the source changed');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            2, 'the duplicate must land on top of our own burst’s commit');
+          assert.strictEqual(await saveAndRead(page, s6gMdPath),
+            '# Doc\n\nalpha EDITED\n\nalpha EDITED\n',
+            'both the typed edit and the duplicate land, and the copy carries the edit');
+
+          await page.close();
+          console.log('S2 複製: works with a dirty burst open on its own block — OK');
+        } finally {
+          s6gSrv.close();
+        }
+      }
+
+      {
+        const { srv: s6hSrv, url: s6hUrl, mdPath: s6hMdPath } =
+          await setupTableDoc(['# Doc', '', 'alpha', '', 'bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(s6hUrl, { waitUntil: 'networkidle0' });
+
+          const sel = await blockSelByType(page, 'paragraph');
+          await pressHandleWithDirtyBurst(page, sel, ' EDITED');
+          await clickOpenMenuItem(page, sel, '刪除');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the SAME hole in deleteBlockViaGutter(): its re-resolve used the source ' +
+            'fingerprint, which our own burst commit had just invalidated');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            1, 'the edited paragraph must actually be gone');
+          assert.strictEqual(await saveAndRead(page, s6hMdPath), '# Doc\n\nbravo\n',
+            'the block the user pressed ⠿ on is deleted, edit and all');
+
+          await page.close();
+          console.log('S2 刪除: works with a dirty burst open on its own block — OK');
+        } finally {
+          s6hSrv.close();
+        }
+      }
+    }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
     //    type + Enter commits; file line updated on save ──────────────────

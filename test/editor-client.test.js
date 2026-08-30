@@ -738,12 +738,15 @@ function countInCode(source, needle) {
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
   // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
   // S2 Task 4 the eighth (convertListItemAway, which commits its own spliced
-  // range instead of going through commitListStructure) and S2 Task 5 the
-  // ninth (convertBlockIntoList, which commits the block's own range widened
-  // over the §4.3 rule 2 separator), so the expected total is DECLARED once +
-  // EXPORTED once + 9 uses = 11.
-  assert.strictEqual(helperCalls, 11,
-    'the helper must be DECLARED once, EXPORTED once, and used at all nine ' +
+  // range instead of going through commitListStructure), S2 Task 5 the ninth
+  // (convertBlockIntoList, which commits the block's own range widened over
+  // the §4.3 rule 2 separator) and S2 Task 6 the tenth
+  // (duplicateBlockViaMenu's NON-li path, which commits through
+  // commitBlockInsertion() — the li path goes through commitListStructure()
+  // and reuses ITS site, so 複製 adds exactly one). The expected total is
+  // therefore DECLARED once + EXPORTED once + 10 uses = 12.
+  assert.strictEqual(helperCalls, 12,
+    'the helper must be DECLARED once, EXPORTED once, and used at all ten ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
