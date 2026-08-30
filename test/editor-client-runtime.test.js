@@ -10147,9 +10147,38 @@ async function clickInsertMenuItem(page, sel, label) {
     // would silently reintroduce once the base rule became a fixed `width`,
     // since a fixed width on the base rule is no longer overridden by a
     // min-width on the task rule).
+    //
+    // ── Branch review, STRONGLY RECOMMENDED 4 ────────────────────────────
+    // The guard above USED to stop at ".ed-li-text's left edge is constant",
+    // and that measures the wrong thing: the marker box is FIXED, so that edge
+    // is 96 for a 1-item list and for a 120-item one alike — growing the
+    // fixture could never make it red. What it could not see is the DIRECTION
+    // the overflow takes. With "width + text-align: right", once the glyphs
+    // are wider than the box, text-align has nothing left to distribute: the
+    // ink grows from the box's LEFT edge rightward, across the 6px column-gap
+    // and onto the item's own text. Measured on the old CSS at 15px:
+    // marker box [72, 90], .ed-li-text at 96, and marker.scrollWidth reporting
+    // 21 at item 10 and 29 at item 100 — ink out to x=101, five pixels inside
+    // the text, which a dsf-8 screenshot reads back as "100item 100".
+    //
+    // The oracle below is the review's own — "the marker's ink right edge must
+    // not reach the text's left edge" — stated as something the page can
+    // actually measure. scrollWidth counts END-side overflow only (LTR), so it
+    // is exactly the ink that escaped to the RIGHT, and the LEFT overflow the
+    // fix produces is invisible to it by construction rather than by luck.
+    //
+    // The fixture is 120 items, not 12, and that is load-bearing in the other
+    // direction: under this machine's Liberation Sans a two-digit ordinal
+    // overflows by only 3px and still stops 3px short of the text, so a
+    // 12-item fixture is green on the BROKEN build. Under DejaVu Sans (what
+    // fc-match sans-serif resolves to here) two digits already collide. Three
+    // digits collide under both, so the fixture is sized past the font
+    // question rather than tuned to one font — and the canvas measurement
+    // below asserts that it really is past it on whatever font this machine
+    // ends up using.
     {
       const { srv: wsrv, url: wurl } = await setupListDoc(
-        Array.from({ length: 12 }, (_, i) => (i + 1) + '. item ' + (i + 1))
+        Array.from({ length: 120 }, (_, i) => (i + 1) + '. item ' + (i + 1))
           .concat(['', '- bullet', '- [ ] task', '']));
       try {
         const page = await newPage(browser);
@@ -10157,8 +10186,10 @@ async function clickInsertMenuItem(page, sel, label) {
         const measured = await page.evaluate(() => {
           const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const plainTextLefts = [];
+          const inkOverruns = [];
           let task = null;
-          lis.forEach((li) => {
+          let widestInk = null;
+          lis.forEach((li, i) => {
             const marker = li.querySelector(':scope > .ed-li-marker');
             const check = li.querySelector(':scope > .ed-li-check');
             const text = li.querySelector(':scope > .ed-li-text');
@@ -10170,13 +10201,45 @@ async function clickInsertMenuItem(page, sel, label) {
                 gap: checkRect.left - markerRect.right,
                 columnGap: parseFloat(getComputedStyle(li).columnGap) || 0,
               };
-            } else {
-              plainTextLefts.push(Math.round(text.getBoundingClientRect().left));
+              return;
+            }
+            const markerRect = marker.getBoundingClientRect();
+            const textLeft = text.getBoundingClientRect().left;
+            plainTextLefts.push(Math.round(textLeft));
+            // Ink that escaped to the RIGHT: scrollWidth is clientWidth plus
+            // the end-side overflow and nothing else.
+            const inkRight = markerRect.left + marker.scrollWidth;
+            if (inkRight > textLeft) {
+              inkOverruns.push({ item: i + 1, inkRight: Math.round(inkRight * 100) / 100,
+                textLeft: Math.round(textLeft * 100) / 100,
+                boxRight: Math.round(markerRect.right * 100) / 100 });
+            }
+            if (i === lis.length - 3) {
+              // FIXTURE SANITY, direction-agnostic on purpose: how wide the
+              // widest ordinal's glyphs actually are on this machine's font,
+              // measured by the text engine rather than inferred from the
+              // layout the assertion above is testing. If this is not wider
+              // than the box, the fixture does not contain the shape under
+              // test and a green result means nothing.
+              const cs = getComputedStyle(marker);
+              const ctx = document.createElement('canvas').getContext('2d');
+              ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' +
+                cs.fontFamily;
+              widestInk = { glyphs: ctx.measureText('120.').width, box: markerRect.width };
             }
           });
-          return { plainTextLefts, task };
+          return { plainTextLefts, inkOverruns, task, widestInk };
         });
-        assert.strictEqual(measured.plainTextLefts.length, 13, 'sanity: 12 ordered + 1 plain bullet');
+        assert.strictEqual(measured.plainTextLefts.length, 121, 'sanity: 120 ordered + 1 plain bullet');
+        assert.ok(measured.widestInk, 'sanity: the widest ordered item was measured');
+        assert.ok(measured.widestInk.glyphs > measured.widestInk.box,
+          'FIXTURE SANITY: the widest ordinal must not FIT its marker box, or this scenario ' +
+          'is green because it never contains an overflow at all — glyph width ' +
+          measured.widestInk.glyphs + ' vs box ' + measured.widestInk.box +
+          '. Grow the fixture, do not relax the assertion.');
+        assert.deepStrictEqual(measured.inkOverruns, [],
+          'a wide ordinal must overflow LEFT into the gutter: its ink right edge may never ' +
+          'reach .ed-li-text\'s left edge. Overruns: ' + JSON.stringify(measured.inkOverruns));
         assert.strictEqual(new Set(measured.plainTextLefts).size, 1,
           'a wide ordinal must overflow into the gutter, not shift its row\'s text — got ' +
           JSON.stringify(measured.plainTextLefts));
@@ -10187,7 +10250,8 @@ async function clickInsertMenuItem(page, sel, label) {
           'the checkbox must sit exactly one column-gap after the collapsed marker (no double gap) — got ' +
           JSON.stringify(measured.task));
         await page.close();
-        console.log('S1: two-digit ordinals keep every item\'s text on one left edge; task checkbox collapse intact — OK');
+        console.log('S1: wide ordinals overflow LEFT into the gutter and keep every item\'s ' +
+          'text on one left edge; task checkbox collapse intact — OK');
       } finally {
         wsrv.close();
       }
