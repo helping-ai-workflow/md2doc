@@ -1984,6 +1984,64 @@ async function clickInsertMenuItem(page, sel, label) {
       }
     }
 
+    // ── S2 T8 follow-up: 'hr' and 'html' are withheld for a DIFFERENT reason
+    //    than a table's. A table has no target that could carry its cells; an
+    //    hr has no CONTENT AT ALL — its source line IS its marker — so
+    //    convert-md has nothing to strip and nothing to re-host. Measured
+    //    before this guard existed: 'hr' → 項目符號列表 wrote '- ---', which
+    //    marked re-lexes as an hr again, so the file's bytes changed, the
+    //    block type did not, and NO banner was shown. 'hr' → 文字 was a byte
+    //    no-op, equally silent. An item that appears to work and does nothing
+    //    is worse than an item that is not offered, so neither type gets 轉換成.
+    {
+      const { srv: s2eeSrv, url: s2eeUrl } = await setupTableDoc(
+        ['# Doc', '', '---', '', '<div>raw</div>', '', 'tail', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2eeUrl, { waitUntil: 'networkidle0' });
+
+        // Fixture sanity FIRST: if the renderer ever stopped emitting these as
+        // their own blocks, the assertions below would pass without the guard
+        // ever being consulted — this stage has already shipped six tests that
+        // were green for exactly that kind of reason.
+        const kinds = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block'))
+            .map((b) => b.getAttribute('data-block-type')));
+        assert.ok(kinds.includes('hr'), 'fixture must contain an hr block, got ' + kinds);
+        assert.ok(kinds.includes('html'), 'fixture must contain an html block, got ' + kinds);
+
+        for (const type of ['hr', 'html']) {
+          const sel = await blockSelByType(page, type);
+          await openGutterMenu(page, sel);
+          const labels = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden).map((b) => b.textContent));
+          // The menu must be genuinely OPEN — otherwise "轉換成 is absent" is
+          // trivially true and the assertion guards nothing.
+          assert.ok(labels.length >= 2,
+            'the ⠿ menu must be open on the ' + type + ' block, got ' + JSON.stringify(labels));
+          assert.strictEqual(labels.includes('轉換成 ›'), false,
+            'a ' + type + ' block must not offer 轉換成 — the gesture would change bytes '
+            + 'without changing the block, silently. Got ' + JSON.stringify(labels));
+          await page.keyboard.press('Escape');
+        }
+
+        // A neighbouring paragraph in the same document still offers it, so the
+        // guard is proven to be per-type and not a blanket disable.
+        await openGutterMenu(page, await blockSelByType(page, 'paragraph'));
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).includes('轉換成 ›')),
+          true, 'a paragraph in the same document must still offer 轉換成');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: hr and html blocks offer no 轉換成 — OK');
+      } finally {
+        s2eeSrv.close();
+      }
+    }
+
     {
       const { srv: s2fSrv, url: s2fUrl } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
       try {
