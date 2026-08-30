@@ -355,6 +355,97 @@ function lexLooseDeep(md) {
   return out;
 }
 
+// S2 Task 8: every `code` token in the saved file, nested ones included, as
+// its RAW source text. Two questions in one, and both are needed: HOW MANY
+// code tokens the file holds (a conversion may legitimately create or destroy
+// exactly one) and whether each of them is FENCED. §3.4's corruption — an
+// indent of >= 4 columns left behind with no list to anchor it — produces a
+// code token that `t.type` cannot be told apart from a deliberate fence, so
+// the count alone would miss it and the fence test alone would miss a stray
+// second fence.
+function lexCodeRaws(md) {
+  const out = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'code') { out.push(t.raw); return; }
+      if (t.type === 'list') { (t.items || []).forEach((i) => walk(i.tokens)); return; }
+      if (t.tokens) walk(t.tokens);
+    });
+  })(plainMarked.lexer(md));
+  return out;
+}
+
+// Does this code token come from a FENCE rather than from four columns of
+// indent? Measured against marked 14.1.4: a fenced token's `raw` opens with
+// the fence itself at 0-3 columns, an indented one opens with the indent.
+function isFencedCode(raw) {
+  return /^ {0,3}(?:`{3,}|~{3,})/.test(String(raw));
+}
+
+// S2 Task 8: WHICH block token of the saved file holds `needle`, as a short
+// descriptor ('paragraph' / 'heading:2' / 'blockquote' / 'code' /
+// 'li:ul' / 'li:ol' / 'li:ul:task'). This is the third byte-level property the
+// conversion sweep asserts, and the one neither the loose flag nor the code
+// count can see: §4.3 rule 1's failure mode is LAZY CONTINUATION — drop the
+// blank line a li → 文字 needs and the converted text is swallowed into the
+// item above it, which leaves every list TIGHT and creates no code token
+// (measured on this very fixture) while the user's block has silently ceased
+// to exist as a block.
+//
+// Only LISTS are descended into (an item's own text, and any list nested
+// inside it); heading / code / blockquote / paragraph are leaves, so the
+// descriptor names the block the user would see rather than some inline
+// fragment of it.
+function lexHostOf(md, needle) {
+  const hits = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'list') {
+        (t.items || []).forEach((item) => {
+          if (String(item.raw).indexOf(needle) < 0) return;
+          // The item's OWN text arrives as a `text` token that also carries
+          // any nested list as a CHILD (measured — a nested list is never a
+          // sibling of the item's text at the item's top level). So collect
+          // the nested LISTS out of it and descend into those only: descending
+          // into the text token itself would report 'text', which is an inline
+          // container and not a block the user can see.
+          const nested = [];
+          (function collect(ts) {
+            (ts || []).forEach((k) => {
+              if (k.type === 'list') { nested.push(k); return; }
+              if (k.type === 'text' && k.tokens) collect(k.tokens);
+            });
+          })(item.tokens);
+          const before = hits.length;
+          walk(nested);
+          if (hits.length === before) {
+            hits.push('li:' + (t.ordered ? 'ol' : 'ul') + (item.task ? ':task' : ''));
+          }
+        });
+        return;
+      }
+      if (String(t.raw || '').indexOf(needle) < 0) return;
+      hits.push(t.type === 'heading' ? 'heading:' + t.depth : t.type);
+    });
+  })(plainMarked.lexer(md));
+  return hits;
+}
+
+// The descriptor lexHostOf() must report after a successful conversion to
+// `target` — the twelve ids of §3.2, spelled out rather than derived, so a
+// renamed id fails loudly here instead of quietly matching nothing.
+function hostExpectedFor(target) {
+  if (target === 'text') return 'paragraph';
+  if (/^h[1-6]$/.test(target)) return 'heading:' + target.slice(1);
+  if (target === 'ul') return 'li:ul';
+  if (target === 'ol') return 'li:ol';
+  if (target === 'task') return 'li:ul:task';
+  if (target === 'code') return 'code';
+  if (target === 'quote') return 'blockquote';
+  throw new Error('hostExpectedFor: unknown target ' + target);
+}
+
+
 // S2 Task 2: selector for the FIRST block of `type` in document order. Block
 // ids are re-minted on every render, so a conversion scenario must re-resolve
 // between steps rather than hold one selector across a commit.
@@ -3541,6 +3632,455 @@ async function clickInsertMenuItem(page, sel, label) {
           console.log('S2 Task 7: ＋ on a li works with a dirty burst open on that li — OK');
         } finally { t7hSrv.close(); }
       }
+    }
+
+    // ── S2 Task 8 Step 2: the conversion matrix, swept ─────────────────────
+    //
+    // §5.3 item 11, "轉換矩陣逐格": every source kind × every one of §3.2's
+    // twelve targets, with the SAVED BYTES as the subject. 96 cells — six
+    // source rows of twelve, plus two rows that exist to make a REFUSAL an
+    // observable outcome rather than a gap. Four properties are asserted per
+    // cell, and each one is a defect this stage actually opened at some point:
+    //
+    //   * no list went LOOSE — §4.3 rule 2. `lexLooseDeep()` and not
+    //     `lexLoose()`: a nested list going loose leaves the top level tight,
+    //     and the degrade (every item grows a <p>, serializeBlocks() pushes
+    //     'P', the whole run freezes read-only with no banner) is identical
+    //     either way.
+    //   * no token became `code` that was not `code` before — §3.4's
+    //     orphaned-indent corruption. Asserted as a COUNT (a conversion may
+    //     legitimately create or destroy exactly one) plus "every code token
+    //     in the file is FENCED", because an indented code block and a fenced
+    //     one are the same `t.type`.
+    //   * the converted text is HOSTED by the target's own block type —
+    //     lexHostOf(). Neither of the two above can see §4.3 rule 1's failure:
+    //     drop the blank line a li → 文字 needs and the text is swallowed as a
+    //     lazy continuation of the item above, which leaves every list tight
+    //     and creates no code token (measured), while the user's block has
+    //     silently stopped being a block.
+    //   * the cell's outcome is one of three NAMED shapes — converted,
+    //     identity no-op, or refused-with-a-banner. A fourth shape, "the file
+    //     came back byte-identical, no banner, and this was not an identity
+    //     conversion", is a silent dropped gesture and is collected as a
+    //     defect rather than passed over.
+    //
+    // ⚠ The fixture's own preconditions are asserted BEFORE every cell, not
+    // once at the top. A sweep whose fixture cannot express the shape under
+    // test reports green and removes the pressure to look — that is how this
+    // project shipped four tests that guarded nothing. Concretely: the block
+    // really is of the kind the row claims, its list run really is
+    // structurally editable (an `unsupported` run refuses all twelve and the
+    // whole row would be green for the wrong reason), and the submenu really
+    // offers all twelve labels.
+    {
+      const convertMdMod = require('../lib/editor/convert-md.js');
+      const TARGETS = convertMdMod.CONVERT_TARGETS;
+      assert.strictEqual(TARGETS.length, 12,
+        'FIXTURE SANITY: §3.2 v1 has exactly twelve targets; the sweep is sized off the ' +
+        'module\'s own list so a thirteenth enters it automatically. Got ' + TARGETS.length);
+
+      const bannerNow = (p) => p.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Banners hang on document.body, never time out and survive
+      // rerenderAll() — a leftover one makes the NEXT cell's read a lie, and
+      // with 96 cells sharing three pages that is not a hypothetical.
+      const clearBanner = (p) => p.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        if (b) b.remove();
+      });
+      // The block of `type` whose text contains `needle`, asserted UNIQUE —
+      // an ambiguous needle would silently sweep whichever block happened to
+      // come first in document order.
+      const sweepSel = async (p, type, needle) => {
+        const ids = await p.evaluate((ty, n) => Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="' + ty + '"]'))
+          .filter((b) => {
+            const own = b.querySelector(':scope > .ed-li-text');
+            return (own ? own.textContent : b.textContent).indexOf(n) >= 0;
+          }).map((b) => b.getAttribute('data-block-id')), type, needle);
+        assert.strictEqual(ids.length, 1,
+          'FIXTURE SANITY: exactly one ' + type + ' block must contain ' +
+          JSON.stringify(needle) + ', got ' + ids.length);
+        return '.ed-block[data-block-type="' + type + '"][data-block-id="' + ids[0] + '"]';
+      };
+      const runUnsupported = (p) => p.evaluate(() =>
+        window.md2docListMd.serializeBlocks(Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+      const visibleMenuLabels = (p) => p.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('.ed-handle-menu-btn'))
+        .filter((b) => !b.hidden && !b.closest('.ed-handle-submenu'))
+        .map((b) => b.textContent));
+
+      const rows = [];
+      const defects = [];
+      const record = (cell, outcome, why) => rows.push({ cell, outcome, why: why || '' });
+
+      // ── the first 72 cells: 6 source rows × 12 targets ───────────────────
+      const SWEEP_LINES = [
+        '# Doc', '',
+        'Para under test.', '',
+        '- ul sibling A',
+        '- ul sibling B', '',
+        '## Head under test', '',
+        '> Quote under test.', '',
+        '```',
+        'Code under test.',
+        '```', '',
+        '- run two A',
+        '  - nested child',
+        '- Item under test',
+        '  - orphan child',
+        '    - orphan grandchild',
+        '- run two B', '',
+        '### Solo section', '',
+        '- alpha',
+        '1. Solo under test',
+        '- charlie', '',
+        '## Tail', '',
+      ];
+      const SWEEP_MD = SWEEP_LINES.join('\n');
+      // Fixture preconditions, measured in NODE before a browser exists. Each
+      // source kind is placed against a neighbour that makes its hard case
+      // reachable: the paragraph and the code block each sit next to a ul run
+      // (so a list target has to eat the separator — §4.3 rule 2), the heading
+      // sits under one (same, from the other side); the first li sits BETWEEN
+      // two siblings and owns a two-level subtree (so §3.4's clamp has children
+      // to orphan and lexLooseDeep() has nested lists to watch); and the second
+      // li is the sole member of its run (so §4.3 rule 1's OUTER-edge blanks
+      // are the only thing standing between it and a lazy continuation).
+      assert.deepStrictEqual(lexTypes(SWEEP_MD),
+        ['heading', 'paragraph', 'space', 'list', 'space', 'heading', 'blockquote',
+          'space', 'code', 'space', 'list', 'space', 'heading', 'list', 'list', 'list',
+          'space', 'heading'],
+        'FIXTURE SANITY: all five source kinds must be present as their own top-level ' +
+        'tokens, or the row for a missing one sweeps nothing. The THREE adjacent list tokens ' +
+        'near the end are §3.8 rule (b) at work — a marker-type change interrupts a list on ' +
+        'its own — and they are what make the 「run 中唯一成員」 row below real');
+      assert.deepStrictEqual(lexLooseDeep(SWEEP_MD),
+        [false, false, false, false, false, false, false, false],
+        'FIXTURE SANITY: eight lists (three top-level runs, three NESTED levels, and the two ' +
+        'single-item runs either side of the sole member), every one TIGHT — a fixture that ' +
+        'starts loose can never report a conversion that made it loose, and the nested ones ' +
+        'are the whole reason this uses lexLooseDeep() rather than lexLoose(), which only ' +
+        'ever sees the top-level runs');
+      assert.strictEqual(lexCodeRaws(SWEEP_MD).length, 1,
+        'FIXTURE SANITY: exactly one code token at baseline, so the per-cell count model below ' +
+        '(1 + created − destroyed) is arithmetic and not a guess');
+      assert.ok(isFencedCode(lexCodeRaws(SWEEP_MD)[0]),
+        'FIXTURE SANITY: the code source must be FENCED — stripMarker() refuses an INDENTED ' +
+        'code block by design, so an indented fixture would turn all twelve of that row into ' +
+        'refusals and prove nothing about conversion');
+
+      const SOURCES = [
+        { kind: 'paragraph', label: 'paragraph', needle: 'Para under test.', identity: 'text' },
+        { kind: 'heading', label: 'heading(h2)', needle: 'Head under test', identity: 'h2' },
+        { kind: 'blockquote', label: 'blockquote', needle: 'Quote under test.', identity: 'quote' },
+        { kind: 'code', label: 'code(fenced)', needle: 'Code under test.', identity: 'code' },
+        { kind: 'li', label: 'li(ul, 2-level subtree)', needle: 'Item under test', identity: 'ul',
+          li: { indent: '0', listType: 'ul', subtree: 2, runSize: null } },
+        // §4.3 rule 1's 2026-08-30 erratum: the item that is the ONLY member
+        // of its run. §3.8 rule (b) makes '- alpha / 1. Solo / - charlie'
+        // three list tokens, so both halves of the split are EMPTY and the
+        // in-range '\n\n' joins never fire — the blank lines have to come
+        // from the run's own outer edges or the converted text is swallowed
+        // as a lazy continuation of '- alpha'.
+        { kind: 'li', label: 'li(ol, sole run member)', needle: 'Solo under test', identity: 'ol',
+          li: { indent: '0', listType: 'ol', subtree: 0, runSize: 1 } },
+      ];
+      // Each needle must name exactly ONE block at baseline, and that block
+      // must be of the kind its row claims — the identity conversion of every
+      // row is derived from this, and a needle that matched two blocks (or the
+      // wrong one) would make the host assertion below unfalsifiable.
+      SOURCES.forEach((src) => {
+        assert.deepStrictEqual(lexHostOf(SWEEP_MD, src.needle),
+          [hostExpectedFor(src.identity)],
+          'FIXTURE SANITY: ' + JSON.stringify(src.needle) + ' must be hosted by exactly one ' +
+          src.kind + ' block at baseline, which is also what makes ' + src.identity +
+          ' the identity cell of that row');
+      });
+
+      const sweepDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-'));
+      const sweepMdPath = path.join(sweepDir, 'doc.md');
+      fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
+      // An EXPLICIT idle timeout for the same reason the shared server at the
+      // top of this file has one: 72 cells on one server outlive
+      // createEditorServer()'s 30s default, and the symptom is a bare
+      // net::ERR_CONNECTION_REFUSED that reads as a broken test.
+      const sweepSrv = await createEditorServer({
+        files: [sweepMdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+      });
+      try {
+        const page = await newPage(browser);
+        for (const src of SOURCES) {
+          for (const tgt of TARGETS) {
+            // The LABEL, not the kind: two rows are both `li` and a shared
+            // name would let one row's defect be read as the other's.
+            const cell = src.label + ' → ' + tgt.id;
+            // Every cell starts from the same bytes; only the navigation is
+            // repeated. A cell that DID write despite refusing therefore
+            // cannot poison the next one, and the byte comparison below is
+            // always against the pristine fixture.
+            fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
+            await page.goto(sweepSrv.urlFor(sweepMdPath), { waitUntil: 'networkidle0' });
+            await clearBanner(page);
+
+            const sel = await sweepSel(page, src.kind, src.needle);
+            const pre = await page.evaluate((s) => {
+              const el = document.querySelector(s);
+              return {
+                type: el.getAttribute('data-block-type'),
+                indent: el.getAttribute('data-indent'),
+                listType: el.getAttribute('data-list-type'),
+                task: el.getAttribute('data-task'),
+                hasHandle: !!el.querySelector(':scope > .ed-handle'),
+                subtree: (function () {
+                  // The flat model's subtree: the contiguous run of FOLLOWING
+                  // li blocks at a strictly greater indent.
+                  if (el.getAttribute('data-block-type') !== 'li') return null;
+                  const own = Number(el.getAttribute('data-indent')) || 0;
+                  const all = Array.prototype.slice.call(
+                    document.querySelectorAll('.ed-block'));
+                  let n = 0;
+                  for (let i = all.indexOf(el) + 1; i < all.length; i++) {
+                    const b = all[i];
+                    if (b.getAttribute('data-block-type') !== 'li') break;
+                    if ((Number(b.getAttribute('data-indent')) || 0) <= own) break;
+                    n++;
+                  }
+                  return n;
+                })(),
+              };
+            }, sel);
+            assert.strictEqual(pre.type, src.kind,
+              'PRECONDITION ' + cell + ': the block under test must really be a ' + src.kind);
+            assert.ok(pre.hasHandle,
+              'PRECONDITION ' + cell + ': the block must own a ⠿, or the gesture is unreachable');
+            assert.deepStrictEqual(await runUnsupported(page), [],
+              'PRECONDITION ' + cell + ': every list run in the fixture must be structurally ' +
+              'EDITABLE at the start of this cell. A degraded run refuses all twelve targets, ' +
+              'and this whole row would then be green without a single conversion happening');
+            if (src.kind === 'li') {
+              assert.strictEqual(pre.indent, src.li.indent,
+                'PRECONDITION ' + cell + ': the li under test is at indent ' + src.li.indent +
+                ', so §3.9\'s accepted list-breakage is not what this cell is measuring');
+              assert.strictEqual(pre.listType, src.li.listType,
+                'PRECONDITION ' + cell + ': the li under test must be a ' + src.li.listType +
+                ' item, which is what makes ' + src.identity + ' the identity cell of this row');
+              assert.ok(pre.task !== '1' && pre.task !== 'true',
+                'PRECONDITION ' + cell + ': the li under test is not a task item, or 待辦清單 ' +
+                'would be a second identity cell');
+              assert.strictEqual(pre.subtree, src.li.subtree,
+                'PRECONDITION ' + cell + ': the li under test must own a subtree of exactly ' +
+                src.li.subtree + ' block(s). A childless item never orphans anything, so ' +
+                '§3.4\'s clamp — the `operatedBecomes` branch this stage lit up for the first ' +
+                'time — would not be on the path and that row would sweep the easy shape only. ' +
+                'Got ' + pre.subtree);
+              if (src.li.runSize !== null) {
+                const span = await page.evaluate(new Function('s', RUN_SPAN_FN + `
+                  return runSpanOf(document.querySelector(s)).length;
+                `), sel);
+                assert.strictEqual(span, src.li.runSize,
+                  'PRECONDITION ' + cell + ': this li must be the ONLY member of its run ' +
+                  '(§3.8 rule (b) — the bullet items either side are different list tokens). ' +
+                  'A run of ' + span + ' would put a sibling in `before`/`after` and the ' +
+                  'in-range separators would do the work §4.3 rule 1\'s outer edges are here ' +
+                  'to prove');
+              }
+            }
+
+            await openGutterMenu(page, sel);
+            assert.ok((await visibleMenuLabels(page)).indexOf('轉換成 ›') >= 0,
+              'PRECONDITION ' + cell + ': the ⠿ menu must OFFER 轉換成 on a ' + src.kind);
+            await page.evaluate(() => {
+              const b = Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-menu-btn'))
+                .find((x) => x.textContent === '轉換成 ›');
+              b.click();
+            });
+            await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+            assert.deepStrictEqual(
+              await page.evaluate(() => Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+                .map((b) => b.textContent)),
+              TARGETS.map((t) => t.label),
+              'PRECONDITION ' + cell + ': the submenu must render all twelve targets, in order');
+            await page.evaluate((label) => {
+              const b = Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+                .find((x) => x.textContent === label);
+              if (!b) throw new Error('no submenu item labelled ' + label);
+              b.click();
+            }, tgt.label);
+            await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+              { timeout: 5000 });
+            await settleEditor(page);
+
+            const banner = await bannerNow(page);
+            const after = await saveAndRead(page, sweepMdPath);
+            await clearBanner(page);
+
+            const changed = after !== SWEEP_MD;
+            const identity = tgt.id === src.identity;
+            let outcome;
+            if (changed) outcome = banner ? 'converted+banner' : 'converted';
+            else if (banner) outcome = 'refused';
+            else if (identity) outcome = 'no-op';
+            else outcome = 'SILENT';
+            record(cell, outcome, banner || (identity ? 'identity conversion' : ''));
+
+            if (outcome === 'SILENT') {
+              defects.push(cell + ': the file came back byte-identical with NO banner, and ' +
+                'this is not an identity conversion — a dropped gesture, not a refusal');
+            }
+            if (outcome === 'converted+banner') {
+              defects.push(cell + ': the file was rewritten AND a banner was shown (' +
+                banner + ') — a refusal that wrote bytes');
+            }
+            const loose = lexLooseDeep(after);
+            if (loose.some(Boolean)) {
+              defects.push(cell + ': a list went LOOSE (§4.3 rule 2) — lexLooseDeep ' +
+                JSON.stringify(loose) + ' from\n' + JSON.stringify(after));
+            }
+            const codes = lexCodeRaws(after);
+            const unfenced = codes.filter((r) => !isFencedCode(r));
+            if (unfenced.length) {
+              defects.push(cell + ': an INDENTED code block appeared (§3.4) — ' +
+                JSON.stringify(unfenced) + ' from\n' + JSON.stringify(after));
+            }
+            if (outcome === 'converted' || outcome === 'no-op') {
+              const host = lexHostOf(after, src.needle);
+              const want = [hostExpectedFor(tgt.id)];
+              if (JSON.stringify(host) !== JSON.stringify(want)) {
+                defects.push(cell + ': the converted text is hosted by ' + JSON.stringify(host) +
+                  ', expected ' + JSON.stringify(want) + ' — the block did not become the ' +
+                  'target type (a lazy continuation swallowed it, or it split in two). From\n' +
+                  JSON.stringify(after));
+              }
+            }
+            const expectedCodes = changed
+              ? 1 + (tgt.id === 'code' ? 1 : 0) - (src.kind === 'code' ? 1 : 0)
+              : 1;
+            if (codes.length !== expectedCodes) {
+              defects.push(cell + ': the file holds ' + codes.length + ' code tokens, expected ' +
+                expectedCodes + ' (baseline 1, ' + (tgt.id === 'code' ? '+1 target' : 'no target') +
+                ', ' + (src.kind === 'code' ? '−1 source' : 'no source') + ') — from\n' +
+                JSON.stringify(after));
+            }
+          }
+        }
+
+        // ── 12 more cells: a table REFUSES all twelve, by design (§3.7) ────
+        // Recorded, not skipped: "there is no menu item to press" is an
+        // outcome the matrix has to be able to state, and it is only
+        // meaningful next to a positive assertion that the menu itself opened.
+        {
+          const { srv: tsrv, url: turl, mdPath: tmd } =
+            await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
+          try {
+            const tpage = await newPage(browser);
+            await tpage.goto(turl, { waitUntil: 'networkidle0' });
+            const tbefore = fs.readFileSync(tmd, 'utf8');
+            const tsel = await tableBlockSel(tpage, 0);
+            for (const tgt of TARGETS) {
+              const cell = 'table → ' + tgt.id;
+              await openGutterMenu(tpage, tsel);
+              const labels = await visibleMenuLabels(tpage);
+              assert.deepStrictEqual(labels, ['複製', '刪除', 'MD 原始碼'],
+                'PRECONDITION ' + cell + ': the ⠿ menu must really be OPEN on the table (its ' +
+                'other three items visible) — otherwise "轉換成 is absent" is green because ' +
+                'nothing opened. Got ' + JSON.stringify(labels));
+              assert.strictEqual(await bannerNow(tpage), null,
+                cell + ': a refusal by MENU OMISSION shows no banner — there is no gesture to ' +
+                'refuse, the item is simply not offered');
+              assert.strictEqual(fs.readFileSync(tmd, 'utf8'), tbefore,
+                cell + ': nothing may be written');
+              await tpage.keyboard.press('Escape');
+              await tpage.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+                { timeout: 5000 });
+              record(cell, 'refused', '§3.7: a table block is offered no 轉換成 at all');
+            }
+            assert.strictEqual(await saveAndRead(tpage, tmd), tbefore,
+              'the table fixture must come back byte-identical after all twelve');
+            await tpage.close();
+          } finally { tsrv.close(); }
+        }
+
+        // ── 12 more cells: a DEGRADED run refuses all twelve, with a banner ─
+        // The other refusal shape, and the one that must never be silent. The
+        // fixture is PROVEN degraded first: '- a' + blank + '- b' is ONE loose
+        // list, so serializeBlocks() reports P,P and §4.3's run-wide gate has
+        // to turn every target away.
+        {
+          const DEG = ['# Doc', '', '- a', '', '- b', ''].join('\n');
+          const degDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-deg-'));
+          const degMd = path.join(degDir, 'doc.md');
+          fs.writeFileSync(degMd, DEG, 'utf8');
+          const degSrv = await createEditorServer({
+            files: [degMd], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+          });
+          try {
+            const dpage = await newPage(browser);
+            for (const tgt of TARGETS) {
+              const cell = 'li(degraded run) → ' + tgt.id;
+              fs.writeFileSync(degMd, DEG, 'utf8');
+              await dpage.goto(degSrv.urlFor(degMd), { waitUntil: 'networkidle0' });
+              await clearBanner(dpage);
+              assert.deepStrictEqual(await runUnsupported(dpage), ['P', 'P'],
+                'PRECONDITION ' + cell + ': this run must really be degraded, or the refusal ' +
+                'below is green for the wrong reason');
+              const dsel = await liBlockSelByText(dpage, 'a');
+              await convertVia(dpage, dsel, tgt.label);
+              const banner = await bannerNow(dpage);
+              const after = await saveAndRead(dpage, degMd);
+              await clearBanner(dpage);
+              if (after !== DEG) {
+                defects.push(cell + ': a refused conversion WROTE — ' + JSON.stringify(after));
+              }
+              if (!banner) {
+                defects.push(cell + ': refused silently — the file is byte-identical but no ' +
+                  'banner was shown, so the user cannot tell the gesture from a no-op');
+              }
+              assert.strictEqual(banner, '此清單含不支援的格式，無法調整結構',
+                cell + ': §4.3\'s run-wide gate owns this refusal, so it must be §4.1\'s ' +
+                'banner and not convert-md.js\'s per-block 此區塊的格式無法轉換');
+              record(cell, 'refused', banner);
+            }
+            await dpage.close();
+          } finally { degSrv.close(); }
+        }
+
+        const counts = rows.reduce((acc, r) => {
+          acc[r.outcome] = (acc[r.outcome] || 0) + 1; return acc;
+        }, {});
+        console.log('S2 T8 conversion matrix — ' + rows.length + ' cells: ' +
+          JSON.stringify(counts));
+        // The matrix itself, one line per source row, so a reviewer reads the
+        // outcomes rather than trusting a pass/fail bit.
+        const SHORT = { converted: 'C', 'no-op': '=', refused: 'R', SILENT: '!' };
+        rows.reduce((seen, r) => {
+          const src = r.cell.slice(0, r.cell.lastIndexOf(' → '));
+          (seen[src] = seen[src] || []).push(
+            r.cell.slice(r.cell.lastIndexOf(' → ') + 3) + '=' + (SHORT[r.outcome] || r.outcome));
+          if (seen[src].length === TARGETS.length) {
+            console.log('  ' + src + ': ' + seen[src].join(' '));
+          }
+          return seen;
+        }, {});
+        console.log('  (C=converted  ==identity no-op  R=refused  !=silent)');
+        rows.filter((r) => r.outcome === 'refused').forEach((r) => {
+          console.log('  refused: ' + r.cell + ' — ' + r.why);
+        });
+        assert.deepStrictEqual(defects, [],
+          'the conversion matrix must produce no silent corruption; found:\n  ' +
+          defects.join('\n  '));
+        assert.strictEqual(rows.length, SOURCES.length * TARGETS.length + TARGETS.length * 2,
+          'every cell of the matrix must be RECORDED, including the ones that refuse');
+        await page.close();
+        console.log('S2 T8: the conversion matrix is swept, ' +
+          (counts.refused || 0) + ' cells refuse by design and none corrupts — OK');
+      } finally { sweepSrv.close(); }
     }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
