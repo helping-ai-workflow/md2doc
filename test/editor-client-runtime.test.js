@@ -325,6 +325,15 @@ function lexTypes(md) {
 // and the run degrades read-only with no banner. `loose === true` after a
 // conversion IS the defect, so it is asserted directly rather than inferred
 // from the token types (which look identical either way).
+// ⚠ 2026-08-30 test-integrity review: NO assertion in this file calls this any
+// more. All nine sites that did now call lexLooseDeep() below, which is the
+// policy lexLooseDeep()'s own note states — a li scenario that checks only the
+// top level is green for the wrong reason. Two of those nine really do carry a
+// nested list this function cannot see ('- alpha / (2sp)- beta' after a rule-2
+// merge, and '- a / (2sp)- a1' after a 複製), so for them the change moved the
+// asserted value, not just the call. It is kept as the NAMED top-level-only scan
+// that note, the Task-7 ＋ scenario and the 96-cell sweep each contrast
+// themselves against; do not reach for it in a new assertion.
 function lexLoose(md) {
   return plainMarked.lexer(md).filter((t) => t.type === 'list').map((t) => t.loose);
 }
@@ -2224,6 +2233,29 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
           'still not one byte');
 
+        // ANTI-VACUOUS (2026-08-30 test-integrity review). MEASURED: both
+        // refusals above stay GREEN when convertBlockViaMenu() is stubbed to
+        // `refuseStructuralListEdit(); return;`, so on their own they cannot
+        // tell "refuses THIS shape" from "refuses everything". The control
+        // gesture below is what separates the two, and it is not a fig leaf:
+        // §4.1's multi-line refusal is TARGET-scoped, not run-wide —
+        // listRunSupportsStructuralEdit() lets MULTILINE past for a BYSTANDER
+        // and refuses only the operated block — so `bravo`, the single-line
+        // sibling of the item that just refused twice, must still convert.
+        // The banner is dismiss-only (it does not time out, and rerenderAll()
+        // leaves it alone), so it is cleared by hand first or the next read
+        // would just see this same one.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null,
+          'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
+        assert.strictEqual(await bannerNow(), null,
+          'a single-line target in the SAME run still converts — §4.1 refuses the ' +
+          'multi-line TARGET, not the run around it');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath),
+          '# Doc\n\n- alpha\n  continued\n1. bravo\n',
+          'and the control gesture actually landed');
+
         await page.close();
         console.log('S2 轉換成: a multi-line li refuses with the §4.1 banner — OK');
       } finally {
@@ -2283,23 +2315,45 @@ async function clickInsertMenuItem(page, sel, label) {
       // deeper run, so the single call in convertBlockViaMenu() is sufficient
       // and no separate scope walk is needed. Delete the gate and this
       // scenario rewrites c1/c2 without asking.
+      //
+      // The '## Tail' + '1. healthy' half of the fixture is the ANTI-VACUOUS
+      // control, added by the 2026-08-30 test-integrity review. MEASURED: the
+      // refusal below stays GREEN when convertBlockViaMenu() is stubbed to
+      // `refuseStructuralListEdit(); return;`, so by itself it cannot tell
+      // "refuses THIS run" from "refuses everything". `healthy` is a SECOND
+      // run, cut off from the degraded one by a heading, whose own
+      // listRunOf() holds nothing unsupported — the gate is per-run, so that
+      // one has to go through.
       const { srv: s3gSrv, url: s3gUrl, mdPath: s3gMdPath } =
-        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '  - c2', '- bravo', '']);
+        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '  - c2', '- bravo', '',
+          '## Tail', '', '1. healthy', '']);
       try {
         const page = await newPage(browser);
         await page.goto(s3gUrl, { waitUntil: 'networkidle0' });
 
+        const bannerNow = () => page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.querySelector('span').textContent : null;
+        });
         const before = fs.readFileSync(s3gMdPath, 'utf8');
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
-        assert.strictEqual(
-          await page.evaluate(() => {
-            const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
-          }),
+        assert.strictEqual(await bannerNow(),
           '此清單含不支援的格式，無法調整結構',
           'the gate must see the LOOSE child run, not just the operated block’s own run');
         assert.strictEqual(await saveAndRead(page, s3gMdPath), before,
           'a deeper degraded run refuses the whole gesture — not one byte moves');
+
+        // The control gesture. Dismiss first: the banner is dismiss-only, so
+        // a stale one would answer the read below.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null,
+          'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'healthy'), '文字');
+        assert.strictEqual(await bannerNow(), null,
+          'a HEALTHY run elsewhere in the document still converts — the gate is per-run');
+        assert.strictEqual(await saveAndRead(page, s3gMdPath),
+          '# Doc\n\n- alpha\n  - c1\n\n  - c2\n- bravo\n\n## Tail\n\nhealthy\n',
+          'and the control gesture actually landed');
 
         await page.close();
         console.log('S2 轉換成: the §4.3 gate reaches a DEEPER loose run (listRunOf scope) — OK');
@@ -2660,7 +2714,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(out, '# Doc\n\n- alpha\n- bravo\n- charlie\n',
           '§4.3 rule 2: a same-type li above AND below, so BOTH separators are eaten');
         assert.deepStrictEqual(lexTypes(out), ['heading', 'list'], 'one list, not three');
-        assert.deepStrictEqual(lexLoose(out), [false],
+        assert.deepStrictEqual(lexLooseDeep(out), [false],
           'a loose list pushes P for every item and degrades the whole run read-only');
 
         // §3.4: one gesture is one undo op — and this is the WIDEST range
@@ -2716,7 +2770,7 @@ async function clickInsertMenuItem(page, sel, label) {
           'the ol below is a different list type, so that separator survives');
         assert.deepStrictEqual(lexTypes(out), ['heading', 'list', 'space', 'list'],
           'still two lists — a marker-type change is a boundary a blank line cannot cross');
-        assert.deepStrictEqual(lexLoose(out), [false, false], 'and both are tight');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'and both are tight');
 
         await page.close();
         console.log('S2 轉換成 › 項目符號列表: only the matching side is merged — OK');
@@ -2749,7 +2803,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const out = await saveAndRead(page, s5dMdPath);
         assert.strictEqual(out, before,
           '§4.3: rules 1 and 2 are the two ends of one path and must compose byte-exactly');
-        assert.deepStrictEqual(lexLoose(out), [false], 'and the run comes back TIGHT');
+        assert.deepStrictEqual(lexLooseDeep(out), [false], 'and the run comes back TIGHT');
 
         await page.close();
         console.log('S2 轉換成: convert out and back in is a byte-identical round trip — OK');
@@ -2782,7 +2836,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.deepStrictEqual(lexTypes(out),
           ['heading', 'list', 'space', 'list', 'space', 'list'],
           'three lists — bravo did not join the ul above or the one below');
-        assert.deepStrictEqual(lexLoose(out), [false, false, false], 'all three tight');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false, false], 'all three tight');
 
         await page.close();
         console.log('S2 轉換成 › 編號列表: a different type does NOT eat the separators — OK');
@@ -2843,7 +2897,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const out = await saveAndRead(page, s5gMdPath);
         assert.strictEqual(out, '# Doc\n\n- a\n- b\n',
           'li → li merges the two runs too: the separator between them must be eaten');
-        assert.deepStrictEqual(lexLoose(out), [false],
+        assert.deepStrictEqual(lexLooseDeep(out), [false],
           'this is the byte-level shape of the freeze — loose === true is the defect');
 
         // The freeze itself, asserted directly rather than inferred from the
@@ -2886,6 +2940,19 @@ async function clickInsertMenuItem(page, sel, label) {
           const bn = document.querySelector('.ed-conflict');
           return bn ? bn.querySelector('span').textContent : null;
         });
+
+        // FIXTURE SANITY, asked of the serializer rather than assumed from
+        // the bytes (the 2026-08-30 test-integrity review's last residue of
+        // this pattern): '- a' + blank + '- b' has to REALLY be one loose
+        // list, i.e. serializeBlocks() has to report a 'P' for each of its
+        // items, or the refusal below is green for the wrong reason — a
+        // refusal of a healthy run would look identical from here.
+        assert.deepStrictEqual(
+          await page.evaluate(() => window.md2docListMd.serializeBlocks(
+            Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]')))
+            .unsupported),
+          ['P', 'P'],
+          'FIXTURE SANITY: the a/b run must really be degraded');
 
         await convertVia(page, await liBlockSelByText(page, 'c'), '項目符號列表');
         assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
@@ -2932,8 +2999,11 @@ async function clickInsertMenuItem(page, sel, label) {
         const out = await saveAndRead(page, s5iMdPath);
         assert.strictEqual(out, '# Doc\n\n- alpha\n  - beta\n- gamma\n',
           'the merge partner is the RUN above, whose head is `alpha` at indent 0');
-        assert.deepStrictEqual(lexLoose(out), [false],
-          'the plan’s previous-BLOCK predicate would leave the separator and go loose');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false],
+          'the plan’s previous-BLOCK predicate would leave the separator and go loose. ' +
+          'TWO entries because `beta` is a NESTED list of its own: lexLoose() reports ' +
+          'only [false] here, which is the top-level-only blind spot lexLooseDeep()’s ' +
+          'own note names');
 
         await page.close();
         console.log('S2 轉換成: rule 2 asks the neighbour’s RUN, not the neighbour block — OK');
@@ -3021,8 +3091,10 @@ async function clickInsertMenuItem(page, sel, label) {
           ['- a\n  - a1\n', '- a\n', '- b'],
           'a1 stays the ORIGINAL a’s child — the byte string alone reads the same either way ' +
           'to a careless eye, the item boundaries do not');
-        assert.deepStrictEqual(lexLoose(s6bOut), [false],
-          'no leading blank: commitBlockInsertion()’s always-on one measures loose === true');
+        assert.deepStrictEqual(lexLooseDeep(s6bOut), [false, false],
+          'no leading blank: commitBlockInsertion()’s always-on one measures ' +
+          'loose === true. TWO entries because `a1` is a nested list — checking only ' +
+          'the top level would miss a copy that went loose one level down');
 
         await page.close();
         console.log('S2 複製: the copy goes after the whole subtree — OK');
@@ -3050,7 +3122,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const s6cOut = await saveAndRead(page, s6cMdPath);
         assert.strictEqual(s6cOut, '# Doc\n\n- [x] done\n- [x] done\n- [ ] todo\n',
           '§4.3 names 型態 / 縮排 / 勾選狀態 as preserved');
-        assert.deepStrictEqual(lexLoose(s6cOut), [false], 'the run stays tight');
+        assert.deepStrictEqual(lexLooseDeep(s6cOut), [false], 'the run stays tight');
 
         await page.close();
         console.log('S2 複製: type, indent and checked state are preserved — OK');
@@ -3079,7 +3151,7 @@ async function clickInsertMenuItem(page, sel, label) {
           { timeout: 5000 }).catch(() => {});
         const s6dOut = await saveAndRead(page, s6dMdPath);
         assert.strictEqual(s6dOut, '# Doc\n\n1. alpha\n2. alpha\n3. bravo\n', 'spec 3.8');
-        assert.deepStrictEqual(lexLoose(s6dOut), [false], 'the run stays tight');
+        assert.deepStrictEqual(lexLooseDeep(s6dOut), [false], 'the run stays tight');
 
         await page.close();
         console.log('S2 複製: an ordered item’s copy renumbers the run — OK');
@@ -13910,6 +13982,97 @@ async function clickInsertMenuItem(page, sel, label) {
           console.log('B1: ' + c.name + ' — OK');
         } finally { dsrv.close(); }
       }
+    }
+
+    // ── Branch review follow-up (2026-08-30): the `removed` clamp's OWN
+    //    end-to-end guard, because the six B1 cases above are not one ──────
+    //
+    // MEASURED, and it is why this scenario exists at all: drop
+    // `{ removed: true }` from deleteListItemViaGutter()'s applyIndentClamp()
+    // call — or no-op applyIndentClamp() outright — and every one of the six
+    // B1 cases above stays GREEN. Case (b), the one whose NAME is "an
+    // orphaned child is clamped", deletes the run's FIRST member, and what
+    // re-anchors '    - deep' there is not the clamp: list-md.js rebuilds its
+    // marker-width `widths` stack from EMPTY for each serialized span, so the
+    // first li of a span emits at column 0 whatever its data-indent says. The
+    // clamp's answer and the serializer's answer coincide, so deleting the
+    // clamp costs nothing B1 can see. (This is the same mechanism the
+    // `operatedBecomes` note in test/indent-clamp.test.js records for the
+    // simple orphan shape.)
+    //
+    // So this is the `removed` counterpart of the 'S2 轉換成: the §3.4 segment
+    // deltas survive the split commit' scenario, and it has that scenario's
+    // shape rather than B1's: the deleted item is NOT the run's head, and
+    // §3.4 rule 3's scope holds TWO segments with DIFFERENT deltas. Deleting
+    // `beta`(1) leaves `gamma`(2) as segment 1 — its delta is 1, because
+    // `alpha`(0) survives and can still anchor at indent 1 (the conversion
+    // case's delta is 2 there, since its operated block survives as a
+    // NON-anchor) — while `delta`(1) plus its child `epsilon`(2) is segment 2
+    // with a delta of 0. One delta per segment is what leaves gamma and delta
+    // as SIBLINGS instead of adopting delta into gamma.
+    //
+    // ⚠ WHERE THE DIFFERENCE SURFACES, and it is NOT the indent columns.
+    // MEASURED, twice: exhaustively over every legal li-only span of up to 7
+    // blocks with mixed ul/ol markers, and then over 400k randomised spans of
+    // up to 19 blocks (long enough for an ordinal to reach the 4-column
+    // '10. ' marker width). 4778 of those randomised deletes changed a byte;
+    // NOT ONE changed an indent column. On a delete, the clamped and the
+    // unclamped span never emit different indent columns — the
+    // width stack collapses an orphaned data-indent to the very column the
+    // clamp would have picked. What does change is the ORDINAL, because
+    // list-md.js keys `counters[]` / `types[]` on the RAW data-indent
+    // (serializeBlocks(), the `counters[indent]` reset block), not on the
+    // emitted column. Unclamped, gamma stays at raw indent 2 and delta at 1,
+    // so they open two different counter levels and the file comes back
+    // '1. gamma / 1. delta' at the same three columns the screen renders as
+    // 1, 2. That is S7's file-vs-screen split exactly, and it is what this
+    // assertion catches.
+    {
+      const { srv: b1rSrv, url: b1rUrl, mdPath: b1rMd } =
+        await setupListDoc(['# Doc', '', '1. alpha', '   1. beta', '      1. gamma',
+          '   2. delta', '      1. epsilon', '2. zeta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(b1rUrl, { waitUntil: 'networkidle0' });
+
+        // FIXTURE SANITY, stated because the whole point of the scenario is
+        // its SHAPE: beta is not the run's head, gamma is deeper than beta,
+        // and delta is beta's same-level sibling carrying a child of its own.
+        // With any other indent profile rule 3's scope holds ONE segment and
+        // the assertion below would be green for the wrong reason.
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((el) => el.querySelector(':scope > .ed-li-text').textContent + ':' +
+              el.getAttribute('data-indent'))),
+          ['alpha:0', 'beta:1', 'gamma:2', 'delta:1', 'epsilon:2', 'zeta:0'],
+          'FIXTURE SANITY: §3.4 rule 3 needs a non-head target and two segments with ' +
+          'different deltas — without these exact indents this scenario proves nothing');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'beta'), '刪除');
+        await settleEditor(page);
+        const out = await saveAndRead(page, b1rMd);
+        assert.strictEqual(out,
+          '# Doc\n\n1. alpha\n   1. gamma\n   2. delta\n      1. epsilon\n2. zeta\n',
+          '§3.4 rule 3 on the DELETE path: gamma’s segment shifts by 1 onto alpha, ' +
+          'delta’s by 0, so the two land as SIBLINGS at indent 1 and §3.8 numbers them ' +
+          '1, 2. Drop `{ removed: true }` (or no-op applyIndentClamp) and gamma keeps ' +
+          'raw indent 2, opens its own counter level, and delta comes back a second ' +
+          '"1." at the same column');
+        // The consequence, said out loud rather than left inside the byte
+        // string: the ordinals the FILE states are the ones the CSS counter
+        // renders. Unclamped they are [1, 1] — identical columns, identical
+        // rendering, and a file that silently rewrites itself the next time
+        // anybody touches that run.
+        assert.deepStrictEqual(
+          out.split('\n').filter((l) => /^ {3}\d+\. /.test(l))
+            .map((l) => Number(l.match(/^ {3}(\d+)\./)[1])),
+          [1, 2],
+          'S7 restated: the file’s ordinals must be the ones the screen shows');
+
+        await page.close();
+        console.log('B1 follow-up: the §3.4 `removed` deltas survive the delete commit — OK');
+      } finally { b1rSrv.close(); }
     }
 
     // ── Task 7 fix round 1: the hard-break sweep ──────────────────────────

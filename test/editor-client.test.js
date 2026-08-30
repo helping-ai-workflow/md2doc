@@ -728,6 +728,17 @@ function codeLines(source) {
 function countInCode(source, needle) {
   return codeLines(source).filter((l) => l.indexOf(needle) !== -1).length;
 }
+// WHAT THE TWO COUNTS BELOW PROVE, AND WHAT THEY DO NOT. Both are
+// SOURCE-TEXT PRESENCE checks over client.js, never REACHABILITY checks:
+// they prove the helper is still WRITTEN at N places, not that any of those
+// places is still on a live path. MEASURED 2026-08-30 - delete the
+// `await convertListItemAway(liveBlockEl, liRun, rec, target);` dispatch
+// inside convertBlockViaMenu() and that function, together with the
+// rollbackFailedRender() site it owns, is unreachable; this block still
+// counts 12 and passes. The runtime scenarios in
+// test/editor-client-runtime.test.js are what catch that, because they drive
+// the real gesture. Read these two numbers as "nobody re-inlined the idiom
+// or grew an unreviewed commit site", and nothing more.
 {
   const undoCalls = countInCode(src, 'stack.undo(lines)');
   assert.strictEqual(undoCalls, 2,
