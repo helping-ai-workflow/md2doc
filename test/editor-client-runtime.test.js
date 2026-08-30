@@ -14347,6 +14347,158 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally { srv.close(); }
     }
 
+    // ── S3 Task 2: the block-selection tint and a real focus holder ────────
+    // There is no gesture that CREATES a selection until Task 4, so these
+    // scenarios drive the state through client.js's own test-only hooks
+    // (window.__edTestSetSelection / __edTestClearSelection).
+    //
+    // Each scenario gets its OWN doc/server — same isolation reasoning as
+    // setupTableDoc()/setupListDoc() above (no undo-stack or save state can
+    // leak between them, and the shared setup() doc's fixed block indices
+    // stay undisturbed).
+    const s3Scenario = async (label, md, fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-s3-'));
+      const mdPath = path.join(dir, 'doc.md');
+      fs.writeFileSync(mdPath, md, 'utf8');
+      const ssrv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await settleEditor(page);
+        await fn(page, mdPath);
+        await page.close();
+        console.log('S3 T2 ' + label + ' — OK');
+      } finally { ssrv.close(); }
+    };
+
+    await s3Scenario('a selected block is tinted, and the tint is semi-transparent',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const got = await page.evaluate(() => {
+          const els = [].slice.call(document.querySelectorAll('.ed-block'));
+          return els.map((b) => ({
+            type: b.getAttribute('data-block-type'),
+            selected: b.classList.contains('ed-selected'),
+            bg: getComputedStyle(b).backgroundColor,
+          }));
+        });
+        assert.deepStrictEqual(got.map((g) => g.selected), [false, true, true],
+          'only the two blocks in the line range are selected, got ' + JSON.stringify(got));
+        const tint = got[1].bg;
+        console.log('S3 T2 measured tint on a selected paragraph: ' + tint);
+        assert.ok(/^rgba\(/.test(tint), 'the tint must be rgba, not opaque — the user must still '
+          + 'read the text under it. Got ' + tint);
+        const alpha = Number(tint.match(/rgba\([^)]*,\s*([\d.]+)\)/)[1]);
+        assert.ok(alpha > 0 && alpha < 0.5, 'tint alpha must be visibly transparent, got ' + alpha);
+        // The UNSELECTED block must not have picked up a tint of its own —
+        // otherwise "everything is tinted" would satisfy the assertion above.
+        assert.ok(!/^rgba\([^)]*,\s*0?\.\d+\)$/.test(got[0].bg),
+          'an UNSELECTED block must carry no tint, got ' + got[0].bg);
+      });
+
+    await s3Scenario('the selection survives inside a table and over a code block',
+      // Two BODY rows, not one: with a single body row there is no
+      // `tr:nth-child(even)` anywhere in the document, the zebra-stripe probe
+      // below `continue`s past a null element and the whole check is vacuous.
+      // The even row's FIRST cell is where the two strongest opaque rules
+      // compound (zebra #fafbfc at (0,3,4) on top of the sticky column's
+      // #ffffff at z-index 1), so it gets its own probe.
+      '# Doc\n\n```\ncode\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n',
+      async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(1, 99));
+        const measured = await page.evaluate(() => {
+          // The sticky first column paints at z-index 1 over anything beneath
+          // it, and <pre>/<th>/zebra rows carry opaque backgrounds. If the tint
+          // loses to any of them the selection is invisible exactly where a
+          // user is most likely to be selecting.
+          const out = [];
+          for (const sel of ['pre', 'th', 'tbody td:first-child',
+            'tr:nth-child(even)', 'tbody tr:nth-child(even) td:first-child']) {
+            const el = document.querySelector('.ed-selected ' + sel);
+            out.push({ sel: sel, found: !!el, bg: el ? getComputedStyle(el).backgroundColor : null });
+          }
+          return out;
+        });
+        console.log('S3 T2 measured backgrounds inside the selection:\n  ' +
+          measured.map((m) => m.sel + ' -> ' + m.bg).join('\n  '));
+        const missing = measured.filter((m) => !m.found).map((m) => m.sel);
+        assert.deepStrictEqual(missing, [],
+          'fixture must actually contain every probed element, missing: ' + missing);
+        const unreadable = measured
+          .filter((m) => !/rgba\(/.test(m.bg) || /,\s*1\)$/.test(m.bg))
+          .map((m) => m.sel + ':' + m.bg);
+        assert.deepStrictEqual(unreadable, [],
+          'every opaque background inside a selected block must let the tint through: ' +
+          unreadable);
+      });
+
+    await s3Scenario('the selection has a real focus holder, not document.body',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const focus = await page.evaluate(() => ({
+          tag: document.activeElement.tagName,
+          isBlock: document.activeElement.classList.contains('ed-block'),
+          selected: document.activeElement.classList.contains('ed-selected'),
+          id: document.activeElement.getAttribute('data-block-id'),
+          tabindex: document.activeElement.getAttribute('tabindex'),
+          tabindexCount: document.querySelectorAll('.ed-block[tabindex]').length,
+          // §4.4's focus holder is the FOCUS endpoint, not the anchor — the
+          // last block of the 3..5 range here.
+          focusEndpointId: (function () {
+            const els = [].slice.call(document.querySelectorAll('.ed-block'));
+            return els[els.length - 1].getAttribute('data-block-id');
+          })(),
+        }));
+        assert.strictEqual(focus.isBlock, true,
+          'spec 4.4: the selection needs a REAL focus holder, not <body>. Got ' + focus.tag);
+        assert.strictEqual(focus.tabindexCount, 1,
+          'roving tabindex: exactly one block is focusable at a time, got ' + focus.tabindexCount);
+        assert.strictEqual(focus.tabindex, '-1',
+          'the roving tabindex must be -1 (script-reachable, not in the Tab order), got ' +
+          focus.tabindex);
+        assert.strictEqual(focus.id, focus.focusEndpointId,
+          'the holder must be the FOCUS endpoint block, not the anchor');
+        assert.strictEqual(focus.selected, true, 'the focus holder is itself in the set');
+      });
+
+    await s3Scenario('clearing the selection removes every trace',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        await page.evaluate(() => window.__edTestClearSelection());
+        const left = await page.evaluate(() => ({
+          selected: document.querySelectorAll('.ed-selected').length,
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+        }));
+        assert.deepStrictEqual(left, { selected: 0, tabindexed: 0 }, 'no residue');
+      });
+
+    // The ⠿ gutter handle must NOT appear just because its block holds the
+    // roving focus. `.ed-block:hover .ed-handle, .ed-handle:focus` couples the
+    // handle's OWN focus to its visibility — a block-level :focus is a
+    // different thing, and a selection's focus endpoint moves on every
+    // Shift+arrow (Task 4), which would flicker the handle across the
+    // document. The tint is the selection's affordance; the handle stays a
+    // hover/handle-focus affordance.
+    await s3Scenario('the roving focus does not reveal the block handle',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const got = await page.evaluate(() => {
+          const holder = document.activeElement;
+          const handle = holder.querySelector && holder.querySelector('.ed-handle');
+          return {
+            hasHandle: !!handle,
+            opacity: handle ? getComputedStyle(handle).opacity : null,
+            outline: getComputedStyle(holder).outlineStyle,
+          };
+        });
+        assert.strictEqual(got.hasHandle, true, 'sanity: the focus holder has a gutter handle');
+        assert.strictEqual(got.opacity, '0',
+          'focusing a block must not reveal its handle, got opacity ' + got.opacity);
+        assert.strictEqual(got.outline, 'none',
+          'the tint is the selection affordance; the default focus ring is suppressed, got ' +
+          got.outline);
+      });
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
