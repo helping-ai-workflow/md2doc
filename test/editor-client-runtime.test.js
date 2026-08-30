@@ -93,7 +93,19 @@ async function setup() {
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  // S2 Task 4: an EXPLICIT idle timeout, because this one server is shared by
+  // 33 scenarios spread across the whole file while every scenario in between
+  // runs against its own short-lived server. createEditorServer()'s default is
+  // 30s of no requests, and the S2 轉換 group in the middle now sits idle for
+  // longer than that — the symptom is a bare
+  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0` from the
+  // NEXT shared-server scenario, which reads as a broken test rather than as a
+  // stopwatch. The timeout is the product's own dev-server convenience and
+  // nothing in this suite asserts it; srv.close() at the end still tears it
+  // down deterministically.
+  const srv = await createEditorServer({
+    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+  });
   return { dir, mdPath, srv, url: srv.urlFor(mdPath) };
 }
 
@@ -230,10 +242,10 @@ async function openBlockEditor(page, sel) {
   }
 }
 
-// Hovers a block to reveal its ⠿ handle, opens its small menu, and clicks
-// the menu item whose exact textContent is `label` ('−' / '+' /
-// 'MD 原始碼' / '✕'). Mirrors the old clickBarButton() helper's role for
-// the retired paragraph/heading bar buttons.
+// Hovers a block to reveal its ⠿ handle, opens its menu, and clicks the menu
+// item whose exact textContent is `label` — S2 §3.7's four: '轉換成 ›' /
+// '複製' / '刪除' / 'MD 原始碼'. Mirrors the old clickBarButton() helper's
+// role for the retired paragraph/heading bar buttons.
 async function clickGutterMenuItem(page, sel, label) {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -262,6 +274,197 @@ async function clickGutterMenuItem(page, sel, label) {
       if (attempt >= 3 || !STALE_NODE_RE.test(String(err && err.message))) throw err;
     }
   }
+}
+
+// S2 Task 2: hovers a block, clicks its ⠿ handle and waits for the menu to be
+// on screen. Sibling to clickGutterMenuItem() above — that one opens the menu
+// as a side effect of clicking an item in it; this one is for the scenarios
+// that inspect the OPEN menu without pressing anything in it.
+async function openGutterMenu(page, sel) {
+  await settleEditor(page);
+  const menuOpen = await page.evaluate(
+    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0, sel);
+  if (menuOpen) return;
+  await page.hover(sel);
+  await page.click(sel + ' .ed-handle');
+  await page.waitForFunction(
+    (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+    { timeout: 5000 }, sel);
+}
+
+// S2 Task 2: the whole 轉換成 gesture — open the ⠿ menu on `sel`, open its
+// 轉換成 submenu, click the target whose exact label is `targetLabel`, and
+// wait for the menu to tear itself down (which is what proves the conversion
+// actually fired rather than the submenu merely toggling).
+async function convertVia(page, sel, targetLabel) {
+  await clickGutterMenuItem(page, sel, '轉換成 ›');
+  await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+  await page.evaluate((label) => {
+    const b = Array.from(document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+      .find((x) => x.textContent === label);
+    if (!b) throw new Error('no submenu item labelled ' + label);
+    b.click();
+  }, targetLabel);
+  await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+  await settleEditor(page);
+}
+
+// S2 Task 4: the token types `marked` reads out of a saved file, top level
+// only. The one shape §3.4 exists to prevent is an unanchored indent lexing
+// as an INDENTED CODE BLOCK, and a type list is the cheapest direct assertion
+// that it did not happen. Runs in NODE against the bytes on disk — not in the
+// page — because the file is the thing under test, not the DOM.
+function lexTypes(md) {
+  return plainMarked.lexer(md).map((t) => t.type);
+}
+
+// S2 Task 5: the `loose` flag of every LIST token in the saved file, in
+// document order. §4.3 rule 2's whole subject: a blank line between two
+// same-type lists does not separate them, it makes ONE list LOOSE — every
+// item grows a <p>, serializeBlocks() reports 'P' for each (list-md.js:56-70)
+// and the run degrades read-only with no banner. `loose === true` after a
+// conversion IS the defect, so it is asserted directly rather than inferred
+// from the token types (which look identical either way).
+// ⚠ 2026-08-30 test-integrity review: NO assertion in this file calls this any
+// more. All nine sites that did now call lexLooseDeep() below, which is the
+// policy lexLooseDeep()'s own note states — a li scenario that checks only the
+// top level is green for the wrong reason. Two of those nine really do carry a
+// nested list this function cannot see ('- alpha / (2sp)- beta' after a rule-2
+// merge, and '- a / (2sp)- a1' after a 複製), so for them the change moved the
+// asserted value, not just the call. It is kept as the NAMED top-level-only scan
+// that note, the Task-7 ＋ scenario and the 96-cell sweep each contrast
+// themselves against; do not reach for it in a new assertion.
+function lexLoose(md) {
+  return plainMarked.lexer(md).filter((t) => t.type === 'list').map((t) => t.loose);
+}
+
+// S2 Task 7: the same flag for EVERY list in the file, nested ones included,
+// in document order. MEASURED, and it is why lexLoose() alone is not enough
+// here: inserting a blank-line-separated sibling under a NESTED item leaves
+// the TOP-level list tight and makes only the nested one loose —
+// '# Doc\n\n- alpha\n  - child\n\n  -\n' reports [false] from lexLoose()
+// and [false, true] from this. The degrade is identical either way (every
+// item of the loose list grows a <p>, serializeBlocks() pushes 'P', the run
+// freezes read-only), so a li scenario that only checks the top level is
+// green for the wrong reason.
+function lexLooseDeep(md) {
+  const out = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'list') {
+        out.push(t.loose);
+        (t.items || []).forEach((i) => walk(i.tokens));
+        return;
+      }
+      // A list nested inside an item arrives as a child of that item's `text`
+      // token, not at the item's own top level.
+      if (t.type === 'text' && t.tokens) walk(t.tokens);
+    });
+  })(plainMarked.lexer(md));
+  return out;
+}
+
+// S2 Task 8: every `code` token in the saved file, nested ones included, as
+// its RAW source text. Two questions in one, and both are needed: HOW MANY
+// code tokens the file holds (a conversion may legitimately create or destroy
+// exactly one) and whether each of them is FENCED. §3.4's corruption — an
+// indent of >= 4 columns left behind with no list to anchor it — produces a
+// code token that `t.type` cannot be told apart from a deliberate fence, so
+// the count alone would miss it and the fence test alone would miss a stray
+// second fence.
+function lexCodeRaws(md) {
+  const out = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'code') { out.push(t.raw); return; }
+      if (t.type === 'list') { (t.items || []).forEach((i) => walk(i.tokens)); return; }
+      if (t.tokens) walk(t.tokens);
+    });
+  })(plainMarked.lexer(md));
+  return out;
+}
+
+// Does this code token come from a FENCE rather than from four columns of
+// indent? Measured against marked 14.1.4: a fenced token's `raw` opens with
+// the fence itself at 0-3 columns, an indented one opens with the indent.
+function isFencedCode(raw) {
+  return /^ {0,3}(?:`{3,}|~{3,})/.test(String(raw));
+}
+
+// S2 Task 8: WHICH block token of the saved file holds `needle`, as a short
+// descriptor ('paragraph' / 'heading:2' / 'blockquote' / 'code' /
+// 'li:ul' / 'li:ol' / 'li:ul:task'). This is the third byte-level property the
+// conversion sweep asserts, and the one neither the loose flag nor the code
+// count can see: §4.3 rule 1's failure mode is LAZY CONTINUATION — drop the
+// blank line a li → 文字 needs and the converted text is swallowed into the
+// item above it, which leaves every list TIGHT and creates no code token
+// (measured on this very fixture) while the user's block has silently ceased
+// to exist as a block.
+//
+// Only LISTS are descended into (an item's own text, and any list nested
+// inside it); heading / code / blockquote / paragraph are leaves, so the
+// descriptor names the block the user would see rather than some inline
+// fragment of it.
+function lexHostOf(md, needle) {
+  const hits = [];
+  (function walk(toks) {
+    (toks || []).forEach((t) => {
+      if (t.type === 'list') {
+        (t.items || []).forEach((item) => {
+          if (String(item.raw).indexOf(needle) < 0) return;
+          // The item's OWN text arrives as a `text` token that also carries
+          // any nested list as a CHILD (measured — a nested list is never a
+          // sibling of the item's text at the item's top level). So collect
+          // the nested LISTS out of it and descend into those only: descending
+          // into the text token itself would report 'text', which is an inline
+          // container and not a block the user can see.
+          const nested = [];
+          (function collect(ts) {
+            (ts || []).forEach((k) => {
+              if (k.type === 'list') { nested.push(k); return; }
+              if (k.type === 'text' && k.tokens) collect(k.tokens);
+            });
+          })(item.tokens);
+          const before = hits.length;
+          walk(nested);
+          if (hits.length === before) {
+            hits.push('li:' + (t.ordered ? 'ol' : 'ul') + (item.task ? ':task' : ''));
+          }
+        });
+        return;
+      }
+      if (String(t.raw || '').indexOf(needle) < 0) return;
+      hits.push(t.type === 'heading' ? 'heading:' + t.depth : t.type);
+    });
+  })(plainMarked.lexer(md));
+  return hits;
+}
+
+// The descriptor lexHostOf() must report after a successful conversion to
+// `target` — the twelve ids of §3.2, spelled out rather than derived, so a
+// renamed id fails loudly here instead of quietly matching nothing.
+function hostExpectedFor(target) {
+  if (target === 'text') return 'paragraph';
+  if (/^h[1-6]$/.test(target)) return 'heading:' + target.slice(1);
+  if (target === 'ul') return 'li:ul';
+  if (target === 'ol') return 'li:ol';
+  if (target === 'task') return 'li:ul:task';
+  if (target === 'code') return 'code';
+  if (target === 'quote') return 'blockquote';
+  throw new Error('hostExpectedFor: unknown target ' + target);
+}
+
+
+// S2 Task 2: selector for the FIRST block of `type` in document order. Block
+// ids are re-minted on every render, so a conversion scenario must re-resolve
+// between steps rather than hold one selector across a commit.
+async function blockSelByType(page, type) {
+  const id = await page.evaluate((t) => {
+    const el = document.querySelector('.ed-block[data-block-type="' + t + '"]');
+    return el ? el.getAttribute('data-block-id') : null;
+  }, type);
+  assert.ok(id !== null, 'no block of type ' + type + ' on the page');
+  return '.ed-block[data-block-id="' + id + '"]';
 }
 
 // Opens the WYSIWYG editor on a block — Phase 3 Task 2: paragraph/heading
@@ -1557,17 +1760,18 @@ async function clickInsertMenuItem(page, sel, label) {
         return !lb || lb.hidden;
       }, { timeout: 3000 });
 
-      // ⠿ handle: hover reveals it, click opens the small menu (heading ±
-      // for a heading, MD 原始碼, close) — replaces the old bar's ✎/MD combo.
+      // ⠿ handle: hover reveals it, click opens the menu — replaces the old
+      // bar's ✎/MD combo. S2 §5.4 fallout: the heading ± pair moved to Tab /
+      // Shift+Tab (§3.5) and ✕ is gone (§3.7 closes by Esc / outside click),
+      // so the four items are now 轉換成 › / 複製 / 刪除 / MD 原始碼.
       await page.hover(selHeading);
       await page.click(selHeading + ' .ed-handle');
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
           .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-        // §10-gap fix: the ⠿ menu also gained a 刪除 (delete block) item.
-        '+,MD 原始碼,−,✕,刪除'.split(',').sort().join(','),
-        'the ⠿ menu on a heading must show ± / MD 原始碼 / 刪除 / ✕'
+        '轉換成 ›,複製,刪除,MD 原始碼'.split(',').sort().join(','),
+        'the ⠿ menu on a heading must show 轉換成 › / 複製 / 刪除 / MD 原始碼'
       );
       // The MD escape hatch forces raw-edit even on a WYSIWYG-eligible block
       // — the direct migration of the old bar's MD button.
@@ -1585,26 +1789,2428 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.keyboard.press('Escape');
       await page.waitForFunction((s) => !document.querySelector(s + ' textarea.ed-raw'), {}, selHeading);
 
-      // A non-heading block's ⠿ menu must hide ± (only MD 原始碼 / ✕ visible).
+      // §5.4 fallout: a non-heading block used to be the case that HID the
+      // heading ± pair. There is no ± any more and no per-type hiding left on
+      // a paragraph at all — 轉換成 is offered on every block except a table
+      // (§7) — so the migrated assertion is that a paragraph really does get
+      // 轉換成, and Esc (not a ✕ button) is what closes the menu.
       await page.hover(selA);
       await page.click(selA + ' .ed-handle');
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
-          return minus ? minus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
-        true,
-        'a non-heading block\'s ⠿ menu must hide the heading ± buttons'
+        false,
+        'a paragraph block\'s ⠿ menu must offer 轉換成 ›'
       );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
       await page.close();
       console.log('always-on: click = caret/focus, lightbox-exempt, ⠿ handle opens menu + MD escape hatch — OK');
+    }
+
+    // ── S2 Task 2: the ⠿ menu is VERTICAL and carries a 轉換成 submenu ──────
+    //    Spec §3.7 fixes the item list to 轉換成 › / 複製 / 刪除 / MD 原始碼
+    //    (no ✕, no heading ±); §3.2 fixes the submenu's twelve targets; §7
+    //    excludes a table block from 轉換成 and RULING F-O excludes a list
+    //    item from MD 原始碼. setupTableDoc() is used purely as the generic
+    //    "isolated doc + server" helper (it is byte-identical to
+    //    setupListDoc()) so none of these scenarios can leak undo/save state
+    //    into another.
+    {
+      const { srv: s2srv, url: s2url } = await setupTableDoc(['# Heading', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2url, { waitUntil: 'networkidle0' });
+
+        const headingSel = await blockSelByType(page, 'heading');
+        await openGutterMenu(page, headingSel);
+        const items = await page.evaluate(() => {
+          const menu = document.querySelector('.ed-handle-menu');
+          const btns = Array.from(menu.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden);
+          return {
+            labels: btns.map((b) => b.textContent),
+            // Stacked, not in a row: every button shares a left edge and each
+            // sits strictly below the previous one.
+            lefts: Array.from(new Set(btns.map((b) => Math.round(b.getBoundingClientRect().left)))),
+            monotonicTop: btns.every((b, i, a) => i === 0 ||
+              b.getBoundingClientRect().top >= a[i - 1].getBoundingClientRect().bottom - 1),
+            flexDir: getComputedStyle(menu).flexDirection,
+          };
+        });
+        assert.deepStrictEqual(items.labels, ['轉換成 ›', '複製', '刪除', 'MD 原始碼'],
+          'spec 3.7 names these four, in this order, and no ✕');
+        assert.strictEqual(items.lefts.length, 1,
+          'a vertical menu has one left edge, got ' + JSON.stringify(items.lefts));
+        assert.strictEqual(items.monotonicTop, true, 'each item must sit below the previous one');
+        assert.strictEqual(items.flexDir, 'column', 'flex-direction must be column');
+
+        // No ✕ any more; Esc and an outside click both close.
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .some((b) => b.textContent === '✕')),
+          false, 'spec 3.7 removes ✕');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+        await openGutterMenu(page, headingSel);
+        await page.mouse.click(5, 5);
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+
+        // 轉換成 grows a submenu to the RIGHT carrying the twelve §3.2 targets.
+        await clickGutterMenuItem(page, headingSel, '轉換成 ›');
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+        const sub = await page.evaluate(() => {
+          const s = document.querySelector('.ed-handle-submenu');
+          const parent = document.querySelector('.ed-handle-menu').getBoundingClientRect();
+          return {
+            labels: Array.from(s.querySelectorAll('.ed-handle-menu-btn')).map((b) => b.textContent),
+            left: Math.round(s.getBoundingClientRect().left),
+            parentRight: Math.round(parent.right),
+          };
+        });
+        assert.deepStrictEqual(sub.labels,
+          ['文字', '標題 1', '標題 2', '標題 3', '標題 4', '標題 5', '標題 6',
+            '項目符號列表', '編號列表', '待辦清單', '程式碼', '引用'],
+          'spec 3.2 v1 list — 折疊列表 is explicitly NOT in this version');
+        assert.ok(sub.left >= sub.parentRight - 2,
+          'the submenu grows to the right of the menu, got left=' + sub.left +
+          ' vs right=' + sub.parentRight);
+
+        await page.keyboard.press('Escape');
+        await page.close();
+        console.log('S2 ⠿ menu: vertical, four §3.7 items, 轉換成 submenu of twelve §3.2 targets — OK');
+      } finally {
+        s2srv.close();
+      }
+    }
+
+    // ── S2 Task 2: 轉換成 on a block that owns its own lines (paragraph ↔
+    //    heading ↔ quote ↔ code). List sources and list targets land in
+    //    Tasks 3-5 and refuse until then. ────────────────────────────────
+    {
+      const { srv: s2bSrv, url: s2bUrl, mdPath: s2bMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 2');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const els = document.querySelectorAll('.ed-block[data-block-type="heading"]');
+            return els.length === 2 ? els[1].querySelector('*').tagName : null;
+          }),
+          'H2', 'the converted block is an H2 now');
+        assert.strictEqual(await saveAndRead(page, s2bMdPath), '# Doc\n\n## A paragraph.\n',
+          'exact bytes: one gesture, one heading, nothing else touched');
+
+        await page.close();
+        console.log('S2 轉換成 › 標題 2: a paragraph becomes an H2 and saves byte-exactly — OK');
+      } finally {
+        s2bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2cSrv, url: s2cUrl, mdPath: s2cMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '引用');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\n> A paragraph.\n', 'to quote');
+        await convertVia(page, await blockSelByType(page, 'blockquote'), '程式碼');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\n```\nA paragraph.\n```\n', 'to code');
+        await convertVia(page, await blockSelByType(page, 'code'), '文字');
+        assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\nA paragraph.\n',
+          'back to text, byte-identical');
+
+        await page.close();
+        console.log('S2 轉換成: 引用 / 程式碼 round-trip through 文字, byte-identical — OK');
+      } finally {
+        s2cSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2dSrv, url: s2dUrl, mdPath: s2dMdPath } =
+        await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 3');
+        await page.waitForFunction(() => !!document.querySelector('.content h3'), { timeout: 5000 });
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        // Wait for the undo to land, but let the WAIT fail silently and assert
+        // afterwards: a bare waitForFunction reports a bare TimeoutError, which
+        // says nothing about what this scenario is guarding.
+        await page.waitForFunction(() => !document.querySelector('.content h3'), { timeout: 5000 })
+          .catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.content h3')), false,
+          'one Ctrl+Z must undo the whole conversion — spec 3.4, one gesture is one op');
+        assert.strictEqual(await saveAndRead(page, s2dMdPath), '# Doc\n\nA paragraph.\n',
+          'one Ctrl+Z restores the file exactly — spec 3.4, one gesture is one op');
+
+        await page.close();
+        console.log('S2 轉換成: one conversion is exactly one undo op — OK');
+      } finally {
+        s2dSrv.close();
+      }
+    }
+
+    // ── S2 Task 2: the two per-type visibility rules, re-applied on every
+    //    open because the menu is a SINGLETON node moved between blocks ───
+    {
+      const { srv: s2eSrv, url: s2eUrl } =
+        await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2eUrl, { waitUntil: 'networkidle0' });
+
+        await openGutterMenu(page, await tableBlockSel(page, 0));
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).includes('轉換成 ›')),
+          false, 'spec 7: no 轉換成 for a table block');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: a table block offers no 轉換成 (spec 7) — OK');
+      } finally {
+        s2eSrv.close();
+      }
+    }
+
+    // ── S2 T8 follow-up: 'hr' and 'html' are withheld for a DIFFERENT reason
+    //    than a table's. A table has no target that could carry its cells; an
+    //    hr has no CONTENT AT ALL — its source line IS its marker — so
+    //    convert-md has nothing to strip and nothing to re-host. Measured
+    //    before this guard existed: 'hr' → 項目符號列表 wrote '- ---', which
+    //    marked re-lexes as an hr again, so the file's bytes changed, the
+    //    block type did not, and NO banner was shown. 'hr' → 文字 was a byte
+    //    no-op, equally silent. An item that appears to work and does nothing
+    //    is worse than an item that is not offered, so neither type gets 轉換成.
+    {
+      const { srv: s2eeSrv, url: s2eeUrl } = await setupTableDoc(
+        ['# Doc', '', '---', '', '<div>raw</div>', '', 'tail', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2eeUrl, { waitUntil: 'networkidle0' });
+
+        // Fixture sanity FIRST: if the renderer ever stopped emitting these as
+        // their own blocks, the assertions below would pass without the guard
+        // ever being consulted — this stage has already shipped six tests that
+        // were green for exactly that kind of reason.
+        const kinds = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block'))
+            .map((b) => b.getAttribute('data-block-type')));
+        assert.ok(kinds.includes('hr'), 'fixture must contain an hr block, got ' + kinds);
+        assert.ok(kinds.includes('html'), 'fixture must contain an html block, got ' + kinds);
+
+        for (const type of ['hr', 'html']) {
+          const sel = await blockSelByType(page, type);
+          await openGutterMenu(page, sel);
+          const labels = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden).map((b) => b.textContent));
+          // The menu must be genuinely OPEN — otherwise "轉換成 is absent" is
+          // trivially true and the assertion guards nothing.
+          assert.ok(labels.length >= 2,
+            'the ⠿ menu must be open on the ' + type + ' block, got ' + JSON.stringify(labels));
+          assert.strictEqual(labels.includes('轉換成 ›'), false,
+            'a ' + type + ' block must not offer 轉換成 — the gesture would change bytes '
+            + 'without changing the block, silently. Got ' + JSON.stringify(labels));
+          await page.keyboard.press('Escape');
+        }
+
+        // A neighbouring paragraph in the same document still offers it, so the
+        // guard is proven to be per-type and not a blanket disable.
+        await openGutterMenu(page, await blockSelByType(page, 'paragraph'));
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent).includes('轉換成 ›')),
+          true, 'a paragraph in the same document must still offer 轉換成');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: hr and html blocks offer no 轉換成 — OK');
+      } finally {
+        s2eeSrv.close();
+      }
+    }
+
+    {
+      const { srv: s2fSrv, url: s2fUrl } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s2fUrl, { waitUntil: 'networkidle0' });
+
+        await openGutterMenu(page, await liBlockSelByText(page, 'alpha'));
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .filter((b) => !b.hidden).map((b) => b.textContent)),
+          ['轉換成 ›', '複製', '刪除'],
+          'RULING F-O forbids openRawEditor on a list item, permanently');
+        await page.keyboard.press('Escape');
+
+        await page.close();
+        console.log('S2 ⠿ menu: a list item still offers no MD 原始碼 (RULING F-O) — OK');
+      } finally {
+        s2fSrv.close();
+      }
+    }
+    // ── S2 Task 3: 轉換成 between LIST types. The block stays a li, so the
+    //    run stays a run and the whole span goes through commitListStructure()
+    //    exactly as every other structural list op does (§3.8 renumbering and
+    //    the §3.4 marker-width stack come for free).
+    //
+    //    ⚠ The expected bytes below were MEASURED, not reasoned. The plan
+    //    pinned blank lines around a converted item in two of these; that is
+    //    wrong. serializeBlocks() emits one line per block and no separators,
+    //    and none are needed here: marked.lexer('- alpha\n1. bravo\n- charlie')
+    //    already returns THREE list tokens, because a marker-type change
+    //    interrupts a list on its own. §4.3 rule 1's blank line is about
+    //    li → NON-list (Task 4), where lazy continuation really would swallow
+    //    the converted line into the item above it. ──────────────────────────
+    {
+      const { srv: s3aSrv, url: s3aUrl, mdPath: s3aMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-list-type')).join(',');
+          }),
+          'ul,ol,ul', 'only the grip’s own block changed type (spec 3.3)');
+        assert.strictEqual(await saveAndRead(page, s3aMdPath),
+          '# Doc\n\n- alpha\n1. bravo\n- charlie\n',
+          'spec 3.8 rule (b): a different data-list-type ends the run, and the new run renumbers from 1');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表: one bullet becomes an ordinal, run splits — OK');
+      } finally {
+        s3aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3bSrv, url: s3bUrl, mdPath: s3bMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '待辦清單');
+        // §4.1: data-list-type and data-task are ORTHOGONAL axes, so a ul that
+        // gains a checkbox is still a ul and the run does not split.
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const el = document.querySelector('.ed-block[data-block-type="li"]');
+            return el.getAttribute('data-list-type') + '/' + el.getAttribute('data-task') +
+              '/' + (el.querySelector(':scope > .ed-li-check') ? 'box' : 'nobox');
+          }),
+          'ul/1/box', 'the item is a ul task with a live .ed-li-check element');
+        assert.strictEqual(await saveAndRead(page, s3bMdPath),
+          '# Doc\n\n- [ ] alpha\n- bravo\n',
+          'spec 4.1: listType and task are orthogonal, so a ul stays a ul');
+
+        await page.close();
+        console.log('S2 轉換成 › 待辦清單: a bullet gains a checkbox, stays a ul — OK');
+      } finally {
+        s3bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3cSrv, url: s3cUrl, mdPath: s3cMdPath } =
+        await setupTableDoc(['# Doc', '', '- [x] alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const el = document.querySelector('.ed-block[data-block-type="li"]');
+            return el.getAttribute('data-task') +
+              '/' + (el.querySelector(':scope > .ed-li-check') ? 'box' : 'nobox');
+          }),
+          '0/nobox', 'the checkbox element is gone, not merely unchecked');
+        assert.strictEqual(await saveAndRead(page, s3cMdPath),
+          '# Doc\n\n- alpha\n- bravo\n',
+          'a plain bullet has nowhere to store checkedness; it is dropped');
+
+        await page.close();
+        console.log('S2 轉換成: 待辦清單 → 項目符號列表 drops the checkbox — OK');
+      } finally {
+        s3cSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3dSrv, url: s3dUrl, mdPath: s3dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - child', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        // §3.3: only the grip's block converts — the child keeps its own type
+        // and its own data-indent. §3.4's marker-width stack is what moves its
+        // COLUMNS: '1. ' contributes 3, so the child sits at column 3, not 2.
+        // MEASURED: marked.lexer('1. alpha\n   - child\n- bravo\n') returns the
+        // child as a real nested list token inside alpha (childTokens=[text,
+        // list]) and bravo as a second, top-level list token — no blank line
+        // needed, and none emitted.
+        assert.strictEqual(await saveAndRead(page, s3dMdPath),
+          '# Doc\n\n1. alpha\n   - child\n- bravo\n',
+          'spec 3.4: the child re-indents to the new marker width but does not change type');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-list-type') + el.getAttribute('data-indent')).join(',');
+          }),
+          'ol0,ul1,ul0', 'the child kept both its type and its indent');
+
+        await page.close();
+        console.log('S2 轉換成: a child re-indents to the new marker width, keeps its type — OK');
+      } finally {
+        s3dSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3eSrv, url: s3eUrl, mdPath: s3eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3eUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s3eMdPath, 'utf8');
+        const bannerNow = () => page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.querySelector('span').textContent : null;
+        });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        // §4.1: a conversion rewrites the item's own line, so it is NOT
+        // column-only and a multi-line li refuses as its TARGET.
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'spec 4.1 refusal banner, not convert-md.js’s per-block one');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
+          'a refused conversion must not touch a single byte');
+
+        // The MESSAGE on a NON-list target is the ordering tripwire. §4.3's
+        // run-wide gate has to sit ahead of everything else in
+        // convertBlockViaMenu() — ahead of the li→list routing, and therefore
+        // ahead of the stripMarker() call further down, which refuses a
+        // multi-line li too but with its own, narrower 「此區塊的格式無法轉換」.
+        // Today a li → 文字 stops at Task 4's not-implemented refusal; the
+        // gate is what makes the answer §4.1's banner instead, and that stays
+        // true when Task 4 replaces that refusal with a stripMarker() path.
+        // If the gate is ever moved below either one, this is the line that
+        // notices — it goes 「清單的轉換尚未實作」 now, 「此區塊的格式無法轉換」
+        // after Task 4.
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'the §4.3 gate must run BEFORE the per-target routing, not after it');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
+          'still not one byte');
+
+        // ANTI-VACUOUS (2026-08-30 test-integrity review). MEASURED: both
+        // refusals above stay GREEN when convertBlockViaMenu() is stubbed to
+        // `refuseStructuralListEdit(); return;`, so on their own they cannot
+        // tell "refuses THIS shape" from "refuses everything". The control
+        // gesture below is what separates the two, and it is not a fig leaf:
+        // §4.1's multi-line refusal is TARGET-scoped, not run-wide —
+        // listRunSupportsStructuralEdit() lets MULTILINE past for a BYSTANDER
+        // and refuses only the operated block — so `bravo`, the single-line
+        // sibling of the item that just refused twice, must still convert.
+        // The banner is dismiss-only (it does not time out, and rerenderAll()
+        // leaves it alone), so it is cleared by hand first or the next read
+        // would just see this same one.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null,
+          'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
+        assert.strictEqual(await bannerNow(), null,
+          'a single-line target in the SAME run still converts — §4.1 refuses the ' +
+          'multi-line TARGET, not the run around it');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath),
+          '# Doc\n\n- alpha\n  continued\n1. bravo\n',
+          'and the control gesture actually landed');
+
+        await page.close();
+        console.log('S2 轉換成: a multi-line li refuses with the §4.1 banner — OK');
+      } finally {
+        s3eSrv.close();
+      }
+    }
+    {
+      const { srv: s3fSrv, url: s3fUrl, mdPath: s3fMdPath } =
+        await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3fUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'gap is ~5px'), '編號列表');
+        // A list-type conversion changes the item's MARKER and nothing else —
+        // its content is not touched, so its content must come from the FILE,
+        // exactly like every other member of the run. Concretely: the serializer
+        // re-states the marker for a carried line too (list-md.js emits
+        // `head + carriedSplit.content`, and SRC_MARKER_RE eats the old bullet
+        // AND the old GFM checkbox), so carrying the converted item costs
+        // nothing and buys byte-fidelity.
+        //
+        // MEASURED, and it is why convertListItemType() passes NO `mutatedEl`
+        // to bystanderCarryOver() — contradicting the plan's Task 3 sketch,
+        // which passes `liEl`. `bystanderCarryOver(span, mutatedEl)` EXCLUDES
+        // `mutatedEl` from the replay map, so naming the converted item is what
+        // sends its content back through inline-md.js's escapeText() —
+        // measured: serializeInline('~5px') === '\\~5px'. That is the exact
+        // bystander-corruption class the S1 branch spent three commits
+        // eliminating, re-introduced on the one item the user did point at.
+        assert.strictEqual(await saveAndRead(page, s3fMdPath),
+          '# Doc\n\n1. gap is ~5px\n- bravo\n',
+          'the converted item’s own content is replayed from the file, never re-serialized');
+
+        await page.close();
+        console.log('S2 轉換成: a list-type change never re-escapes the item’s own content — OK');
+      } finally {
+        s3fSrv.close();
+      }
+    }
+    {
+      // §4.3's open question, answered by MEASUREMENT rather than by reading
+      // the spec: is listRunOf() — "outermost run PLUS every descendant" — a
+      // superset of §3.4 rule 2's SCOPE, which is what §4.3 says the gate's
+      // input must be? §4.3 is explicit that checking only the operated
+      // block's own run misses "a deeper child run containing a loose item",
+      // which then gets silently re-indented.
+      //
+      // This fixture is exactly that shape, and it is a real one:
+      // marked.lexer('- alpha\n  - c1\n\n  - c2\n- bravo\n') returns ONE tight
+      // top-level list whose `alpha` item holds a LOOSE nested list. The
+      // operated block (alpha) sits in a perfectly clean indent-0 run; the
+      // degradation lives one level down, in c1/c2, whose loose items render
+      // as <p> and reach list-md.js as unsupported 'P'.
+      //
+      // The refusal below is the evidence: listRunOf(alpha) DOES reach the
+      // deeper run, so the single call in convertBlockViaMenu() is sufficient
+      // and no separate scope walk is needed. Delete the gate and this
+      // scenario rewrites c1/c2 without asking.
+      //
+      // The '## Tail' + '1. healthy' half of the fixture is the ANTI-VACUOUS
+      // control, added by the 2026-08-30 test-integrity review. MEASURED: the
+      // refusal below stays GREEN when convertBlockViaMenu() is stubbed to
+      // `refuseStructuralListEdit(); return;`, so by itself it cannot tell
+      // "refuses THIS run" from "refuses everything". `healthy` is a SECOND
+      // run, cut off from the degraded one by a heading, whose own
+      // listRunOf() holds nothing unsupported — the gate is per-run, so that
+      // one has to go through.
+      const { srv: s3gSrv, url: s3gUrl, mdPath: s3gMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '  - c2', '- bravo', '',
+          '## Tail', '', '1. healthy', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3gUrl, { waitUntil: 'networkidle0' });
+
+        const bannerNow = () => page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.querySelector('span').textContent : null;
+        });
+        const before = fs.readFileSync(s3gMdPath, 'utf8');
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        assert.strictEqual(await bannerNow(),
+          '此清單含不支援的格式，無法調整結構',
+          'the gate must see the LOOSE child run, not just the operated block’s own run');
+        assert.strictEqual(await saveAndRead(page, s3gMdPath), before,
+          'a deeper degraded run refuses the whole gesture — not one byte moves');
+
+        // The control gesture. Dismiss first: the banner is dismiss-only, so
+        // a stale one would answer the read below.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null,
+          'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'healthy'), '文字');
+        assert.strictEqual(await bannerNow(), null,
+          'a HEALTHY run elsewhere in the document still converts — the gate is per-run');
+        assert.strictEqual(await saveAndRead(page, s3gMdPath),
+          '# Doc\n\n- alpha\n  - c1\n\n  - c2\n- bravo\n\n## Tail\n\nhealthy\n',
+          'and the control gesture actually landed');
+
+        await page.close();
+        console.log('S2 轉換成: the §4.3 gate reaches a DEEPER loose run (listRunOf scope) — OK');
+      } finally {
+        s3gSrv.close();
+      }
+    }
+
+    // ── S2 Task 4: 轉換成 OUT of a list — the block leaves the run, so the
+    //    span is rebuilt as [survivors before] + [converted lines] +
+    //    [survivors after] with §4.3 rule 1's blank lines between them, and
+    //    the orphaned subtree is shifted by indent-clamp's `operatedBecomes`
+    //    branch (its first production caller, RULING T6-B).
+    //
+    //    ⚠ Every expected byte string below was MEASURED with marked.lexer
+    //    before it was pinned. ─────────────────────────────────────────────
+    {
+      const { srv: s4aSrv, url: s4aUrl, mdPath: s4aMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        const out = await saveAndRead(page, s4aMdPath);
+        assert.strictEqual(out, '# Doc\n\n1. alpha\n\nbravo\n\n1. charlie\n',
+          '§4.3 rule 1: a blank line either side, or lazy continuation swallows bravo ' +
+          'into alpha; §3.8: the surviving half renumbers from 1');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'paragraph', 'space', 'list'],
+          'bravo is its OWN paragraph, not a continuation of alpha');
+
+        await page.close();
+        console.log('S2 轉換成 › 文字: a middle item splits the list and renumbers — OK');
+      } finally {
+        s4aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4bSrv, url: s4bUrl, mdPath: s4bMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '標題 2');
+        const out = await saveAndRead(page, s4bMdPath);
+        assert.strictEqual(out, '# Doc\n\n## alpha\n\n- bravo\n- charlie\n',
+          'the survivors stay ONE run; no blank line is added above the heading ' +
+          'because the line already there is blank');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'heading', 'list'],
+          'one list token holding both survivors');
+
+        await page.close();
+        console.log('S2 轉換成 › 標題 2: the FIRST item leaves, the rest stay one run — OK');
+      } finally {
+        s4bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4cSrv, url: s4cUrl, mdPath: s4cMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grandchild', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
+        const out = await saveAndRead(page, s4cMdPath);
+        assert.strictEqual(out, '# Doc\n\nalpha\n\n- child\n  - grandchild\n- bravo\n',
+          'the orphaned subtree keeps its shape and re-anchors at indent 0');
+        assert.strictEqual(lexTypes(out).includes('code'), false,
+          'NOTHING may become a code block — that is the data-loss shape §3.4 exists to stop');
+
+        await page.close();
+        console.log('S2 轉換成: a converted parent re-anchors its orphaned subtree — OK');
+      } finally {
+        s4cSrv.close();
+      }
+    }
+
+    {
+      // §3.4 rule 3, and the ONE shape in which the clamp changes the emitted
+      // bytes at all — see convertListItemAway()'s own note. `beta` and
+      // `delta` are siblings at indent 1; `gamma` is beta's child and
+      // `epsilon` is delta's. Converting beta away leaves gamma as the
+      // segment head (delta 2 -> 0) while delta's own segment shifts by 0, so
+      // delta stays at 1 and is adopted by gamma, carrying epsilon with it.
+      //
+      // THIS is the scenario that goes red if `{ operatedBecomes: ... }` is
+      // dropped from the applyIndentClamp() call: without it the operated
+      // block still counts as a live anchor, every delta is 0, and the three
+      // survivors come back FLAT ('- gamma / - delta / (2sp)- epsilon').
+      const { srv: s4dSrv, url: s4dUrl, mdPath: s4dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '    - gamma',
+          '  - delta', '    - epsilon', '- zeta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'beta'), '文字');
+        const out = await saveAndRead(page, s4dMdPath);
+        assert.strictEqual(out,
+          '# Doc\n\n- alpha\n\nbeta\n\n- gamma\n  - delta\n    - epsilon\n- zeta\n',
+          '§3.4 rule 3: ONE delta per segment — gamma’s subtree shifts by 2, ' +
+          'delta’s by 0, so the two segments keep their relative depths');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+
+        await page.close();
+        console.log('S2 轉換成: the §3.4 segment deltas survive the split commit — OK');
+      } finally {
+        s4dSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4eSrv, url: s4eUrl, mdPath: s4eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '  - charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4eUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'beta'), '程式碼');
+        const out = await saveAndRead(page, s4eMdPath);
+        // §3.9: the user has ALREADY accepted that charlie stops being
+        // alpha's child here — a fence cannot live inside a list item that a
+        // paragraph-level block has already closed.
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\n```\nbeta\n```\n\n- charlie\n',
+          '§3.9: converting an indented item to 程式碼 breaks the list, by ruling');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'code', 'space', 'list'],
+          'exactly one fenced code block, and charlie is a list again');
+
+        await page.close();
+        console.log('S2 轉換成 › 程式碼 on an indented item breaks the list (§3.9) — OK');
+      } finally {
+        s4eSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4fSrv, url: s4fUrl, mdPath: s4fMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4fUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s4fMdPath, 'utf8');
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        // Assert the conversion LANDED before undoing it. Without this the
+        // scenario is vacuous: a refused conversion leaves the file untouched,
+        // so the post-undo byte comparison below passes for the wrong reason —
+        // measured, it was the one assertion in this group that stayed GREEN
+        // against the pre-Task-4 refusal.
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => [
+            document.querySelectorAll('.ed-block[data-block-type="li"]').length,
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length,
+          ].join('/')),
+          '2/1', 'bravo left the run and is a paragraph block now');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s4fMdPath), before,
+          'ONE Ctrl+Z, not two — §3.4: one user gesture is exactly one undo op ' +
+          '(RULING F-J is the only two-op gesture, and this is not it)');
+
+        await page.close();
+        console.log('S2 轉換成: converting away from a list is exactly one undo op — OK');
+      } finally {
+        s4fSrv.close();
+      }
+    }
+
+    {
+      // A HARD-WRAPPED bystander in the same run. §4.1 refuses a multi-line li
+      // as the TARGET of a conversion but keeps it a perfectly good bystander,
+      // and listRunSupportsStructuralEdit() encodes exactly that asymmetry
+      // (MULTILINE is filtered out of the run-wide veto and re-checked against
+      // the target's own line range). The split-span serialization below must
+      // not re-introduce a run-wide veto of its own — measured: a naive
+      // `unsupported.length > 0` check on the two halves refuses this gesture.
+      const { srv: s4gSrv, url: s4gUrl, mdPath: s4gMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4gUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'charlie'), '文字');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }),
+          null, 'a multi-line BYSTANDER must not veto the gesture (§4.1)');
+        assert.strictEqual(await saveAndRead(page, s4gMdPath),
+          '# Doc\n\n- alpha\n  continued\n- bravo\n\ncharlie\n',
+          'the hard-wrapped bystander is replayed byte-for-byte from the file');
+
+        await page.close();
+        console.log('S2 轉換成: a multi-line bystander is replayed, not refused — OK');
+      } finally {
+        s4gSrv.close();
+      }
+    }
+
+    {
+      // ── carry 3, direction A: the SPAN handed to the clamp is NARROWER
+      //    than §3.4 rule 2's scope would be if it were measured over the
+      //    whole document. This is the plan's own worked example. `a` and `b`
+      //    are both indent 0 but of different list types, so §3.8 rule (b)
+      //    ends the run at `b` and listRunOf(a) is [a, a1] — while rule 2's
+      //    scope, which stops only at "indent < operated indent" or a non-li,
+      //    would run on through [a1, b, b1].
+      //
+      //    MEASURED: harmless, and the reason is arithmetic rather than luck.
+      //    Every block rule 2 would reach beyond the span sits at an indent
+      //    <= the operated block's OLD indent (anything deeper is inside the
+      //    span by construction — listRunOf() extends past its last member to
+      //    cover the subtree). A block at or above the operated block's depth
+      //    has a non-zero delta only if its own anchor moved, and its anchor
+      //    is either above the operated block or inside the span, where the
+      //    clamp already settled it. Here b's bound after a1 lands at 0 is 1
+      //    and b is at 0, so the delta is 0 either way — and b/b1 are outside
+      //    the commit range as well, so not one of their bytes can move.
+      const { srv: s4hSrv, url: s4hUrl, mdPath: s4hMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - a1', '1. b', '   - b1', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4hUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'a'), '文字');
+        const out = await saveAndRead(page, s4hMdPath);
+        assert.strictEqual(out, '# Doc\n\na\n\n- a1\n1. b\n   - b1\n',
+          'the adjacent ol run is outside BOTH the span and the commit range, ' +
+          'and needs no clamp of its own');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+
+        await page.close();
+        console.log('S2 轉換成: a run-boundary neighbour outside the clamp span is untouched — OK');
+      } finally {
+        s4hSrv.close();
+      }
+    }
+
+    {
+      // ── carry 3, direction B: a block INSIDE the clamp span but OUTSIDE
+      //    §3.4 rule 2's scope. `d` is at indent 1, the operated block `c` is
+      //    at indent 2, so rule 2's scope ("stop at the first li whose indent
+      //    is SMALLER than the operated block's old indent") is EMPTY and the
+      //    clamp leaves d's data-indent at 1 — correctly, by the rule.
+      //
+      //    MEASURED, and this is the one place the two disagree observably:
+      //    d is the FIRST block of the `after` half, and list-md.js rebuilds
+      //    its marker-width stack from empty per span, so d is EMITTED at
+      //    column 0 regardless. d is therefore promoted out of `a` by the
+      //    serializer, not by the clamp.
+      //
+      //    Not a defect, and not silently divergent: markdown has no way to
+      //    keep d inside `a` once a paragraph has closed that list (§3.9
+      //    accepts exactly this breakage for the 程式碼/引用 targets), and
+      //    the re-render re-derives data-indent from these bytes, so the
+      //    model and the file agree from the next frame on. Pinned so that a
+      //    future change to the width stack — or to §3.4 rule 2's scope — has
+      //    to come past this line.
+      const { srv: s4iSrv, url: s4iUrl, mdPath: s4iMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - b', '    - c', '  - d', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4iUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
+        const out = await saveAndRead(page, s4iMdPath);
+        assert.strictEqual(out, '# Doc\n\n- a\n  - b\n\nc\n\n- d\n',
+          'd is re-anchored at column 0 by the serializer’s per-span width stack');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-indent')).join(',');
+          }),
+          '0,1,0', 'after the re-render the model matches the bytes — no drift');
+
+        await page.close();
+        console.log('S2 轉換成: a block outside rule 2’s scope re-anchors via the width stack — OK');
+      } finally {
+        s4iSrv.close();
+      }
+    }
+
+    {
+      // ── §4.3 rule 1 at the RUN's own edges, which is where it actually
+      //    bites. `bravo` is an ol between two ul's, so §3.8 rule (b) makes it
+      //    a run of ONE: `before` and `after` are both empty and the '\n\n'
+      //    joins inside the span never fire. The neighbours are still li's,
+      //    with no blank line between them — a marker-type change splits a run
+      //    on its own (measured in Task 3), so the file legitimately has none.
+      //
+      //    MEASURED, and it is the whole reason rule 1 exists:
+      //    marked.lexer('# Doc\n\n- alpha\nbravo\n- charlie\n') returns ONE
+      //    list whose first item's text is "alpha\nbravo" — the converted
+      //    paragraph is swallowed as a LAZY CONTINUATION of the item above it
+      //    and stops existing as a block at all.
+      const { srv: s4jSrv, url: s4jUrl, mdPath: s4jMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '1. bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4jUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        const out = await saveAndRead(page, s4jMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          '§4.3 rule 1: a blank line is inserted on BOTH edges of the run, because ' +
+          'the neighbouring li belongs to an adjacent run that the span never covers');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'paragraph', 'space', 'list'],
+          'bravo is its own paragraph; without the edge blanks it is alpha’s second line');
+
+        await page.close();
+        console.log('S2 轉換成: §4.3 rule 1 inserts the blanks at the run’s own edges — OK');
+      } finally {
+        s4jSrv.close();
+      }
+    }
+
+    // ── S2 Task 5: 轉換成 INTO a list — §4.3 rule 2, the looseness trap.
+    //
+    //    A blank line between two lists of the SAME marker type does NOT
+    //    separate them. MEASURED, and it is the whole reason this rule
+    //    exists:
+    //      marked.lexer('- a\n- b\n- c\n').loose === false
+    //      marked.lexer('- a\n- b\n\n- c\n').loose === true   ← ONE list
+    //    Every item of a loose list renders as <p>…</p>, serializeBlocks()
+    //    reports 'P' for each of them (list-md.js:56-70, :462) and the whole
+    //    run degrades read-only — with NO banner, because nothing refused
+    //    anything. So a conversion whose RESULT is a li must EAT the
+    //    separator to a same-type neighbour.
+    //
+    //    ⚠ Every expected byte string below was MEASURED with marked.lexer
+    //    before it was pinned. ─────────────────────────────────────────────
+    {
+      const { srv: s5aSrv, url: s5aUrl, mdPath: s5aMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5aMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n- bravo\n- charlie\n',
+          '§4.3 rule 2: a same-type li above AND below, so BOTH separators are eaten');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list'], 'one list, not three');
+        assert.deepStrictEqual(lexLooseDeep(out), [false],
+          'a loose list pushes P for every item and degrades the whole run read-only');
+
+        // §3.4: one gesture is one undo op — and this is the WIDEST range
+        // Task 5 ever commits (the block's own lines PLUS a separator at each
+        // end), so it is where a widened range would show up as two ops or as
+        // a partial restore.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(await saveAndRead(page, s5aMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          'ONE Ctrl+Z restores both eaten separators — the widened range is still one op');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: a paragraph joins the run TIGHTLY — OK');
+      } finally {
+        s5aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5bSrv, url: s5bUrl, mdPath: s5bMdPath } =
+        await setupTableDoc(['# Doc', '', 'bravo', '', '## Tail', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        assert.strictEqual(await saveAndRead(page, s5bMdPath), '# Doc\n\n- bravo\n\n## Tail\n',
+          'nothing to merge with, so the separators stay — rule 2 eats a separator, ' +
+          'it does not glue a list onto whatever happens to be next');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: no adjacent list, blank lines survive — OK');
+      } finally {
+        s5bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5cSrv, url: s5cUrl, mdPath: s5cMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '1. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5cMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n- bravo\n\n1. charlie\n',
+          'the ol below is a different list type, so that separator survives');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list', 'space', 'list'],
+          'still two lists — a marker-type change is a boundary a blank line cannot cross');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'and both are tight');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: only the matching side is merged — OK');
+      } finally {
+        s5cSrv.close();
+      }
+    }
+
+    {
+      // ⚠ The load-bearing one. §4.3 rule 1 (Task 4) and rule 2 (this task)
+      //   are the two ends of ONE path; this is the test that fails if they
+      //   disagree. The intermediate assertion is not decoration: without it
+      //   the scenario would go green if BOTH legs were refused outright and
+      //   the file never changed at all.
+      const { srv: s5dSrv, url: s5dUrl, mdPath: s5dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5dUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s5dMdPath, 'utf8');
+        assert.strictEqual(before, '# Doc\n\n- alpha\n- bravo\n- charlie\n', 'fixture sanity');
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        assert.strictEqual(await saveAndRead(page, s5dMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          'the OUTBOUND leg really happened (rule 1 put a blank on either side)');
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5dMdPath);
+        assert.strictEqual(out, before,
+          '§4.3: rules 1 and 2 are the two ends of one path and must compose byte-exactly');
+        assert.deepStrictEqual(lexLooseDeep(out), [false], 'and the run comes back TIGHT');
+
+        await page.close();
+        console.log('S2 轉換成: convert out and back in is a byte-identical round trip — OK');
+      } finally {
+        s5dSrv.close();
+      }
+    }
+
+    {
+      // The composition the plan does NOT test, flagged by Task 4's
+      // implementer: coming back as a DIFFERENT list type than the
+      // neighbours. Rule 2 must NOT fire — measured,
+      // '# Doc\n\n- alpha\n\n1. bravo\n\n- charlie\n' is THREE tight lists,
+      // and eating either separator would splice bravo into a ul it does not
+      // belong to.
+      const { srv: s5eSrv, url: s5eUrl, mdPath: s5eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5eUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        assert.strictEqual(await saveAndRead(page, s5eMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n', 'the outbound leg really happened');
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '編號列表');
+        const out = await saveAndRead(page, s5eMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\n1. bravo\n\n- charlie\n',
+          'a different list type than either neighbour, so NEITHER separator is eaten');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'list', 'space', 'list'],
+          'three lists — bravo did not join the ul above or the one below');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false, false], 'all three tight');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表: a different type does NOT eat the separators — OK');
+      } finally {
+        s5eSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5fSrv, url: s5fUrl, mdPath: s5fMdPath } =
+        await setupTableDoc(['# Doc', '', '## Sub', '', '- alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5fUrl, { waitUntil: 'networkidle0' });
+
+        const subSel = await page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll('.ed-block[data-block-type="heading"]'));
+          return els.length === 2 ? '.ed-block[data-block-id="' +
+            els[1].getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(subSel, 'fixture must have two headings');
+        await convertVia(page, subSel, '編號列表');
+        const out = await saveAndRead(page, s5fMdPath);
+        assert.strictEqual(out, '# Doc\n\n1. Sub\n\n- alpha\n',
+          'a ul below is a different type, so no merge');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list', 'space', 'list'],
+          'the heading became an ol of its own; the ul below is untouched');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表 on a heading: numbered 1, nothing re-anchored — OK');
+      } finally {
+        s5fSrv.close();
+      }
+    }
+
+    {
+      // ── The li → li defect, measured in the live editor by Task 3's
+      //    implementer and NOT covered by the plan's Task 5 (which only
+      //    implements 非清單 → 清單). §4.3 rule 2's 2026-08-30 revision is
+      //    the ruling that closes it: the trigger is 「轉換結果是 li」, not
+      //    「來源是非清單」.
+      //
+      //    MEASURED before the fix:
+      //      start  '# Doc\n\n- a\n\n1. b\n'  → list|space|list, BOTH tight
+      //      gesture 轉換成 › 項目符號列表 on b
+      //      bytes  '# Doc\n\n- a\n\n- b\n'   → ONE list, loose === true
+      //      after  every structural gesture on that run → 「此清單含不支援的
+      //             格式，無法調整結構」
+      //    One conversion froze a run the user could no longer restructure,
+      //    with no banner.
+      const { srv: s5gSrv, url: s5gUrl, mdPath: s5gMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '', '1. b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5gUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'b'), '項目符號列表');
+        const out = await saveAndRead(page, s5gMdPath);
+        assert.strictEqual(out, '# Doc\n\n- a\n- b\n',
+          'li → li merges the two runs too: the separator between them must be eaten');
+        assert.deepStrictEqual(lexLooseDeep(out), [false],
+          'this is the byte-level shape of the freeze — loose === true is the defect');
+
+        // The freeze itself, asserted directly rather than inferred from the
+        // bytes: a structural gesture on the merged run still WORKS. Before
+        // the fix this refused with §4.1's banner every time.
+        const bannerNow = () => page.evaluate(() => {
+          const bn = document.querySelector('.ed-conflict');
+          return bn ? bn.querySelector('span').textContent : null;
+        });
+        assert.strictEqual(await bannerNow(), null, 'the conversion itself must not banner');
+        await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
+        assert.strictEqual(await bannerNow(), null,
+          'the run is still restructurable — this is what the defect took away');
+        assert.strictEqual(await saveAndRead(page, s5gMdPath), '# Doc\n\n- a\n\nb\n',
+          'and the follow-up gesture actually landed');
+
+        await page.close();
+        console.log('S2 轉換成: li → li does not freeze the merged run (the S2 T3 defect) — OK');
+      } finally {
+        s5gSrv.close();
+      }
+    }
+
+    {
+      // ── §4.3 rule 2's second half: the gate must hold for BOTH runs before
+      //    merging. '- a' + blank + '- b' is ALREADY one loose list (measured:
+      //    loose === true), so serializeBlocks() reports P,P for it. Merging
+      //    the healthy '1. c' into that would freeze c as well — and NOT
+      //    merging is no escape either, because the marker types match and
+      //    markdown merges them whether or not the separator survives. The
+      //    only correct answer is to refuse the whole gesture.
+      const { srv: s5hSrv, url: s5hUrl, mdPath: s5hMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '', '- b', '', '1. c', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5hUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s5hMdPath, 'utf8');
+        const bannerNow = () => page.evaluate(() => {
+          const bn = document.querySelector('.ed-conflict');
+          return bn ? bn.querySelector('span').textContent : null;
+        });
+
+        // FIXTURE SANITY, asked of the serializer rather than assumed from
+        // the bytes (the 2026-08-30 test-integrity review's last residue of
+        // this pattern): '- a' + blank + '- b' has to REALLY be one loose
+        // list, i.e. serializeBlocks() has to report a 'P' for each of its
+        // items, or the refusal below is green for the wrong reason — a
+        // refusal of a healthy run would look identical from here.
+        assert.deepStrictEqual(
+          await page.evaluate(() => window.md2docListMd.serializeBlocks(
+            Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]')))
+            .unsupported),
+          ['P', 'P'],
+          'FIXTURE SANITY: the a/b run must really be degraded');
+
+        await convertVia(page, await liBlockSelByText(page, 'c'), '項目符號列表');
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'the run c would merge INTO is degraded, so the merge is refused with §4.1’s banner');
+        assert.strictEqual(await saveAndRead(page, s5hMdPath), before,
+          'a refused conversion must not touch a single byte');
+
+        // Anti-vacuous: c is not frozen in general — only the gesture that
+        // would have merged it into the degraded run is refused. The banner
+        // is dismiss-only (it does not time out and rerenderAll() leaves it
+        // alone — it lives on document.body, outside .content), so it has to
+        // be cleared by hand or the next read would just see this same one.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null, 'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
+        assert.strictEqual(await bannerNow(), null, 'a NON-merging target still works');
+        assert.strictEqual(await saveAndRead(page, s5hMdPath), '# Doc\n\n- a\n\n- b\n\nc\n',
+          'and that one landed');
+
+        await page.close();
+        console.log('S2 轉換成: merging into a DEGRADED run is refused, not performed — OK');
+      } finally {
+        s5hSrv.close();
+      }
+    }
+
+    {
+      // ── MEASURED, and it contradicts the plan's Task 5 sketch, which asks
+      //    the IMMEDIATELY PREVIOUS block whether it is a li at indent 0.
+      //    Here it is `beta` at indent 1, so that predicate says "no merge" —
+      //    and the result it would commit,
+      //    '# Doc\n\n- alpha\n  - beta\n\n- gamma\n', is ONE list with
+      //    loose === true. The blank line separates gamma from BETA, but the
+      //    list it would join is ALPHA's, and looseness is a property of the
+      //    whole list token. The question rule 2 has to ask is therefore
+      //    about the neighbour's RUN (listRunOf), not the neighbour block.
+      const { srv: s5iSrv, url: s5iUrl, mdPath: s5iMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '', 'gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5iUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5iMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n  - beta\n- gamma\n',
+          'the merge partner is the RUN above, whose head is `alpha` at indent 0');
+        assert.deepStrictEqual(lexLooseDeep(out), [false, false],
+          'the plan’s previous-BLOCK predicate would leave the separator and go loose. ' +
+          'TWO entries because `beta` is a NESTED list of its own: lexLoose() reports ' +
+          'only [false] here, which is the top-level-only blind spot lexLooseDeep()’s ' +
+          'own note names');
+
+        await page.close();
+        console.log('S2 轉換成: rule 2 asks the neighbour’s RUN, not the neighbour block — OK');
+      } finally {
+        s5iSrv.close();
+      }
+    }
+    // ── S2 Task 6: 複製 (duplicate) — §4.3 ────────────────────────────────
+    //
+    //    TWO commit paths, chosen by MEASUREMENT rather than by symmetry, and
+    //    the measurement is the whole point of this group:
+    //
+    //    * a NON-li block goes through commitBlockInsertion(), which IS
+    //      "insert these lines below that block" and already owns the
+    //      blank-line policy. Measured against the pure export:
+    //        commitBlockInsertion(['# Doc','','alpha',''], paragraph, ['alpha'])
+    //        -> '# Doc\n\nalpha\n\nalpha\n'
+    //    * a li does NOT, and this is the trap. commitBlockInsertion() ALWAYS
+    //      inserts a leading blank line (client.js:170-179). Measured against
+    //      the same pure export, on ['# Doc','','- a','- b',''] with body
+    //      ['- a']:
+    //        -> '# Doc\n\n- a\n\n- a\n\n- b\n'
+    //        marked.lexer(...) -> ONE list, loose === TRUE
+    //      Every item of a loose list renders as <p>, serializeBlocks()
+    //      reports 'P' for each of them and the whole run degrades read-only
+    //      with NO banner — §4.3 rule 2's exact defect, re-opened by a
+    //      duplicate instead of by a conversion. So a li duplicates through
+    //      the RUN's own re-serialization (commitListStructure), which emits
+    //      no blank at all and renumbers the run per §3.8 on the way. Every
+    //      li scenario below asserts `loose === false` directly, because the
+    //      bytes and the token types look identical either way.
+    {
+      const { srv: s6aSrv, url: s6aUrl, mdPath: s6aMdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6aUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+          2, 'the copy must exist as its own block, not merge into the original');
+        assert.strictEqual(await saveAndRead(page, s6aMdPath), '# Doc\n\nalpha\n\nalpha\n',
+          'one copy, blank-separated — commitBlockInsertion()’s own contract');
+
+        await page.close();
+        console.log('S2 複製: a paragraph gets a copy directly below it — OK');
+      } finally {
+        s6aSrv.close();
+      }
+    }
+
+    {
+      // §4.3, and the spec records the MEASUREMENT that forces it: the copy
+      // goes after the block's whole SUBTREE, not after its own line.
+      //   after the subtree: '- a\n  - a1\n- a\n- b\n'
+      //     -> items ['- a\n  - a1\n', '- a\n', '- b']  (a keeps its child)
+      //   after a's own line: '- a\n- a\n  - a1\n- b\n'
+      //     -> items ['- a\n', '- a\n  - a1\n', '- b']  (the COPY got a1)
+      // Both lex cleanly and both are tight, so only the item boundaries tell
+      // them apart — which is why the byte string is asserted, not the shape.
+      const { srv: s6bSrv, url: s6bUrl, mdPath: s6bMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - a1', '- b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6bUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 4,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          4, 'the duplicate must have landed before the bytes mean anything');
+        const s6bOut = await saveAndRead(page, s6bMdPath);
+        assert.strictEqual(s6bOut, '# Doc\n\n- a\n  - a1\n- a\n- b\n',
+          '§4.3: after the SUBTREE. Inserting after a’s own line moves a1 into the copy');
+        assert.deepStrictEqual(
+          plainMarked.lexer(s6bOut).filter((t) => t.type === 'list')[0].items.map((it) => it.raw),
+          ['- a\n  - a1\n', '- a\n', '- b'],
+          'a1 stays the ORIGINAL a’s child — the byte string alone reads the same either way ' +
+          'to a careless eye, the item boundaries do not');
+        assert.deepStrictEqual(lexLooseDeep(s6bOut), [false, false],
+          'no leading blank: commitBlockInsertion()’s always-on one measures ' +
+          'loose === true. TWO entries because `a1` is a nested list — checking only ' +
+          'the top level would miss a copy that went loose one level down');
+
+        await page.close();
+        console.log('S2 複製: the copy goes after the whole subtree — OK');
+      } finally {
+        s6bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s6cSrv, url: s6cUrl, mdPath: s6cMdPath } =
+        await setupTableDoc(['# Doc', '', '- [x] done', '- [ ] todo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6cUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'done'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"] > .ed-li-check'))
+            .map((b) => b.getAttribute('data-checked')).join(',')),
+          '1,1,0', '§4.3 names 勾選狀態 as preserved — the copy is checked too');
+        const s6cOut = await saveAndRead(page, s6cMdPath);
+        assert.strictEqual(s6cOut, '# Doc\n\n- [x] done\n- [x] done\n- [ ] todo\n',
+          '§4.3 names 型態 / 縮排 / 勾選狀態 as preserved');
+        assert.deepStrictEqual(lexLooseDeep(s6cOut), [false], 'the run stays tight');
+
+        await page.close();
+        console.log('S2 複製: type, indent and checked state are preserved — OK');
+      } finally {
+        s6cSrv.close();
+      }
+    }
+
+    {
+      // §3.8: the run is re-serialized and renumbered 1..n. A pure line
+      // insertion would leave '1. alpha\n1. alpha\n2. bravo\n' — which lexes
+      // to the same three items and renders 1,2,3 in both modes, so nothing
+      // would LOOK wrong; it just leaves the user a diff they did not ask for
+      // on the next structural gesture. Going through the run's own
+      // re-serialization is what makes §3.8 true here rather than merely
+      // harmless.
+      const { srv: s6dSrv, url: s6dUrl, mdPath: s6dMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6dUrl, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        const s6dOut = await saveAndRead(page, s6dMdPath);
+        assert.strictEqual(s6dOut, '# Doc\n\n1. alpha\n2. alpha\n3. bravo\n', 'spec 3.8');
+        assert.deepStrictEqual(lexLooseDeep(s6dOut), [false], 'the run stays tight');
+
+        await page.close();
+        console.log('S2 複製: an ordered item’s copy renumbers the run — OK');
+      } finally {
+        s6dSrv.close();
+      }
+    }
+    {
+      // The copy's CONTENT is never re-serialized. bystanderCarryOver(span)
+      // is called with NO `mutatedEl` — naming a block EXCLUDES it from the
+      // replay map, which is what sends its content back through
+      // inline-md.js's escapeText(); measured on the conversion paths,
+      // serializeInline('~5px') === '\\~5px'. The copy shares the original's
+      // block id, so the ONE map entry covers both and list-md.js replays the
+      // file's own bytes for each while re-stating only the marker.
+      const { srv: s6eSrv2, url: s6eUrl2, mdPath: s6eMdPath2 } =
+        await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6eUrl2, { waitUntil: 'networkidle0' });
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'gap is ~5px'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          3, 'the duplicate must have landed before the bytes mean anything');
+        assert.strictEqual(await saveAndRead(page, s6eMdPath2),
+          '# Doc\n\n- gap is ~5px\n- gap is ~5px\n- bravo\n',
+          'neither the original NOR the copy may be re-escaped — a `~5px` stays `~5px`');
+
+        await page.close();
+        console.log('S2 複製: the copy is not re-escaped, and neither is the original — OK');
+      } finally {
+        s6eSrv2.close();
+      }
+    }
+
+    {
+      // §4.3: 複製與刪除均為單一 undo. Both commit paths are asserted, because
+      // they are different functions — the paragraph's commitBlockInsertion()
+      // and the li's commitListStructure() — and only one of them can be
+      // covered by any single fixture.
+      const { srv: s6eSrv, url: s6eUrl, mdPath: s6eMdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '', '- a', '- b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6eUrl, { waitUntil: 'networkidle0' });
+        const s6eBefore = fs.readFileSync(s6eMdPath, 'utf8');
+
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        // Assert the duplicate LANDED before undoing it. Without this the
+        // byte comparison after the Ctrl+Z is vacuous: a REFUSED duplicate
+        // leaves the file untouched and the assertion passes for exactly the
+        // wrong reason.
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+          2, 'the paragraph duplicate must have landed');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s6eMdPath), s6eBefore,
+          'ONE Ctrl+Z restores the file — §3.4, one gesture is one undo op');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          3, 'the li duplicate must have landed');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s6eMdPath), s6eBefore,
+          'the li path is one undo op too — a different commit function, same rule');
+
+        await page.close();
+        console.log('S2 複製: one duplicate is exactly one undo op, on both paths — OK');
+      } finally {
+        s6eSrv.close();
+      }
+    }
+
+    {
+      // §4.1 修訂 2: a duplicate is NOT column-only — it adds the item's lines
+      // over again — so a multi-line li refuses as a TARGET, with §4.1's
+      // run-wide banner and not convert-md.js's per-block one.
+      const { srv: s6fSrv, url: s6fUrl, mdPath: s6fMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s6fUrl, { waitUntil: 'networkidle0' });
+        const s6fBefore = fs.readFileSync(s6fMdPath, 'utf8');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }),
+          '此清單含不支援的格式，無法調整結構',
+          '§4.1: a duplicate rewrites line COUNT, so a multi-line li refuses as a target');
+        assert.strictEqual(
+          await page.evaluate(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+          2, 'the refusal must be a refusal — no copy on screen either');
+        assert.strictEqual(await saveAndRead(page, s6fMdPath), s6fBefore,
+          'a refused duplicate must not touch a single byte');
+
+        await page.close();
+        console.log('S2 複製: a multi-line li refuses with the §4.1 banner — OK');
+      } finally {
+        s6fSrv.close();
+      }
+    }
+
+    // ── Finding 5a, the half that was never closed: 複製 and 刪除 with a
+    //    DIRTY burst open on the block being operated on.
+    //
+    //    5a's mousedown preventDefault() deliberately keeps that burst alive
+    //    across the ⠿ press, so the commit that lands inside switchAwayFrom()
+    //    is a rewrite of THIS block's own source lines — and
+    //    reresolveBlockEl()'s fingerprint is the block's SOURCE, so it is
+    //    guaranteed to miss. The gesture is then dropped with
+    //    '文件已更新，請重試這個操作' and nothing happens.
+    //
+    //    Task 2 closed this for 轉換 with ownsOpenSession() +
+    //    reresolveBlockElAfterSelfCommit() (startLine + type, no fingerprint,
+    //    used ONLY when we are the reason the source changed). 刪除 shares the
+    //    hole and was never migrated; 複製 would have inherited it.
+    //
+    //    The press is a REAL human-speed one (mousedown, gap, mouseup), the
+    //    same shape the Finding 5 scenario above uses — that gap is what makes
+    //    the pre-fix behaviour deterministic instead of racy.
+    {
+      async function pressHandleWithDirtyBurst(page, sel, typed) {
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(typed);
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true, 'sanity: the burst must be open and DIRTY before the ⠿ is pressed');
+        await page.hover(sel);
+        const box = await page.evaluate((s) => {
+          const r = document.querySelector(s + ' .ed-handle').getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }, sel);
+        await page.mouse.move(box.x, box.y);
+        await page.mouse.down();
+        await new Promise((r) => setTimeout(r, 250));
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+          true, '5a: the mousedown on ⠿ must NOT blur the still-open dirty burst');
+        await page.mouse.up();
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 5000 }, sel);
+      }
+      async function clickOpenMenuItem(page, sel, label) {
+        await page.evaluate((s, l) => {
+          const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
+            .find((b) => b.textContent === l && !b.hidden);
+          if (!btn) throw new Error('gutter menu item not found: ' + l);
+          btn.click();
+        }, sel, label);
+      }
+      const bannerNow = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+
+      {
+        const { srv: s6gSrv, url: s6gUrl, mdPath: s6gMdPath } =
+          await setupTableDoc(['# Doc', '', 'alpha', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(s6gUrl, { waitUntil: 'networkidle0' });
+
+          const sel = await blockSelByType(page, 'paragraph');
+          await pressHandleWithDirtyBurst(page, sel, ' EDITED');
+          await clickOpenMenuItem(page, sel, '複製');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the gesture must not be DROPPED: we are the reason the source changed');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            2, 'the duplicate must land on top of our own burst’s commit');
+          assert.strictEqual(await saveAndRead(page, s6gMdPath),
+            '# Doc\n\nalpha EDITED\n\nalpha EDITED\n',
+            'both the typed edit and the duplicate land, and the copy carries the edit');
+
+          await page.close();
+          console.log('S2 複製: works with a dirty burst open on its own block — OK');
+        } finally {
+          s6gSrv.close();
+        }
+      }
+
+      {
+        const { srv: s6hSrv, url: s6hUrl, mdPath: s6hMdPath } =
+          await setupTableDoc(['# Doc', '', 'alpha', '', 'bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(s6hUrl, { waitUntil: 'networkidle0' });
+
+          const sel = await blockSelByType(page, 'paragraph');
+          await pressHandleWithDirtyBurst(page, sel, ' EDITED');
+          await clickOpenMenuItem(page, sel, '刪除');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the SAME hole in deleteBlockViaGutter(): its re-resolve used the source ' +
+            'fingerprint, which our own burst commit had just invalidated');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            1, 'the edited paragraph must actually be gone');
+          assert.strictEqual(await saveAndRead(page, s6hMdPath), '# Doc\n\nbravo\n',
+            'the block the user pressed ⠿ on is deleted, edit and all');
+
+          await page.close();
+          console.log('S2 刪除: works with a dirty burst open on its own block — OK');
+        } finally {
+          s6hSrv.close();
+        }
+      }
+    }
+
+    // ── S2 Task 7: the ＋ comes back to a list item ─────────────────────────
+    //
+    // §6's S1 note item 3 — 「＋ 對 li 在 S1 隱藏，S2 解除」 — with the three
+    // preconditions it names now met: §4.3's blank-line rules (Tasks 4–5), the
+    // run-wide gate (S1), and an insertion point that inherits the anchor's
+    // indent (this task).
+    {
+      const bannerNow = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Banners hang on document.body, never time out and survive
+      // rerenderAll() — a leftover one makes the NEXT scenario's read a lie.
+      const clearBanner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        if (b) b.remove();
+      });
+      // The run's own health, asked of the serializer rather than inferred:
+      // `unsupported` non-empty IS the read-only degrade (every structural op
+      // on the run then refuses). Stronger than a loose-flag check, and it is
+      // what the ⚠ in §4.3 rule 2 is actually about.
+      const runUnsupported = (page) => page.evaluate(() =>
+        window.md2docListMd.serializeBlocks(
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+
+      // 5.3 item 3c. Chrome and geometry only — nothing is written to the
+      // file, so RED-first is the whole bar here (no mutation transcript).
+      {
+        const { srv: t7aSrv, url: t7aUrl } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '', '## Tail', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7aUrl, { waitUntil: 'networkidle0' });
+          const geo = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('.ed-block')).map((b) => {
+              const ins = b.querySelector(':scope > .ed-insert');
+              const h = b.querySelector(':scope > .ed-handle');
+              const ir = ins && ins.getBoundingClientRect();
+              const hr = h && h.getBoundingClientRect();
+              return {
+                type: b.getAttribute('data-block-type'),
+                indent: b.getAttribute('data-indent'),
+                hasInsert: !!ins, hasHandle: !!h,
+                insLeft: ir && Math.round(ir.left), insRight: ir && Math.round(ir.right),
+                hLeft: hr && Math.round(hr.left),
+                sameY: !!(ir && hr) && Math.abs(ir.top - hr.top) < 1,
+              };
+            }));
+          assert.deepStrictEqual(geo.map((g) => g.type + '@' + g.indent),
+            ['heading@null', 'li@0', 'li@1', 'heading@null'],
+            'FIXTURE SANITY: two block types and two list depths must be on screen, or the ' +
+            '"one X for all types and depths" assertions below are about one shape');
+          assert.ok(geo.every((g) => g.hasInsert && g.hasHandle),
+            'S2 un-hides ＋ on a li at EVERY depth, alongside the ⠿ S1 gave it — got ' +
+            JSON.stringify(geo.map((g) => g.type + ':' + g.hasInsert + '/' + g.hasHandle)));
+          assert.strictEqual(new Set(geo.map((g) => g.insLeft)).size, 1,
+            'one ＋ X for all types and depths, got ' + JSON.stringify(geo.map((g) => g.insLeft)));
+          assert.strictEqual(new Set(geo.map((g) => g.hLeft)).size, 1,
+            'one ⠿ X for all types and depths, got ' + JSON.stringify(geo.map((g) => g.hLeft)));
+          assert.ok(geo.every((g) => g.sameY),
+            '＋ and ⠿ share a Y on every row, got ' + JSON.stringify(geo));
+          assert.ok(geo.every((g) => g.insRight === g.hLeft),
+            '5.3 item 3c: ＋ sits immediately left of ⠿ with no gap, got ' +
+            JSON.stringify(geo.map((g) => g.insRight + '|' + g.hLeft)));
+          await page.close();
+          console.log('S2 Task 7: a list item has a ＋, aligned with its ⠿ — OK');
+        } finally { t7aSrv.close(); }
+      }
+
+      // ＋ 清單 on a NESTED item: a sibling at the same depth, and the run
+      // stays TIGHT. This is the fork Task 6 measured for 複製, re-opened
+      // here: commitBlockInsertion() ALWAYS writes a leading blank line, and
+      // measured on this very fixture that gives
+      // '# Doc\n\n- alpha\n  - child\n\n  -\n' — whose NESTED list marked
+      // reports loose === true, so every item grows a <p>, serializeBlocks()
+      // pushes 'P' and the run degrades read-only with no banner. The li path
+      // therefore goes through the run's own re-serialization instead.
+      {
+        const { srv: t7bSrv, url: t7bUrl, mdPath: t7bMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7bUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new item must actually be on screen — everything below is vacuous otherwise');
+          assert.strictEqual(await bannerNow(page), null, 'no refusal banner');
+          // Asked BEFORE the save, because this is the assertion the leading
+          // blank line kills: with commitBlockInsertion()'s blank in place the
+          // nested list is LOOSE, every item of it renders as <p>, and
+          // serializeBlocks() answers ['P','P','P'] — the run is frozen
+          // read-only with no banner, which is §4.3 rule 2's whole subject.
+          assert.deepStrictEqual(await runUnsupported(page), [],
+            'the run must still be structurally editable — a loose run answers P per item');
+          const out = await saveAndRead(page, t7bMd);
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n  -\n',
+            'the new sibling inherits the anchor indent — 2 columns, taken from the ' +
+            'serializer\'s own marker-width stack, not from indent * 2');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false],
+            '§4.3 rule 2: BOTH lists — the outer one and the nested one the new item ' +
+            'joins — must stay tight. lexLoose() alone only sees the outer one.');
+          await page.close();
+          console.log('S2 Task 7: ＋ 清單 on a nested li inserts a tight sibling — OK');
+        } finally { t7bSrv.close(); }
+      }
+
+      // ＋ on a PARENT: the insertion point is the end of its SUBTREE, which
+      // is the ruling §4.3 already made for 複製 (「副本插在該 block 整棵子樹
+      // 之後」) and for the same reason — inserting between a parent and its
+      // children leaves the children with no anchor.
+      {
+        const { srv: t7cSrv, url: t7cUrl, mdPath: t7cMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7cUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.deepStrictEqual(await runUnsupported(page), [],
+            'the run must still be structurally editable, i.e. TIGHT, before it is saved');
+          const out = await saveAndRead(page, t7cMd);
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n-\n',
+            'the new item is alpha\'s SIBLING and lands after alpha\'s whole subtree, so ' +
+            'child keeps its parent');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'both lists stay tight');
+          await page.close();
+          console.log('S2 Task 7: ＋ on a parent inserts after its whole subtree — OK');
+        } finally { t7cSrv.close(); }
+      }
+
+      // §3.4's marker-width stack, which is the WHOLE of carry 2: under a
+      // '1. ' parent the child column is THREE, not indent * 2. The fixture is
+      // chosen so a fixed two-columns-per-level would emit '  -' and be
+      // measurably wrong (marked reads a 2-column line under a 3-column marker
+      // as a SIBLING of the parent, not a child).
+      {
+        const { srv: t7dSrv, url: t7dUrl, mdPath: t7dMd } =
+          await setupTableDoc(['# Doc', '', '1. alpha', '   - child', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7dUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          const out = await saveAndRead(page, t7dMd);
+          assert.strictEqual(out, '# Doc\n\n1. alpha\n   - child\n   -\n',
+            '§3.4: the indent prefix under a "1. " marker is 3 columns. ' +
+            "' '.repeat(indent * 2) would emit '  -' here, which re-lexes as a SIBLING " +
+            'of alpha rather than a child of it');
+          assert.deepStrictEqual(
+            await page.evaluate(() =>
+              Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+                .map((el) => el.getAttribute('data-list-type') + el.getAttribute('data-indent'))),
+            ['ol0', 'ul1', 'ul1'],
+            'and the new item is a sibling of child (ul, indent 1), not of alpha');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false], 'both lists stay tight');
+          await page.close();
+          console.log('S2 Task 7: the new item\'s indent comes from the marker-width stack — OK');
+        } finally { t7dSrv.close(); }
+      }
+
+      // The new item inherits the anchor's list TYPE (§3.8 rule (b): a
+      // different data-list-type ENDS the run, so a bullet dropped into an
+      // ordered run would split it in two), and §3.8's renumbering falls out
+      // of the run re-serialization for free. Plus: exactly one undo op.
+      {
+        const { srv: t7eSrv, url: t7eUrl, mdPath: t7eMd } =
+          await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7eUrl, { waitUntil: 'networkidle0' });
+          const t7eBefore = fs.readFileSync(t7eMd, 'utf8');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new ordered item must have landed');
+          assert.strictEqual(await saveAndRead(page, t7eMd), '# Doc\n\n1. alpha\n2.\n3. bravo\n',
+            'the new item is an ORDINAL, and §3.8 renumbers the run 1..n');
+          // Blur, not Escape. MEASURED, and it is a pre-existing quirk rather
+          // than anything this task introduced: the Ctrl+S above ENDS the
+          // burst but leaves the new item's surface focused and still
+          // `.ed-wys-armed`, so the document keydown listener hands Ctrl+Z to
+          // handleBurstKeydown() -> burstUndo(), which returns immediately
+          // because `currentBurst` is null. The undo never reaches the
+          // document stack. (Same for a second Escape: revertBurstAndEnd()
+          // has no burst to revert.) Blurring puts the target back on <body>,
+          // which is where a real user's next click would put it too.
+          await page.evaluate(() => {
+            if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+          });
+          await settleEditor(page);
+          await page.keyboard.down('Control');
+          await page.keyboard.press('KeyZ');
+          await page.keyboard.up('Control');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await saveAndRead(page, t7eMd), t7eBefore,
+            'ONE Ctrl+Z restores the file — §3.4, one gesture is one undo op');
+          await page.close();
+          console.log('S2 Task 7: ＋ 清單 inherits the ordered type and renumbers, one undo — OK');
+        } finally { t7eSrv.close(); }
+      }
+
+      // A NON-list kind under a li. The measured danger is a descendant at 4
+      // columns, and it is one level down from the parent: measured against
+      // the pure core, commitBlockInsertion() anchored on `child` gives
+      // '# Doc\n\n- alpha\n  - child\n\n​\n\n    - grand\n', and marked
+      // lexes '    - grand' after a paragraph as an INDENTED CODE BLOCK — the
+      // item's content is gone. Anchoring on the end of the subtree is what
+      // removes the hazard entirely.
+      {
+        const { srv: t7fSrv, url: t7fUrl, mdPath: t7fMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grand', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7fUrl, { waitUntil: 'networkidle0' });
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '段落');
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+            { timeout: 5000 }).catch(() => {});
+          // Anti-vacuous: a REFUSED insert would also leave no 'code' token.
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
+            1, 'the paragraph must actually have landed');
+          assert.strictEqual(await bannerNow(page), null, 'and it must not have been refused');
+          // The skeleton paragraph is a `pristineInsert`: left untouched, the
+          // very Ctrl+S below resolves its burst and DISCARDS it again (a
+          // pre-existing contract — see resolveBurst()'s pristineInsert
+          // branch — and measured here: the save came back without it).
+          // Typing into it is what a real user does, and it is what makes the
+          // byte assertion below about the insertion rather than about that
+          // discard. focusInsertedBlock() has already selected the ZWSP, so
+          // the keystrokes replace it.
+          await settleEditor(page);
+          assert.strictEqual(
+            await page.evaluate(() => !!(document.activeElement &&
+              document.activeElement.classList.contains('ed-wys-armed'))),
+            true, 'the new paragraph must be focused before anything is typed into it');
+          await page.keyboard.type('para');
+          const out = await saveAndRead(page, t7fMd);
+          assert.strictEqual(lexTypes(out).includes('code'), false,
+            'the 4-column grandchild must not end up after a paragraph — that is an ' +
+            'INDENTED CODE BLOCK and the item\'s content is lost. Got ' +
+            JSON.stringify(lexTypes(out)) + ' for ' + JSON.stringify(out));
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n    - grand\n\npara\n',
+            'the paragraph lands after the anchor\'s whole subtree, so nothing is orphaned');
+          assert.deepStrictEqual(lexLooseDeep(out), [false, false, false],
+            'and the list it was inserted after is untouched and still tight');
+          await page.close();
+          console.log('S2 Task 7: ＋ 段落 under a li orphans no descendant — OK');
+        } finally { t7fSrv.close(); }
+      }
+
+      // §4.3's run-wide gate, on the ＋ path. The fixture is PROVEN degraded
+      // first: '- a' + blank + '- b' is ONE loose list (measured in Task 5's
+      // scenarios), so serializeBlocks() reports P,P for it and every
+      // structural op on that run must refuse.
+      {
+        const { srv: t7gSrv, url: t7gUrl, mdPath: t7gMd } =
+          await setupTableDoc(['# Doc', '', '- a', '', '- b', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7gUrl, { waitUntil: 'networkidle0' });
+          const t7gBefore = fs.readFileSync(t7gMd, 'utf8');
+          assert.deepStrictEqual(await runUnsupported(page), ['P', 'P'],
+            'FIXTURE SANITY: this run must really be degraded, or the refusal below is ' +
+            'green for the wrong reason');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'a'), '清單');
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), '此清單含不支援的格式，無法調整結構',
+            '§4.3: the ＋ goes through the same run-wide gate as 轉換／複製／刪除');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            2, 'the refusal must be a refusal — no new item on screen');
+          assert.strictEqual(await saveAndRead(page, t7gMd), t7gBefore, 'nothing written');
+          await clearBanner(page);
+          await page.close();
+          console.log('S2 Task 7: ＋ on a li in a degraded run refuses — OK');
+        } finally { t7gSrv.close(); }
+      }
+
+      // The FOURTH and last call site of the dirty-burst hole 轉換 / 刪除 /
+      // 複製 already closed. Finding 5a's mousedown preventDefault() covers
+      // '.ed-insert' too (client.js's delegated mousedown listener names both
+      // buttons), so the burst is still open and dirty when insertBlockBelow()
+      // runs — and switchAwayFrom() then commits a rewrite of this very
+      // block's source, which is exactly what reresolveBlockEl()'s source
+      // fingerprint cannot survive.
+      {
+        const { srv: t7hSrv, url: t7hUrl, mdPath: t7hMd } =
+          await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+        try {
+          const page = await newPage(browser);
+          await page.goto(t7hUrl, { waitUntil: 'networkidle0' });
+          const sel = await liBlockSelByText(page, 'alpha');
+          const editEl = sel + ' > .ed-li-text';
+          await page.click(editEl);
+          await page.keyboard.press('End');
+          await page.keyboard.type(' EDITED');
+          assert.strictEqual(
+            await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+            true, 'sanity: the burst must be open and DIRTY before the ＋ is pressed');
+          await page.hover(sel);
+          const box = await page.evaluate((s) => {
+            const r = document.querySelector(s + ' .ed-insert').getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }, sel);
+          await page.mouse.move(box.x, box.y);
+          await page.mouse.down();
+          await new Promise((r) => setTimeout(r, 250));
+          assert.strictEqual(
+            await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
+            true, '5a: the mousedown on ＋ must NOT blur the still-open dirty burst');
+          await page.mouse.up();
+          await page.waitForFunction(
+            (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
+            { timeout: 5000 }, sel);
+          await settleEditor(page);
+          await page.evaluate((s) => {
+            const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
+              .find((b) => b.textContent === '清單');
+            if (!btn) throw new Error('insert menu item not found: 清單');
+            btn.click();
+          }, sel);
+          await page.waitForFunction(
+            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+            { timeout: 5000 }).catch(() => {});
+          await settleEditor(page);
+          assert.strictEqual(await bannerNow(page), null,
+            'the gesture must not be DROPPED with 文件已更新，請重試這個操作: WE are the ' +
+            'reason the source changed, so the narrowed re-resolve (startLine + type) applies');
+          assert.strictEqual(
+            await page.evaluate(
+              () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+            3, 'the new item must land on top of our own burst\'s commit');
+          assert.strictEqual(await saveAndRead(page, t7hMd),
+            '# Doc\n\n- alpha EDITED\n-\n- bravo\n',
+            'both the typed edit and the insertion land');
+          await page.close();
+          console.log('S2 Task 7: ＋ on a li works with a dirty burst open on that li — OK');
+        } finally { t7hSrv.close(); }
+      }
+    }
+
+    // ── S2 Task 8 Step 2: the conversion matrix, swept ─────────────────────
+    //
+    // §5.3 item 11, "轉換矩陣逐格": every source kind × every one of §3.2's
+    // twelve targets, with the SAVED BYTES as the subject. 96 cells — six
+    // source rows of twelve, plus two rows that exist to make a REFUSAL an
+    // observable outcome rather than a gap. Four properties are asserted per
+    // cell, and each one is a defect this stage actually opened at some point:
+    //
+    //   * no list went LOOSE — §4.3 rule 2. `lexLooseDeep()` and not
+    //     `lexLoose()`: a nested list going loose leaves the top level tight,
+    //     and the degrade (every item grows a <p>, serializeBlocks() pushes
+    //     'P', the whole run freezes read-only with no banner) is identical
+    //     either way.
+    //   * no token became `code` that was not `code` before — §3.4's
+    //     orphaned-indent corruption. Asserted as a COUNT (a conversion may
+    //     legitimately create or destroy exactly one) plus "every code token
+    //     in the file is FENCED", because an indented code block and a fenced
+    //     one are the same `t.type`.
+    //   * the converted text is HOSTED by the target's own block type —
+    //     lexHostOf(). Neither of the two above can see §4.3 rule 1's failure:
+    //     drop the blank line a li → 文字 needs and the text is swallowed as a
+    //     lazy continuation of the item above, which leaves every list tight
+    //     and creates no code token (measured), while the user's block has
+    //     silently stopped being a block.
+    //   * the cell's outcome is one of three NAMED shapes — converted,
+    //     identity no-op, or refused-with-a-banner. A fourth shape, "the file
+    //     came back byte-identical, no banner, and this was not an identity
+    //     conversion", is a silent dropped gesture and is collected as a
+    //     defect rather than passed over.
+    //
+    // ⚠ The fixture's own preconditions are asserted BEFORE every cell, not
+    // once at the top. A sweep whose fixture cannot express the shape under
+    // test reports green and removes the pressure to look — that is how this
+    // project shipped four tests that guarded nothing. Concretely: the block
+    // really is of the kind the row claims, its list run really is
+    // structurally editable (an `unsupported` run refuses all twelve and the
+    // whole row would be green for the wrong reason), and the submenu really
+    // offers all twelve labels.
+    {
+      const convertMdMod = require('../lib/editor/convert-md.js');
+      const TARGETS = convertMdMod.CONVERT_TARGETS;
+      assert.strictEqual(TARGETS.length, 12,
+        'FIXTURE SANITY: §3.2 v1 has exactly twelve targets; the sweep is sized off the ' +
+        'module\'s own list so a thirteenth enters it automatically. Got ' + TARGETS.length);
+
+      const bannerNow = (p) => p.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Banners hang on document.body, never time out and survive
+      // rerenderAll() — a leftover one makes the NEXT cell's read a lie, and
+      // with 96 cells sharing three pages that is not a hypothetical.
+      const clearBanner = (p) => p.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        if (b) b.remove();
+      });
+      // The block of `type` whose text contains `needle`, asserted UNIQUE —
+      // an ambiguous needle would silently sweep whichever block happened to
+      // come first in document order.
+      const sweepSel = async (p, type, needle) => {
+        const ids = await p.evaluate((ty, n) => Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="' + ty + '"]'))
+          .filter((b) => {
+            const own = b.querySelector(':scope > .ed-li-text');
+            return (own ? own.textContent : b.textContent).indexOf(n) >= 0;
+          }).map((b) => b.getAttribute('data-block-id')), type, needle);
+        assert.strictEqual(ids.length, 1,
+          'FIXTURE SANITY: exactly one ' + type + ' block must contain ' +
+          JSON.stringify(needle) + ', got ' + ids.length);
+        return '.ed-block[data-block-type="' + type + '"][data-block-id="' + ids[0] + '"]';
+      };
+      const runUnsupported = (p) => p.evaluate(() =>
+        window.md2docListMd.serializeBlocks(Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+      const visibleMenuLabels = (p) => p.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('.ed-handle-menu-btn'))
+        .filter((b) => !b.hidden && !b.closest('.ed-handle-submenu'))
+        .map((b) => b.textContent));
+
+      const rows = [];
+      const defects = [];
+      const record = (cell, outcome, why) => rows.push({ cell, outcome, why: why || '' });
+
+      // ── the first 72 cells: 6 source rows × 12 targets ───────────────────
+      const SWEEP_LINES = [
+        '# Doc', '',
+        'Para under test.', '',
+        '- ul sibling A',
+        '- ul sibling B', '',
+        '## Head under test', '',
+        '> Quote under test.', '',
+        '```',
+        'Code under test.',
+        '```', '',
+        '- run two A',
+        '  - nested child',
+        '- Item under test',
+        '  - orphan child',
+        '    - orphan grandchild',
+        '- run two B', '',
+        '### Solo section', '',
+        '- alpha',
+        '1. Solo under test',
+        '- charlie', '',
+        '## Tail', '',
+      ];
+      const SWEEP_MD = SWEEP_LINES.join('\n');
+      // Fixture preconditions, measured in NODE before a browser exists. Each
+      // source kind is placed against a neighbour that makes its hard case
+      // reachable: the paragraph and the code block each sit next to a ul run
+      // (so a list target has to eat the separator — §4.3 rule 2), the heading
+      // sits under one (same, from the other side); the first li sits BETWEEN
+      // two siblings and owns a two-level subtree (so §3.4's clamp has children
+      // to orphan and lexLooseDeep() has nested lists to watch); and the second
+      // li is the sole member of its run (so §4.3 rule 1's OUTER-edge blanks
+      // are the only thing standing between it and a lazy continuation).
+      assert.deepStrictEqual(lexTypes(SWEEP_MD),
+        ['heading', 'paragraph', 'space', 'list', 'space', 'heading', 'blockquote',
+          'space', 'code', 'space', 'list', 'space', 'heading', 'list', 'list', 'list',
+          'space', 'heading'],
+        'FIXTURE SANITY: all five source kinds must be present as their own top-level ' +
+        'tokens, or the row for a missing one sweeps nothing. The THREE adjacent list tokens ' +
+        'near the end are §3.8 rule (b) at work — a marker-type change interrupts a list on ' +
+        'its own — and they are what make the 「run 中唯一成員」 row below real');
+      assert.deepStrictEqual(lexLooseDeep(SWEEP_MD),
+        [false, false, false, false, false, false, false, false],
+        'FIXTURE SANITY: eight lists (three top-level runs, three NESTED levels, and the two ' +
+        'single-item runs either side of the sole member), every one TIGHT — a fixture that ' +
+        'starts loose can never report a conversion that made it loose, and the nested ones ' +
+        'are the whole reason this uses lexLooseDeep() rather than lexLoose(), which only ' +
+        'ever sees the top-level runs');
+      assert.strictEqual(lexCodeRaws(SWEEP_MD).length, 1,
+        'FIXTURE SANITY: exactly one code token at baseline, so the per-cell count model below ' +
+        '(1 + created − destroyed) is arithmetic and not a guess');
+      assert.ok(isFencedCode(lexCodeRaws(SWEEP_MD)[0]),
+        'FIXTURE SANITY: the code source must be FENCED — stripMarker() refuses an INDENTED ' +
+        'code block by design, so an indented fixture would turn all twelve of that row into ' +
+        'refusals and prove nothing about conversion');
+
+      const SOURCES = [
+        { kind: 'paragraph', label: 'paragraph', needle: 'Para under test.', identity: 'text' },
+        { kind: 'heading', label: 'heading(h2)', needle: 'Head under test', identity: 'h2' },
+        { kind: 'blockquote', label: 'blockquote', needle: 'Quote under test.', identity: 'quote' },
+        { kind: 'code', label: 'code(fenced)', needle: 'Code under test.', identity: 'code' },
+        { kind: 'li', label: 'li(ul, 2-level subtree)', needle: 'Item under test', identity: 'ul',
+          li: { indent: '0', listType: 'ul', subtree: 2, runSize: null } },
+        // §4.3 rule 1's 2026-08-30 erratum: the item that is the ONLY member
+        // of its run. §3.8 rule (b) makes '- alpha / 1. Solo / - charlie'
+        // three list tokens, so both halves of the split are EMPTY and the
+        // in-range '\n\n' joins never fire — the blank lines have to come
+        // from the run's own outer edges or the converted text is swallowed
+        // as a lazy continuation of '- alpha'.
+        { kind: 'li', label: 'li(ol, sole run member)', needle: 'Solo under test', identity: 'ol',
+          li: { indent: '0', listType: 'ol', subtree: 0, runSize: 1 } },
+      ];
+      // Each needle must name exactly ONE block at baseline, and that block
+      // must be of the kind its row claims — the identity conversion of every
+      // row is derived from this, and a needle that matched two blocks (or the
+      // wrong one) would make the host assertion below unfalsifiable.
+      SOURCES.forEach((src) => {
+        assert.deepStrictEqual(lexHostOf(SWEEP_MD, src.needle),
+          [hostExpectedFor(src.identity)],
+          'FIXTURE SANITY: ' + JSON.stringify(src.needle) + ' must be hosted by exactly one ' +
+          src.kind + ' block at baseline, which is also what makes ' + src.identity +
+          ' the identity cell of that row');
+      });
+
+      const sweepDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-'));
+      const sweepMdPath = path.join(sweepDir, 'doc.md');
+      fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
+      // An EXPLICIT idle timeout for the same reason the shared server at the
+      // top of this file has one: 72 cells on one server outlive
+      // createEditorServer()'s 30s default, and the symptom is a bare
+      // net::ERR_CONNECTION_REFUSED that reads as a broken test.
+      const sweepSrv = await createEditorServer({
+        files: [sweepMdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+      });
+      try {
+        const page = await newPage(browser);
+        for (const src of SOURCES) {
+          for (const tgt of TARGETS) {
+            // The LABEL, not the kind: two rows are both `li` and a shared
+            // name would let one row's defect be read as the other's.
+            const cell = src.label + ' → ' + tgt.id;
+            // Every cell starts from the same bytes; only the navigation is
+            // repeated. A cell that DID write despite refusing therefore
+            // cannot poison the next one, and the byte comparison below is
+            // always against the pristine fixture.
+            fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
+            await page.goto(sweepSrv.urlFor(sweepMdPath), { waitUntil: 'networkidle0' });
+            await clearBanner(page);
+
+            const sel = await sweepSel(page, src.kind, src.needle);
+            const pre = await page.evaluate((s) => {
+              const el = document.querySelector(s);
+              return {
+                type: el.getAttribute('data-block-type'),
+                indent: el.getAttribute('data-indent'),
+                listType: el.getAttribute('data-list-type'),
+                task: el.getAttribute('data-task'),
+                hasHandle: !!el.querySelector(':scope > .ed-handle'),
+                subtree: (function () {
+                  // The flat model's subtree: the contiguous run of FOLLOWING
+                  // li blocks at a strictly greater indent.
+                  if (el.getAttribute('data-block-type') !== 'li') return null;
+                  const own = Number(el.getAttribute('data-indent')) || 0;
+                  const all = Array.prototype.slice.call(
+                    document.querySelectorAll('.ed-block'));
+                  let n = 0;
+                  for (let i = all.indexOf(el) + 1; i < all.length; i++) {
+                    const b = all[i];
+                    if (b.getAttribute('data-block-type') !== 'li') break;
+                    if ((Number(b.getAttribute('data-indent')) || 0) <= own) break;
+                    n++;
+                  }
+                  return n;
+                })(),
+              };
+            }, sel);
+            assert.strictEqual(pre.type, src.kind,
+              'PRECONDITION ' + cell + ': the block under test must really be a ' + src.kind);
+            assert.ok(pre.hasHandle,
+              'PRECONDITION ' + cell + ': the block must own a ⠿, or the gesture is unreachable');
+            assert.deepStrictEqual(await runUnsupported(page), [],
+              'PRECONDITION ' + cell + ': every list run in the fixture must be structurally ' +
+              'EDITABLE at the start of this cell. A degraded run refuses all twelve targets, ' +
+              'and this whole row would then be green without a single conversion happening');
+            if (src.kind === 'li') {
+              assert.strictEqual(pre.indent, src.li.indent,
+                'PRECONDITION ' + cell + ': the li under test is at indent ' + src.li.indent +
+                ', so §3.9\'s accepted list-breakage is not what this cell is measuring');
+              assert.strictEqual(pre.listType, src.li.listType,
+                'PRECONDITION ' + cell + ': the li under test must be a ' + src.li.listType +
+                ' item, which is what makes ' + src.identity + ' the identity cell of this row');
+              assert.ok(pre.task !== '1' && pre.task !== 'true',
+                'PRECONDITION ' + cell + ': the li under test is not a task item, or 待辦清單 ' +
+                'would be a second identity cell');
+              assert.strictEqual(pre.subtree, src.li.subtree,
+                'PRECONDITION ' + cell + ': the li under test must own a subtree of exactly ' +
+                src.li.subtree + ' block(s). A childless item never orphans anything, so ' +
+                '§3.4\'s clamp — the `operatedBecomes` branch this stage lit up for the first ' +
+                'time — would not be on the path and that row would sweep the easy shape only. ' +
+                'Got ' + pre.subtree);
+              if (src.li.runSize !== null) {
+                const span = await page.evaluate(new Function('s', RUN_SPAN_FN + `
+                  return runSpanOf(document.querySelector(s)).length;
+                `), sel);
+                assert.strictEqual(span, src.li.runSize,
+                  'PRECONDITION ' + cell + ': this li must be the ONLY member of its run ' +
+                  '(§3.8 rule (b) — the bullet items either side are different list tokens). ' +
+                  'A run of ' + span + ' would put a sibling in `before`/`after` and the ' +
+                  'in-range separators would do the work §4.3 rule 1\'s outer edges are here ' +
+                  'to prove');
+              }
+            }
+
+            await openGutterMenu(page, sel);
+            assert.ok((await visibleMenuLabels(page)).indexOf('轉換成 ›') >= 0,
+              'PRECONDITION ' + cell + ': the ⠿ menu must OFFER 轉換成 on a ' + src.kind);
+            await page.evaluate(() => {
+              const b = Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-menu-btn'))
+                .find((x) => x.textContent === '轉換成 ›');
+              b.click();
+            });
+            await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+            assert.deepStrictEqual(
+              await page.evaluate(() => Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+                .map((b) => b.textContent)),
+              TARGETS.map((t) => t.label),
+              'PRECONDITION ' + cell + ': the submenu must render all twelve targets, in order');
+            await page.evaluate((label) => {
+              const b = Array.prototype.slice.call(
+                document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+                .find((x) => x.textContent === label);
+              if (!b) throw new Error('no submenu item labelled ' + label);
+              b.click();
+            }, tgt.label);
+            await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+              { timeout: 5000 });
+            await settleEditor(page);
+
+            const banner = await bannerNow(page);
+            const after = await saveAndRead(page, sweepMdPath);
+            await clearBanner(page);
+
+            const changed = after !== SWEEP_MD;
+            const identity = tgt.id === src.identity;
+            let outcome;
+            if (changed) outcome = banner ? 'converted+banner' : 'converted';
+            else if (banner) outcome = 'refused';
+            else if (identity) outcome = 'no-op';
+            else outcome = 'SILENT';
+            record(cell, outcome, banner || (identity ? 'identity conversion' : ''));
+
+            if (outcome === 'SILENT') {
+              defects.push(cell + ': the file came back byte-identical with NO banner, and ' +
+                'this is not an identity conversion — a dropped gesture, not a refusal');
+            }
+            if (outcome === 'converted+banner') {
+              defects.push(cell + ': the file was rewritten AND a banner was shown (' +
+                banner + ') — a refusal that wrote bytes');
+            }
+            const loose = lexLooseDeep(after);
+            if (loose.some(Boolean)) {
+              defects.push(cell + ': a list went LOOSE (§4.3 rule 2) — lexLooseDeep ' +
+                JSON.stringify(loose) + ' from\n' + JSON.stringify(after));
+            }
+            const codes = lexCodeRaws(after);
+            const unfenced = codes.filter((r) => !isFencedCode(r));
+            if (unfenced.length) {
+              defects.push(cell + ': an INDENTED code block appeared (§3.4) — ' +
+                JSON.stringify(unfenced) + ' from\n' + JSON.stringify(after));
+            }
+            if (outcome === 'converted' || outcome === 'no-op') {
+              const host = lexHostOf(after, src.needle);
+              const want = [hostExpectedFor(tgt.id)];
+              if (JSON.stringify(host) !== JSON.stringify(want)) {
+                defects.push(cell + ': the converted text is hosted by ' + JSON.stringify(host) +
+                  ', expected ' + JSON.stringify(want) + ' — the block did not become the ' +
+                  'target type (a lazy continuation swallowed it, or it split in two). From\n' +
+                  JSON.stringify(after));
+              }
+            }
+            const expectedCodes = changed
+              ? 1 + (tgt.id === 'code' ? 1 : 0) - (src.kind === 'code' ? 1 : 0)
+              : 1;
+            if (codes.length !== expectedCodes) {
+              defects.push(cell + ': the file holds ' + codes.length + ' code tokens, expected ' +
+                expectedCodes + ' (baseline 1, ' + (tgt.id === 'code' ? '+1 target' : 'no target') +
+                ', ' + (src.kind === 'code' ? '−1 source' : 'no source') + ') — from\n' +
+                JSON.stringify(after));
+            }
+          }
+        }
+
+        // ── 12 more cells: a table REFUSES all twelve, by design (§3.7) ────
+        // Recorded, not skipped: "there is no menu item to press" is an
+        // outcome the matrix has to be able to state, and it is only
+        // meaningful next to a positive assertion that the menu itself opened.
+        {
+          const { srv: tsrv, url: turl, mdPath: tmd } =
+            await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
+          try {
+            const tpage = await newPage(browser);
+            await tpage.goto(turl, { waitUntil: 'networkidle0' });
+            const tbefore = fs.readFileSync(tmd, 'utf8');
+            const tsel = await tableBlockSel(tpage, 0);
+            for (const tgt of TARGETS) {
+              const cell = 'table → ' + tgt.id;
+              await openGutterMenu(tpage, tsel);
+              const labels = await visibleMenuLabels(tpage);
+              assert.deepStrictEqual(labels, ['複製', '刪除', 'MD 原始碼'],
+                'PRECONDITION ' + cell + ': the ⠿ menu must really be OPEN on the table (its ' +
+                'other three items visible) — otherwise "轉換成 is absent" is green because ' +
+                'nothing opened. Got ' + JSON.stringify(labels));
+              assert.strictEqual(await bannerNow(tpage), null,
+                cell + ': a refusal by MENU OMISSION shows no banner — there is no gesture to ' +
+                'refuse, the item is simply not offered');
+              assert.strictEqual(fs.readFileSync(tmd, 'utf8'), tbefore,
+                cell + ': nothing may be written');
+              await tpage.keyboard.press('Escape');
+              await tpage.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+                { timeout: 5000 });
+              record(cell, 'refused', '§3.7: a table block is offered no 轉換成 at all');
+            }
+            assert.strictEqual(await saveAndRead(tpage, tmd), tbefore,
+              'the table fixture must come back byte-identical after all twelve');
+            await tpage.close();
+          } finally { tsrv.close(); }
+        }
+
+        // ── 12 more cells: a DEGRADED run refuses all twelve, with a banner ─
+        // The other refusal shape, and the one that must never be silent. The
+        // fixture is PROVEN degraded first: '- a' + blank + '- b' is ONE loose
+        // list, so serializeBlocks() reports P,P and §4.3's run-wide gate has
+        // to turn every target away.
+        {
+          const DEG = ['# Doc', '', '- a', '', '- b', ''].join('\n');
+          const degDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-deg-'));
+          const degMd = path.join(degDir, 'doc.md');
+          fs.writeFileSync(degMd, DEG, 'utf8');
+          const degSrv = await createEditorServer({
+            files: [degMd], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+          });
+          try {
+            const dpage = await newPage(browser);
+            for (const tgt of TARGETS) {
+              const cell = 'li(degraded run) → ' + tgt.id;
+              fs.writeFileSync(degMd, DEG, 'utf8');
+              await dpage.goto(degSrv.urlFor(degMd), { waitUntil: 'networkidle0' });
+              await clearBanner(dpage);
+              assert.deepStrictEqual(await runUnsupported(dpage), ['P', 'P'],
+                'PRECONDITION ' + cell + ': this run must really be degraded, or the refusal ' +
+                'below is green for the wrong reason');
+              const dsel = await liBlockSelByText(dpage, 'a');
+              await convertVia(dpage, dsel, tgt.label);
+              const banner = await bannerNow(dpage);
+              const after = await saveAndRead(dpage, degMd);
+              await clearBanner(dpage);
+              if (after !== DEG) {
+                defects.push(cell + ': a refused conversion WROTE — ' + JSON.stringify(after));
+              }
+              if (!banner) {
+                defects.push(cell + ': refused silently — the file is byte-identical but no ' +
+                  'banner was shown, so the user cannot tell the gesture from a no-op');
+              }
+              assert.strictEqual(banner, '此清單含不支援的格式，無法調整結構',
+                cell + ': §4.3\'s run-wide gate owns this refusal, so it must be §4.1\'s ' +
+                'banner and not convert-md.js\'s per-block 此區塊的格式無法轉換');
+              record(cell, 'refused', banner);
+            }
+            await dpage.close();
+          } finally { degSrv.close(); }
+        }
+
+        const counts = rows.reduce((acc, r) => {
+          acc[r.outcome] = (acc[r.outcome] || 0) + 1; return acc;
+        }, {});
+        console.log('S2 T8 conversion matrix — ' + rows.length + ' cells: ' +
+          JSON.stringify(counts));
+        // The matrix itself, one line per source row, so a reviewer reads the
+        // outcomes rather than trusting a pass/fail bit.
+        const SHORT = { converted: 'C', 'no-op': '=', refused: 'R', SILENT: '!' };
+        rows.reduce((seen, r) => {
+          const src = r.cell.slice(0, r.cell.lastIndexOf(' → '));
+          (seen[src] = seen[src] || []).push(
+            r.cell.slice(r.cell.lastIndexOf(' → ') + 3) + '=' + (SHORT[r.outcome] || r.outcome));
+          if (seen[src].length === TARGETS.length) {
+            console.log('  ' + src + ': ' + seen[src].join(' '));
+          }
+          return seen;
+        }, {});
+        console.log('  (C=converted  ==identity no-op  R=refused  !=silent)');
+        rows.filter((r) => r.outcome === 'refused').forEach((r) => {
+          console.log('  refused: ' + r.cell + ' — ' + r.why);
+        });
+        assert.deepStrictEqual(defects, [],
+          'the conversion matrix must produce no silent corruption; found:\n  ' +
+          defects.join('\n  '));
+        assert.strictEqual(rows.length, SOURCES.length * TARGETS.length + TARGETS.length * 2,
+          'every cell of the matrix must be RECORDED, including the ones that refuse');
+        await page.close();
+        console.log('S2 T8: the conversion matrix is swept, ' +
+          (counts.refused || 0) + ' cells refuse by design and none corrupts — OK');
+      } finally { sweepSrv.close(); }
     }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
@@ -1747,9 +4353,13 @@ async function clickInsertMenuItem(page, sel, label) {
       console.log('degrade block click->textarea: image paragraph opens raw-edit immediately on click — OK');
     }
 
-    // ── Migrated + Phase 3 Task 2 RED scenario "⠿ menu heading ±": the ⠿
-    //    handle's small menu shows ± only for heading blocks; clicking +
-    //    changes the '#' count in the source after commit ────────────────
+    // ── §5.4 fallout, migrated from "⠿ menu heading ±": §3.5 moved the ±
+    //    pair onto Tab / Shift+Tab and §3.7 replaced it with 轉換成 › 標題 N,
+    //    so the same three facts are asserted through the new gesture — the
+    //    item is offered on a heading AND on a paragraph (only a table is
+    //    excluded, §7), the menu closes without a ✕ button, and the source's
+    //    '#' count really does change after commit. The expected file bytes
+    //    are unchanged from the ± version: '# Heading' -> '## Heading'. ────
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -1763,24 +4373,15 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-          return plus ? plus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
         false,
-        'heading block: the ⠿ menu\'s + button must be visible'
+        'heading block: the ⠿ menu\'s 轉換成 › item must be visible'
       );
-      assert.strictEqual(
-        await page.evaluate(() => {
-          const minus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '−');
-          return minus ? minus.hidden : null;
-        }),
-        false,
-        'heading block: the ⠿ menu\'s − button must be visible'
-      );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      // No ✕ any more — a click outside the menu is what closes it (§3.7).
+      await page.mouse.click(5, 5);
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
       const nonHeadingId = await page.evaluate(() =>
@@ -1791,25 +4392,18 @@ async function clickInsertMenuItem(page, sel, label) {
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => {
-          const plus = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-          return plus ? plus.hidden : null;
+          const conv = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((b) => b.textContent === '轉換成 ›');
+          return conv ? conv.hidden : null;
         }),
-        true,
-        'non-heading block: the ⠿ menu\'s + button must stay hidden'
+        false,
+        'non-heading block: 轉換成 › is offered here too — unlike the ± pair it replaced'
       );
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-        btn.click();
-      });
+      // …and Esc is the other way to close it.
+      await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
-      await page.hover(sel);
-      await page.click(sel + ' .ed-handle');
-      await page.waitForSelector('.ed-handle-menu');
-      await page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '+');
-        btn.click();
-      });
+      await convertVia(page, sel, '標題 2');
       await page.waitForFunction(
         (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
         {}, sel
@@ -1817,7 +4411,7 @@ async function clickInsertMenuItem(page, sel, label) {
       assert.strictEqual(
         await page.evaluate(() => !document.querySelector('.ed-handle-menu')),
         true,
-        'the ⠿ menu must close itself once a heading-depth op is clicked'
+        'the ⠿ menu must close itself once a conversion is clicked'
       );
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
@@ -1825,10 +4419,11 @@ async function clickInsertMenuItem(page, sel, label) {
       await awaitSaveSettled(page);
       const fileText2 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/^## Heading/m.test(fileText2),
-        'heading ±: clicking + must increase the heading depth in the source (# -> ##)');
+        '轉換成 › 標題 2 must rewrite the heading depth in the source (# -> ##)');
 
       await page.close();
-      console.log('⠿ menu heading ±: shown only for headings, + increases depth and persists to file — OK');
+      console.log('⠿ menu 轉換成: offered on heading and paragraph, Esc/outside-click close it, ' +
+        '標題 2 persists to file — OK');
     }
 
     // ── Task 3: Shift+Enter inserts <br> instead of committing; a later
@@ -8016,10 +10611,13 @@ async function clickInsertMenuItem(page, sel, label) {
         // eliminate) the window for a stale-handle race in what follows.
         await new Promise((r) => setTimeout(r, 150));
 
-        // 2) heading ± via the ⠿ handle menu's '+' — a direct commitEdit(),
-        // never a burst (see changeHeadingDepth()'s own comment).
+        // 2) heading depth via the ⠿ handle menu — a direct commitRangeEdit(),
+        // never a burst. §5.4 fallout: this used to press the menu's '+', which
+        // §3.5 moved onto Tab and §3.7 replaced with 轉換成 › 標題 N. Same
+        // resulting bytes ('# Heading One' -> '## Heading One'), asserted
+        // against `expectedLines[0]` further down, unchanged.
         const selHeading = '.ed-block[data-block-type="heading"]';
-        await clickGutterMenuItem(page, selHeading, '+');
+        await convertVia(page, selHeading, '標題 2');
         await page.waitForFunction(
           (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
           {}, selHeading
@@ -8500,18 +11098,44 @@ async function clickInsertMenuItem(page, sel, label) {
           { timeout: 2000 }, sel
         );
 
-        // Click the menu's '+' — resolves (commits) the dirty burst via
-        // switchAwayFrom() first, THEN bumps the heading depth.
+        // §5.4 fallout: the ± pair the original scenario drove is gone (§3.5
+        // moved it to Tab, §3.7 replaced the menu row with 轉換成 › 標題 N).
+        // The 5a/5c contract is unchanged and is what this still asserts —
+        // opening the submenu and clicking 標題 2 resolves (commits) the dirty
+        // burst via switchAwayFrom() first, THEN rewrites the heading. 5c is
+        // if anything harder through this path: the burst's own commit
+        // rewrites THIS block's source, so the re-resolve cannot lean on
+        // reresolveBlockEl()'s source fingerprint.
         await page.evaluate((s) => {
           const btn = Array.from(document.querySelectorAll(s + ' .ed-handle-menu-btn'))
-            .find((b) => b.textContent === '+' && !b.hidden);
-          if (!btn) throw new Error('+ button not found');
+            .find((b) => b.textContent === '轉換成 ›' && !b.hidden);
+          if (!btn) throw new Error('轉換成 › button not found');
           btn.click();
         }, sel);
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+        await page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('.ed-handle-submenu .ed-handle-menu-btn'))
+            .find((b) => b.textContent === '標題 2');
+          if (!btn) throw new Error('標題 2 submenu item not found');
+          btn.click();
+        });
 
+        // Let the wait fail silently and assert afterwards: 5c's failure mode
+        // is a gesture that is DROPPED (the block's own burst commit rewrote
+        // its source, so the re-resolve's fingerprint misses), and a bare
+        // TimeoutError names none of that.
         await page.waitForFunction(
           (s) => { const h = document.querySelector(s + ' > *'); return h && h.tagName === 'H2'; },
           { timeout: 5000 }, sel
+        ).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const h = document.querySelector(s + ' > *');
+            return h ? h.tagName : null;
+          }, sel),
+          'H2',
+          '5c: the conversion must re-resolve the LIVE block after its own dirty burst ' +
+          'committed — a dropped gesture leaves the heading at H1'
         );
 
         await page.keyboard.down('Control');
@@ -9791,11 +12415,17 @@ async function clickInsertMenuItem(page, sel, label) {
           'sanity: the fixture must render one nested item between two top-level ones');
         assert.deepStrictEqual(handles.map((h) => h.hasHandle), [true, true, true],
           'EVERY list item gets a ⠿, including the nested one');
-        // S2 unhides this; until insertBlockBelow() is indent-aware a ＋ on a
-        // parent item writes a bare skeleton line at endLine + 1 and orphans
-        // the children, so the button must not exist on a li at all yet.
-        assert.deepStrictEqual(handles.map((h) => h.hasInsert), [false, false, false],
-          'the ＋ stays out of a list item until S2 gives insertBlockBelow indent awareness');
+        // S2 Task 7 INVERTED this. It used to assert [false, false, false] with
+        // the note "the ＋ stays out of a list item until S2 gives
+        // insertBlockBelow indent awareness" — that is now delivered (the li
+        // path re-serializes the run, so the new item's indent prefix comes
+        // from the serializer's own marker-width stack, and the insertion
+        // point is the end of the anchor's subtree so no child is orphaned).
+        // The assertion is inverted rather than deleted: it is the only place
+        // that pins the ＋'s presence at EVERY depth in the same breath as the
+        // ⠿'s, which is 5.3 item 3b and 3c side by side.
+        assert.deepStrictEqual(handles.map((h) => h.hasInsert), [true, true, true],
+          'S2 gives every list item a ＋, at every indent depth (§6 S1 note item 3)');
         // the serializer must still see a clean document with the chrome present
         const clean = await page.evaluate(() => {
           const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
@@ -9817,13 +12447,13 @@ async function clickInsertMenuItem(page, sel, label) {
         const liMenu = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
-        assert.strictEqual(liMenu, '刪除,✕'.split(',').sort().join(','),
-          "a list item's ⠿ menu must show only 刪除 / ✕ — no heading ±, and no MD 原始碼 (RULING F-O), got " +
+        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 複製,
+        // so a li now shows three of the four items — everything except
+        // MD 原始碼, which RULING F-O forbids on a list item permanently.
+        assert.strictEqual(liMenu, '轉換成 ›,複製,刪除'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show 轉換成 › / 複製 / 刪除 — no MD 原始碼 (RULING F-O), got " +
           JSON.stringify(liMenu));
-        await page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-          btn.click();
-        });
+        await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
         // ...and the hiding must be per-type, not sticky: the SAME singleton
@@ -9848,10 +12478,7 @@ async function clickInsertMenuItem(page, sel, label) {
             false,
             'MD 原始碼 must be visible again on a non-li block — the hide is per-type, not sticky'
           );
-          await page.evaluate(() => {
-            const btn = Array.from(document.querySelectorAll('.ed-handle-menu-btn')).find((b) => b.textContent === '✕');
-            btn.click();
-          });
+          await page.keyboard.press('Escape');
           await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
         }
 
@@ -9923,8 +12550,9 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-          '刪除,✕'.split(',').sort().join(','),
-          'sanity: 刪除 is the only range-taking action the menu offers on a li');
+          '轉換成 ›,複製,刪除'.split(',').sort().join(','),
+          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 複製; ' +
+          '刪除 is still the item this scenario drives');
         await page.evaluate(() => {
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .find((b) => b.textContent === '刪除').click();
@@ -10259,9 +12887,12 @@ async function clickInsertMenuItem(page, sel, label) {
 
     {
       // D6: ＋ immediately left of ⠿, same row, no gap — for EVERY block type
-      // that owns a ＋, not just a paragraph. `.ed-insert` is deliberately
-      // absent on li until S2, so the guard is scoped by exclusion rather than
-      // by listing types: whatever grows a ＋ next has to satisfy this too.
+      // that owns a ＋, not just a paragraph. The `:not(li)` scoping is a
+      // leftover from S1, when a li carried no ＋ at all; S2 Task 7 gives it
+      // one and pins the same geometry across both list depths in its own
+      // scenario (which is 5.3 item 3c). This fixture holds no li, so the
+      // exclusion changes nothing here — it is kept so the two scenarios stay
+      // one-fixture-one-question rather than merged.
       const { srv: psrv, url: purl } = await setupListDoc([
         '# Heading', '', 'A paragraph.', '', '> quote', '',
         '| a | b |', '|---|---|', '| 1 | 2 |', '',
@@ -10377,8 +13008,8 @@ async function clickInsertMenuItem(page, sel, label) {
         });
         assert.ok(geo, 'fixture sanity: this page must actually have a sidebar splitter');
         assert.ok(geo.plusRects.length >= 3,
-          'fixture sanity: at least three ＋ buttons must be on screen (headings and ' +
-          'paragraphs own one; li deliberately does not until S2), got ' +
+          'fixture sanity: at least three ＋ buttons must be on screen (S2 Task 7 gives ' +
+          'the two li rows one as well, so the probe now sweeps their bands too), got ' +
           geo.plusRects.length);
         assert.ok(Math.abs(geo.splitter.right - geo.contentBoxLeft) <= 1,
           'fixture sanity: the splitter and .content must still be adjacent — this whole ' +
@@ -11351,6 +13982,97 @@ async function clickInsertMenuItem(page, sel, label) {
           console.log('B1: ' + c.name + ' — OK');
         } finally { dsrv.close(); }
       }
+    }
+
+    // ── Branch review follow-up (2026-08-30): the `removed` clamp's OWN
+    //    end-to-end guard, because the six B1 cases above are not one ──────
+    //
+    // MEASURED, and it is why this scenario exists at all: drop
+    // `{ removed: true }` from deleteListItemViaGutter()'s applyIndentClamp()
+    // call — or no-op applyIndentClamp() outright — and every one of the six
+    // B1 cases above stays GREEN. Case (b), the one whose NAME is "an
+    // orphaned child is clamped", deletes the run's FIRST member, and what
+    // re-anchors '    - deep' there is not the clamp: list-md.js rebuilds its
+    // marker-width `widths` stack from EMPTY for each serialized span, so the
+    // first li of a span emits at column 0 whatever its data-indent says. The
+    // clamp's answer and the serializer's answer coincide, so deleting the
+    // clamp costs nothing B1 can see. (This is the same mechanism the
+    // `operatedBecomes` note in test/indent-clamp.test.js records for the
+    // simple orphan shape.)
+    //
+    // So this is the `removed` counterpart of the 'S2 轉換成: the §3.4 segment
+    // deltas survive the split commit' scenario, and it has that scenario's
+    // shape rather than B1's: the deleted item is NOT the run's head, and
+    // §3.4 rule 3's scope holds TWO segments with DIFFERENT deltas. Deleting
+    // `beta`(1) leaves `gamma`(2) as segment 1 — its delta is 1, because
+    // `alpha`(0) survives and can still anchor at indent 1 (the conversion
+    // case's delta is 2 there, since its operated block survives as a
+    // NON-anchor) — while `delta`(1) plus its child `epsilon`(2) is segment 2
+    // with a delta of 0. One delta per segment is what leaves gamma and delta
+    // as SIBLINGS instead of adopting delta into gamma.
+    //
+    // ⚠ WHERE THE DIFFERENCE SURFACES, and it is NOT the indent columns.
+    // MEASURED, twice: exhaustively over every legal li-only span of up to 7
+    // blocks with mixed ul/ol markers, and then over 400k randomised spans of
+    // up to 19 blocks (long enough for an ordinal to reach the 4-column
+    // '10. ' marker width). 4778 of those randomised deletes changed a byte;
+    // NOT ONE changed an indent column. On a delete, the clamped and the
+    // unclamped span never emit different indent columns — the
+    // width stack collapses an orphaned data-indent to the very column the
+    // clamp would have picked. What does change is the ORDINAL, because
+    // list-md.js keys `counters[]` / `types[]` on the RAW data-indent
+    // (serializeBlocks(), the `counters[indent]` reset block), not on the
+    // emitted column. Unclamped, gamma stays at raw indent 2 and delta at 1,
+    // so they open two different counter levels and the file comes back
+    // '1. gamma / 1. delta' at the same three columns the screen renders as
+    // 1, 2. That is S7's file-vs-screen split exactly, and it is what this
+    // assertion catches.
+    {
+      const { srv: b1rSrv, url: b1rUrl, mdPath: b1rMd } =
+        await setupListDoc(['# Doc', '', '1. alpha', '   1. beta', '      1. gamma',
+          '   2. delta', '      1. epsilon', '2. zeta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(b1rUrl, { waitUntil: 'networkidle0' });
+
+        // FIXTURE SANITY, stated because the whole point of the scenario is
+        // its SHAPE: beta is not the run's head, gamma is deeper than beta,
+        // and delta is beta's same-level sibling carrying a child of its own.
+        // With any other indent profile rule 3's scope holds ONE segment and
+        // the assertion below would be green for the wrong reason.
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((el) => el.querySelector(':scope > .ed-li-text').textContent + ':' +
+              el.getAttribute('data-indent'))),
+          ['alpha:0', 'beta:1', 'gamma:2', 'delta:1', 'epsilon:2', 'zeta:0'],
+          'FIXTURE SANITY: §3.4 rule 3 needs a non-head target and two segments with ' +
+          'different deltas — without these exact indents this scenario proves nothing');
+
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'beta'), '刪除');
+        await settleEditor(page);
+        const out = await saveAndRead(page, b1rMd);
+        assert.strictEqual(out,
+          '# Doc\n\n1. alpha\n   1. gamma\n   2. delta\n      1. epsilon\n2. zeta\n',
+          '§3.4 rule 3 on the DELETE path: gamma’s segment shifts by 1 onto alpha, ' +
+          'delta’s by 0, so the two land as SIBLINGS at indent 1 and §3.8 numbers them ' +
+          '1, 2. Drop `{ removed: true }` (or no-op applyIndentClamp) and gamma keeps ' +
+          'raw indent 2, opens its own counter level, and delta comes back a second ' +
+          '"1." at the same column');
+        // The consequence, said out loud rather than left inside the byte
+        // string: the ordinals the FILE states are the ones the CSS counter
+        // renders. Unclamped they are [1, 1] — identical columns, identical
+        // rendering, and a file that silently rewrites itself the next time
+        // anybody touches that run.
+        assert.deepStrictEqual(
+          out.split('\n').filter((l) => /^ {3}\d+\. /.test(l))
+            .map((l) => Number(l.match(/^ {3}(\d+)\./)[1])),
+          [1, 2],
+          'S7 restated: the file’s ordinals must be the ones the screen shows');
+
+        await page.close();
+        console.log('B1 follow-up: the §3.4 `removed` deltas survive the delete commit — OK');
+      } finally { b1rSrv.close(); }
     }
 
     // ── Task 7 fix round 1: the hard-break sweep ──────────────────────────

@@ -3,10 +3,80 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.10.2 — 2026-08-29
+## v2.11.0 — 2026-08-30
+
+### Added
+
+- **Any block can now be turned into any other block type.** The ⠿ handle opens a
+  vertical menu whose `轉換成 ›` submenu carries all twelve types — 文字,
+  標題 1 through 標題 6, 項目符號列表, 編號列表, 待辦清單, 程式碼, 引用 — and every
+  block type can reach every one of them: a paragraph becomes a heading, a code
+  block becomes a bulleted list, a list item becomes a quote, and back again. The
+  block's text is moved across verbatim rather than re-generated, so characters
+  markdown would otherwise escape (`~5px`, `snake_case`) come through a conversion
+  unchanged, and the whole thing is a single Ctrl+Z.
+- **`複製` duplicates a block.** For a list item the copy is inserted after the
+  item's entire subtree, so the original keeps its children, and the copy carries
+  the item's type, indent and checkbox state. Ordered lists renumber themselves
+  around it. One undo, like every other gesture.
+- **The `＋` button works on list items.** It used to be hidden on them, so a list
+  was the one place in the document you could not insert from. A new item inherits
+  the anchor's list type and indent and lands after the anchor's whole subtree, so
+  inserting under a parent no longer breaks its children off.
+- **List items get the same gutter as every other block.** Edit mode now draws each
+  item as its own full-width row with the ⠿ and ＋ on one vertical axis at every
+  nesting depth, instead of nested list markup in which a deep item had no handle
+  at all. A table block is the one block with no `轉換成` — there is no type that
+  could carry its cells.
+- **Tab and Shift+Tab do the indenting.** Inside a list they indent and outdent the
+  item (children stay where they are and become siblings); on a heading they step
+  the level down and up. The `−` / `+` buttons the old menu carried for heading
+  level are gone, and so is its `✕` — the menu closes on Esc or a click outside.
+- **Task lists and ordered lists are independent.** `1. [ ] a` round-trips as an
+  ordered task item instead of losing one of the two, and a mixed run
+  (`1. plain / 2. [ ] task / 3. plain`) stays a single list with continuous
+  numbering.
 
 ### Fixed
 
+- **A conversion can no longer freeze a list read-only.** Turning a block into a
+  list next to an existing list of the same type left the blank line between them
+  standing, and markdown does not read that blank as a separator — it reads it as
+  an instruction to make the combined list *loose*. Every item then rendered as a
+  paragraph, and from that moment every structural edit anywhere in that list was
+  refused, with no message saying why. The separator is now absorbed so the run
+  stays tight and editable. The opposite direction is handled with it: converting
+  an item out of a list puts blank lines back where they are needed, including at
+  the run's outer edges, where the converted text would otherwise be swallowed
+  back into the item above it.
+- **A menu gesture is no longer dropped when the block has unsaved edits.** Typing
+  in a block and then pressing ⠿ or ＋ without clicking away first answered
+  「文件已更新，請重試這個操作」 and did nothing — on all four of 轉換成, 複製,
+  刪除 and ＋. The editor was committing your typing first and then failing to
+  recognise the very block it had just rewritten. The gesture now lands on top of
+  your own edit.
+- **A conversion refuses out loud instead of guessing.** An indented (unfenced)
+  code block, a list item spanning more than one line, and a list that already
+  contains something the editor cannot represent each show a banner and change
+  nothing, rather than producing a plausible-looking block with content silently
+  dropped. Converting to 程式碼 also lengthens the fence when the text itself
+  contains one, so a code sample that carries a fence of its own no longer breaks
+  out of the block it was just converted into.
+- **Deleting a list item deletes the list item.** The ⠿ menu's 刪除 used to splice
+  out the block's line range: on a paragraph followed by a three-item numbered
+  list it removed the paragraph and all three items; it left a child indented under
+  nothing, which markdown then reads as a code block; and it left the surviving
+  items carrying their old numbers on disk while the screen showed the new ones.
+- **A line you did not touch is never rewritten.** Editing one item of a list used
+  to re-generate the whole list, which put backslashes in front of `~` and `_` in
+  the items around it. Untouched lines now keep their own bytes, and a hard line
+  break (two trailing spaces) survives an edit of its own block.
+- **A failed commit no longer rolls back somebody else's edit,** and a block that
+  owns no source line of its own refuses to be deleted or raw-edited instead of
+  quietly removing a blank line belonging to a different block.
+- **A wide ordinal stays in its own column.** `10.` no longer pushes its row's text
+  out of alignment with the rest of the list, and a marker that outgrows its column
+  overflows into the gutter rather than onto its own text.
 - **The table row grip is back on the table's border line, and every row uses the
   same rule.** v2.10.1 moved it fully inside the table's left edge, where a 20px
   grip sat on top of the first cell's 14px padding and bit ~5px into the cell's

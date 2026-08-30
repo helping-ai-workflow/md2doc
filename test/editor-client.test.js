@@ -590,6 +590,7 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
     'history.js': historySrc,
     'blockmap.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'blockmap.js'), 'utf8'),
     'indent-clamp.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'indent-clamp.js'), 'utf8'),
+    'convert-md.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'convert-md.js'), 'utf8'),
     'server.js': fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'server.js'), 'utf8'),
   };
   Object.keys(scanned).forEach((name) => {
@@ -727,6 +728,17 @@ function codeLines(source) {
 function countInCode(source, needle) {
   return codeLines(source).filter((l) => l.indexOf(needle) !== -1).length;
 }
+// WHAT THE TWO COUNTS BELOW PROVE, AND WHAT THEY DO NOT. Both are
+// SOURCE-TEXT PRESENCE checks over client.js, never REACHABILITY checks:
+// they prove the helper is still WRITTEN at N places, not that any of those
+// places is still on a live path. MEASURED 2026-08-30 - delete the
+// `await convertListItemAway(liveBlockEl, liRun, rec, target);` dispatch
+// inside convertBlockViaMenu() and that function, together with the
+// rollbackFailedRender() site it owns, is unreachable; this block still
+// counts 12 and passes. The runtime scenarios in
+// test/editor-client-runtime.test.js are what catch that, because they drive
+// the real gesture. Read these two numbers as "nobody re-inlined the idiom
+// or grew an unreviewed commit site", and nothing more.
 {
   const undoCalls = countInCode(src, 'stack.undo(lines)');
   assert.strictEqual(undoCalls, 2,
@@ -735,8 +747,25 @@ function countInCode(source, needle) {
     'redo). Every OTHER rollback must go through rollbackFailedRender(), which ' +
     'declines when the commit pushed nothing; found ' + undoCalls);
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
-  assert.strictEqual(helperCalls, 8,
-    'the helper must be DECLARED once, EXPORTED once, and used at all six ' +
+  // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
+  // S2 Task 4 the eighth (convertListItemAway, which commits its own spliced
+  // range instead of going through commitListStructure), S2 Task 5 the ninth
+  // (convertBlockIntoList, which commits the block's own range widened over
+  // the §4.3 rule 2 separator) and S2 Task 6 the tenth
+  // (duplicateBlockViaMenu's NON-li path, which commits through
+  // commitBlockInsertion() — the li path goes through commitListStructure()
+  // and reuses ITS site, so 複製 adds exactly one). The expected total is
+  // therefore DECLARED once + EXPORTED once + 10 uses = 12.
+  //
+  // S2 Task 7 (li ＋) adds NONE, and that was checked rather than assumed:
+  // its 清單 path splices the new item into the run and commits through
+  // commitListStructure() — the same site 複製's li path already reuses —
+  // and every other kind goes down insertBlockBelow()'s existing
+  // commitBlockInsertion() tail, which was already one of the ten. If a
+  // future task grows an eleventh, migrate this number WITH the reason;
+  // never relax the assertion.
+  assert.strictEqual(helperCalls, 12,
+    'the helper must be DECLARED once, EXPORTED once, and used at all ten ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
