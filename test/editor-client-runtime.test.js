@@ -15138,6 +15138,267 @@ async function clickInsertMenuItem(page, sel, label) {
           JSON.stringify(after));
       }, 'T4');
 
+    // ── S3 Task 5: surviving rerenderAll() ────────────────────────────────
+    // Spec §4.4's ordered three steps: (1) armEditables(); (2) rebuild the
+    // member set from the LINE RANGE the operation declared (clear it if that
+    // range no longer resolves); (3) give the focus endpoint a real roving
+    // `tabindex="-1"` holder. Every batch operation in Tasks 6/7 ends in a
+    // rerenderAll(), so without these the blue tint and the keyboard both die
+    // on the operation that was supposed to act on the set.
+    //
+    // MEASURED baseline on this branch before the rebuild landed, with a
+    // selection over lines 3-4 standing and a forced render:
+    //   before {memberLines:[[3,3],[4,4]], domSelectedLines:[[3,3],[4,4]], activeElement: the li block}
+    //   after  {memberLines:[[3,3],[4,4]], domSelectedLines:[],             activeElement: <body>}
+    // i.e. the MODEL survives for free (its identity is a line range, which no
+    // render can invalidate) and the PAINT does not. The plan's own assertion
+    // message has this backwards — it claims "the tint survives (it is
+    // re-derived from lines) but focus falls back to <body>". Nothing
+    // re-derives the tint; contentEl.innerHTML throws the classes away with
+    // the nodes that carried them.
+    //
+    // Focus is asserted BY IDENTITY (which block, by document-order index and
+    // by its own text) and never by counting `[tabindex]` attributes: Task 4
+    // carry 1 records two earlier carries that were simply WRONG because
+    // their tests only counted the attribute. `focusHolderId` from
+    // __edTestGetSelection() is deliberately NOT used as a focus assertion
+    // either — it reports which element WOULD hold the focus, and it still
+    // answered "2" in the baseline above while activeElement was <body>.
+    const t5Focus = (page) => page.evaluate(() => {
+      const ae = document.activeElement;
+      if (!ae || ae === document.body) return { where: 'body' };
+      const b = ae.closest ? ae.closest('.ed-block') : null;
+      if (!b) return { where: 'other', tag: ae.tagName };
+      const all = [].slice.call(document.querySelectorAll('.ed-block'));
+      return {
+        where: 'block',
+        isTheBlockItself: ae === b,
+        index: all.indexOf(b),
+        type: b.getAttribute('data-block-type'),
+        // The rendered table shows only its header and body cells — the markdown
+        // separator row is not text in the DOM (measured: 'AB12', not 'AB---12').
+        // The ⠿ handle and the ＋ insert affordance are children of the block,
+        // so their glyphs are in textContent; strip braille + whitespace so
+        // the assertion reads as the block's own visible text.
+        text: (b.textContent || '').replace(/[\s⠀-⣿＋+]/g, ''),
+        tabindex: b.getAttribute('tabindex'),
+      };
+    });
+    const t5Blocks = (page) => page.evaluate(() =>
+      [].slice.call(document.querySelectorAll('.ed-block')).map((el, i) => ({
+        i: i,
+        type: el.getAttribute('data-block-type'),
+        selected: el.classList.contains('ed-selected'),
+        text: (el.textContent || '').replace(/[\s⠀-⣿＋+]/g, ''),
+      })));
+    const t5Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+    const t5TabindexCount = (page) =>
+      page.evaluate(() => document.querySelectorAll('.ed-block[tabindex]').length);
+    const T5LIST = '# Doc\n\n- a\n- b\n- c\n'; // heading{1,1} li{3,3} li{4,4} li{5,5}
+
+    await s3Scenario('a selection survives the rerender that a batch operation causes',
+      T5LIST, async (page) => {
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => [b.type, b.text]),
+          [['heading', 'Doc'], ['li', 'a'], ['li', 'b'], ['li', 'c']],
+          'fixture shape: four blocks, the three list items on lines 3/4/5');
+        assert.strictEqual(await t5Sel(page), null, 'precondition: nothing selected yet');
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 4));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+            domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+          'precondition: the selection really covers "a" and "b" BEFORE the render, in the '
+          + 'model AND in the paint — a test that only looks after the render would pass '
+          + 'on a selection that never existed. Got ' + JSON.stringify(before));
+        const focusBefore = await t5Focus(page);
+        assert.deepStrictEqual(focusBefore,
+          { where: 'block', isTheBlockItself: true, index: 2, type: 'li', text: 'b',
+            tabindex: '-1' },
+          'precondition: the focus endpoint block "b" really holds DOM focus before the '
+          + 'render. Got ' + JSON.stringify(focusBefore));
+
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have SUCCEEDED — every assertion below is about what '
+          + 'survives a successful swap');
+
+        const after = await t5Sel(page);
+        assert.deepStrictEqual(after, before,
+          'spec 4.4 step 2: the member set is re-derived from the LINE RANGE against the '
+          + 'freshly built blocks, so it must come back identical — model and paint both. '
+          + 'Got ' + JSON.stringify(after));
+        const focusAfter = await t5Focus(page);
+        assert.deepStrictEqual(focusAfter, focusBefore,
+          'spec 4.4 step 3: the roving focus holder must be rebuilt onto the SAME block '
+          + '("b"), not left on <body> with the keyboard dead. Got ' +
+          JSON.stringify(focusAfter));
+        assert.strictEqual(await t5TabindexCount(page), 1,
+          'exactly one block is focusable at a time — the tabindex is roving');
+      }, 'T5');
+
+    await s3Scenario('a selection whose lines no longer parse is cleared, not left dangling',
+      T5LIST, async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(4, 5));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+            domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+          'precondition: the selection over "b" and "c" really EXISTS before the lines are '
+          + 'taken away — otherwise "it was cleared" is green for a set that was never '
+          + 'built. Got ' + JSON.stringify(before));
+        assert.deepStrictEqual((await t5Focus(page)).text, 'c',
+          'precondition: and it has a real focus holder to lose');
+
+        await page.evaluate(() => window.__edTestTruncateTo(3));
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have succeeded');
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => [b.type, b.text]),
+          [['heading', 'Doc'], ['li', 'a']],
+          'precondition: lines 4 and 5 really are gone from the rendered document — '
+          + 'without this the clear below could be about any other cause');
+
+        assert.strictEqual(await t5Sel(page), null,
+          'spec 4.4: if the range no longer resolves the selection is CLEARED. This is an '
+          + 'assertion about the STATE, not about the paint: the innerHTML swap removes '
+          + 'every .ed-selected class on its own, so a node count is 0 whether or not the '
+          + 'selection was cleared, and a stale blockSelection left standing would still '
+          + 'answer Shift+arrow from a range the document no longer has');
+        assert.strictEqual(await page.evaluate(() =>
+          document.querySelectorAll('.ed-selected').length), 0, 'and nothing is tinted');
+        assert.strictEqual(await t5TabindexCount(page), 0,
+          'and no block is left focusable');
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'and there is no focus holder — Task 4 carry 1: clearing the roving tabindex '
+          + 'blurs the block it was on, so a cleared selection ends on <body>');
+      }, 'T5');
+
+    // The plan asks for this one explicitly: the failure exits inside
+    // rerenderAll() `return false` without touching any reset state, so a
+    // line-range selection survives a failed render for free. It is GREEN
+    // before the implementation (nothing cleared it either), so it is proved
+    // to BITE by mutation instead — see the transcript in the task report:
+    // adding clearBlockSelection() to the malformed-response exit turns it RED.
+    await s3Scenario('a render that FAILS leaves the selection exactly as it was',
+      T5LIST, async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 4));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+            domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+          'precondition: a real selection stands before the failing render. Got ' +
+          JSON.stringify(before));
+        const focusBefore = await t5Focus(page);
+        assert.strictEqual(focusBefore.text, 'b', 'precondition: with a real focus holder');
+
+        const ok = await page.evaluate(() => {
+          const realFetch = window.fetch;
+          window.fetch = function (u, o) {
+            if (String(u).indexOf('/api/render') !== -1) {
+              return Promise.reject(new Error('render offline (test)'));
+            }
+            return realFetch.call(window, u, o);
+          };
+          return window.__edTestForceRerender().then((r) => { window.fetch = realFetch; return r; });
+        });
+        assert.strictEqual(ok, false,
+          'precondition: the render must actually have FAILED — otherwise this scenario is '
+          + 'just the success path again');
+        assert.ok(await page.evaluate(() => !!document.querySelector('.ed-conflict')),
+          'precondition: and it must have surfaced its banner, so the failure went through '
+          + 'the real exit rather than being swallowed somewhere else');
+
+        assert.deepStrictEqual(await t5Sel(page), before,
+          'a failed render leaves .content and `blocks` untouched, so the selection it was '
+          + 'built against is still exactly true — clearing it would throw away a set the '
+          + 'user can still see');
+        assert.deepStrictEqual(await t5Focus(page), focusBefore,
+          'and the focus holder is untouched too — the DOM was never swapped');
+      }, 'T5');
+
+    // §4.4 step 3 against the shape Tasks 6/7 will actually produce:
+    // collapseTo() hands back a range's END line, and a table owns four lines
+    // for one block, so the focus endpoint routinely lands INSIDE a block
+    // rather than on its startLine. Task 2 carry 5: selectionFocusBlockEl()
+    // answers null for such a line, which is a selection with no focus holder
+    // at all and a dead keyboard.
+    await s3Scenario('a focus endpoint that is not a startLine gets a real holder anyway',
+      '# Doc\n\nalpha\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n', async (page) => {
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => b.type),
+          ['heading', 'paragraph', 'table'],
+          'fixture shape: heading{1,1} paragraph{3,3} table{5,7}');
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 6));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 6, memberLines: [[3, 3], [5, 7]],
+            domSelectedLines: [[3, 3], [5, 7]], focusHolderId: null },
+          'precondition: line 6 is the table\'s SEPARATOR row — inside the block, not its '
+          + 'startLine — so this selection has NO focus holder to begin with. Got ' +
+          JSON.stringify(before));
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'precondition: and therefore nothing is focused before the render');
+
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have succeeded');
+
+        const after = await t5Sel(page);
+        assert.deepStrictEqual([after.memberLines, after.domSelectedLines],
+          [[[3, 3], [5, 7]], [[3, 3], [5, 7]]],
+          'the member set must be IDENTICAL — snapping the focus endpoint onto a startLine '
+          + 'must never quietly change which blocks a batch operation would write to — and '
+          + 'the paint must agree with it. Got ' + JSON.stringify(after));
+        assert.deepStrictEqual([after.anchorLine, after.focusLine], [3, 5],
+          'the focus endpoint moved to the table\'s own startLine (the anchor never moves)');
+        const focusAfter = await t5Focus(page);
+        assert.deepStrictEqual(focusAfter,
+          { where: 'block', isTheBlockItself: true, index: 2, type: 'table', text: 'AB12',
+            tabindex: '-1' },
+          'spec 4.4 step 3: the rebuilt selection has a REAL focus holder — the table '
+          + 'block — not <body>. Got ' + JSON.stringify(focusAfter));
+      }, 'T5');
+
+    // §4.4: "undo / redo 一律清空選取集合". UndoStack's op is exactly
+    // {startLine, endLine, before, after} and carries no selection state, so
+    // there is nothing to restore a set to. Without an explicit declaration
+    // the rebuild above would keep the old line range standing over a document
+    // that just changed underneath it.
+    await s3Scenario('undo clears the selection instead of standing it over a changed doc',
+      '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+        const original = fs.readFileSync(mdPath, 'utf8');
+        const pid = await page.evaluate(() =>
+          document.querySelector('.ed-block[data-block-type="paragraph"]')
+            .getAttribute('data-block-id'));
+        await openWysiwyg(page, '.ed-block[data-block-id="' + pid + '"]');
+        await page.keyboard.type('Z');
+        const edited = await saveAndRead(page, mdPath);
+        assert.notStrictEqual(edited, original,
+          'precondition: the edit must have landed and pushed a real undo op, file is '
+          + 'still ' + JSON.stringify(original));
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]],
+            domSelectedLines: [[3, 3], [5, 5]], focusHolderId: '2' },
+          'precondition: a real two-block selection stands before Ctrl+Z. Got ' +
+          JSON.stringify(before));
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        assert.strictEqual(await saveAndRead(page, mdPath), original,
+          'precondition: the undo must actually have LANDED — otherwise "the selection was '
+          + 'cleared" would be green for a keystroke that did nothing');
+        assert.strictEqual(await t5Sel(page), null,
+          'spec 4.4: undo/redo always clears the selection. The op records no selection '
+          + 'state, so a set left standing is a range against a document that no longer '
+          + 'produced it');
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'and no block is left holding the roving focus');
+      }, 'T5');
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
