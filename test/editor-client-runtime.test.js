@@ -244,7 +244,7 @@ async function openBlockEditor(page, sel) {
 
 // Hovers a block to reveal its ⠿ handle, opens its menu, and clicks the menu
 // item whose exact textContent is `label` — S2 §3.7's four: '轉換成 ›' /
-// '複製' / '刪除' / 'MD 原始碼'. Mirrors the old clickBarButton() helper's
+// '建立副本' / '刪除' / 'MD 原始碼'. Mirrors the old clickBarButton() helper's
 // role for the retired paragraph/heading bar buttons.
 async function clickGutterMenuItem(page, sel, label) {
   for (let attempt = 0; ; attempt++) {
@@ -330,7 +330,7 @@ function lexTypes(md) {
 // policy lexLooseDeep()'s own note states — a li scenario that checks only the
 // top level is green for the wrong reason. Two of those nine really do carry a
 // nested list this function cannot see ('- alpha / (2sp)- beta' after a rule-2
-// merge, and '- a / (2sp)- a1' after a 複製), so for them the change moved the
+// merge, and '- a / (2sp)- a1' after a 建立副本), so for them the change moved the
 // asserted value, not just the call. It is kept as the NAMED top-level-only scan
 // that note, the Task-7 ＋ scenario and the 96-cell sweep each contrast
 // themselves against; do not reach for it in a new assertion.
@@ -1181,6 +1181,102 @@ async function clickInsertMenuItem(page, sel, label) {
   }, sel, label);
 }
 
+// ── v2.11.1 acceptance helpers (Tab focus / gutter hover) ───────────────
+// Records `defaultPrevented` for every keydown AFTER client.js's own
+// document-level handler has run: the listener sits on `window` in the BUBBLE
+// phase, so it fires strictly after a `document` bubble-phase handler for the
+// same event. A CAPTURE-phase listener reads defaultPrevented BEFORE the app
+// sees the key and therefore always reports false — a test written that way is
+// green on a broken build, which is the exact vacuity this file has shipped
+// nine times.
+async function armKeyRecorder(page) {
+  await page.evaluate(() => {
+    window.__edKeys = [];
+    if (window.__edKeyRecorderWired) return;
+    window.__edKeyRecorderWired = true;
+    window.addEventListener('keydown', (e) => {
+      window.__edKeys.push({ key: e.key, shift: e.shiftKey, prevented: e.defaultPrevented });
+    }, false);
+  });
+}
+
+// What holds focus RIGHT NOW — tag + class + owning .ed-block. A Tab assertion
+// that does not state where focus was BEFORE the key proves nothing (focus
+// could already have been sitting on whatever the assertion finds afterwards),
+// so every Tab scenario below reads this on BOTH sides of the keypress.
+async function focusDescr(page) {
+  return page.evaluate(() => {
+    const a = document.activeElement;
+    if (!a) return 'null';
+    const blk = a.closest ? a.closest('.ed-block') : null;
+    return a.tagName + '.' + (a.className || '(no-class)') + '@' +
+      (blk ? blk.getAttribute('data-block-type') + '#' + blk.getAttribute('data-block-id') : 'no-block');
+  });
+}
+
+// One recorded keypress: returns { prevented, before, after } so a caller can
+// assert all three facts of a Tab (it was consumed, focus did not move, and
+// focus was somewhere meaningful to begin with) in one place.
+async function pressRecorded(page, key, opts) {
+  const shift = !!(opts && opts.shift);
+  const before = await focusDescr(page);
+  await page.evaluate(() => { window.__edKeys = []; });
+  if (shift) await page.keyboard.down('Shift');
+  await page.keyboard.press(key);
+  if (shift) await page.keyboard.up('Shift');
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const keys = await page.evaluate(() => window.__edKeys);
+  const rec = keys.filter((k) => k.key === key).pop();
+  return { prevented: rec ? rec.prevented : null, before: before, after: await focusDescr(page) };
+}
+
+// Walks a REAL pointer across the gutter in `step`-px increments, dispatching
+// one mousemove and settling one animation frame per increment
+// (movePointerAndSettle()), and samples the block's own :hover state plus its
+// ⠿'s COMPUTED opacity at every stop. Teleporting straight to the button's
+// centre — which is what every pre-existing gutter helper does — never enters
+// the corridor the defect lives in and cannot see it.
+async function gutterOpacityWalk(page, sel, xFrom, xTo, y, step) {
+  const samples = [];
+  const dir = xTo < xFrom ? -1 : 1;
+  // The ⠿ fades in over `transition: opacity .12s`, which is ~4x longer than
+  // the two animation frames each step settles for. Park on the START point
+  // until the fade has finished, so every sample that follows is measuring
+  // hover state rather than the ramp — and so a DROP (which is what the defect
+  // looks like) is unambiguous: once the walk is at 1, any sample below it
+  // means :hover went false somewhere in the last two frames.
+  await movePointerAndSettle(page, xFrom, y);
+  for (let i = 0; i < 40; i++) {
+    const op = await page.evaluate((sl) =>
+      Number(getComputedStyle(document.querySelector(sl).querySelector('.ed-handle')).opacity), sel);
+    if (op >= 0.999) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  for (let x = xFrom; dir < 0 ? x >= xTo : x <= xTo; x += dir * step) {
+    await movePointerAndSettle(page, x, y);
+    const s = await page.evaluate((sl) => {
+      const b = document.querySelector(sl);
+      return {
+        hover: b.matches(':hover'),
+        handle: Number(getComputedStyle(b.querySelector('.ed-handle')).opacity),
+        insert: Number(getComputedStyle(b.querySelector('.ed-insert')).opacity),
+      };
+    }, sel);
+    samples.push({ x: Math.round(x), hover: s.hover, handle: s.handle, insert: s.insert });
+  }
+  return samples;
+}
+
+// Box of a block and of its two gutter buttons, in viewport coordinates.
+async function gutterGeometry(page, sel) {
+  return page.evaluate((s) => {
+    const b = document.querySelector(s);
+    const r = (el) => { const q = el.getBoundingClientRect(); return { l: q.left, r: q.right, t: q.top, b: q.bottom, h: q.height }; };
+    return { block: r(b), handle: r(b.querySelector('.ed-handle')), insert: r(b.querySelector('.ed-insert')) };
+  }, sel);
+}
+
+
 (async () => {
   const { srv, url, mdPath } = await setup();
   const browser = await puppeteer.launch({
@@ -1763,15 +1859,15 @@ async function clickInsertMenuItem(page, sel, label) {
       // ⠿ handle: hover reveals it, click opens the menu — replaces the old
       // bar's ✎/MD combo. S2 §5.4 fallout: the heading ± pair moved to Tab /
       // Shift+Tab (§3.5) and ✕ is gone (§3.7 closes by Esc / outside click),
-      // so the four items are now 轉換成 › / 複製 / 刪除 / MD 原始碼.
+      // so the four items are now 轉換成 › / 建立副本 / 刪除 / MD 原始碼.
       await page.hover(selHeading);
       await page.click(selHeading + ' .ed-handle');
       await page.waitForSelector('.ed-handle-menu');
       assert.strictEqual(
         await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
           .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-        '轉換成 ›,複製,刪除,MD 原始碼'.split(',').sort().join(','),
-        'the ⠿ menu on a heading must show 轉換成 › / 複製 / 刪除 / MD 原始碼'
+        '轉換成 ›,建立副本,刪除,MD 原始碼'.split(',').sort().join(','),
+        'the ⠿ menu on a heading must show 轉換成 › / 建立副本 / 刪除 / MD 原始碼'
       );
       // The MD escape hatch forces raw-edit even on a WYSIWYG-eligible block
       // — the direct migration of the old bar's MD button.
@@ -1814,7 +1910,7 @@ async function clickInsertMenuItem(page, sel, label) {
     }
 
     // ── S2 Task 2: the ⠿ menu is VERTICAL and carries a 轉換成 submenu ──────
-    //    Spec §3.7 fixes the item list to 轉換成 › / 複製 / 刪除 / MD 原始碼
+    //    Spec §3.7 fixes the item list to 轉換成 › / 建立副本 / 刪除 / MD 原始碼
     //    (no ✕, no heading ±); §3.2 fixes the submenu's twelve targets; §7
     //    excludes a table block from 轉換成 and RULING F-O excludes a list
     //    item from MD 原始碼. setupTableDoc() is used purely as the generic
@@ -1843,7 +1939,7 @@ async function clickInsertMenuItem(page, sel, label) {
             flexDir: getComputedStyle(menu).flexDirection,
           };
         });
-        assert.deepStrictEqual(items.labels, ['轉換成 ›', '複製', '刪除', 'MD 原始碼'],
+        assert.deepStrictEqual(items.labels, ['轉換成 ›', '建立副本', '刪除', 'MD 原始碼'],
           'spec 3.7 names these four, in this order, and no ✕');
         assert.strictEqual(items.lefts.length, 1,
           'a vertical menu has one left edge, got ' + JSON.stringify(items.lefts));
@@ -2061,7 +2157,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.deepStrictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent)),
-          ['轉換成 ›', '複製', '刪除'],
+          ['轉換成 ›', '建立副本', '刪除'],
           'RULING F-O forbids openRawEditor on a list item, permanently');
         await page.keyboard.press('Escape');
 
@@ -3011,7 +3107,7 @@ async function clickInsertMenuItem(page, sel, label) {
         s5iSrv.close();
       }
     }
-    // ── S2 Task 6: 複製 (duplicate) — §4.3 ────────────────────────────────
+    // ── S2 Task 6: 建立副本 (duplicate) — §4.3 ─────────────────────────────
     //
     //    TWO commit paths, chosen by MEASUREMENT rather than by symmetry, and
     //    the measurement is the whole point of this group:
@@ -3042,7 +3138,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(s6aUrl, { waitUntil: 'networkidle0' });
 
-        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
           { timeout: 5000 }).catch(() => {});
@@ -3054,7 +3150,7 @@ async function clickInsertMenuItem(page, sel, label) {
           'one copy, blank-separated — commitBlockInsertion()’s own contract');
 
         await page.close();
-        console.log('S2 複製: a paragraph gets a copy directly below it — OK');
+        console.log('S2 建立副本: a paragraph gets a copy directly below it — OK');
       } finally {
         s6aSrv.close();
       }
@@ -3075,7 +3171,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(s6bUrl, { waitUntil: 'networkidle0' });
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 4,
           { timeout: 5000 }).catch(() => {});
@@ -3097,7 +3193,7 @@ async function clickInsertMenuItem(page, sel, label) {
           'the top level would miss a copy that went loose one level down');
 
         await page.close();
-        console.log('S2 複製: the copy goes after the whole subtree — OK');
+        console.log('S2 建立副本: the copy goes after the whole subtree — OK');
       } finally {
         s6bSrv.close();
       }
@@ -3110,7 +3206,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(s6cUrl, { waitUntil: 'networkidle0' });
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'done'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'done'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
           { timeout: 5000 }).catch(() => {});
@@ -3125,7 +3221,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.deepStrictEqual(lexLooseDeep(s6cOut), [false], 'the run stays tight');
 
         await page.close();
-        console.log('S2 複製: type, indent and checked state are preserved — OK');
+        console.log('S2 建立副本: type, indent and checked state are preserved — OK');
       } finally {
         s6cSrv.close();
       }
@@ -3145,7 +3241,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(s6dUrl, { waitUntil: 'networkidle0' });
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
           { timeout: 5000 }).catch(() => {});
@@ -3154,7 +3250,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.deepStrictEqual(lexLooseDeep(s6dOut), [false], 'the run stays tight');
 
         await page.close();
-        console.log('S2 複製: an ordered item’s copy renumbers the run — OK');
+        console.log('S2 建立副本: an ordered item’s copy renumbers the run — OK');
       } finally {
         s6dSrv.close();
       }
@@ -3173,7 +3269,7 @@ async function clickInsertMenuItem(page, sel, label) {
         const page = await newPage(browser);
         await page.goto(s6eUrl2, { waitUntil: 'networkidle0' });
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'gap is ~5px'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'gap is ~5px'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
           { timeout: 5000 }).catch(() => {});
@@ -3186,14 +3282,14 @@ async function clickInsertMenuItem(page, sel, label) {
           'neither the original NOR the copy may be re-escaped — a `~5px` stays `~5px`');
 
         await page.close();
-        console.log('S2 複製: the copy is not re-escaped, and neither is the original — OK');
+        console.log('S2 建立副本: the copy is not re-escaped, and neither is the original — OK');
       } finally {
         s6eSrv2.close();
       }
     }
 
     {
-      // §4.3: 複製與刪除均為單一 undo. Both commit paths are asserted, because
+      // §4.3: 建立副本與刪除均為單一 undo. Both commit paths are asserted, because
       // they are different functions — the paragraph's commitBlockInsertion()
       // and the li's commitListStructure() — and only one of them can be
       // covered by any single fixture.
@@ -3204,7 +3300,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(s6eUrl, { waitUntil: 'networkidle0' });
         const s6eBefore = fs.readFileSync(s6eMdPath, 'utf8');
 
-        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '複製');
+        await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
           { timeout: 5000 }).catch(() => {});
@@ -3226,7 +3322,7 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(await saveAndRead(page, s6eMdPath), s6eBefore,
           'ONE Ctrl+Z restores the file — §3.4, one gesture is one undo op');
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '建立副本');
         await page.waitForFunction(
           () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
           { timeout: 5000 }).catch(() => {});
@@ -3245,7 +3341,7 @@ async function clickInsertMenuItem(page, sel, label) {
           'the li path is one undo op too — a different commit function, same rule');
 
         await page.close();
-        console.log('S2 複製: one duplicate is exactly one undo op, on both paths — OK');
+        console.log('S2 建立副本: one duplicate is exactly one undo op, on both paths — OK');
       } finally {
         s6eSrv.close();
       }
@@ -3262,7 +3358,7 @@ async function clickInsertMenuItem(page, sel, label) {
         await page.goto(s6fUrl, { waitUntil: 'networkidle0' });
         const s6fBefore = fs.readFileSync(s6fMdPath, 'utf8');
 
-        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '複製');
+        await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
         await settleEditor(page);
         assert.strictEqual(
           await page.evaluate(() => {
@@ -3279,13 +3375,13 @@ async function clickInsertMenuItem(page, sel, label) {
           'a refused duplicate must not touch a single byte');
 
         await page.close();
-        console.log('S2 複製: a multi-line li refuses with the §4.1 banner — OK');
+        console.log('S2 建立副本: a multi-line li refuses with the §4.1 banner — OK');
       } finally {
         s6fSrv.close();
       }
     }
 
-    // ── Finding 5a, the half that was never closed: 複製 and 刪除 with a
+    // ── Finding 5a, the half that was never closed: 建立副本 and 刪除 with a
     //    DIRTY burst open on the block being operated on.
     //
     //    5a's mousedown preventDefault() deliberately keeps that burst alive
@@ -3298,7 +3394,7 @@ async function clickInsertMenuItem(page, sel, label) {
     //    Task 2 closed this for 轉換 with ownsOpenSession() +
     //    reresolveBlockElAfterSelfCommit() (startLine + type, no fingerprint,
     //    used ONLY when we are the reason the source changed). 刪除 shares the
-    //    hole and was never migrated; 複製 would have inherited it.
+    //    hole and was never migrated; 建立副本 would have inherited it.
     //
     //    The press is a REAL human-speed one (mousedown, gap, mouseup), the
     //    same shape the Finding 5 scenario above uses — that gap is what makes
@@ -3350,7 +3446,7 @@ async function clickInsertMenuItem(page, sel, label) {
 
           const sel = await blockSelByType(page, 'paragraph');
           await pressHandleWithDirtyBurst(page, sel, ' EDITED');
-          await clickOpenMenuItem(page, sel, '複製');
+          await clickOpenMenuItem(page, sel, '建立副本');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 2,
             { timeout: 5000 }).catch(() => {});
@@ -3366,7 +3462,7 @@ async function clickInsertMenuItem(page, sel, label) {
             'both the typed edit and the duplicate land, and the copy carries the edit');
 
           await page.close();
-          console.log('S2 複製: works with a dirty burst open on its own block — OK');
+          console.log('S2 建立副本: works with a dirty burst open on its own block — OK');
         } finally {
           s6gSrv.close();
         }
@@ -3474,7 +3570,7 @@ async function clickInsertMenuItem(page, sel, label) {
       }
 
       // ＋ 清單 on a NESTED item: a sibling at the same depth, and the run
-      // stays TIGHT. This is the fork Task 6 measured for 複製, re-opened
+      // stays TIGHT. This is the fork Task 6 measured for 建立副本, re-opened
       // here: commitBlockInsertion() ALWAYS writes a leading blank line, and
       // measured on this very fixture that gives
       // '# Doc\n\n- alpha\n  - child\n\n  -\n' — whose NESTED list marked
@@ -3516,7 +3612,7 @@ async function clickInsertMenuItem(page, sel, label) {
       }
 
       // ＋ on a PARENT: the insertion point is the end of its SUBTREE, which
-      // is the ruling §4.3 already made for 複製 (「副本插在該 block 整棵子樹
+      // is the ruling §4.3 already made for 建立副本 (「副本插在該 block 整棵子樹
       // 之後」) and for the same reason — inserting between a parent and its
       // children leaves the children with no anchor.
       {
@@ -3689,7 +3785,7 @@ async function clickInsertMenuItem(page, sel, label) {
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'a'), '清單');
           await settleEditor(page);
           assert.strictEqual(await bannerNow(page), '此清單含不支援的格式，無法調整結構',
-            '§4.3: the ＋ goes through the same run-wide gate as 轉換／複製／刪除');
+            '§4.3: the ＋ goes through the same run-wide gate as 轉換／建立副本／刪除');
           assert.strictEqual(
             await page.evaluate(
               () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
@@ -3702,7 +3798,7 @@ async function clickInsertMenuItem(page, sel, label) {
       }
 
       // The FOURTH and last call site of the dirty-burst hole 轉換 / 刪除 /
-      // 複製 already closed. Finding 5a's mousedown preventDefault() covers
+      // 建立副本 already closed. Finding 5a's mousedown preventDefault() covers
       // '.ed-insert' too (client.js's delegated mousedown listener names both
       // buttons), so the burst is still open and dirty when insertBlockBelow()
       // runs — and switchAwayFrom() then commits a rewrite of this very
@@ -4117,7 +4213,7 @@ async function clickInsertMenuItem(page, sel, label) {
               const cell = 'table → ' + tgt.id;
               await openGutterMenu(tpage, tsel);
               const labels = await visibleMenuLabels(tpage);
-              assert.deepStrictEqual(labels, ['複製', '刪除', 'MD 原始碼'],
+              assert.deepStrictEqual(labels, ['建立副本', '刪除', 'MD 原始碼'],
                 'PRECONDITION ' + cell + ': the ⠿ menu must really be OPEN on the table (its ' +
                 'other three items visible) — otherwise "轉換成 is absent" is green because ' +
                 'nothing opened. Got ' + JSON.stringify(labels));
@@ -12447,11 +12543,11 @@ async function clickInsertMenuItem(page, sel, label) {
         const liMenu = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
-        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 複製,
+        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 建立副本,
         // so a li now shows three of the four items — everything except
         // MD 原始碼, which RULING F-O forbids on a list item permanently.
-        assert.strictEqual(liMenu, '轉換成 ›,複製,刪除'.split(',').sort().join(','),
-          "a list item's ⠿ menu must show 轉換成 › / 複製 / 刪除 — no MD 原始碼 (RULING F-O), got " +
+        assert.strictEqual(liMenu, '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show 轉換成 › / 建立副本 / 刪除 — no MD 原始碼 (RULING F-O), got " +
           JSON.stringify(liMenu));
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
@@ -12550,8 +12646,8 @@ async function clickInsertMenuItem(page, sel, label) {
         assert.strictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-          '轉換成 ›,複製,刪除'.split(',').sort().join(','),
-          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 複製; ' +
+          '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
+          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 建立副本; ' +
           '刪除 is still the item this scenario drives');
         await page.evaluate(() => {
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -14346,6 +14442,530 @@ async function clickInsertMenuItem(page, sel, label) {
         console.log('T7 sweep: no gesture on any item rewrites a line outside its own range — OK');
       } finally { srv.close(); }
     }
+
+    // ── v2.11.1 acceptance item 1: Tab / Shift+Tab must never reach the
+    //    browser's own sequential focus navigation ────────────────────────
+    // Spec §3.5 states it outright ("必須 preventDefault()，否則 Tab 在 body 上
+    // 是瀏覽器焦點巡覽"). Two independent escape classes were measured on the
+    // released 2.11.0, and they need two different fixes:
+    //
+    //   Class B — the surface IS .ed-wys-armed and focused, but `currentBurst`
+    //     is null (Ctrl+S resolves the burst without blurring), so
+    //     handleBurstKeydown()'s `currentBurst.editEl !== editEl` guard bails
+    //     and the delegated handler's `return` swallows the rest of the
+    //     document handler with it. Measured: focus jumped to that item's OWN
+    //     ＋ button.
+    //   Class A — nothing is focused at all (BODY), which is where a commit /
+    //     Escape / Ctrl+Z / a click on the bullet marker leaves it. No
+    //     `.ed-wys-armed` ancestor exists, so the armed branch never runs and
+    //     there was no other Tab branch in the whole document handler.
+    //
+    // Every assertion below states where focus was BEFORE the key. A Tab test
+    // that only looks at the after-state is green on a broken build whenever
+    // the "after" element happens to be where focus already was.
+    {
+      const { srv: tabSrv, url: tabUrl, mdPath: tabMdPath } =
+        await setupListDoc(['# Doc', '', '- alpha', '- beta', '', '> quoted', '']);
+      try {
+        // Class B — armed surface, null burst.
+        {
+          const page = await newPage(browser);
+          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const alpha = await liBlockSelByText(page, 'alpha');
+          await openWysiwyg(page, alpha);
+          await page.keyboard.down('Control');
+          await page.keyboard.press('KeyS');
+          await page.keyboard.up('Control');
+          await awaitSaveSettled(page);
+          const state = await page.evaluate((s) => {
+            const surf = document.querySelector(s + ' > .ed-li-text');
+            return {
+              focused: document.activeElement === surf,
+              armed: !!surf && surf.classList.contains('ed-wys-armed'),
+            };
+          }, alpha);
+          assert.ok(state.focused && state.armed,
+            'fixture sanity for class B: after Ctrl+S the item\'s own .ed-li-text must STILL ' +
+            'be focused and still .ed-wys-armed — that is the state whose burst is null. Got ' +
+            JSON.stringify(state));
+          const before = fs.readFileSync(tabMdPath, 'utf8');
+          const t = await pressRecorded(page, 'Tab');
+          assert.ok(/ed-li-text/.test(t.before),
+            'fixture sanity: focus must sit on the armed .ed-li-text BEFORE Tab, got ' + t.before);
+          assert.strictEqual(t.prevented, true,
+            'class B: Tab on an armed surface whose burst has been resolved must still be ' +
+            'consumed — an unprevented Tab is the browser walking the caret out of the ' +
+            'document. Focus went ' + t.before + ' -> ' + t.after);
+          assert.strictEqual(t.after, t.before,
+            'class B: Tab must leave focus exactly where it was, got ' + t.before + ' -> ' + t.after);
+          const st = await pressRecorded(page, 'Tab', { shift: true });
+          assert.strictEqual(st.prevented, true,
+            'class B: Shift+Tab must be consumed too. Focus went ' + st.before + ' -> ' + st.after);
+          assert.strictEqual(st.after, st.before,
+            'class B: Shift+Tab must leave focus where it was, got ' + st.before + ' -> ' + st.after);
+          assert.strictEqual(await saveAndRead(page, tabMdPath), before,
+            'class B: a swallowed Tab is a no-op, not an edit — the file must be byte-identical');
+          await page.close();
+        }
+        // Class A — nothing focused (BODY), reached by clicking the bullet
+        // marker, which is chrome and not an edit surface.
+        {
+          const page = await newPage(browser);
+          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const beta = await liBlockSelByText(page, 'beta');
+          await page.click(beta + ' > .ed-li-marker');
+          await settleEditor(page);
+          assert.ok(await page.evaluate(() => document.activeElement === document.body),
+            'fixture sanity for class A: a click on the bullet marker must leave focus on BODY');
+          const before = fs.readFileSync(tabMdPath, 'utf8');
+          const t = await pressRecorded(page, 'Tab');
+          assert.strictEqual(t.before, 'BODY.(no-class)@no-block',
+            'fixture sanity: focus must be on BODY before the key, got ' + t.before);
+          assert.strictEqual(t.prevented, true,
+            'class A: Tab with nothing focused must be consumed — measured on 2.11.0 it moved ' +
+            'focus to a gutter ＋ button. Focus went ' + t.before + ' -> ' + t.after);
+          assert.strictEqual(t.after, t.before,
+            'class A: Tab must not move focus, got ' + t.before + ' -> ' + t.after);
+          const st = await pressRecorded(page, 'Tab', { shift: true });
+          assert.strictEqual(st.prevented, true,
+            'class A: Shift+Tab must be consumed. Focus went ' + st.before + ' -> ' + st.after);
+          assert.strictEqual(st.after, st.before,
+            'class A: Shift+Tab must not move focus, got ' + st.before + ' -> ' + st.after);
+          assert.strictEqual(await saveAndRead(page, tabMdPath), before,
+            'class A: a swallowed Tab must not touch the file');
+          await page.close();
+        }
+        // Class A, second shape: Escape out of a burst leaves BODY focused.
+        {
+          const page = await newPage(browser);
+          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const alpha = await liBlockSelByText(page, 'alpha');
+          await openWysiwyg(page, alpha);
+          await page.keyboard.press('End');
+          await page.keyboard.type('Z');
+          await page.keyboard.press('Escape');
+          await settleEditor(page);
+          assert.ok(await page.evaluate(() => document.activeElement === document.body),
+            'fixture sanity: Escape out of a burst must leave focus on BODY');
+          const t = await pressRecorded(page, 'Tab');
+          assert.strictEqual(t.prevented, true,
+            'class A (post-Escape): Tab must be consumed. Focus went ' + t.before + ' -> ' + t.after);
+          assert.strictEqual(t.after, t.before,
+            'class A (post-Escape): focus must not move, got ' + t.before + ' -> ' + t.after);
+          await page.close();
+        }
+        // The other side of the same rule: a REAL control inside a block keeps
+        // its keyboard contract. The raw source editor's 完成/取消 buttons are
+        // reached by tabbing out of its textarea, and a blanket "swallow Tab
+        // inside .ed-block" would trap focus on the button it lands on.
+        {
+          const page = await newPage(browser);
+          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const bq = await page.evaluate(() => {
+            const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
+              .find((e) => e.textContent.indexOf('quoted') >= 0);
+            return '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]';
+          });
+          await openBlockEditor(page, bq);
+          assert.ok(await page.evaluate((sl) =>
+            document.activeElement === document.querySelector(sl + ' .ed-raw'), bq),
+            'fixture sanity: the blockquote\'s raw editor must be open and focused');
+          const t1 = await pressRecorded(page, 'Tab');
+          assert.ok(/ed-commit|ed-cancel/.test(t1.after),
+            'Tab out of the raw editor\'s textarea must still reach its own buttons, got ' +
+            t1.before + ' -> ' + t1.after);
+          const t2 = await pressRecorded(page, 'Tab');
+          assert.notStrictEqual(t2.after, t2.before,
+            'and Tab from that button must not be swallowed — focus would be trapped on it. ' +
+            'Got ' + t2.before + ' -> ' + t2.after);
+          await page.close();
+        }
+        // The gutter buttons are mouse-only affordances with no keyboard
+        // contract; being <button>s is what made them tab stops in the first
+        // place and produced the most jarring symptom of both classes.
+        {
+          const page = await newPage(browser);
+          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          const idx = await page.evaluate(() => {
+            const all = Array.prototype.slice.call(document.querySelectorAll('.ed-handle, .ed-insert'));
+            return {
+              total: all.length,
+              missing: all.filter((b) => b.getAttribute('tabindex') !== '-1').length,
+            };
+          });
+          assert.ok(idx.total >= 8,
+            'fixture sanity: the doc must carry several gutter buttons, got ' + idx.total);
+          assert.strictEqual(idx.missing, 0,
+            'every .ed-handle / .ed-insert must carry tabindex="-1" — they are mouse-only, and ' +
+            'as plain <button>s they are sequential focus stops sitting immediately after every ' +
+            'block. ' + idx.missing + ' of ' + idx.total + ' still lack it');
+          await page.close();
+        }
+      } finally { tabSrv.close(); }
+    }
+
+    // ── v2.11.1 item 1, the paths that ALREADY worked and must not regress ──
+    {
+      const { srv: tnrSrv, url: tnrUrl, mdPath: tnrMdPath, original: tnrOriginal } =
+        await setupListDoc(['# Doc', '', '- one', '- alpha', '  continued', '- bravo', '']);
+      // Each sub-scenario below COMMITS, so every one of them starts by putting
+      // the fixture back: sharing one server is fine, sharing one file's bytes
+      // across scenarios is how an expectation silently starts describing the
+      // previous scenario's output instead of its own.
+      const resetTnr = () => fs.writeFileSync(tnrMdPath, tnrOriginal, 'utf8');
+      try {
+        // (a) armed single-line item: Tab indents, Shift+Tab outdents.
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const bravo = await liBlockSelByText(page, 'bravo');
+          await openWysiwyg(page, bravo);
+          const t = await pressRecorded(page, 'Tab');
+          await settleEditor(page);
+          assert.strictEqual(t.prevented, true, 'a working Tab is still a consumed Tab');
+          assert.strictEqual(
+            await page.evaluate((s) => document.querySelector(s).getAttribute('data-indent'), bravo),
+            '1', 'non-regression: Tab on an armed single-line item still indents it');
+          const st = await pressRecorded(page, 'Tab', { shift: true });
+          await settleEditor(page);
+          assert.strictEqual(st.prevented, true, 'a working Shift+Tab is still a consumed Shift+Tab');
+          assert.strictEqual(
+            await page.evaluate((s) => document.querySelector(s).getAttribute('data-indent'), bravo),
+            '0', 'non-regression: Shift+Tab still outdents');
+          await page.close();
+        }
+        // (b) five consecutive Tabs: the first indents, the rest are clean
+        //     no-ops (the §3.4 clamp caps at prev.indent + 1).
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const bravo = await liBlockSelByText(page, 'bravo');
+          await openWysiwyg(page, bravo);
+          const seen = [];
+          for (let i = 0; i < 5; i++) {
+            const t = await pressRecorded(page, 'Tab');
+            await settleEditor(page);
+            seen.push(t.prevented + ':' +
+              await page.evaluate((s) => document.querySelector(s).getAttribute('data-indent'), bravo));
+          }
+          assert.deepStrictEqual(seen, ['true:1', 'true:1', 'true:1', 'true:1', 'true:1'],
+            'non-regression: five consecutive Tabs — the first indents to 1 and the rest are ' +
+            'consumed no-ops, got ' + JSON.stringify(seen));
+          const after = await saveAndRead(page, tnrMdPath);
+          assert.strictEqual(after, '# Doc\n\n- one\n- alpha\n  continued\n  - bravo\n',
+            'non-regression: the four refused Tabs wrote nothing, got ' + JSON.stringify(after));
+          await page.close();
+        }
+        // (c) a Tab refused by indentListItem() at the run's first item.
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const one = await liBlockSelByText(page, 'one');
+          await openWysiwyg(page, one);
+          const before = fs.readFileSync(tnrMdPath, 'utf8');
+          const t = await pressRecorded(page, 'Tab');
+          await settleEditor(page);
+          assert.ok(/ed-li-text/.test(t.before),
+            'fixture sanity: focus must be on the first item\'s surface, got ' + t.before);
+          assert.strictEqual(t.prevented, true,
+            'non-regression: a Tab REFUSED by rule (d) is still consumed — refusing the ' +
+            'structural edit and refusing the keystroke are different things');
+          assert.strictEqual(t.after, t.before, 'a refused Tab must not move focus');
+          assert.strictEqual(
+            await page.evaluate((s) => document.querySelector(s).getAttribute('data-indent'), one),
+            '0', 'the run\'s first item has nothing to nest under');
+          assert.strictEqual(await saveAndRead(page, tnrMdPath), before,
+            'a refused Tab is byte-identical');
+          await page.close();
+        }
+        // (d) a hard-wrapped item — admitted by `columnOnly: true`, because an
+        //     indent rewrites nothing but leading columns.
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const alpha = await liBlockSelByText(page, 'alpha');
+          await openWysiwyg(page, alpha);
+          const t = await pressRecorded(page, 'Tab');
+          await settleEditor(page);
+          assert.strictEqual(t.prevented, true, 'a hard-wrapped item\'s Tab is consumed');
+          const after = await saveAndRead(page, tnrMdPath);
+          assert.strictEqual(after, '# Doc\n\n- one\n  - alpha\n    continued\n- bravo\n',
+            'non-regression: a hard-wrapped li is still legitimately indentable, got ' +
+            JSON.stringify(after));
+          await page.close();
+        }
+        // (e) type-then-Tab: the burst is live and dirty when the key lands.
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const bravo = await liBlockSelByText(page, 'bravo');
+          await openWysiwyg(page, bravo);
+          await page.keyboard.press('End');
+          await page.keyboard.type('!');
+          const t = await pressRecorded(page, 'Tab');
+          await settleEditor(page);
+          assert.strictEqual(t.prevented, true, 'type-then-Tab is still consumed');
+          const after = await saveAndRead(page, tnrMdPath);
+          assert.strictEqual(after, '# Doc\n\n- one\n- alpha\n  continued\n  - bravo!\n',
+            'non-regression: type-then-Tab keeps the typing AND indents, got ' +
+            JSON.stringify(after));
+          await page.close();
+        }
+        // (f) a Tab refused RUN-WIDE by listRunSupportsStructuralEdit().
+        {
+          const page = await newPage(browser);
+          resetTnr();
+          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await armKeyRecorder(page);
+          const one = await liBlockSelByText(page, 'one');
+          const bravo = await liBlockSelByText(page, 'bravo');
+          await page.evaluate((s) => {
+            document.querySelector(s + ' > .ed-li-text').innerHTML +=
+              '<span style="color:red">unsupported</span>';
+          }, one);
+          await openWysiwyg(page, bravo);
+          const before = fs.readFileSync(tnrMdPath, 'utf8');
+          const t = await pressRecorded(page, 'Tab');
+          await settleEditor(page);
+          assert.strictEqual(t.prevented, true,
+            'non-regression: a run-wide refusal still consumes the keystroke');
+          assert.strictEqual(t.after, t.before, 'a refused Tab must not move focus');
+          assert.strictEqual(await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }), '此清單含不支援的格式，無法調整結構',
+            'the run-wide refusal banner must still be the one shown');
+          assert.strictEqual(await saveAndRead(page, tnrMdPath), before,
+            'a run-wide refusal writes nothing');
+          await page.close();
+        }
+      } finally { tnrSrv.close(); }
+    }
+
+    // ── v2.11.1 acceptance item 2: no dead hover corridor in the gutter ────
+    // Measured on 2.11.0 at 1400x900: .content's 56px of padding with
+    // .ed-handle at left:-36px put the pair at [blockLeft-54, blockLeft-18],
+    // leaving [blockLeft-18, blockLeft) owned by neither the block's border
+    // box nor a button — elementFromPoint() returned main.content for
+    // x 394..411 and a real pointer walk held the ⠿ at opacity 0 for 16
+    // consecutive frames. Two further gaps in the same scan: the buttons are
+    // 20px tall at top:0 while an li row is 24.75px (so the bottom ~4.75px of
+    // every row is an empty gutter), and a 61.5px heading's vertical centre
+    // has no button anywhere in the gutter at all.
+    {
+      const { srv: hovSrv, url: hovUrl } =
+        await setupListDoc(['# A heading here', '', '- alpha', '- beta', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(hovUrl, { waitUntil: 'networkidle0' });
+        const beta = await liBlockSelByText(page, 'beta');
+        const geo = await gutterGeometry(page, beta);
+        // Spec §4.2's number contract: the pair occupies
+        // [contentLeft-40, contentLeft-4], one Y, no gap between them, 4px of
+        // breathing room on the right.
+        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -22,
+          'spec §4.2: ⠿ must start 22px left of the block, got ' + (geo.handle.l - geo.block.l));
+        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -4,
+          'spec §4.2: ⠿ must end 4px left of the block, got ' + (geo.handle.r - geo.block.l));
+        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -40,
+          'spec §4.2: ＋ must start 40px left of the block, got ' + (geo.insert.l - geo.block.l));
+        assert.strictEqual(Math.round(geo.insert.r - geo.handle.l), 0,
+          'spec §4.2: ＋ and ⠿ sit flush, no gap');
+        // A REAL pointer walk from inside the text out past the ＋. Jumping
+        // straight to a button's centre — which every other gutter helper in
+        // this file does — cannot see a corridor, because it never enters one.
+        const midY = geo.block.t + geo.block.h / 2;
+        const walk = await gutterOpacityWalk(page, beta,
+          geo.block.l + 6, geo.block.l - 38, midY, 2);
+        const dead = walk.filter((s) => s.handle < 0.99 || !s.hover);
+        assert.strictEqual(dead.length, 0,
+          'the ⠿ must stay fully visible for every pixel between the text and the ＋ — ' +
+          dead.length + ' of ' + walk.length + ' sample points dropped it: ' +
+          JSON.stringify(dead.slice(0, 12)));
+        // Row bottom: the buttons are 20px tall and the row is taller.
+        const lowY = geo.block.b - 2;
+        const lowWalk = await gutterOpacityWalk(page, beta,
+          geo.block.l + 6, geo.block.l - 38, lowY, 4);
+        const lowDead = lowWalk.filter((s) => s.handle < 0.99 || !s.hover);
+        assert.strictEqual(lowDead.length, 0,
+          'the gutter must stay live along the BOTTOM of a row, below the 20px buttons — ' +
+          JSON.stringify(lowDead));
+        // A heading is 61.5px tall; its vertical centre is 20px below the
+        // bottom of its own ⠿.
+        const hSel = await blockSelByType(page, 'heading');
+        const hGeo = await gutterGeometry(page, hSel);
+        assert.ok(hGeo.block.h > hGeo.handle.h + 10,
+          'fixture sanity: the heading must be taller than its 20px handle, got ' + hGeo.block.h);
+        const hMidY = hGeo.block.t + hGeo.block.h / 2;
+        assert.ok(hMidY > hGeo.handle.b,
+          'fixture sanity: the heading\'s vertical centre must sit BELOW its ⠿ — that is the ' +
+          'gap being closed');
+        const hWalk = await gutterOpacityWalk(page, hSel,
+          hGeo.block.l + 6, hGeo.block.l - 38, hMidY, 4);
+        const hDead = hWalk.filter((s) => s.handle < 0.99 || !s.hover);
+        assert.strictEqual(hDead.length, 0,
+          'moving left from the MIDDLE of a heading must reveal and keep its ⠿ — ' +
+          JSON.stringify(hDead));
+        // Hit-test conflict 1 (spec §4.2): the gutter must still leave the
+        // sidebar splitter's own drag zone alone.
+        const spl = await page.evaluate(() => {
+          const s = document.getElementById('sidebar-splitter');
+          const r = s.getBoundingClientRect();
+          const el = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
+          return { right: r.right, hit: el ? el.className : 'null',
+            y: r.top + r.height / 2, left: r.left };
+        });
+        assert.strictEqual(spl.hit, 'sidebar-splitter',
+          'spec §4.2 conflict 1: elementFromPoint(splitter.right - 2) must still BE the ' +
+          'splitter, got ' + spl.hit);
+        const sidebarBefore = await page.evaluate(() =>
+          document.querySelector('.reader-sidebar').offsetWidth);
+        await page.mouse.move(spl.right - 2, spl.y);
+        await page.mouse.down();
+        await page.mouse.move(spl.right - 2 + 60, spl.y, { steps: 6 });
+        await page.mouse.up();
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const sidebarAfter = await page.evaluate(() =>
+          document.querySelector('.reader-sidebar').offsetWidth);
+        assert.ok(sidebarAfter - sidebarBefore > 40,
+          'the sidebar splitter must still drag after the gutter hover zone is added: ' +
+          sidebarBefore + ' -> ' + sidebarAfter);
+        await page.close();
+      } finally { hovSrv.close(); }
+    }
+
+    // ── v2.11.1 item 2, second half: the hover zone changes the band's
+    //    hit-test target, and wireBlockSelection()'s click delegator must not
+    //    change meaning because of it ─────────────────────────────────────
+    {
+      const { srv: bandSrv, url: bandUrl } =
+        await setupListDoc(['# Doc', '', 'A paragraph.', '', '> quoted block', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(bandUrl, { waitUntil: 'networkidle0' });
+        // A blockquote is a DEGRADED block: a click ON it opens the in-place
+        // source editor. A click in its GUTTER must not.
+        const bq = await page.evaluate(() => {
+          const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
+            .find((e) => e.textContent.indexOf('quoted block') >= 0);
+          const r = b.getBoundingClientRect();
+          return { sel: '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]',
+            l: r.left, t: r.top, h: r.height };
+        });
+        // Fixture sanity FIRST: on main.content (no zone) or on a button, "no
+        // raw editor opened" would be true for the wrong reason.
+        assert.strictEqual(await page.evaluate((x, y) => {
+          const el = document.elementFromPoint(x, y);
+          return el ? el.tagName + '.' + (el.className || '') : 'null';
+        }, bq.l - 2, bq.t + bq.h / 2), 'DIV.ed-block',
+          'the probe point must land in the block\'s own gutter hover zone');
+        await page.mouse.click(bq.l - 2, bq.t + bq.h / 2);
+        await settleEditor(page);
+        assert.strictEqual(await page.evaluate((s) =>
+          document.querySelectorAll(s + ' .ed-raw').length, bq.sel), 0,
+          'a click in the gutter band must NOT open a degraded block\'s raw editor — before ' +
+          'the hover zone that point hit main.content and meant "clicked outside any block"');
+        // And the same click must still resolve an open burst, exactly as it
+        // did when the band belonged to main.content.
+        const para = await paragraphSelByText(page, 'A paragraph.');
+        await openWysiwyg(page, para);
+        await page.keyboard.press('End');
+        await page.keyboard.type('!');
+        await page.mouse.click(bq.l - 2, bq.t + bq.h / 2);
+        await settleEditor(page);
+        assert.ok(await page.evaluate(() => document.activeElement === document.body),
+          'a click in the gutter band must still end the open burst (switchAwayFrom), as it ' +
+          'did when the band hit main.content');
+        await page.close();
+      } finally { bandSrv.close(); }
+    }
+
+    // ── v2.11.1 acceptance item 3: Enter then Tab on the new empty item ────
+    // Measured on 2.11.0: `- beta` + Enter + Tab serialised `- beta\n  -\n`.
+    // CommonMark cannot read `  -` as an empty list item there — an EMPTY list
+    // item may not interrupt a paragraph, and a line of nothing but dashes at
+    // the parent's own content column is a SETEXT H2 UNDERLINE. So `beta`
+    // became an <h2> and the new item ceased to exist: two ordinary keystrokes
+    // destroying content.
+    {
+      const { srv: setSrv, url: setUrl, mdPath: setMdPath } =
+        await setupListDoc(['# Doc', '', '- alpha', '- beta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(setUrl, { waitUntil: 'networkidle0' });
+        const beta = await liBlockSelByText(page, 'beta');
+        await openWysiwyg(page, beta);
+        await page.keyboard.press('End');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+        assert.strictEqual(await page.evaluate(() =>
+          document.querySelectorAll('.ed-block[data-block-type="li"]').length), 3,
+          'fixture sanity: Enter on a non-empty item must produce a third, empty item');
+        await page.keyboard.press('Tab');
+        await settleEditor(page);
+        const md = await saveAndRead(page, setMdPath);
+        assert.strictEqual(md, '# Doc\n\n- alpha\n- beta\n  - ​\n',
+          'the indented empty item must not serialise as a bare `  -` (a setext H2 underline ' +
+          'for `beta`). Got ' + JSON.stringify(md));
+        // The bytes are only half of it — what marked reads back is the fact
+        // that matters, and it is what a byte assertion alone can be green
+        // without.
+        // A DEEP token scan, deliberately NOT lexTypes(): the setext H2 this fix
+        // exists to prevent lives INSIDE a list item, so a top-level-only scan
+        // reports ['heading', 'list'] either way and is green on a broken
+        // build — the exact vacuity lexLoose()'s own note above warns about.
+        const countHeadings = (toks) => (toks || []).reduce((n, t) =>
+          n + (t.type === 'heading' ? 1 : 0) + countHeadings(t.tokens) +
+          (t.items || []).reduce((m, it) => m + countHeadings(it.tokens), 0), 0);
+        const headings = countHeadings(plainMarked.lexer(md));
+        assert.strictEqual(headings, 1,
+          'the document must contain exactly ONE heading (`# Doc`) AT ANY DEPTH — a second ' +
+          'one is `beta` swallowed by a setext underline inside its own list item. Got ' +
+          headings + ' from ' + JSON.stringify(md));
+        assert.ok(!/<h2/.test(await page.evaluate(() =>
+          document.querySelector('.content').innerHTML)),
+          'no <h2> may appear anywhere in the re-rendered document');
+        const shape = await page.evaluate(() =>
+          Array.prototype.slice.call(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((b) => b.getAttribute('data-indent') + ':' +
+              JSON.stringify(b.querySelector(':scope > .ed-li-text').textContent)).join(' '));
+        assert.strictEqual(shape, '0:"alpha" 0:"beta" 1:""',
+          'after the round trip the run must be alpha / beta / an EMPTY child of beta — the ' +
+          'escape must not leak a visible character into the item. Got ' + shape);
+        // Typing into the recovered item must produce clean bytes: the escape
+        // is the serializer's, and it must not become part of the user's text.
+        // reopenWysiwyg(), not openWysiwyg(): the Ctrl+S above resolved the
+        // burst on this very surface WITHOUT blurring it, so a plain click
+        // fires no focusin and starts no new burst — the typing would then be
+        // owned by nobody and the commit would write nothing.
+        await reopenWysiwyg(page, await liBlockSelByText(page, ''));
+        await page.keyboard.type('gamma');
+        await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+        await settleEditor(page);
+        const md2 = await saveAndRead(page, setMdPath);
+        assert.strictEqual(md2, '# Doc\n\n- alpha\n- beta\n  - gamma\n',
+          'typing into the escaped empty item must write plain bytes, with no escape residue. ' +
+          'Got ' + JSON.stringify(md2));
+        await page.close();
+      } finally { setSrv.close(); }
+    }
+
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
