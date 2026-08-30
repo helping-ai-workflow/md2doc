@@ -1855,6 +1855,251 @@ async function clickInsertMenuItem(page, sel, label) {
         s2fSrv.close();
       }
     }
+    // ── S2 Task 3: 轉換成 between LIST types. The block stays a li, so the
+    //    run stays a run and the whole span goes through commitListStructure()
+    //    exactly as every other structural list op does (§3.8 renumbering and
+    //    the §3.4 marker-width stack come for free).
+    //
+    //    ⚠ The expected bytes below were MEASURED, not reasoned. The plan
+    //    pinned blank lines around a converted item in two of these; that is
+    //    wrong. serializeBlocks() emits one line per block and no separators,
+    //    and none are needed here: marked.lexer('- alpha\n1. bravo\n- charlie')
+    //    already returns THREE list tokens, because a marker-type change
+    //    interrupts a list on its own. §4.3 rule 1's blank line is about
+    //    li → NON-list (Task 4), where lazy continuation really would swallow
+    //    the converted line into the item above it. ──────────────────────────
+    {
+      const { srv: s3aSrv, url: s3aUrl, mdPath: s3aMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-list-type')).join(',');
+          }),
+          'ul,ol,ul', 'only the grip’s own block changed type (spec 3.3)');
+        assert.strictEqual(await saveAndRead(page, s3aMdPath),
+          '# Doc\n\n- alpha\n1. bravo\n- charlie\n',
+          'spec 3.8 rule (b): a different data-list-type ends the run, and the new run renumbers from 1');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表: one bullet becomes an ordinal, run splits — OK');
+      } finally {
+        s3aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3bSrv, url: s3bUrl, mdPath: s3bMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '待辦清單');
+        // §4.1: data-list-type and data-task are ORTHOGONAL axes, so a ul that
+        // gains a checkbox is still a ul and the run does not split.
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const el = document.querySelector('.ed-block[data-block-type="li"]');
+            return el.getAttribute('data-list-type') + '/' + el.getAttribute('data-task') +
+              '/' + (el.querySelector(':scope > .ed-li-check') ? 'box' : 'nobox');
+          }),
+          'ul/1/box', 'the item is a ul task with a live .ed-li-check element');
+        assert.strictEqual(await saveAndRead(page, s3bMdPath),
+          '# Doc\n\n- [ ] alpha\n- bravo\n',
+          'spec 4.1: listType and task are orthogonal, so a ul stays a ul');
+
+        await page.close();
+        console.log('S2 轉換成 › 待辦清單: a bullet gains a checkbox, stays a ul — OK');
+      } finally {
+        s3bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3cSrv, url: s3cUrl, mdPath: s3cMdPath } =
+        await setupTableDoc(['# Doc', '', '- [x] alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const el = document.querySelector('.ed-block[data-block-type="li"]');
+            return el.getAttribute('data-task') +
+              '/' + (el.querySelector(':scope > .ed-li-check') ? 'box' : 'nobox');
+          }),
+          '0/nobox', 'the checkbox element is gone, not merely unchecked');
+        assert.strictEqual(await saveAndRead(page, s3cMdPath),
+          '# Doc\n\n- alpha\n- bravo\n',
+          'a plain bullet has nowhere to store checkedness; it is dropped');
+
+        await page.close();
+        console.log('S2 轉換成: 待辦清單 → 項目符號列表 drops the checkbox — OK');
+      } finally {
+        s3cSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3dSrv, url: s3dUrl, mdPath: s3dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - child', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        // §3.3: only the grip's block converts — the child keeps its own type
+        // and its own data-indent. §3.4's marker-width stack is what moves its
+        // COLUMNS: '1. ' contributes 3, so the child sits at column 3, not 2.
+        // MEASURED: marked.lexer('1. alpha\n   - child\n- bravo\n') returns the
+        // child as a real nested list token inside alpha (childTokens=[text,
+        // list]) and bravo as a second, top-level list token — no blank line
+        // needed, and none emitted.
+        assert.strictEqual(await saveAndRead(page, s3dMdPath),
+          '# Doc\n\n1. alpha\n   - child\n- bravo\n',
+          'spec 3.4: the child re-indents to the new marker width but does not change type');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-list-type') + el.getAttribute('data-indent')).join(',');
+          }),
+          'ol0,ul1,ul0', 'the child kept both its type and its indent');
+
+        await page.close();
+        console.log('S2 轉換成: a child re-indents to the new marker width, keeps its type — OK');
+      } finally {
+        s3dSrv.close();
+      }
+    }
+
+    {
+      const { srv: s3eSrv, url: s3eUrl, mdPath: s3eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3eUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s3eMdPath, 'utf8');
+        const bannerNow = () => page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.querySelector('span').textContent : null;
+        });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        // §4.1: a conversion rewrites the item's own line, so it is NOT
+        // column-only and a multi-line li refuses as its TARGET.
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'spec 4.1 refusal banner, not convert-md.js’s per-block one');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
+          'a refused conversion must not touch a single byte');
+
+        // The MESSAGE on a NON-list target is the ordering tripwire. §4.3's
+        // run-wide gate has to sit ahead of everything else in
+        // convertBlockViaMenu() — ahead of the li→list routing, and therefore
+        // ahead of the stripMarker() call further down, which refuses a
+        // multi-line li too but with its own, narrower 「此區塊的格式無法轉換」.
+        // Today a li → 文字 stops at Task 4's not-implemented refusal; the
+        // gate is what makes the answer §4.1's banner instead, and that stays
+        // true when Task 4 replaces that refusal with a stripMarker() path.
+        // If the gate is ever moved below either one, this is the line that
+        // notices — it goes 「清單的轉換尚未實作」 now, 「此區塊的格式無法轉換」
+        // after Task 4.
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'the §4.3 gate must run BEFORE the per-target routing, not after it');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
+          'still not one byte');
+
+        await page.close();
+        console.log('S2 轉換成: a multi-line li refuses with the §4.1 banner — OK');
+      } finally {
+        s3eSrv.close();
+      }
+    }
+    {
+      const { srv: s3fSrv, url: s3fUrl, mdPath: s3fMdPath } =
+        await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3fUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'gap is ~5px'), '編號列表');
+        // A list-type conversion changes the item's MARKER and nothing else —
+        // its content is not touched, so its content must come from the FILE,
+        // exactly like every other member of the run. Concretely: the serializer
+        // re-states the marker for a carried line too (list-md.js emits
+        // `head + carriedSplit.content`, and SRC_MARKER_RE eats the old bullet
+        // AND the old GFM checkbox), so carrying the converted item costs
+        // nothing and buys byte-fidelity.
+        //
+        // MEASURED, and it is why convertListItemType() passes NO `mutatedEl`
+        // to bystanderCarryOver() — contradicting the plan's Task 3 sketch,
+        // which passes `liEl`. `bystanderCarryOver(span, mutatedEl)` EXCLUDES
+        // `mutatedEl` from the replay map, so naming the converted item is what
+        // sends its content back through inline-md.js's escapeText() —
+        // measured: serializeInline('~5px') === '\\~5px'. That is the exact
+        // bystander-corruption class the S1 branch spent three commits
+        // eliminating, re-introduced on the one item the user did point at.
+        assert.strictEqual(await saveAndRead(page, s3fMdPath),
+          '# Doc\n\n1. gap is ~5px\n- bravo\n',
+          'the converted item’s own content is replayed from the file, never re-serialized');
+
+        await page.close();
+        console.log('S2 轉換成: a list-type change never re-escapes the item’s own content — OK');
+      } finally {
+        s3fSrv.close();
+      }
+    }
+    {
+      // §4.3's open question, answered by MEASUREMENT rather than by reading
+      // the spec: is listRunOf() — "outermost run PLUS every descendant" — a
+      // superset of §3.4 rule 2's SCOPE, which is what §4.3 says the gate's
+      // input must be? §4.3 is explicit that checking only the operated
+      // block's own run misses "a deeper child run containing a loose item",
+      // which then gets silently re-indented.
+      //
+      // This fixture is exactly that shape, and it is a real one:
+      // marked.lexer('- alpha\n  - c1\n\n  - c2\n- bravo\n') returns ONE tight
+      // top-level list whose `alpha` item holds a LOOSE nested list. The
+      // operated block (alpha) sits in a perfectly clean indent-0 run; the
+      // degradation lives one level down, in c1/c2, whose loose items render
+      // as <p> and reach list-md.js as unsupported 'P'.
+      //
+      // The refusal below is the evidence: listRunOf(alpha) DOES reach the
+      // deeper run, so the single call in convertBlockViaMenu() is sufficient
+      // and no separate scope walk is needed. Delete the gate and this
+      // scenario rewrites c1/c2 without asking.
+      const { srv: s3gSrv, url: s3gUrl, mdPath: s3gMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '  - c2', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s3gUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s3gMdPath, 'utf8');
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }),
+          '此清單含不支援的格式，無法調整結構',
+          'the gate must see the LOOSE child run, not just the operated block’s own run');
+        assert.strictEqual(await saveAndRead(page, s3gMdPath), before,
+          'a deeper degraded run refuses the whole gesture — not one byte moves');
+
+        await page.close();
+        console.log('S2 轉換成: the §4.3 gate reaches a DEEPER loose run (listRunOf scope) — OK');
+      } finally {
+        s3gSrv.close();
+      }
+    }
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
     //    type + Enter commits; file line updated on save ──────────────────
