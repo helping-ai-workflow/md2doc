@@ -11274,7 +11274,33 @@ async function clickInsertMenuItem(page, sel, label) {
         '  lazy continuation ~y',
         '- hotel hard' + HB,
         '  hotel two ~z',
-        '- india ~z2',
+        '- india ~z2', '',
+        // ── Branch review, BLOCKING 3: RUN 3, and why the sweep needed it ──
+        // 6edb250 (§3.12) made a hard break serialize as a trailing '\\', so
+        // list-md.js's isMultiLine now fires for a hard-break item and pushes
+        // MULTILINE into `unsupported`. That is correct, and it also routed
+        // BOTH of the runs above to resolveBurst()'s PARTIAL branch (measured:
+        // __pathTaken === 'PARTIAL', unsupported = ["MULTILINE","MULTILINE"]).
+        // The WHOLE-RUN bystander carry-over — the one thing d854430 exists to
+        // fix, and whose own commit message quotes run 1 byte-for-byte — was
+        // then executed by no test at all: reverting it to `const carry = null`
+        // left all 29 files green and this very sweep printing "0 violations".
+        //
+        // Run 3 is therefore shaped by exclusion: no hard break and no lazy
+        // continuation (either one diverts the whole run to the partial path),
+        // and every item single-line, so `unsupported` is EMPTY and typing in
+        // one takes the whole-run commit. What makes it discriminating is the
+        // escapable content: escapeText() turns '~' into '\\~' and a
+        // non-word-flanked '_' into '\\_' on every re-serialized block, so a
+        // bystander that is re-serialized instead of replayed changes bytes
+        // the user never touched. That the run really does take that path is
+        // not left to inspection — it is asserted below against the
+        // serializer itself, so a future serializer change cannot silently
+        // reroute it the way §3.12 did.
+        'Second divider paragraph.', '',
+        '- juliet ~t3',
+        '- kilo _u3 tail',
+        '- lima plain',
         '',
       ];
       const sweepOriginal = SWEEP_ROWS.join('\n');
@@ -11288,9 +11314,10 @@ async function clickInsertMenuItem(page, sel, label) {
         // k-th `.ed-block[data-block-type="li"]` on screen is the k-th li block
         // here, which is what makes a DOM index addressable as a line range.
         const liBlocks = buildBlockMap(sweepOriginal).blocks.filter((b) => b.type === 'li');
-        assert.strictEqual(liBlocks.length, 9,
-          'fixture sanity: 9 list items over two runs (5 hard-break, 1 lazy, 3 single-line), got ' +
-          liBlocks.length);
+        assert.strictEqual(liBlocks.length, 12,
+          'fixture sanity: 12 list items over THREE runs (5 hard-break, 1 lazy, 6 single-line ' +
+          '— three of those six being run 3, the only run that reaches the whole-run commit ' +
+          'path), got ' + liBlocks.length);
         assert.strictEqual(SWEEP_ROWS.filter((r) => /  $/.test(r)).length, 5,
           'fixture sanity: exactly 5 rows must end in a real hard break — the shape the ' +
           'real CHANGELOG.md does not have and therefore could not test. FOUR of them are ' +
@@ -11311,6 +11338,53 @@ async function clickInsertMenuItem(page, sel, label) {
             ', divider at ' + dividerAt);
         }
         const page = await newPage(browser);
+        // ── BLOCKING 3: the fixture-sanity assertion that stops run 3 being
+        // rerouted the way §3.12 rerouted runs 1 and 2 ──────────────────────
+        // Asked of the SERIALIZER, in the page, not of the fixture's own
+        // bytes: "does this run still commit through the whole-run branch?"
+        // resolveBurst()'s li branch takes that branch only when `unsupported`
+        // is empty, so an empty `unsupported` here IS the statement that the
+        // carry-over at client.js's `bystanderCarryOver(runEls, editedLiEl)`
+        // is on the path the 'type' gesture below walks. A future serializer
+        // change that starts reporting something for these items fails HERE,
+        // with this explanation, instead of quietly turning the sweep back
+        // into a tripwire that guards nothing.
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        const run3 = await page.evaluate(new Function('prefix', RUN_SPAN_FN + `
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const seed = lis.find((el) => {
+            const t = el.querySelector(':scope > .ed-li-text');
+            return !!t && t.textContent.indexOf(prefix) === 0;
+          });
+          if (!seed) return null;
+          const span = runSpanOf(seed);
+          const res = window.md2docListMd.serializeBlocks(span);
+          return {
+            size: span.length,
+            unsupported: res.unsupported,
+            multi: res.multiLineBlockIds,
+            md: res.md,
+          };
+        `), 'juliet');
+        assert.ok(run3, 'fixture sanity: run 3 (the "juliet" item) must be on screen');
+        assert.strictEqual(run3.size, 3,
+          'fixture sanity: run 3 is exactly its own three items — a span of ' + run3.size +
+          ' means the divider paragraph that separates it from run 2 was lost, and the ' +
+          'lazy item in run 2 would then divert run 3 to the partial path too');
+        assert.deepStrictEqual(run3.unsupported, [],
+          'fixture sanity: run 3 must serialize with an EMPTY `unsupported` — that is the ' +
+          'exact condition resolveBurst() keys the WHOLE-RUN commit on, and therefore the ' +
+          'only reason this sweep reaches the whole-run bystander carry-over at all. Got ' +
+          JSON.stringify(run3.unsupported) + ' from\n' + JSON.stringify(run3.md));
+        assert.deepStrictEqual(run3.multi, [],
+          'fixture sanity: no item in run 3 may be multi-line (hard break OR lazy ' +
+          'continuation) — either one pushes MULTILINE and reroutes the whole run. Got ' +
+          JSON.stringify(run3.multi));
+        assert.ok(/~/.test(run3.md) && /_/.test(run3.md),
+          'fixture sanity: run 3 must still carry escapable content — a re-serialized ' +
+          'bystander picks up \\~ and \\_, and without those characters the run is green ' +
+          'on a broken build. Got ' + JSON.stringify(run3.md));
         const violations = [];
         const gestures = ['type', 'tab', 'shift-tab'];
         for (let k = 0; k < liBlocks.length; k++) {
