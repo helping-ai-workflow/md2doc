@@ -3,6 +3,55 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.12.0 — 2026-08-31
+
+### Added
+
+- **Blocks can be selected as a set, and one gesture then acts on all of them.**
+  Press inside a block and drag past its edge, or Shift+Click a second block: every
+  block in between takes a semi-transparent blue wash with its text still readable
+  underneath. Shift+↑ / ↓ then grows and shrinks the set a block at a time, and Esc
+  clears it. With a set standing, the ⠿ menu's `轉換成`, `建立副本` and `刪除` act on
+  the whole set, and so do Tab, Shift+Tab, Delete and Backspace. Each of them is a
+  single Ctrl+Z, however many blocks it touched — including selecting the whole
+  document and pressing Delete, which empties it and takes one Ctrl+Z to bring back.
+- **Tab over a selection keeps the blocks' relationship to each other.** The whole
+  set moves by one shared step, measured from its shallowest item, so three
+  selected siblings stay siblings instead of folding into one another — and a set
+  that cannot move as a whole does not move at all rather than half-moving. On
+  headings the same key steps every heading in the set a level down or up, stopping
+  at 標題 1 and 標題 6.
+- **The selection stays put across the redraw its own operation causes.** After a
+  batch convert, duplicate or indent the set lands on the lines the operation
+  produced, the keyboard still works without touching the mouse, and the page does
+  not jump. An undo or redo clears it, so you are never left with a highlight over
+  a document that has changed underneath it.
+- **A batch that cannot be done says so instead of doing nothing.** Selections that
+  mix list items with other blocks, that skip a block in the middle, that span two
+  separate lists, or that cover a list already frozen read-only are refused with a
+  message on screen, and not one byte of the file is written.
+- **Every ⠿ menu item now leads with an icon** — a turning arrow for `轉換成 ›`,
+  two offset cards for `建立副本`, a bin for `刪除`, angle brackets for `MD 原始碼`.
+  They are drawn in the item's own colour, so they follow the menu rather than
+  being pinned to one theme.
+- **`轉換成 ›` opens its submenu on hover**, without a click. Moving diagonally
+  towards a target further down the panel keeps it open the whole way, including
+  across the few pixels of gap between the item and the panel; settling on another
+  item closes it. A click still toggles it, as before.
+
+### Fixed
+
+- **Esc with the ⠿ menu open threw away what you had just typed.** The menu's own
+  Esc handler was unreachable while any edit surface held focus — which is always,
+  because the menu deliberately keeps focus where it was — so the key fell through
+  to the editor and reverted the block instead, leaving the menu on screen. Esc now
+  resolves the thing nearest the front: a table drag, then a menu, then a block
+  selection, and only then the block being edited.
+- **Ctrl+S followed by Ctrl+Z did nothing.** Saving an untouched block leaves it
+  focused with no edit in progress, and in that state the undo key was captured by
+  the block and then discarded. Undo and redo now reach the document whenever there
+  is no edit in progress to own them.
+
 ## v2.11.1 — 2026-08-31
 
 ### Fixed

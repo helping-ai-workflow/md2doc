@@ -17312,6 +17312,465 @@ async function gutterGeometry(page, sel) {
     }
     // <<<T7SECTION
 
+    // ── S3 Task 8: the selection-shape × operation sweep ──────────────────
+    // >>>T8SWEEP  (and <<<T8SWEEP at the end: the scratch subset runner every
+    // S3 task has used slices a section out by markers, never by line number.)
+    //
+    // Eleven selection SHAPES against seven batch OPERATIONS. Tasks 6 and 7
+    // each pinned exact bytes for the shapes their own arithmetic lives in;
+    // this is the cross product, and its job is different — it asks every
+    // shape the same seven questions and refuses to let a cell be green for
+    // being silent.
+    //
+    // Three rules the sweep is built around, all of them lessons this plan
+    // has already paid for:
+    //
+    //   1. **Preconditions are asserted per CELL, before the operation.** A
+    //      sweep whose fixture cannot express the shape under test reports
+    //      green and removes the pressure to look — eleven vacuous tests
+    //      across S1–S3 got in that way. So every cell first proves the set
+    //      really holds the member count the row claims, that a "degraded"
+    //      run really reports something unsupported, that a "phantom"
+    //      fixture really has an INVERTED range between two members, and
+    //      that a table span really covers the table's whole four-line body.
+    //   2. **A refusal is an OUTCOME, not a skip.** §3.6's 2026-08-31 ruling
+    //      is explicit that 「靜默不動作是缺陷」, so a cell that comes back
+    //      byte-identical with no banner is a DEFECT unless the row names it
+    //      as a documented no-op with a reason. Every refusing cell asserts
+    //      both halves: the banner's exact text AND a byte-identical file.
+    //   3. **The assertions are on the SAVED BYTES**, read back off disk
+    //      after a real Ctrl+S (Task 6 carry 4: a ⠿ gesture's bytes are not
+    //      on disk until then, and a bare readFileSync straight afterwards
+    //      reads the original — five write scenarios "failed" that way once).
+    //      lexLooseDeep(), not lexLoose(): the shallow one cannot see a
+    //      NESTED list going loose and that has already caused a false green.
+    {
+      // The eleven shapes. `md` is the fixture, `anchor`/`focus` the selection
+      // (a LINE range — the selection's identity is lines, never ids), and
+      // `members` what membersOf() must answer for it. Measured with
+      // buildBlockMap() before being written down.
+      const T8_P = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
+      const T8_L = '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n4. delta\n';
+      const T8_MIX = '# Doc\n\nalpha\n\n- bravo\n- charlie\n';
+      const T8_DEG = '# Doc\n\n- a\n\n- b\n';
+      const T8_TBL = '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n';
+      const T8_GAP = '# Doc\n\n- a\n- - b\n- c\n';
+      const T8_EDGE = 'alpha\n\nbravo\n\ncharlie\n';
+      const T8_WHOLE = 'alpha\n\nbravo\n';
+
+      // Outcome vocabulary. `applied` = the file changed and no banner was
+      // raised. `refused:<message>` = the file is byte-identical AND that
+      // banner stands. `noop:<reason>` = byte-identical, no banner, and the
+      // row states WHY the spec says nothing should happen. Anything else is
+      // a defect, `SILENT` above all.
+      const RUN_GATE = '此清單含不支援的格式，無法調整結構';
+      const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+      const GAP = '選取範圍不連續，無法整批操作';
+      const refused = (m) => ({ kind: 'refused', message: m });
+      const noop = (why) => ({ kind: 'noop', why: why });
+      const applied = { kind: 'applied' };
+      // §3.5: 「段落 no-op」— a span with no heading and no list item in it has
+      // nothing for Tab to change, and that is the spec's answer, not a
+      // dropped gesture.
+      const PARA_TAB = noop('§3.5: a span of paragraphs has nothing Tab can change');
+      const allRefuse = (m) => ({
+        'convert-quote': refused(m), 'convert-ul': refused(m), duplicate: refused(m),
+        'delete-menu': refused(m), 'delete-key': refused(m),
+        tab: refused(m), 'shift-tab': refused(m),
+      });
+      const paraOps = {
+        'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+        'delete-menu': applied, 'delete-key': applied,
+        tab: PARA_TAB, 'shift-tab': PARA_TAB,
+      };
+
+      const T8_SHAPES = [
+        { id: '1 block', md: T8_P, anchor: 3, focus: 3, members: [[3, 3]],
+          expect: paraOps },
+        { id: '2 blocks', md: T8_P, anchor: 3, focus: 5, members: [[3, 3], [5, 5]],
+          expect: paraOps },
+        { id: 'N blocks', md: T8_P, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]], expect: paraOps },
+        // A span of list items, deliberately NOT starting at the run's first
+        // item: an anchor that is the list's own start has delta 0 by
+        // indentListItem()'s list-start clause, and the Tab cell would then be
+        // a no-op for a reason that has nothing to do with the batch.
+        { id: 'list-item span', md: T8_L, anchor: 4, focus: 6,
+          members: [[4, 4], [5, 5], [6, 6]],
+          expect: {
+            'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied, tab: applied,
+            // T7 carry 5: the delta is measured from the set's MINIMUM old
+            // indent and a member already at 0 can move −1 nowhere, so the
+            // whole batch is a no-op. The alternative (a max(0,…) floor) would
+            // move the deeper members and make a's child its sibling — the
+            // same unasked-for restructure §3.5 rules out for Tab.
+            'shift-tab': noop('T7 carry 5: minimum old indent is already 0, so the '
+              + 'one delta is 0 and §3.5 forbids a per-item floor'),
+          } },
+        // §3.6's 2026-08-31 ruling. Every one of the seven refuses.
+        { id: 'crossing kinds', md: T8_MIX, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], mixed: true, expect: allRefuse(MIXED) },
+        // §4.3's run-wide gate. The fixture is one LOOSE list, so
+        // serializeBlocks() reports 'P' for every item and the gate refuses
+        // ahead of the columnOnly bail — which is why Tab refuses here too.
+        { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], degraded: true, expect: allRefuse(RUN_GATE) },
+        // Task 1 carry 2 / Task 6 carry 15: a no-line PHANTOM sits BETWEEN two
+        // real members, so the set cannot be expressed as one contiguous index
+        // range in `blocks`.
+        { id: 'phantom in span', md: T8_GAP, anchor: 3, focus: 5,
+          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2, expect: allRefuse(GAP) },
+        // A table is ONE block owning four source lines. The anchor is put on
+        // the table's startLine and the FOCUS on the paragraph, so the roving
+        // holder — and therefore the ⠿ the menu opens on — is the paragraph:
+        // §3.7 gives a table block no 轉換成 at all, and a grip that could not
+        // offer the item would make two of the seven cells unreachable rather
+        // than answered.
+        // ⚠ MEASURED and recorded rather than changed: the two conversion cells
+        // of this row APPLY, and they convert the TABLE with the rest of the
+        // span — 引用 gives '> | A | B |' … and 項目符號列表 gives
+        // '- | A | B |' with its other two lines carried as continuations. Both
+        // still lex as a table (nested in a blockquote / in the list item), so
+        // no cells are lost — but §3.7 withholds 轉換成 from a table block
+        // ENTIRELY, on the grounds that no target could carry its cells, and a
+        // batch whose grip is a paragraph reaches the table anyway. That is a
+        // scope question the spec has not ruled on for a SET, and inventing an
+        // answer at stage closure is the mistake §3.6's own 2026-08-31 ruling
+        // was written to avoid. Pinned as it behaves today so the next change
+        // to it is visible.
+        { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
+          members: [[3, 3], [5, 7]], tableLines: [5, 7], expect: {
+            'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        { id: 'document start', md: T8_EDGE, anchor: 1, focus: 3,
+          members: [[1, 1], [3, 3]], expect: paraOps },
+        { id: 'document end', md: T8_EDGE, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], expect: paraOps },
+        // T7 carry 7: a whole-document set is allowed and its delete empties
+        // the file. One Ctrl+Z brings it back, which is what makes it safe.
+        { id: 'whole document', md: T8_WHOLE, anchor: 1, focus: 3,
+          members: [[1, 1], [3, 3]], empties: true, expect: paraOps },
+      ];
+
+      // The seven operations. Two conversions — one list target and one
+      // non-list target, the two sides of §4.3's rules 1 and 2 — plus the ⠿'s
+      // other two set operations and the three keyboard ones.
+      const T8_OPS = [
+        { id: 'convert-quote', run: (page, sel) => convertVia(page, sel, '引用') },
+        { id: 'convert-ul', run: (page, sel) => convertVia(page, sel, '項目符號列表') },
+        { id: 'duplicate', run: (page, sel) => clickGutterMenuItem(page, sel, '建立副本') },
+        { id: 'delete-menu', run: (page, sel) => clickGutterMenuItem(page, sel, '刪除') },
+        { id: 'delete-key', run: (page) => page.keyboard.press('Delete') },
+        { id: 'tab', run: (page) => page.keyboard.press('Tab') },
+        { id: 'shift-tab', run: async (page) => {
+          await page.keyboard.down('Shift');
+          await page.keyboard.press('Tab');
+          await page.keyboard.up('Shift');
+        } },
+      ];
+
+      const t8Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const t8Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t8Blocks = (page) => page.evaluate(() => window.__edTestBlocks());
+      // §4.3's own gate, asked of the live DOM: which blocks serializeBlocks()
+      // cannot round-trip. `[]` means every run in the document is
+      // structurally editable — the precondition ten of the eleven rows need,
+      // and the one thing the 'degraded run' row needs to be NON-empty.
+      const t8Unsupported = (page) => page.evaluate(() =>
+        window.md2docListMd.serializeBlocks(Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+
+      const t8Rows = [];
+      const t8Defects = [];
+
+      for (const shape of T8_SHAPES) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s3-t8-'));
+        const mdPath = path.join(dir, 'doc.md');
+        fs.writeFileSync(mdPath, shape.md, 'utf8');
+        // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
+        // has one: seven cells on one server outlive createEditorServer()'s
+        // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
+        // that reads as a broken test.
+        const srv8 = await createEditorServer({
+          files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+        });
+        try {
+          const page = await newPage(browser);
+          // The batch paths are async handlers with no catch of their own, so
+          // a throw inside one is silent and looks exactly like "the gesture
+          // did nothing" (Task 6 carry 17).
+          const thrown = [];
+          page.on('pageerror', (e) => thrown.push(String(e && e.message)));
+
+          for (const op of T8_OPS) {
+            const cell = shape.id + ' × ' + op.id;
+            const want = shape.expect[op.id];
+            assert.ok(want, 'FIXTURE SANITY ' + cell + ': every cell of the matrix must '
+              + 'state an expected outcome — an unlisted cell is a hole in the sweep');
+            thrown.length = 0;
+            // Every cell starts from the same bytes; only the navigation is
+            // repeated. A cell that DID write despite refusing therefore
+            // cannot poison the next one.
+            fs.writeFileSync(mdPath, shape.md, 'utf8');
+            await page.goto(srv8.urlFor(mdPath), { waitUntil: 'networkidle0' });
+            await settleEditor(page);
+
+            // ── PRECONDITIONS ────────────────────────────────────────────
+            await page.evaluate((a, f) => window.__edTestSetSelection(a, f),
+              shape.anchor, shape.focus);
+            const before = await t8Sel(page);
+            assert.ok(before, 'PRECONDITION ' + cell + ': a selection must actually stand');
+            assert.deepStrictEqual(before.memberLines, shape.members,
+              'PRECONDITION ' + cell + ': the set must really hold ' + shape.members.length
+              + ' member(s) at ' + JSON.stringify(shape.members) + ' — a row whose fixture '
+              + 'cannot express its own shape sweeps nothing. Got '
+              + JSON.stringify(before.memberLines));
+            assert.deepStrictEqual(before.domSelectedLines, shape.members,
+              'PRECONDITION ' + cell + ': the PAINT must agree with the model. A count of '
+              + '.ed-selected nodes is an assertion about Task 2\'s CSS; the pair is what '
+              + 'catches the two drifting apart. Got '
+              + JSON.stringify(before.domSelectedLines));
+            assert.ok(before.focusHolderId !== null,
+              'PRECONDITION ' + cell + ': the set must have a roving focus holder, or the '
+              + 'three keyboard operations have no receiver at all and their cells would '
+              + 'be green for having no keyboard');
+            const unsupported = await t8Unsupported(page);
+            if (shape.degraded) {
+              assert.ok(unsupported.length > 0,
+                'PRECONDITION ' + cell + ': this row\'s whole subject is a run §4.3\'s gate '
+                + 'REFUSES. serializeBlocks().unsupported must be non-empty, or the row is '
+                + 'sweeping an ordinary healthy list and every refusal below would be '
+                + 'measuring something else. Got ' + JSON.stringify(unsupported));
+            } else {
+              assert.deepStrictEqual(unsupported, [],
+                'PRECONDITION ' + cell + ': every list run in the fixture must be '
+                + 'structurally EDITABLE at the start of this cell — a degraded run refuses '
+                + 'all seven operations and this whole row would be green without a single '
+                + 'one of them happening. Got ' + JSON.stringify(unsupported));
+            }
+            const blocksNow = await t8Blocks(page);
+            if (shape.phantomAt !== undefined) {
+              const ph = blocksNow[shape.phantomAt];
+              assert.ok(ph && ph.endLine === ph.startLine - 1,
+                'PRECONDITION ' + cell + ': index ' + shape.phantomAt + ' of `blocks` must '
+                + 'be a no-line PHANTOM (an INVERTED range) sitting BETWEEN two members, '
+                + 'which is the only thing that makes this a GAP. Nothing in the DOM '
+                + 'carries that fact — the phantom\'s element is there, its missing line '
+                + 'range is not. Got ' + JSON.stringify(ph));
+              const memberIdx = blocksNow
+                .map((b, i) => ({ b: b, i: i }))
+                .filter((x) => shape.members
+                  .some((m) => m[0] === x.b.startLine && m[1] === x.b.endLine))
+                .map((x) => x.i);
+              assert.ok(memberIdx[memberIdx.length - 1] - memberIdx[0] + 1 !== memberIdx.length,
+                'PRECONDITION ' + cell + ': the members must be NON-adjacent in `blocks` '
+                + '(indices ' + JSON.stringify(memberIdx) + '), or there is no gap to refuse');
+            }
+            if (shape.tableLines) {
+              const tbl = blocksNow.find((b) => b.type === 'table');
+              assert.ok(tbl, 'PRECONDITION ' + cell + ': the fixture must hold a table block');
+              assert.deepStrictEqual([tbl.startLine, tbl.endLine], shape.tableLines,
+                'PRECONDITION ' + cell + ': the table must own all '
+                + (shape.tableLines[1] - shape.tableLines[0] + 1) + ' of its source lines');
+              assert.ok(shape.members.some((m) =>
+                m[0] === tbl.startLine && m[1] === tbl.endLine),
+                'PRECONDITION ' + cell + ': the SET must cover the table WHOLE — a member '
+                + 'range that stopped short of its last line would be a different shape '
+                + 'from the one this row claims to sweep');
+            }
+            if (shape.mixed) {
+              const kinds = blocksNow
+                .filter((b) => shape.members
+                  .some((m) => m[0] === b.startLine && m[1] === b.endLine))
+                .map((b) => b.type);
+              assert.ok(kinds.indexOf('li') !== -1 && kinds.some((k) => k !== 'li'),
+                'PRECONDITION ' + cell + ': the set must really hold BOTH a list item and a '
+                + 'non-list block, or there is no mixed span to refuse. Got '
+                + JSON.stringify(kinds));
+            }
+            assert.strictEqual(await t8Banner(page), null,
+              'PRECONDITION ' + cell + ': no banner may be standing before the operation, or '
+              + 'the refusal read below is somebody else\'s');
+
+            // ── THE OPERATION ────────────────────────────────────────────
+            const gripSel = '.ed-block[data-block-id="' + before.focusHolderId + '"]';
+            await op.run(page, gripSel);
+            await settleEditor(page);
+
+            const nAfter = (await t8Blocks(page)).length;
+            const banner = await t8Banner(page);
+            const after = await saveAndRead(page, mdPath);
+            const changed = after !== shape.md;
+            assert.deepStrictEqual(thrown, [],
+              cell + ': the batch handlers are async with no catch, so an exception inside '
+              + 'one is silent and reads exactly like "the gesture did nothing"');
+
+            let outcome;
+            if (changed && banner) outcome = 'WROTE+BANNER';
+            else if (changed) outcome = 'applied';
+            else if (banner) outcome = 'refused';
+            else outcome = 'no-op';
+            t8Rows.push({ cell: cell, outcome: outcome, banner: banner,
+                          why: want.kind === 'noop' ? want.why : '' });
+
+            // How many BLOCKS the operation may create or destroy, stated as a
+            // rule rather than as 77 hand-copied numbers: a duplicate adds one
+            // block per member, a delete removes one per member, and a
+            // conversion or an indent change neither creates nor destroys any.
+            // This is the only assertion in the sweep that can tell a batch
+            // that operated on the WHOLE set from one that operated on part of
+            // it — "the file changed" is satisfied by an operand set one item
+            // too short (T7 carry 10's M6), and so is every byte-level
+            // invariant below it. Measured to hold in all 77 cells before it
+            // was written down; a cell that ever needs a different number is a
+            // finding, not a constant to edit.
+            const n = shape.members.length;
+            const wantDelta = want.kind !== 'applied' ? 0
+              : op.id === 'duplicate' ? n
+                : (op.id === 'delete-menu' || op.id === 'delete-key') ? -n : 0;
+            assert.strictEqual(nAfter - blocksNow.length, wantDelta,
+              cell + ': ' + (want.kind === 'applied'
+                ? 'the operation must act on the WHOLE set of ' + n + ' member(s)'
+                : 'this cell writes nothing, so the document\'s block count must not move')
+              + ' — expected the block count to move by ' + wantDelta + ', it moved by '
+              + (nAfter - blocksNow.length) + ' (' + blocksNow.length + ' -> ' + nAfter
+              + '). An operand set one item short still changes the file and still passes '
+              + 'every byte-level invariant; this is what notices');
+            // Every member's OWN source lines, taken from the fixture rather
+            // than authored. A conversion REWRITES each member and a delete
+            // REMOVES it, so after either one not a single one of those lines
+            // may still be in the file. This is what makes the two conversion
+            // columns sensitive to a short operand set — the block count above
+            // cannot see it there (a conversion creates and destroys no
+            // blocks), and "the file changed" is satisfied by converting only
+            // the first member.
+            if (want.kind === 'applied' && op.id !== 'duplicate' && op.id !== 'tab'
+                && op.id !== 'shift-tab') {
+              const src = shape.md.split('\n');
+              const gone = [];
+              shape.members.forEach((m) => {
+                for (let ln = m[0]; ln <= m[1]; ln++) gone.push(src[ln - 1]);
+              });
+              const left = after.split('\n');
+              gone.forEach((line) => {
+                assert.strictEqual(left.indexOf(line), -1,
+                  cell + ': ' + JSON.stringify(line) + ' belonged to a member of the set, so '
+                  + 'the operation either rewrote it or removed it and it must be gone from '
+                  + 'the saved file. Got\n' + JSON.stringify(after));
+              });
+            }
+
+            // ── OUTCOME ──────────────────────────────────────────────────
+            if (outcome === 'WROTE+BANNER') {
+              t8Defects.push(cell + ': the file was rewritten AND a banner was shown ('
+                + banner + ') — a refusal that wrote bytes');
+            }
+            if (want.kind === 'refused') {
+              // §3.6's ruling, in as many words: 「拒絕必須有 banner（靜默不
+              // 動作是缺陷）」. Both halves, always.
+              assert.strictEqual(banner, want.message,
+                cell + ': this shape REFUSES, and a refusal must carry its own banner — '
+                + '§3.6\'s 2026-08-31 ruling says 「靜默不動作是缺陷」, so a cell that '
+                + 'quietly did nothing is a defect and not a pass. Expected '
+                + JSON.stringify(want.message) + ', got ' + JSON.stringify(banner));
+              assert.strictEqual(after, shape.md,
+                cell + ': a refusal must leave the file BYTE-IDENTICAL — no partial apply. '
+                + 'Got ' + JSON.stringify(after));
+            } else if (want.kind === 'noop') {
+              assert.strictEqual(banner, null,
+                cell + ': a documented no-op is not a refusal and must raise no banner ('
+                + want.why + '). Got ' + JSON.stringify(banner));
+              assert.strictEqual(after, shape.md,
+                cell + ': ' + want.why + ' — the file must be byte-identical. Got '
+                + JSON.stringify(after));
+            } else {
+              assert.strictEqual(banner, null,
+                cell + ': this shape is supported and must not refuse. Got '
+                + JSON.stringify(banner));
+              assert.notStrictEqual(after, shape.md,
+                cell + ': the operation is expected to APPLY, and the file came back '
+                + 'byte-identical with no banner — a silently dropped gesture, which '
+                + '§3.6\'s ruling calls a defect outright');
+            }
+
+            // ── CORRUPTION, on the SAVED BYTES ───────────────────────────
+            // lexLooseDeep(), never lexLoose(): inserting a blank-line-
+            // separated sibling under a NESTED item leaves the TOP-level list
+            // tight and makes only the nested one loose, and the shallow scan
+            // reports [false] for exactly the file the deep one reports
+            // [false, true] for. That miss has already produced a false green
+            // in this suite.
+            const loose = lexLooseDeep(after);
+            const baseLoose = lexLooseDeep(shape.md);
+            if (changed && loose.some(Boolean)) {
+              t8Defects.push(cell + ': a list went LOOSE (§4.3 rule 2) — lexLooseDeep '
+                + JSON.stringify(loose) + ' against a baseline of '
+                + JSON.stringify(baseLoose) + ', from\n' + JSON.stringify(after));
+            }
+            // No fixture holds a code token and no operation in this matrix
+            // targets 程式碼, so ANY code token in the output is §3.4's
+            // corruption: an indent of >= 4 columns left behind with no list
+            // to anchor it, which marked lexes as an INDENTED code block and
+            // `t.type` cannot tell apart from a deliberate fence.
+            assert.deepStrictEqual(lexCodeRaws(shape.md), [],
+              'FIXTURE SANITY ' + cell + ': the fixture must hold no code token at '
+              + 'baseline, or "a token became a code block" is not what the next '
+              + 'assertion measures');
+            const codes = lexCodeRaws(after);
+            if (codes.length) {
+              t8Defects.push(cell + ': ' + codes.length + ' code token(s) appeared where the '
+                + 'baseline had none — ' + JSON.stringify(codes) + ' (fenced: '
+                + JSON.stringify(codes.map(isFencedCode)) + ') from\n' + JSON.stringify(after));
+            }
+
+            // §3.4: 「一次使用者手勢 = 恰好一個 undo op」, over the whole
+            // batch. Asked of every cell that actually wrote, so no shape can
+            // grow a second commit unnoticed.
+            if (outcome === 'applied') {
+              await page.keyboard.down('Control');
+              await page.keyboard.press('KeyZ');
+              await page.keyboard.up('Control');
+              await settleEditor(page);
+              const undone = await saveAndRead(page, mdPath);
+              assert.strictEqual(undone, shape.md,
+                cell + ': ONE Ctrl+Z must restore the whole batch — §3.4\'s 「一次使用者手勢 '
+                + '= 恰好一個 undo op」. Got ' + JSON.stringify(undone));
+            }
+            if (shape.empties && (op.id === 'delete-menu' || op.id === 'delete-key')) {
+              // T7 carry 7's ruling, re-asked here on the ⠿ path as well as
+              // the key: a whole-document set is allowed and it empties the
+              // file. Asserted on the OPERATION's own output, before the undo
+              // above restored it — hence the re-read of what `after` held.
+              assert.strictEqual(after, '',
+                cell + ': §3.6 allows a set that covers every block, and its delete empties '
+                + 'the document. Got ' + JSON.stringify(after));
+            }
+          }
+          await page.close();
+        } finally { srv8.close(); }
+      }
+
+      // The matrix, printed whole. A sweep whose result nobody can read is a
+      // sweep nobody re-reads when a later stage changes one of these paths.
+      console.log('S3 T8 sweep — ' + t8Rows.length + ' cells (' + T8_SHAPES.length
+        + ' shapes × ' + T8_OPS.length + ' operations):');
+      t8Rows.forEach((r) => {
+        console.log('  ' + (r.cell + '                                        ').slice(0, 34)
+          + ' ' + (r.outcome + '        ').slice(0, 9)
+          + (r.banner ? '  ' + r.banner : (r.why ? '  ' + r.why : '')));
+      });
+      assert.deepStrictEqual(t8Defects, [],
+        'S3 T8 sweep found corruption in the saved bytes:\n  ' + t8Defects.join('\n  '));
+      console.log('S3 T8 sweep: ' + t8Rows.length + ' cells, no corruption — OK');
+    }
+    // <<<T8SWEEP
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
