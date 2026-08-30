@@ -16018,6 +16018,415 @@ async function gutterGeometry(page, sel) {
     }
 
 
+    // ── Task 4b: an icon at the head of every ⠿ menu item, and the 轉換成
+    //    submenu opens on HOVER (both user requests, 2026-08-31) ───────────
+    //
+    //    Every hover scenario below drives REAL `page.mouse.move()` steps
+    //    THROUGH the geometry under test. A test that jumps the pointer
+    //    straight to the submenu's centre fires one mouseover on the target
+    //    and proves nothing about the band the pointer had to cross — which
+    //    is the whole defect this half exists to prevent.
+    {
+      // Rects for the open menu, its visible items, and the submenu if one is
+      // up. `cx`/`cy` are viewport centres, ready for page.mouse.move().
+      const menuGeo = (page) => page.evaluate(() => {
+        const r = (e) => {
+          const b = e.getBoundingClientRect();
+          return { l: b.left, r: b.right, t: b.top, b: b.bottom,
+            cx: b.left + b.width / 2, cy: b.top + b.height / 2 };
+        };
+        const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+        if (!menu) return null;
+        const g = { menu: r(menu), items: {} };
+        Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((b) => !b.hidden && !b.closest('.ed-handle-submenu'))
+          .forEach((b) => { g.items[b.textContent] = r(b); });
+        const sub = document.querySelector('.ed-handle-submenu');
+        if (sub) {
+          g.sub = r(sub);
+          g.subRows = Array.prototype.slice.call(sub.querySelectorAll('.ed-handle-menu-btn'))
+            .map((b) => Object.assign({ label: b.textContent }, r(b)));
+        }
+        return g;
+      });
+      const subOpen = (page) => page.evaluate(() => !!document.querySelector('.ed-handle-submenu'));
+      const menuOpen = (page) => page.evaluate(() =>
+        !!document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)'));
+      // What the pointer is standing on, in the only three terms that matter to
+      // the hover rule: the 轉換成 item, the submenu, or neither.
+      const hitZone = (page, x, y) => page.evaluate(({ x, y }) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el || !el.closest) return 'none';
+        if (el.closest('.ed-handle-submenu')) return 'sub';
+        const btn = el.closest('.ed-handle-menu-btn');
+        if (btn && btn.textContent === '轉換成 ›') return 'convert';
+        if (btn) return 'item:' + btn.textContent;
+        if (el.closest('.ed-handle-menu')) return 'menu';
+        return 'outside';
+      }, { x, y });
+      // A real pointer walk: `steps` samples along the segment, `pauseMs` of
+      // real wall-clock between them. Returns the zone trail so a scenario can
+      // assert the path really crossed what it claims to have crossed.
+      const walk = async (page, x0, y0, x1, y1, steps, pauseMs, collect) => {
+        const trail = [];
+        for (let i = 0; i <= steps; i++) {
+          const x = x0 + (x1 - x0) * i / steps, y = y0 + (y1 - y0) * i / steps;
+          await page.mouse.move(x, y);
+          if (collect) trail.push({ x, y, zone: await hitZone(page, x, y) });
+          if (pauseMs) await new Promise((res) => setTimeout(res, pauseMs));
+        }
+        return trail;
+      };
+
+      // ─ Half 1: the icons ─────────────────────────────────────────────────
+      await s3Scenario('every ⠿ menu item leads with one 16px icon that inherits the menu colour',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const info = await page.evaluate(() => {
+            const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+            return Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden).map((b) => {
+                const svgs = b.querySelectorAll('svg');
+                const svg = svgs[0] || null;
+                const kids = Array.prototype.slice.call(b.childNodes);
+                const box = svg ? svg.getBoundingClientRect() : null;
+                return {
+                  label: b.textContent,
+                  svgCount: svgs.length,
+                  svgIdx: kids.findIndex((n) => n.nodeType === 1 &&
+                    n.tagName.toLowerCase() === 'svg'),
+                  textIdx: kids.findIndex((n) => n.nodeType === 3 && n.textContent.trim() !== ''),
+                  stroke: svg ? getComputedStyle(svg).stroke : null,
+                  fill: svg ? getComputedStyle(svg).fill : null,
+                  strokeWidth: svg ? parseFloat(getComputedStyle(svg).strokeWidth) : null,
+                  linecap: svg ? getComputedStyle(svg).strokeLinecap : null,
+                  box: box ? [Math.round(box.width), Math.round(box.height)] : null,
+                  shapes: svg ? svg.querySelectorAll('path,rect,circle,line,polyline').length : 0,
+                  color: getComputedStyle(b).color,
+                };
+              });
+          });
+          assert.deepStrictEqual(info.map((i) => i.label),
+            ['轉換成 ›', '建立副本', '刪除', 'MD 原始碼'],
+            'the icons must not disturb §3.7\'s four labels or their order — every helper in ' +
+            'this file finds a menu item by EXACT textContent, so an icon that contributed ' +
+            'any text of its own would break clickGutterMenuItem()/convertVia() everywhere. ' +
+            'Got ' + JSON.stringify(info.map((i) => i.label)));
+          for (const i of info) {
+            assert.strictEqual(i.svgCount, 1,
+              i.label + ': exactly one inline <svg> per item, got ' + i.svgCount);
+            assert.strictEqual(i.svgIdx, 0,
+              i.label + ': the icon must be the button\'s FIRST child node, got index ' + i.svgIdx);
+            assert.ok(i.textIdx > i.svgIdx,
+              i.label + ': the <svg> must PRECEDE the label text node (svg at ' + i.svgIdx +
+              ', text at ' + i.textIdx + ')');
+            assert.ok(i.shapes >= 1, i.label + ': the icon must draw something, got ' +
+              i.shapes + ' shape elements');
+            assert.deepStrictEqual(i.box, [16, 16],
+              i.label + ': Notion\'s icons are 16x16, got ' + JSON.stringify(i.box));
+            assert.strictEqual(i.strokeWidth, 1.5,
+              i.label + ': 1.5px stroke, got ' + i.strokeWidth);
+            assert.strictEqual(i.fill, 'none', i.label + ': fill must be none, got ' + i.fill);
+            assert.strictEqual(i.linecap, 'round',
+              i.label + ': round caps, got ' + i.linecap);
+            // The RELATIONSHIP, not a hex literal: currentColor is the whole
+            // point — retheme the menu and the icons follow.
+            assert.strictEqual(i.stroke, i.color,
+              i.label + ': the icon\'s computed stroke must EQUAL the button\'s computed ' +
+              'color (stroke="currentColor"). stroke=' + i.stroke + ' color=' + i.color);
+            // ...and that relationship is only worth anything if the menu
+            // really does set a colour of its own. Without this the assertion
+            // above is green on two defaulted blacks.
+            assert.notStrictEqual(i.color, 'rgb(0, 0, 0)',
+              i.label + ': the menu must carry its own light-on-dark colour for the ' +
+              'currentColor assertion above to mean anything, got ' + i.color);
+          }
+          // S2's two layout invariants survive the icons.
+          const inv = await page.evaluate(() => {
+            const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+            const btns = Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden);
+            return {
+              lefts: Array.from(new Set(btns.map((b) =>
+                Math.round(b.getBoundingClientRect().left)))),
+              monotonicTop: btns.every((b, i, a) => i === 0 ||
+                b.getBoundingClientRect().top >= a[i - 1].getBoundingClientRect().bottom - 1),
+              flexDir: getComputedStyle(menu).flexDirection,
+              widths: Array.from(new Set(btns.map((b) =>
+                Math.round(b.getBoundingClientRect().width)))),
+            };
+          });
+          assert.strictEqual(inv.lefts.length, 1,
+            'S2 invariant: one left edge, got ' + JSON.stringify(inv.lefts));
+          assert.strictEqual(inv.monotonicTop, true,
+            'S2 invariant: each item still sits below the previous one');
+          assert.strictEqual(inv.flexDir, 'column',
+            'S2 invariant: the MENU is still a column, got ' + inv.flexDir);
+          assert.strictEqual(inv.widths.length, 1,
+            'the icons must not make the rows ragged, got widths ' + JSON.stringify(inv.widths));
+        }, 'T4b');
+
+      // ─ Half 2: the submenu opens on hover ────────────────────────────────
+      await s3Scenario('hovering 轉換成 opens the submenu with no click at all',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          assert.strictEqual(await subOpen(page), false,
+            'precondition: the submenu must be SHUT before the hover — an "it is open" ' +
+            'assertion is vacuous against a panel that was already up');
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          // In from outside the menu, 20 real steps — never a jump.
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(
+            await page.evaluate(() => document.querySelectorAll(
+              '.ed-handle-submenu .ed-handle-menu-btn').length), 12,
+            'the hover-opened panel must be the real §3.2 twelve-target submenu');
+          assert.strictEqual(
+            await page.evaluate(() => document.querySelectorAll('.ed-handle-submenu').length),
+            1, 'exactly one submenu, not one per mouseover along the walk');
+        }, 'T4b');
+
+      await s3Scenario('crossing the gap between 轉換成 and the submenu keeps the panel open',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          // FIXTURE SANITY: there must actually BE a band belonging to neither
+          // the item nor the panel, or this scenario crosses nothing. Measured
+          // on 2.11.1: `.ed-handle-submenu { left: 100%; margin-left: 4px }`
+          // over a menu with 4px of padding leaves x in [item.right+4,
+          // sub.left) answering the BLOCK underneath.
+          const x0 = Math.ceil(it.r), x1 = Math.floor(g.sub.l);
+          const band = [];
+          for (let x = x0; x <= x1; x++) band.push({ x, zone: await hitZone(page, x, it.cy) });
+          const dead = band.filter((p) => p.zone !== 'convert' && p.zone !== 'sub');
+          assert.ok(dead.length >= 3,
+            'fixture sanity: there must be a real dead band to cross between the 轉換成 item ' +
+            'and the submenu, otherwise this scenario proves nothing. Got ' +
+            JSON.stringify(band));
+          // Now cross it for real, one pixel at a time, with wall-clock time
+          // between the steps — and assert the panel is still up at EVERY
+          // sample, the dead ones included. "Still open at the far end" alone
+          // would be green against a panel that closed and re-opened.
+          const flick = [];
+          for (const p of band) {
+            await page.mouse.move(p.x, it.cy);
+            await new Promise((res) => setTimeout(res, 30));
+            if (!(await subOpen(page))) flick.push(p);
+          }
+          assert.deepStrictEqual(flick, [],
+            'the submenu must stay up for the whole crossing — it closed at ' +
+            JSON.stringify(flick) + ' (dead band was ' + JSON.stringify(dead.map((d) => d.x)) + ')');
+          assert.strictEqual(await hitZone(page, x1, it.cy), 'sub',
+            'the walk must have finished INSIDE the submenu');
+        }, 'T4b');
+
+      await s3Scenario('a backward tremor while crossing the gap does not shut the panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          // A real hand does not travel monotonically. The aim rule is a
+          // DIRECTION test on consecutive samples, so a single backward sample
+          // mid-gap reads as "not on the way in" — and there is nothing under
+          // the pointer there to say otherwise. The grace period is what makes
+          // that survivable; with it at 0 this scenario is RED.
+          const x0 = Math.ceil(it.r), x1 = Math.floor(g.sub.l);
+          const mid = Math.round((x0 + x1) / 2);
+          const path = [];
+          for (let x = x0; x <= mid; x++) path.push({ x, y: it.cy });
+          path.push({ x: mid - 2, y: it.cy });          // the tremor: back...
+          path.push({ x: mid - 2, y: it.cy - 1 });      // ...and a wobble
+          for (let x = mid - 1; x <= x1; x++) path.push({ x, y: it.cy });
+          const flick = [];
+          for (const p of path) {
+            await page.mouse.move(p.x, p.y);
+            await new Promise((res) => setTimeout(res, 25));
+            if (!(await subOpen(page))) flick.push(p.x);
+          }
+          assert.ok(path.some((p, i) => i > 0 && p.x < path[i - 1].x),
+            'fixture sanity: the path must really contain a BACKWARD step, or this scenario ' +
+            'is just the gap crossing again');
+          assert.deepStrictEqual(flick, [],
+            'a momentary backward sample mid-gap must not shut the panel; it closed at x=' +
+            JSON.stringify(flick));
+          assert.strictEqual(await hitZone(page, x1, it.cy), 'sub',
+            'the walk must have finished INSIDE the submenu');
+        }, 'T4b');
+
+      await s3Scenario('a diagonal to a submenu row further down keeps the panel open',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          const last = g.subRows[g.subRows.length - 1];
+          // ~8px per sample at ~600 px/s — measured on this branch as a 344px
+          // path taking ~570ms, of which ~370ms is spent over other parent
+          // items and over bare page. See the Task 4b carries.
+          const dist = Math.hypot(last.cx - it.cx, last.cy - it.cy);
+          const steps = Math.max(2, Math.round(dist / 8));
+          const trail = await walk(page, it.cx, it.cy, last.cx, last.cy, steps,
+            Math.round((dist / 600) * 1000 / steps), true);
+          const zones = trail.map((p) => p.zone);
+          // FIXTURE SANITY, both halves: the diagonal is only interesting
+          // because it leaves the cluster, and it leaves it in TWO different
+          // ways. If either stops happening the geometry moved and this
+          // scenario has quietly stopped testing the thing.
+          assert.ok(zones.some((z) => z.startsWith('item:')),
+            'fixture sanity: the diagonal must pass over OTHER parent menu items — that is ' +
+            'what makes it hard. Trail: ' + JSON.stringify(zones));
+          assert.ok(zones.some((z) => z === 'outside'),
+            'fixture sanity: the diagonal must also pass over bare page below the menu. ' +
+            'Trail: ' + JSON.stringify(zones));
+          assert.strictEqual(await subOpen(page), true,
+            'the submenu must survive a diagonal to its last row. Trail: ' +
+            JSON.stringify(zones));
+          assert.strictEqual(await hitZone(page, last.cx, last.cy), 'sub',
+            'the pointer must have landed on the last submenu row');
+        }, 'T4b');
+
+      await s3Scenario('hovering a different parent item closes the submenu',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          const dup = g0.items['建立副本'];
+          // Straight DOWN the menu's own column — x is held constant, which is
+          // exactly what says "not on my way to the submenu".
+          await walk(page, it.cx, it.cy, it.cx, dup.cy, 12, 20);
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-submenu'),
+            { timeout: 3000 });
+          assert.strictEqual(await menuOpen(page), true,
+            'only the SUBMENU closes — a hover never closes the ⠿ menu itself (§3.7: click ' +
+            'outside or Esc)');
+          assert.strictEqual(await hitZone(page, it.cx, dup.cy), 'item:建立副本',
+            'the pointer must have finished on 建立副本');
+        }, 'T4b');
+
+      await s3Scenario('leaving the item and the submenu together closes the panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          // Into the panel FIRST — otherwise this scenario only ever proves the
+          // pointer left the ITEM, which the "different parent item" one above
+          // already covers, and the "and the submenu together" half of the rule
+          // goes untested.
+          const row = g.subRows[3];
+          await walk(page, it.cx, it.cy, row.cx, row.cy, 16, 12);
+          assert.strictEqual(await hitZone(page, row.cx, row.cy), 'sub',
+            'precondition: the pointer must really be standing in the panel');
+          assert.strictEqual(await subOpen(page), true, 'precondition: still up inside the panel');
+          // ...and now out of the panel's own right-hand side and away, so the
+          // pointer leaves the item and the submenu together and touches no
+          // other menu row on the way.
+          await walk(page, row.cx, row.cy, g.sub.r + 140, g.sub.b + 140, 24, 12);
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-submenu'),
+            { timeout: 3000 });
+          assert.strictEqual(await menuOpen(page), true,
+            'the ⠿ menu itself stays open — §3.7 closes it by Esc or an outside CLICK only');
+        }, 'T4b');
+
+      await s3Scenario('the click toggle still works, and a click never shuts a hover-opened panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const clickConvert = () => page.evaluate(() => {
+            Array.prototype.slice.call(document.querySelectorAll(
+              '.ed-handle-menu:not(.ed-handle-submenu) .ed-handle-menu-btn'))
+              .find((b) => b.textContent === '轉換成 ›').click();
+          });
+          // The pointer is parked on the ⠿ handle here, NOT on the item, so
+          // these are pure clicks with no hover in play — the exact path
+          // clickGutterMenuItem()/convertVia() drive throughout this file.
+          assert.strictEqual(await subOpen(page), false, 'precondition: shut');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), true, 'click 1 opens');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), false, 'click 2 folds it back up');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), true, 'click 3 opens again');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), false, 'click 4 folds it back up');
+
+          // A real mouse click on an item the pointer is ALREADY hovering must
+          // not fold up the panel that hover just opened — that would make the
+          // panel unreachable by mouse, which is the opposite of the request.
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          await page.mouse.down();
+          await page.mouse.up();
+          await new Promise((res) => setTimeout(res, 400));
+          assert.strictEqual(await subOpen(page), true,
+            'a click on a hover-opened 轉換成 must leave the panel standing');
+        }, 'T4b');
+
+      await s3Scenario('Escape closes a hover-opened submenu together with its menu',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+            { timeout: 3000 });
+          assert.strictEqual(await subOpen(page), false,
+            'Escape must take the submenu down with the menu');
+        }, 'T4b');
+
+      await s3Scenario('re-opening the ⠿ menu on another block inherits no hover-opened panel',
+        '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+          const selA = '.ed-block[data-block-id="1"]';
+          const selB = '.ed-block[data-block-id="2"]';
+          await openGutterMenu(page, selA);
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: A\'s panel is up');
+          await page.hover(selB);
+          await page.click(selB + ' .ed-handle');
+          await page.waitForFunction((s) => !!document.querySelector(
+            s + ' .ed-handle-menu-btn'), { timeout: 5000 }, selB);
+          assert.strictEqual(await subOpen(page), false,
+            'S2 invariant: the submenu\'s targets close over gutterMenuBlockEl at click time, ' +
+            'so a panel inherited from another block converts the WRONG block');
+          assert.strictEqual(
+            await page.evaluate((s) => !!document.querySelector(s + ' .ed-handle-menu'), selB),
+            true, 'the menu really did move to the second block');
+        }, 'T4b');
+    }
+
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
