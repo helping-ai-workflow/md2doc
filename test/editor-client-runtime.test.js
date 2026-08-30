@@ -10306,6 +10306,119 @@ async function clickInsertMenuItem(page, sel, label) {
         psrv.close();
       }
     }
+
+    // ── Branch review, STRONGLY RECOMMENDED 5: §4.2 hit-test conflict 1 ────
+    //
+    // §4.2 names three hit-test conflicts the gutter has to resolve.
+    // Conflicts 2 and 3 (table row grip x ⠿, row grip x colGrip) landed in S0
+    // with elementFromPoint guards. Conflict 1 — the gutter versus
+    // .sidebar-splitter's col-resize zone — got no guard at all, and it was
+    // live: .sidebar-splitter's right edge IS .content's border-box left edge
+    // (adjacent flex items), so 48px of content padding put the ＋/⠿ pair at
+    // [contentLeft-54, contentLeft-18] = [splitterRight-6, splitterRight+12],
+    // six pixels of it lying on top of the drag zone.
+    //
+    // Measured at 1400x900 before the fix: splitter [324, 356], .ed-insert
+    // [350, 368], elementFromPoint(354, ＋'s own y) === button.ed-insert, and a
+    // real pointer drag begun at x=352 or x=354 left the sidebar at 300px
+    // while the same drag from x=336 or x=348 resized it to 420. Because
+    // .ed-insert is 20px tall and li rows carry none at all, the dead zone was
+    // striped both down the page and within a single row — the same x either
+    // resized the sidebar or opened an insert menu depending on which pixel
+    // row the pointer grabbed, which is about the worst failure shape a
+    // resize handle can have.
+    //
+    // Three assertions, in increasing strength: no geometric overlap at all;
+    // §4.2's own elementFromPoint(splitter.right - 2, y) probe over every
+    // block row AND every ＋'s own band; and the gesture itself.
+    {
+      const { srv: ssrv, url: surl } = await setupListDoc([
+        '# Head one', '', 'Para one.', '', '## Head two', '',
+        '- alpha', '- bravo', '', 'Para two.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(surl, { waitUntil: 'networkidle0' });
+        const geo = await page.evaluate(() => {
+          const splitter = document.getElementById('sidebar-splitter');
+          if (!splitter) return null;
+          const sp = splitter.getBoundingClientRect();
+          const blocks = Array.prototype.slice.call(document.querySelectorAll('.ed-block'));
+          const probeX = sp.right - 2;
+          const ys = [];
+          const plusRects = [];
+          blocks.forEach((b) => {
+            const r = b.getBoundingClientRect();
+            ys.push(r.top + 1, r.top + r.height / 2, r.bottom - 1);
+            const p = b.querySelector(':scope > .ed-insert');
+            if (p) {
+              const pr = p.getBoundingClientRect();
+              plusRects.push({ left: pr.left, right: pr.right });
+              // The ＋'s own band is where the overlap actually bites — a
+              // block-centre probe misses it on any block taller than 20px,
+              // which is every heading.
+              ys.push(pr.top + 1, pr.top + pr.height / 2, pr.bottom - 1);
+            }
+          });
+          const hits = ys.map((y) => {
+            const el = document.elementFromPoint(probeX, y);
+            return { y: Math.round(y), id: el ? (el.tagName.toLowerCase() +
+              (el.className ? '.' + String(el.className).split(' ').join('.') : '')) : null };
+          });
+          return {
+            splitter: { left: sp.left, right: sp.right },
+            contentBoxLeft: document.querySelector('.content').getBoundingClientRect().left,
+            plusRects: plusRects,
+            probeX: probeX,
+            offenders: hits.filter((h) => h.id !== 'div.sidebar-splitter'),
+            sidebarWidth: document.querySelector('.reader-sidebar').offsetWidth,
+          };
+        });
+        assert.ok(geo, 'fixture sanity: this page must actually have a sidebar splitter');
+        assert.ok(geo.plusRects.length >= 3,
+          'fixture sanity: at least three ＋ buttons must be on screen (headings and ' +
+          'paragraphs own one; li deliberately does not until S2), got ' +
+          geo.plusRects.length);
+        assert.ok(Math.abs(geo.splitter.right - geo.contentBoxLeft) <= 1,
+          'fixture sanity: the splitter and .content must still be adjacent — this whole ' +
+          'scenario is about that shared edge; splitter.right=' + geo.splitter.right +
+          ' .content left=' + geo.contentBoxLeft);
+        const overlapping = geo.plusRects.filter((r) => r.left < geo.splitter.right);
+        assert.deepStrictEqual(overlapping, [],
+          'no gutter button may reach back over .sidebar-splitter (right edge ' +
+          geo.splitter.right + '); offenders: ' + JSON.stringify(overlapping));
+        assert.deepStrictEqual(geo.offenders, [],
+          '§4.2 conflict 1: elementFromPoint(splitter.right - 2 = ' + geo.probeX + ', y) must ' +
+          'be the splitter at EVERY y — including each ＋\'s own 20px band, which is where ' +
+          'the overlap bit. Offenders: ' + JSON.stringify(geo.offenders));
+        // And the gesture itself, from the very pixel column the guard probes:
+        // geometry that measures clean but does not drag would still be a
+        // broken splitter.
+        const plusY = await page.evaluate(() => {
+          const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
+            .find((x) => x.querySelector(':scope > .ed-insert'));
+          const r = b.querySelector(':scope > .ed-insert').getBoundingClientRect();
+          return r.top + r.height / 2;
+        });
+        const dragX = geo.splitter.right - 2;
+        await page.mouse.move(dragX, plusY);
+        await page.mouse.down();
+        await page.mouse.move(dragX + 60, plusY);
+        await page.mouse.move(dragX + 120, plusY);
+        await page.mouse.up();
+        const widened = await page.evaluate(() =>
+          document.querySelector('.reader-sidebar').offsetWidth);
+        assert.ok(widened >= geo.sidebarWidth + 100,
+          'a drag begun at splitter.right - 2 must resize the sidebar (the pre-fix build ' +
+          'swallowed it into .ed-insert and opened an insert menu instead), got ' +
+          geo.sidebarWidth + ' -> ' + widened);
+        await page.close();
+        console.log('§4.2 conflict 1: the gutter never covers the sidebar splitter — OK');
+      } finally {
+        ssrv.close();
+      }
+    }
     // ── Task 7: a line the user did not touch must never be rewritten ──────
     //
     // §3.4's bystander replay used to be keyed on `multiLineBlockIds`, which
