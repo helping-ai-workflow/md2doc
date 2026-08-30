@@ -1067,4 +1067,117 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
 }
 
+// ── v2.11.1: an EMPTY item that is the first child of a deeper nesting ────
+// `- beta` + Enter + Tab produced `- beta\n  -`, and CommonMark does not read
+// that `  -` as an empty list item at all: an EMPTY list item may not
+// interrupt a paragraph, and a line of nothing but dashes standing at the
+// parent's own CONTENT column is a SETEXT H2 UNDERLINE. marked (14.1.4)
+// therefore returns `<li><h2>beta</h2></li>` — the new item is gone and the
+// parent's text has been re-typed as a heading. Two ordinary keystrokes,
+// silent content destruction.
+//
+// The bare '-' marker itself is not the bug and must stay: '- ' (with the
+// trailing space) lexes as a PARAGRAPH, which is why BLOCK_SKELETONS.list is
+// a bare marker in the first place. The hazard is positional — it exists only
+// where the previous emitted line is the parent's own paragraph text at this
+// line's column, i.e. exactly when this item is the FIRST item of a deeper
+// nesting. There the marker gets a U+200B (zero-width space) body, which is
+// content as far as the block lexer is concerned and invisible as far as the
+// reader is concerned; everywhere else the bytes are unchanged.
+{
+  const ZWSP = '​';
+  // (a) the reported shape.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'alpha'),
+      liBlock({ id: '1', indent: 0 }, 'beta'),
+      liBlock({ id: '2', indent: 1 }),
+    ]);
+    assert.strictEqual(r.md, '- alpha\n- beta\n  - ' + ZWSP,
+      'an empty first-child item must not serialise as a bare `  -`, got ' +
+      JSON.stringify(r.md));
+    const toks = marked.lexer(r.md + '\n');
+    assert.deepStrictEqual(toks.map((t) => t.type), ['list'],
+      're-lexing must give ONE list and no heading — a `heading` token here is `beta` ' +
+      'swallowed by a setext underline. Got ' + JSON.stringify(toks.map((t) => t.type)));
+    const items = toks[0].items;
+    assert.strictEqual(items.length, 2, 'two top-level items, got ' + items.length);
+    const nested = (items[1].tokens || []).filter((t) => t.type === 'list');
+    assert.strictEqual(nested.length, 1,
+      '`beta` must own exactly one nested list, got ' + nested.length +
+      ' from ' + JSON.stringify(r.md));
+    assert.strictEqual(nested[0].items.length, 1, 'the nested list holds the one empty item');
+    assert.strictEqual(nested[0].items[0].text.replace(/​/g, ''), '',
+      'and that item reads as empty once the escape is removed, got ' +
+      JSON.stringify(nested[0].items[0].text));
+  }
+  // (b) an empty item at the SAME level as its predecessor is safe as a bare
+  //     marker (the previous line is a list marker line, not a paragraph at
+  //     this column) and must keep its existing bytes.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'beta'),
+      liBlock({ id: '1', indent: 1 }, 'x'),
+      liBlock({ id: '2', indent: 1 }),
+    ]);
+    assert.strictEqual(r.md, '- beta\n  - x\n  -',
+      'a sibling-position empty item keeps the bare marker, got ' + JSON.stringify(r.md));
+    assert.strictEqual(marked.lexer(r.md + '\n').filter((t) => t.type === 'heading').length, 0,
+      'and it still is not a setext underline');
+  }
+  // (c) top level, previous item at the same indent — unchanged.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'alpha'),
+      liBlock({ id: '1', indent: 0 }),
+    ]);
+    assert.strictEqual(r.md, '- alpha\n-',
+      'a top-level empty item keeps the bare marker, got ' + JSON.stringify(r.md));
+  }
+  // (d) ORDERED: `1.` is not a run of dashes, so it was never ambiguous and
+  //     must not grow an escape.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', type: 'ol', indent: 0 }, 'beta'),
+      liBlock({ id: '1', type: 'ol', indent: 1 }),
+    ]);
+    assert.strictEqual(r.md, '1. beta\n   1.',
+      'an ordered empty first child needs no escape, got ' + JSON.stringify(r.md));
+    assert.strictEqual(marked.lexer(r.md + '\n').filter((t) => t.type === 'heading').length, 0,
+      'and it is not a setext underline either');
+  }
+  // (e) a TASK item's empty first child is already carried as a same-line
+  //     prefix (it never emits a bare marker line), so it is untouched.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'beta'),
+      liBlock({ id: '1', task: true, indent: 1 }),
+      liBlock({ id: '2', indent: 2 }, 'kid'),
+    ]);
+    assert.strictEqual(r.md, '- beta\n  - [ ] - kid',
+      'the content-free task item stays a same-line prefix, got ' + JSON.stringify(r.md));
+  }
+  // (f) the escape is the serializer's own, so the serializer also removes it:
+  //     an item whose surface holds nothing but U+200B is EMPTY, and must not
+  //     come back as a top-level `- <U+200B>`.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'alpha'),
+      liBlock({ id: '1', indent: 0 }, ZWSP),
+    ]);
+    assert.strictEqual(r.md, '- alpha\n-',
+      'a U+200B-only item is empty, got ' + JSON.stringify(r.md));
+  }
+  // (g) a NON-empty first child is untouched — the escape must not attach
+  //     itself to real content.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', indent: 0 }, 'beta'),
+      liBlock({ id: '1', indent: 1 }, 'kid'),
+    ]);
+    assert.strictEqual(r.md, '- beta\n  - kid');
+  }
+}
+
+
 console.log('list-md.test.js OK');
