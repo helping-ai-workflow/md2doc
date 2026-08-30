@@ -14662,6 +14662,482 @@ async function clickInsertMenuItem(page, sel, label) {
         }
       }, 'T3');
 
+
+    // ── S3 Task 4: the entry and exit GESTURES ────────────────────────────
+    // Spec §4.4. Entries: (a) press inside a block and drag across its
+    // boundary; (b) Shift+Click; (c) Shift+↑↓. Exits: Escape (Task 3) and a
+    // click inside any block without Shift. Scrolling and window blur must
+    // NOT clear.
+    //
+    // Every scenario below asserts the resulting member set BY LINE RANGE
+    // (window.__edTestGetSelection(), added for this task), never by counting
+    // `.ed-selected` nodes: a node count is an assertion about Task 2's CSS,
+    // and would stay green for a gesture that built the WRONG range as long as
+    // it built one of the right size. `domSelectedLines` is asserted alongside
+    // it so the model and the paint cannot drift apart unnoticed either.
+    const DOC3 = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n'; // heading{1,1} p{3,3} p{5,5} p{7,7}
+
+    const selSnapshot = (page) => page.evaluate(() => window.__edTestGetSelection());
+    const selRange = (s) => (s === null ? null
+      : { anchorLine: s.anchorLine, focusLine: s.focusLine, memberLines: s.memberLines });
+    // Every `.ed-block`'s geometry plus a point safely INSIDE it (25% across,
+    // vertically centred). Index order is document order, which is also
+    // buildBlockMap()'s id order.
+    const blockGeom = (page) => page.evaluate(() =>
+      [].slice.call(document.querySelectorAll('.ed-block')).map((el, i) => {
+        const r = el.getBoundingClientRect();
+        return {
+          i: i, id: el.getAttribute('data-block-id'), type: el.getAttribute('data-block-type'),
+          x: Math.round(r.left + r.width * 0.25), y: Math.round(r.top + r.height / 2),
+          left: Math.round(r.left), right: Math.round(r.right),
+          top: Math.round(r.top), bottom: Math.round(r.bottom),
+        };
+      }));
+    // "Assert the click landed where you think": which block is actually under
+    // a coordinate, asked the same way client.js's own drag asks it.
+    const blockIdAtPoint = (page, x, y) => page.evaluate((px, py) => {
+      const el = document.elementFromPoint(px, py);
+      const b = el && el.closest ? el.closest('.ed-block') : null;
+      return b ? b.getAttribute('data-block-id') : null;
+    }, x, y);
+    const nativeSelInfo = (page) => page.evaluate(() => {
+      const s = window.getSelection();
+      const anchorEl = s && s.anchorNode
+        ? (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement) : null;
+      return {
+        rangeCount: s ? s.rangeCount : 0,
+        text: s ? String(s) : '',
+        anchorInTable: !!(anchorEl && anchorEl.closest && anchorEl.closest('table')),
+      };
+    });
+    // A real press-move-release. One rAF between steps so client.js's
+    // pointermove (and the rAF-coalesced mousemove chrome it has to share the
+    // gesture with) actually processes each intermediate point — the same
+    // reason movePointerAndSettle() exists for the grip scenarios above.
+    // `hold: true` stops before the release, for the abort scenarios.
+    const dragAcross = async (page, from, to, opts) => {
+      const o = opts || {};
+      const steps = o.steps || 6;
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      for (let i = 1; i <= steps; i++) {
+        await page.mouse.move(Math.round(from.x + (to.x - from.x) * i / steps),
+          Math.round(from.y + (to.y - from.y) * i / steps));
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+      }
+      if (!o.hold) await page.mouse.up();
+    };
+    const shiftClickAt = async (page, x, y) => {
+      await page.keyboard.down('Shift');
+      await page.mouse.click(x, y);
+      await page.keyboard.up('Shift');
+    };
+    const pressShiftKey = async (page, key) => {
+      await page.keyboard.down('Shift');
+      await page.keyboard.press(key);
+      await page.keyboard.up('Shift');
+    };
+
+    // Entry (a). The drag's own threshold is CROSSING THE BLOCK BOUNDARY, not
+    // a pixel distance — dragging inside one block is text selection and must
+    // stay text selection (the scenario right after this one).
+    await s3Scenario('a drag across a block boundary enters block multi-select',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        assert.deepStrictEqual(g.map((b) => b.type),
+          ['heading', 'paragraph', 'paragraph', 'paragraph'], 'fixture shape');
+        assert.strictEqual(await selSnapshot(page), null,
+          'precondition: nothing is selected BEFORE the gesture — otherwise a green ' +
+          'assertion below could be measuring a selection this gesture never made');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 0,
+          'precondition: nothing is tinted before the gesture');
+        assert.strictEqual(await blockIdAtPoint(page, g[1].x, g[1].y), g[1].id,
+          'precondition: the press point is really inside "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, g[2].x, g[2].y), g[2].id,
+          'precondition: the release point is really inside "bravo"');
+        assert.ok(g[2].y - g[1].y > 5,
+          'precondition: the drag must actually travel between two distinct blocks, got dy=' +
+          (g[2].y - g[1].y));
+        await dragAcross(page, g[1], g[2]);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'spec §4.4 entry (a): pressing in "alpha" (line 3) and dragging into "bravo" ' +
+          '(line 5) anchors on the press and puts both blocks in the set. Got ' +
+          JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 3], [5, 5]],
+          'the paint must agree with the model');
+        assert.strictEqual(sel.focusHolderId, g[2].id,
+          'the focus endpoint is the block the drag ENDED in');
+        assert.strictEqual(await nativeSelInfo(page).then((n) => n.text), '',
+          'the native text selection the press started must be dropped once the gesture ' +
+          'becomes a BLOCK selection — otherwise both are painted at once');
+      }, 'T4');
+
+    // The other half of entry (a)'s threshold. Anti-vacuity: the scenario
+    // above proves this exact helper DOES enter a selection once the boundary
+    // is crossed, so "no selection here" is a statement about the boundary
+    // rule, not about a drag that silently never happened.
+    await s3Scenario('a drag that stays inside one block keeps native text selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        const from = { x: g[1].left + 2, y: g[1].y };
+        const to = { x: g[1].left + 60, y: g[1].y };
+        assert.strictEqual(await blockIdAtPoint(page, from.x, from.y), g[1].id,
+          'precondition: the press point is inside "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, to.x, to.y), g[1].id,
+          'precondition: the release point is inside the SAME block');
+        assert.ok(to.x - from.x >= 30, 'precondition: the drag travels far enough to select text');
+        await dragAcross(page, from, to);
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4: the entry threshold is the block BOUNDARY — a drag inside one block ' +
+          'is ordinary text selection and must not enter block multi-select');
+        const native = await nativeSelInfo(page);
+        console.log('S3 T4 in-block drag left native selection: ' + JSON.stringify(native.text));
+        assert.ok(native.text.length > 0,
+          'the drag must have actually selected text (otherwise this scenario proves ' +
+          'nothing about the boundary rule), got ' + JSON.stringify(native));
+      }, 'T4');
+
+    // Entry (b).
+    await s3Scenario('Shift+Click extends from the block that holds the caret',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await openWysiwyg(page, '.ed-block[data-block-id="' + g[1].id + '"]');
+        assert.strictEqual(await selSnapshot(page), null,
+          'precondition: a plain click starts a burst, it does not select blocks');
+        assert.strictEqual(
+          await page.evaluate((id) => !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-block[data-block-id="' + id + '"]')), g[1].id),
+          true, 'precondition: the caret is in "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, g[3].x, g[3].y), g[3].id,
+          'precondition: the Shift+Click point is inside "charlie"');
+        await shiftClickAt(page, g[3].x, g[3].y);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]] },
+          'spec §4.4 entry (b): Shift+Click anchors on the block that held the caret ' +
+          '(line 3) and takes everything through the clicked block (line 7) — the ' +
+          'paragraph BETWEEN them is in the set too. Got ' + JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 3], [5, 5], [7, 7]],
+          'the paint must agree with the model');
+      }, 'T4');
+
+    // Shift+Click INSIDE the block that already holds the caret is the one
+    // Shift+Click that must stay native: it is how a user extends a text
+    // selection to a point, and there is no second block to select.
+    await s3Scenario('Shift+Click inside the caret\'s own block stays native text selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await openWysiwyg(page, '.ed-block[data-block-id="' + g[1].id + '"]');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const x = g[1].left + 60;
+        assert.strictEqual(await blockIdAtPoint(page, x, g[1].y), g[1].id,
+          'precondition: the Shift+Click lands in the SAME block the caret is in');
+        await shiftClickAt(page, x, g[1].y);
+        assert.strictEqual(await selSnapshot(page), null,
+          'a Shift+Click inside the focused block must not build a one-block block-selection ' +
+          '— it is a text-selection gesture');
+      }, 'T4');
+
+    // Entry (c) as an EXTENSION of a standing selection, and the clamp at both
+    // ends. Task 1 carry 3: stepFocus() skips blocks that own no source line,
+    // so every step must MOVE — "the first Shift+↓ does nothing, the second
+    // one moves" is the failure this pins.
+    await s3Scenario('Shift+↓ and Shift+↑ move the focus endpoint one block at a time',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag built exactly lines 3..5 before any key is pressed');
+        await pressShiftKey(page, 'ArrowDown');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]] },
+          'the FIRST Shift+↓ must move the focus endpoint one block down');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'Shift+↑ contracts back');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 3, memberLines: [[3, 3]] },
+          'contracting onto the anchor leaves exactly one member');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 1, memberLines: [[1, 1], [3, 3]] },
+          'crossing the anchor extends upward, heading included');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 1, memberLines: [[1, 1], [3, 3]] },
+          'stepping past the first block is a clamp, never a wrap and never an error');
+      }, 'T4');
+
+    // Entry (c) as an ENTRY, from the state Escape leaves behind.
+    // MEASURED, and it contradicts Task 2 carry 7 / Task 3 carry 7 ("focus
+    // stays on a .ed-block that no longer has a tabindex"): removing the
+    // roving tabindex from the focused block BLURS it, so after a clear
+    // document.activeElement is <body> and there is no DOM anchor left. The
+    // anchor is client.js's `lastSelectionFocusLine` instead — the line the
+    // cleared selection ended on. Both halves are asserted below so a future
+    // change that restores a DOM focus holder cannot silently make this
+    // scenario stop testing the memory path.
+    await s3Scenario('Shift+↓ with nothing selected enters from where the last selection ended',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: a real selection stands before Escape');
+        await page.keyboard.press('Escape');
+        const cleared = await page.evaluate(() => ({
+          sel: window.__edTestGetSelection(),
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+          activeIsBody: document.activeElement === document.body,
+        }));
+        assert.deepStrictEqual(cleared,
+          { sel: null, tabindexed: 0, activeIsBody: true },
+          'precondition: Escape really cleared the selection (Task 3) AND — measured — the ' +
+          'tabindex removal blurred the holder, so nothing in the DOM anchors the keyboard. ' +
+          'Got ' + JSON.stringify(cleared));
+        await pressShiftKey(page, 'ArrowDown');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 5, focusLine: 7, memberLines: [[5, 5], [7, 7]] },
+          'spec §4.4 entry (c): with no selection and no focused block, Shift+↓ anchors on ' +
+          'the line the last selection ended on (5) and steps to the next block (7)');
+      }, 'T4');
+
+    // Exit: a click inside any block without Shift.
+    await s3Scenario('a click inside a block without Shift clears the selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection stands before the click that must clear it');
+        assert.strictEqual(await blockIdAtPoint(page, g[3].x, g[3].y), g[3].id,
+          'precondition: the click point is inside "charlie"');
+        await page.mouse.click(g[3].x, g[3].y);
+        await settleEditor(page);
+        const after = await page.evaluate((id) => ({
+          sel: window.__edTestGetSelection(),
+          tinted: document.querySelectorAll('.ed-selected').length,
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+          caretInClicked: !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-block[data-block-id="' + id + '"]')),
+        }), g[3].id);
+        assert.deepStrictEqual(after,
+          { sel: null, tinted: 0, tabindexed: 0, caretInClicked: true },
+          'spec §4.4 exit: a plain click inside a block clears the whole selection AND ' +
+          'still places the caret where the user clicked. Got ' + JSON.stringify(after));
+      }, 'T4');
+
+    // Escape as an exit for a selection a real GESTURE built (Task 3 pinned the
+    // same rung against a selection built by the test hook).
+    await s3Scenario('Escape clears a selection a drag built',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag built a real selection');
+        await page.keyboard.press('Escape');
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4: Escape clears the selection');
+      }, 'T4');
+
+    // Spec §4.4: "捲動與視窗失焦不清除".
+    await s3Scenario('scrolling and window blur do not clear the selection',
+      '# Doc\n\nalpha\n\nbravo\n\n' + 'pad\n\n'.repeat(60), async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        const built = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(built,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection is built before anything is scrolled');
+        const scrolled = await page.evaluate(() => {
+          window.scrollTo(0, 400);
+          window.dispatchEvent(new Event('scroll'));
+          return window.scrollY;
+        });
+        assert.ok(scrolled > 0,
+          'precondition: the page must actually scroll, or this proves nothing. scrollY=' +
+          scrolled);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), built,
+          'spec §4.4: scrolling must not clear the selection');
+        await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), built,
+          'spec §4.4: window blur must not clear the selection — the window `blur` listener ' +
+          'exists to tear down an in-flight DRAG, and Task 4 adds the selection drag to it; ' +
+          'the SELECTION itself survives');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 2,
+          'the tint survives with it');
+      }, 'T4');
+
+    // Hazard 2 from the recon: there is no `mouseup` listener anywhere in
+    // client.js, so a drag that ends outside the window arrives (if at all) as
+    // `pointercancel` or a window `blur`. Either must END THE DRAG without
+    // half-building the selection — and, crucially, without leaving the drag
+    // live so the next stray pointer move keeps extending it.
+    await s3Scenario('a drag aborted by pointercancel leaves a complete selection, not a live drag',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2], { hold: true });
+        const mid = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(mid,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag is engaged and mid-gesture before it is aborted');
+        await page.evaluate(() => document.dispatchEvent(
+          new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 })));
+        // The pointer keeps moving over a THIRD block. If the abort left the
+        // drag live, the selection would silently grow to lines 3..7.
+        await page.mouse.move(g[3].x, g[3].y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), mid,
+          'the aborted drag must be torn down: the selection stays exactly what it was ' +
+          'when the abort arrived, and later pointer movement no longer extends it');
+      }, 'T4');
+
+    // Same hazard through the window `blur` path.
+    await s3Scenario('a drag the window loses focus mid-gesture is torn down, selection intact',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2], { hold: true });
+        const mid = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(mid,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag is engaged before the window loses focus');
+        await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+        await page.mouse.move(g[3].x, g[3].y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), mid,
+          'window blur ends the DRAG (mirroring the table row drag\'s own blur cleanup) ' +
+          'but keeps the selection — §4.4 says blur does not clear');
+      }, 'T4');
+
+    // wireBlockSelection()'s click handler calls switchAwayFrom() for any click
+    // OUTSIDE a block, and its Task 4 exit rule clears the selection for any
+    // click INSIDE one. A drag's own release fires a click on the common
+    // ancestor of press and release, so both branches are reachable by the very
+    // gesture that just built the selection — it must be excluded explicitly.
+    await s3Scenario('a drag released on the page margin keeps its selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        const margin = { x: 2, y: g[2].y };
+        assert.strictEqual(await blockIdAtPoint(page, margin.x, margin.y), null,
+          'precondition: the release point is outside every block');
+        await dragAcross(page, g[1], { x: g[2].x, y: g[2].y }, { hold: true });
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection is built before the pointer leaves for the margin');
+        await page.mouse.move(margin.x, margin.y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        await settleEditor(page);
+        const after = await page.evaluate(() => ({
+          sel: window.__edTestGetSelection(),
+          tinted: document.querySelectorAll('.ed-selected').length,
+        }));
+        assert.deepStrictEqual(
+          { r: selRange(after.sel), tinted: after.tinted },
+          { r: { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] }, tinted: 2 },
+          'the release on the margin must not clear the selection, and must not run the ' +
+          'outside-a-block switchAwayFrom() branch whose commit would re-render the tint ' +
+          'away. Got ' + JSON.stringify(after));
+      }, 'T4');
+
+    // ── the table exception ───────────────────────────────────────────────
+    // '# Doc'{1,1} | table{3,6} | 'after'{8,8}
+    const DOCTABLE = '# Doc\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nafter\n';
+
+    await s3Scenario('a drag inside one table stays native text selection',
+      DOCTABLE, async (page) => {
+        const g = await blockGeom(page);
+        assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'table', 'paragraph'],
+          'fixture shape');
+        const cells = await page.evaluate(() => {
+          const t = document.querySelector('.ed-block[data-block-type="table"] table');
+          return [].slice.call(t.tBodies[0].rows).map((row) =>
+            [].slice.call(row.cells).map((c) => {
+              const r = c.getBoundingClientRect();
+              return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+                text: c.textContent };
+            }));
+        });
+        assert.deepStrictEqual(cells.map((r) => r.map((c) => c.text)), [['1', '2'], ['3', '4']],
+          'precondition: the fixture has two body rows of two cells');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const from = cells[0][0], to = cells[1][1];
+        assert.strictEqual(await blockIdAtPoint(page, from.x, from.y), g[1].id,
+          'precondition: the press is inside the table block');
+        assert.strictEqual(await blockIdAtPoint(page, to.x, to.y), g[1].id,
+          'precondition: the release is still inside the SAME table block');
+        await dragAcross(page, from, to);
+        const native = await nativeSelInfo(page);
+        console.log('S3 T4 in-table drag left native selection: ' + JSON.stringify(native));
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4 table exception: a drag whose origin is a cell and which never leaves ' +
+          'that table keeps NATIVE text selection — no block selection at all');
+        assert.strictEqual(native.anchorInTable, true,
+          'and the native selection must still be inside the table (not blown away)');
+      }, 'T4');
+
+    await s3Scenario('a drag out of a table takes the whole table block as one unit',
+      DOCTABLE, async (page) => {
+        const g = await blockGeom(page);
+        const cell = await page.evaluate(() => {
+          const c = document.querySelector('.ed-block[data-block-type="table"] table tbody tr td');
+          const r = c.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+            text: c.textContent };
+        });
+        assert.strictEqual(cell.text, '1', 'precondition: the press starts in the first body cell');
+        assert.strictEqual(await blockIdAtPoint(page, cell.x, cell.y), g[1].id,
+          'precondition: that cell belongs to the table block');
+        assert.strictEqual(await blockIdAtPoint(page, g[2].x, g[2].y), g[2].id,
+          'precondition: the release point is inside the paragraph BELOW the table');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        await dragAcross(page, cell, g[2]);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 8, memberLines: [[3, 6], [8, 8]] },
+          'spec §4.4 table exception: dragging OUT of the table puts the WHOLE table block ' +
+          'in the set as one unit — the anchor is the table block\'s startLine (3), not the ' +
+          'cell\'s line, and the member range covers all four of its source lines. Got ' +
+          JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 6], [8, 8]],
+          'the paint must agree with the model');
+        assert.strictEqual(await nativeSelInfo(page).then((n) => n.text), '',
+          'the native cell selection is dropped once the gesture leaves the table');
+      }, 'T4');
+
+    // Recon hazard 1: `pointerdown` fires on every left click and the table
+    // grip gesture is the incumbent. A grip press must still win — the
+    // selection drag is armed only where hitTestGrip() returned nothing.
+    await s3Scenario('a row-grip drag still drags the row and builds no selection',
+      DOCTABLE, async (page, mdPath) => {
+        const tsel = await blockSelByType(page, 'table');
+        const before = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\| 1 \| 2 \|[\s\S]*\| 3 \| 4 \|/.test(before),
+          'precondition: row "1|2" starts above row "3|4", got ' + JSON.stringify(before));
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const grip = await rowGripCoords(page, tsel, 0);
+        const drop = await rowBoundaryCoords(page, tsel, 1);
+        await dragRowTo(page, grip, drop);
+        await settleEditor(page);
+        assert.strictEqual(await selSnapshot(page), null,
+          'a grip drag must not build a block selection: the selection pointerdown is armed ' +
+          'INSIDE the existing handler, only on the branch where hitTestGrip() found nothing');
+        const after = await saveAndRead(page, mdPath);
+        assert.ok(/\| 3 \| 4 \|[\s\S]*\| 1 \| 2 \|/.test(after),
+          'and the row drag itself must still work — the rows must have swapped. Got ' +
+          JSON.stringify(after));
+      }, 'T4');
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
