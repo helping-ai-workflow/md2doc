@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const assert = require('assert');
-const { createEditorServer } = require('../lib/editor/server.js');
+const { createEditorServer, assertBlockRangesFit } = require('../lib/editor/server.js');
 
 function req(port, method, p, body) {
   return new Promise((resolve, reject) => {
@@ -254,6 +254,81 @@ function req(port, method, p, body) {
         JSON.stringify(ed.eol));
     } finally { srv.close(); }
     console.log('server: mixed-EOL file with a CRLF majority reports CRLF — OK');
+  }
+
+  // T7: BARE CR (classic-Mac terminator). marked's preprocess normalises a
+  // lone \r to \n, so blockmap.js hands back one block per logical line —
+  // while /\r\n|\n/ does not split it and `lines` stays a single element.
+  // The two halves of the payload then disagree about what line 2 is, and
+  // the first commit against line 1 splices past the end of `lines`,
+  // deleting the rest of the file. Measured on '# H\rpara\r': blocks say
+  // heading@1 + paragraph@2, lines said ['# H\rpara\r'].
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-cr-'));
+    const mdPath = path.join(dir, 'cr.md');
+    fs.writeFileSync(mdPath, '# H\rpara\r', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const html = await (await fetch(srv.urlFor(mdPath))).text();
+      const m = /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(html);
+      assert.ok(m, '__ED__ payload must be present for a bare-CR file');
+      const ed = JSON.parse(m[1].replace(/\\u003c/g, '<'));
+      assert.deepStrictEqual(ed.lines, ['# H', 'para', ''],
+        'a bare \\r must split a line, exactly as marked treats it, got: ' +
+        JSON.stringify(ed.lines));
+      assert.ok(ed.lines.every((l) => l.indexOf('\r') === -1),
+        'lines must never carry a \\r, got: ' + JSON.stringify(ed.lines));
+      const maxEnd = ed.blocks.reduce((n, b) => (b.endLine > n ? b.endLine : n), 0);
+      assert.ok(maxEnd <= ed.lines.length,
+        'no block may address a line beyond `lines` — got endLine ' + maxEnd +
+        ' for ' + ed.lines.length + ' lines: ' + JSON.stringify(ed.blocks));
+      // And the whole point: the paragraph's own line is addressable.
+      const para = ed.blocks.find((b) => b.type === 'paragraph');
+      assert.strictEqual(ed.lines[para.startLine - 1], 'para',
+        'the paragraph block must address the line that actually holds it');
+      // A file whose MAJORITY terminator is a bare CR keeps CR on save —
+      // same §3.11(4) reasoning the CRLF/LF majority vote above exists for:
+      // now that \r splits, an LF default would rewrite every line of a
+      // classic-Mac file on the first save.
+      assert.strictEqual(ed.eol, '\r',
+        'a CR-majority file must report eol === CR, got: ' + JSON.stringify(ed.eol));
+    } finally { srv.close(); }
+    console.log('server: bare-CR file splits like marked does and keeps its blocks in range — OK');
+  }
+
+  // The invariant itself, addressed directly: the two halves of the payload
+  // are built by different machinery (marked's tokeniser vs a regex split),
+  // so a future divergence must be loud rather than silent.
+  {
+    assert.strictEqual(
+      assertBlockRangesFit([{ startLine: 1, endLine: 2 }], ['a', 'b']), undefined,
+      'an in-range block map must pass silently');
+    assert.throws(
+      () => assertBlockRangesFit([{ startLine: 1, endLine: 3 }], ['a', 'b']),
+      /out of range/,
+      'a block addressing a line past the end of `lines` must throw, not ship');
+    console.log('server: block-map/lines range invariant is enforced — OK');
+  }
+
+  // T7 fix round 1 (LOW-3): a CR/CRLF TIE goes to LF. The majority-vote
+  // comment promises "平手時取 LF"; `crlfCount >= bareCr` handed the tie to
+  // CRLF and contradicted it. Nothing else moves — a pure-CRLF file has
+  // bareCr === 0, so the strict comparison is still true there.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-eol-tie-'));
+    const mdPath = path.join(dir, 'tie.md');
+    // 2 CRLF, 2 bare CR, 0 bare LF.
+    fs.writeFileSync(mdPath, '# H\r\n\rpara\r\n\rx', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const ed = JSON.parse(
+        /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(
+          await (await fetch(srv.urlFor(mdPath))).text())[1].replace(/\\u003c/g, '<'));
+      assert.strictEqual(ed.eol, '\n',
+        'a CR/CRLF tie must fall through to LF, as the majority-vote comment says, got: ' +
+        JSON.stringify(ed.eol));
+    } finally { srv.close(); }
+    console.log('server: a CR/CRLF terminator tie falls through to LF — OK');
   }
 
   // Finding 2: createEditorServer with a listenPort already occupied by

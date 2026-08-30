@@ -34,6 +34,12 @@ Ordered with nested bullet sublist:
    - nested bullet
    - nested bullet two
 
+Hard break list (backslash form — spec 3.12):
+
+- hard break one\
+  hard break two continues
+- plain neighbour
+
 Kept trailing spaces  
 
 Final line no newline at EOF

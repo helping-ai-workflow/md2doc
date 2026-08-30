@@ -9,16 +9,20 @@ const { commitEdit, commitRangeEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { serializeTable } = require('../lib/editor/table-md.js');
 const { serializeInline } = require('../lib/editor/inline-md.js');
-const { serializeList } = require('../lib/editor/list-md.js');
+const { serializeBlocks } = require('../lib/editor/list-md.js');
 
 // minimal element stub — same pattern as test/table-md.test.js /
 // test/inline-md.test.js (childNodes/nodeType/nodeName/textContent/
 // getAttribute only, no querySelector).
 function el(name, attrs, ...children) {
+  const a = attrs || {};
+  const classes = (a.class || '').split(/\s+/).filter(Boolean);
   return {
     nodeType: 1, nodeName: name.toUpperCase(),
     childNodes: children.map(c => typeof c === 'string' ? { nodeType: 3, textContent: c } : c),
-    getAttribute: (k) => (attrs || {})[k] !== undefined ? attrs[k] : null,
+    getAttribute: (k) => a[k] !== undefined ? a[k] : null,
+    // S1: serializeBlocks() token-matches classes via classList.contains.
+    classList: { contains: (c) => classes.indexOf(c) !== -1 },
     get textContent() {
       return this.childNodes.map(c => c.textContent).join('');
     },
@@ -34,9 +38,17 @@ function table(headerRow, bodyRows) {
     el('tbody', {}, ...bodyRows)
   );
 }
-function li(...children) { return el('li', {}, ...children); }
-function ul(...children) { return el('ul', {}, ...children); }
-function ol(...children) { return el('ol', {}, ...children); }
+// S1: edit mode emits one FLAT block per list item — same shape helper as
+// test/list-md.test.js's.
+function liBlock({ id = '0', type = 'ul', task = false, checked = null, indent = 0 }, ...inner) {
+  const kids = [el('span', { class: 'ed-li-marker' })];
+  if (task) kids.push(el('span', { class: 'ed-li-check', 'data-checked': checked ? '1' : '0' }));
+  kids.push(el('div', { class: 'ed-li-text' }, ...inner));
+  return el('div', {
+    class: 'ed-block', 'data-block-id': id, 'data-block-type': 'li',
+    'data-list-type': type, 'data-task': task ? '1' : '0', 'data-indent': String(indent),
+  }, ...kids);
+}
 
 function post(port, p, body) {
   return new Promise((resolve, reject) => {
@@ -236,10 +248,12 @@ function post(port, p, body) {
       assert.deepStrictEqual(beforeLines, ['- outer', '  - inner 1', '  - inner 2'],
         'fixture list run must be the nested-list hazard this test targets');
 
-      const edited = ol(
-        li('outer EDITED', ul(li('inner 1'), li('inner 2 EDITED')))
-      );
-      const { md, unsupported } = serializeList(edited);
+      const edited = [
+        liBlock({ id: '0', type: 'ol', indent: 0 }, 'outer EDITED'),
+        liBlock({ id: '1', type: 'ul', indent: 1 }, 'inner 1'),
+        liBlock({ id: '2', type: 'ul', indent: 1 }, 'inner 2 EDITED'),
+      ];
+      const { md, unsupported } = serializeBlocks(edited);
       assert.deepStrictEqual(unsupported, []);
       const expectedLines = [
         '1. outer EDITED',

@@ -159,4 +159,44 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
   assert.strictEqual(marked.parseInline(md), 'a~~b~~c <del>d</del> e~~f~~g');
 }
 
+// ── spec §3.12: BR is two different things wearing the same tag ──────────
+// The edit-mode renderer (lib/md2doc.js's renderer.br) marks a <br> that came
+// from a markdown HARD BREAK; nothing else carries the marker. This module
+// sees only the DOM, so the marker is the entire basis for telling them apart.
+{
+  // marked's own routing is what makes the marker possible at all, and it
+  // holds only under `breaks: false` (pinned at lib/md2doc.js's setOptions).
+  // Asserted here rather than assumed: if a future marked upgrade sent a
+  // literal '<br>' through the br renderer, the marker would land on
+  // Shift+Enter's breaks too and silently rewrite them.
+  assert.deepStrictEqual(marked.lexer('x  \ny')[0].tokens.map((t) => t.type),
+    ['text', 'br', 'text'], 'a hard break must lex as a `br` token');
+  assert.deepStrictEqual(marked.lexer('x<br>y')[0].tokens.map((t) => t.type),
+    ['text', 'html', 'text'], 'a literal <br> must lex as an `html` token, never `br`');
+
+  // A marked <br> becomes a hard break in BACKSLASH form. Not two trailing
+  // spaces: this module's output is subject to gate-compat.test.js's
+  // assertNoTrailingWhitespace fossil (and list-md.js trims every line it
+  // emits), so the space form cannot be emitted at all — see §3.12.
+  const hard = serializeInline(el('p', {}, 'a', el('br', { 'data-hard-break': '1' }), 'b')).md;
+  assert.strictEqual(hard, 'a\\\nb');
+  assert.deepStrictEqual(hard.split('\n').map((l) => l.replace(/[ \t]+$/, '')), hard.split('\n'),
+    'no emitted line may end in whitespace — the reason the space form is unavailable');
+  // …and it comes back as a hard break, not as a literal backslash.
+  assert.deepStrictEqual(marked.lexer(hard)[0].tokens.map((t) => t.type),
+    ['text', 'br', 'text'], 'the emitted backslash form must re-lex as a hard break');
+
+  // An UNMARKED <br> keeps emitting the literal '<br>' it always did. This is
+  // the Shift+Enter round-trip contract (a browser-inserted <br> carries no
+  // marker), the hand-written-'<br>'-in-source contract, and the Chromium
+  // placeholder <br> left behind when a surface's last character is deleted —
+  // all three are the same code path and none of them may move.
+  assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b')).md, 'a<br>b');
+  // an explicit "not a hard break" attribute value is not a hard break either
+  assert.strictEqual(
+    serializeInline(el('p', {}, 'a', el('br', { 'data-hard-break': '0' }), 'b')).md, 'a<br>b');
+  // and the literal form still round-trips to a <br> in the rendered HTML
+  assert.strictEqual(marked.parseInline('a<br>b'), 'a<br>b');
+}
+
 console.log('inline-md.test.js OK');

@@ -77,8 +77,25 @@ assert.deepStrictEqual(
 // task list items
 {
   const { blocks } = buildBlockMap('- [ ] todo\n- [x] done');
-  assert.deepStrictEqual(blocks.map((b) => [b.listType, b.checked]),
-    [['task', false], ['task', true]]);
+  assert.deepStrictEqual(blocks.map((b) => [b.listType, b.task, b.checked]),
+    [['ul', true, false], ['ul', true, true]]);
+}
+// ordered × task are independent axes (GFM allows `1. [ ] a`)
+{
+  const { blocks } = buildBlockMap('1. [ ] alpha\n2. [x] beta\n');
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.listType, b.task, b.checked]),
+    [['ol', true, false], ['ol', true, true]],
+    'an ordered task list must keep BOTH its ordered-ness and its task-ness'
+  );
+}
+{
+  const { blocks } = buildBlockMap('- plain\n- [ ] todo\n');
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.listType, b.task]),
+    [['ul', false], ['ul', true]],
+    'a bullet list marks task-ness per item, list type per list'
+  );
 }
 // multi-line li (lazy continuation) spans both lines
 {
@@ -90,6 +107,175 @@ assert.deepStrictEqual(
   const { blocks } = buildBlockMap('- a\n  - b\n    - c\n- d');
   assert.deepStrictEqual(blocks.map((b) => [b.startLine, b.endLine, b.indent]),
     [[1, 1, 0], [2, 2, 1], [3, 3, 2], [4, 4, 0]]);
+}
+
+// B1: SAME-LINE NESTING. An item whose content starts with another list
+// marker on the SAME line ('- - a') has a child list token whose first line IS
+// the parent's own first line. Locating that child by matching its text against
+// the item's lines cannot work — marked DEDENTS the child's raw to '- a', which
+// never equals any line of '- - a' — so the child was skipped entirely, the
+// renderer's lockstep walk ran off the end of blocks[], and the whole document
+// failed to open (HTTP 500, "Cannot read properties of undefined (reading
+// 'task')"). Every combination of the five markers nests this way.
+{
+  const MARKERS = ['-', '*', '+', '1.', '1)'];
+  const MARKER_RE = /^ *(?:[-*+]|\d+[.)]) /;
+  MARKERS.forEach((outer) => {
+    MARKERS.forEach((inner) => {
+      const md = outer + ' ' + inner + ' a\n';
+      const { blocks } = buildBlockMap(md);
+      const lis = blocks.filter((b) => b.type === 'li');
+      assert.strictEqual(lis.length, 2,
+        JSON.stringify(md) + ' must produce one block PER ITEM (outer + nested), got ' +
+        lis.length);
+      assert.deepStrictEqual(lis.map((b) => b.indent), [0, 1],
+        JSON.stringify(md) + ': the second item is nested');
+      lis.forEach((b) => {
+        assert.strictEqual(b.startLine, 1,
+          JSON.stringify(md) + ': both items begin on the shared first line, got ' + b.startLine);
+        assert.ok(MARKER_RE.test(md.split('\n')[b.startLine - 1]),
+          JSON.stringify(md) + ': startLine must name a marker line');
+      });
+      // ids stay 0..n-1 in document order — the invariant the renderer walks in
+      // lockstep with.
+      assert.deepStrictEqual(blocks.map((b) => b.id), blocks.map((_, i) => i));
+    });
+  });
+}
+
+// B2: a child list token must never be located by TEXT. An item containing a
+// fenced or indented code block whose content happens to read like the child's
+// first line matched the CODE line first, so startLine pointed inside the code:
+// typing into the real nested item then landed in the fence, or destroyed the
+// indented code block outright.
+{
+  const cases = [
+    ['- a\n\n  ```\n  - b\n  ```\n\n  - b\n', 7],
+    ['- a\n\n      - b\n\n  - b\n', 5],
+    // Branch review, BLOCKING 2: the INLINE-CODE-SPAN shape, which is the one
+    // that actually exercises indexOfAtLineStart(). Both fixtures above pass
+    // on the monotonic `pos` advance alone — the `code` token claims the
+    // lookalike bytes before the `list` token is searched for — so neither of
+    // them reacts to dropping the line-start requirement. An inline span has
+    // no token of its own to consume: `- b` sits INSIDE the parent's `text`
+    // raw, which this walk deliberately skips, so a plain indexOf() from
+    // pos=0 finds the parent's OWN line and the child is placed on it.
+    ['- text with `- b` inline\n  - b\n', 2],
+  ];
+  cases.forEach(([md, expected]) => {
+    const nested = buildBlockMap(md).blocks.filter((b) => b.type === 'li' && b.indent === 1);
+    assert.strictEqual(nested.length, 1, JSON.stringify(md) + ': exactly one nested item');
+    assert.strictEqual(nested[0].startLine, expected,
+      JSON.stringify(md) + ': the nested item is the REAL one at line ' + expected +
+      ', not the identical text inside the code block — got ' + nested[0].startLine +
+      ' (' + JSON.stringify(md.split('\n')[nested[0].startLine - 1]) + ')');
+  });
+
+  // Branch review, BLOCKING 2 — the DIRECT assertion on the whole map, not
+  // just on the nested item's startLine.
+  //
+  // indexOfAtLineStart() had no test of any kind: grep across lib/ and test/
+  // found its definition and its single call site and nothing else. What the
+  // shape below costs when the line-start requirement is dropped is not one
+  // wrong startLine, it is BOTH ranges at once, and neither of them
+  // announces itself:
+  //
+  //   correct: [{1,1},{2,2}]   broken: [{1,0},{1,1}]
+  //
+  // The parent's range INVERTS (endLine < startLine), which
+  // blockOwnsNoLine() silently disarms rather than reports, and the child
+  // now points at the parent's source line — so one real keystroke in the
+  // child saves a DUPLICATED line ('  - bZ' alongside the untouched
+  // '  - b'). Stated as the full [startLine, endLine] pair for every block
+  // so an inverted parent cannot pass by having the right startLine.
+  {
+    const md = '- text with `- b` inline\n  - b\n';
+    assert.deepStrictEqual(
+      buildBlockMap(md).blocks.map((b) => [b.type, b.startLine, b.endLine, b.indent]),
+      [['li', 1, 1, 0], ['li', 2, 2, 1]],
+      'a `- b` inside an INLINE CODE SPAN is not a line start, so the child list token ' +
+      'must be located at line 2. Getting [[li,1,0],[li,1,1]] means the search stopped ' +
+      'requiring a line start: the parent owns no line and the child owns the parent\'s.');
+  }
+}
+
+// I3 (re-asserted) + the durable invariant, over the whole corpus this task has
+// accumulated: every li block's startLine names ITS OWN marker line.
+{
+  const MARKER_RE = /^ *(?:[-*+]|\d+[.)]) /;
+  const corpus = [
+    '- a\n  - b\n\n  more text\n- c\n',
+    '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n',
+    '- alpha\n  cont\n- bravo\n',
+    '- a\n  1. x\n  1) y\n- d\n',
+    '- a\n  - b\n  * c\n- d\n',
+    '- a\n  - b\n    - c\n- d',
+    '# H\n\n- a\n  - b\n\n  tail\n\npara\n',
+    '- a\n\n  ```\n  - b\n  ```\n\n  - b\n',
+    '- a\n\n      - b\n\n  - b\n',
+    '1. [ ] alpha\n2. [x] beta\n',
+    '- plain\n- [ ] todo\n',
+    '- first\n  continued\n- second',
+    '- a\n  - b\n    1. p\n    1) q\n  - c\n- d\n',
+  ];
+  ['-', '*', '+', '1.', '1)'].forEach((o) => {
+    ['-', '*', '+', '1.', '1)'].forEach((i) => corpus.push(o + ' ' + i + ' a\n'));
+  });
+  corpus.forEach((md) => {
+    const lines = md.split('\n');
+    const lis = buildBlockMap(md).blocks.filter((b) => b.type === 'li');
+    let prev = 0;
+    lis.forEach((b) => {
+      assert.ok(MARKER_RE.test(lines[b.startLine - 1]),
+        'li block ' + b.id + ' of ' + JSON.stringify(md) + ' has startLine ' + b.startLine +
+        ' naming ' + JSON.stringify(lines[b.startLine - 1]) + ', which is not a marker line');
+      assert.ok(b.startLine >= prev,
+        'startLines must be non-decreasing in document order, in ' + JSON.stringify(md));
+      prev = b.startLine;
+    });
+  });
+}
+
+// I3's own outcome is unchanged: own content that resumes AFTER a child stays
+// unaddressable — a {startLine, endLine} pair cannot express a discontiguous
+// range, so it is left out rather than mis-covered.
+{
+  const { blocks } = buildBlockMap('- a\n  - b\n\n  more text\n- c\n');
+  assert.deepStrictEqual(blocks.map((b) => [b.startLine, b.endLine, b.indent]),
+    [[1, 1, 0], [2, 2, 1], [5, 5, 0]],
+    "an item whose own content resumes AFTER its sublist keeps only its own " +
+    "contiguous marker line; the trailing own-content line belongs to no block");
+}
+
+// SAME-LINE nesting yields an EMPTY own-range for the outer item, at every
+// marker combination. Asserted explicitly so the shape is a documented output
+// rather than a surprise: lineops.js's replaceLines() turns end < start into an
+// INSERTION, so client.js refuses to arm such a block and no commit can start
+// on it (see canWysiwygForLi's blockOwnsNoLine guard).
+{
+  const MARKERS = ['-', '*', '+', '1.', '1)'];
+  MARKERS.forEach((outer) => {
+    MARKERS.forEach((inner) => {
+      const md = outer + ' ' + inner + ' a\n';
+      const lis = buildBlockMap(md).blocks.filter((b) => b.type === 'li');
+      assert.strictEqual(lis[0].endLine, lis[0].startLine - 1,
+        JSON.stringify(md) + ': the outer item owns NO line of its own, so its range is ' +
+        'empty (endLine === startLine - 1), got [' + lis[0].startLine + '-' + lis[0].endLine + ']');
+      assert.ok(lis[1].endLine >= lis[1].startLine,
+        JSON.stringify(md) + ': the nested item DOES own its line and must keep a ' +
+        'well-formed range');
+    });
+  });
+  // ...and no ordinary shape produces one.
+  ['- a\n- b\n', '- a\n  - b\n', '- alpha\n  cont\n- bravo\n',
+   '- a\n  - b\n\n  more text\n- c\n', '- a\n\n  - a1\n    cont\n  - a2\n\n- b\n',
+  ].forEach((md) => {
+    buildBlockMap(md).blocks.forEach((b) => {
+      assert.ok(b.endLine >= b.startLine,
+        JSON.stringify(md) + ': block ' + b.id + ' must have a well-formed range, got [' +
+        b.startLine + '-' + b.endLine + ']');
+    });
+  });
 }
 
 console.log('blockmap.test.js OK');

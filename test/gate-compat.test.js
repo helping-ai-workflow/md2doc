@@ -31,10 +31,16 @@ marked.setOptions({ gfm: true, breaks: false });
 
 // same minimal element stub as test/table-md.test.js / test/inline-md.test.js
 function el(name, attrs, ...children) {
+  const a = attrs || {};
+  const classes = (a.class || '').split(/\s+/).filter(Boolean);
   return {
     nodeType: 1, nodeName: name.toUpperCase(),
     childNodes: children.map((c) => (typeof c === 'string' ? { nodeType: 3, textContent: c } : c)),
-    getAttribute: (k) => ((attrs || {})[k] !== undefined ? attrs[k] : null),
+    getAttribute: (k) => (a[k] !== undefined ? a[k] : null),
+    // S1: serializeBlocks() token-matches state classes via classList.contains
+    // (never whole-string equality — at runtime .ed-li-text also carries
+    // ed-wys-armed), so the stub has to carry a classList.
+    classList: { contains: (c) => classes.indexOf(c) !== -1 },
     get textContent() {
       return this.childNodes.map((c) => c.textContent).join('');
     },
@@ -46,9 +52,17 @@ function tr(...children) { return el('tr', {}, ...children); }
 function table(headerRow, bodyRows) {
   return el('table', {}, el('colgroup', {}), el('thead', {}, headerRow), el('tbody', {}, ...bodyRows));
 }
-function li(...children) { return el('li', {}, ...children); }
-function ul(...children) { return el('ul', {}, ...children); }
-function ol(...children) { return el('ol', {}, ...children); }
+// S1: edit mode emits one FLAT block per list item — no <ul>/<ol>, no <li>.
+// Same shape helper as test/list-md.test.js's.
+function liBlock({ id = '0', type = 'ul', task = false, checked = null, indent = 0 }, ...inner) {
+  const kids = [el('span', { class: 'ed-li-marker' })];
+  if (task) kids.push(el('span', { class: 'ed-li-check', 'data-checked': checked ? '1' : '0' }));
+  kids.push(el('div', { class: 'ed-li-text' }, ...inner));
+  return el('div', {
+    class: 'ed-block', 'data-block-id': id, 'data-block-type': 'li',
+    'data-list-type': type, 'data-task': task ? '1' : '0', 'data-indent': String(indent),
+  }, ...kids);
+}
 
 // ── gate assertions (the fossilized contract itself) ─────────────────────
 
@@ -91,10 +105,64 @@ function assertGateCompatTable(md, label) {
 // emitted block never contains a blank line (list-md.js's loose-list
 // decision is to degrade to unsupported rather than emit blank-line-
 // separated markdown — see lib/editor/list-md.js's module header).
-function assertGateCompatList(md, label) {
-  md.split('\n').forEach((line, i) => {
-    assert.ok(/^ *(-|\d+\.) /.test(line),
-      label + ': line ' + i + ' fails the list marker/indent contract: ' + JSON.stringify(line));
+// T8 item 5, CONTRACT UPDATE. The original rule here was "every emitted line
+// is a marker line". That was true when a block owned exactly one source line
+// and stopped being true the moment the serializer learned to emit
+// CONTINUATION lines for a hard-wrapped item (see case 13 below). Restated:
+//
+//   * a MARKER line is /^ *(-|\d+\.) / at some accumulated-width indent, as
+//     before;
+//   * a CONTINUATION line carries no marker and must sit EXACTLY on the
+//     content column of the marker line it continues — `indent + marker
+//     width`, the same accumulated-width rule §3.4 pins for a child list.
+//     Not a range: one column too few and marked lexes it as a sibling item
+//     or as a lazy line of the wrong item, four too many and it lexes as an
+//     indented code block. Both failures are silent in the markdown and
+//     catastrophic in the document.
+//   * a continuation line can never come FIRST — there is nothing for it to
+//     continue.
+//
+// `lineMeta` is optional and, when passed, is the serializer's OWN
+// line -> block attribution; it is checked for the invariant every caller of
+// serializeBlocks() relies on (`lineMeta.length === md.split('\n').length`)
+// and cross-checked against the column arithmetic derived from the text, so
+// the two independent accounts of "which line is a continuation" have to
+// agree.
+function assertGateCompatList(md, label, lineMeta) {
+  const lines = md.split('\n');
+  if (lineMeta) {
+    assert.strictEqual(lineMeta.length, lines.length,
+      label + ': lineMeta must carry exactly one entry per emitted line, got ' +
+      lineMeta.length + ' for ' + lines.length + ' lines');
+  }
+  let contentCol = -1;
+  lines.forEach((line, i) => {
+    const m = /^( *)(-|\d+\.) /.exec(line);
+    if (m) {
+      contentCol = m[1].length + m[2].length + 1;
+      if (lineMeta) {
+        assert.notStrictEqual(lineMeta[i].marker, '',
+          label + ': line ' + i + ' carries a marker but lineMeta calls it a continuation: ' +
+          JSON.stringify(line));
+      }
+      return;
+    }
+    assert.notStrictEqual(contentCol, -1,
+      label + ': line ' + i + ' has no marker and nothing precedes it to continue: ' +
+      JSON.stringify(line));
+    const lead = /^ */.exec(line)[0].length;
+    assert.strictEqual(lead, contentCol,
+      label + ': line ' + i + ' is a continuation and must sit on its item\'s content ' +
+      'column ' + contentCol + ', got ' + lead + ': ' + JSON.stringify(line));
+    if (lineMeta) {
+      assert.strictEqual(lineMeta[i].marker, '',
+        label + ': line ' + i + ' is a continuation but lineMeta gives it a marker: ' +
+        JSON.stringify(line));
+      assert.strictEqual(lineMeta[i].blockId, lineMeta[i - 1].blockId,
+        label + ': line ' + i + ' continues the previous line, so it must belong to the ' +
+        'SAME block — a continuation attributed to a different block is exactly how a ' +
+        'caller\'s line index once overwrote another item\'s source');
+    }
   });
   assertNoTrailingWhitespace(md, label);
   assert.ok(!md.includes('\n\n'), label + ': emitted block must not contain a blank line, got:\n' + md);
@@ -235,18 +303,28 @@ function assertGateCompatListRoundTrips(md, label) {
   assertNoTrailingWhitespace(md, 'citation inline content');
 }
 
-// ── representative serializeList() outputs (Task 3 additions) ────────────
+// ── representative serializeBlocks() outputs (Task 3 additions) ──────────
+// S1: the DOM these run against is the FLAT block sequence lib/md2doc.js now
+// emits (data-indent carries the nesting; there is no container element left).
+// The ASSERTIONS and the expected strings are deliberately unchanged — only
+// how the input DOM is built and which serializer entry point is called.
 
 // 9. flat ul / renumbered ol — the common case.
 {
-  const { md } = listMd.serializeList(ul(li('one'), li('two'), li('three')));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'one'), liBlock({ id: '1' }, 'two'), liBlock({ id: '2' }, 'three'),
+  ]);
   assertGateCompatList(md, 'flat ul');
   assertGateCompatListRoundTrips(md, 'flat ul');
 }
 {
   // renumbering matters here regardless of source order/gaps — the gate
   // must always see a clean 1..n sequence, never a stale start value.
-  const { md } = listMd.serializeList(ol(li('a'), li('b'), li('c')));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol' }, 'b'),
+    liBlock({ id: '2', type: 'ol' }, 'c'),
+  ]);
   assertGateCompatList(md, 'renumbered ol');
   assertGateCompatListRoundTrips(md, 'renumbered ol');
   assert.ok(md.startsWith('1. '), 'renumbered ol must start at 1: ' + md);
@@ -255,14 +333,14 @@ function assertGateCompatListRoundTrips(md, label) {
 // 10. deep mixed nesting (ul > ol > ul) — every line, at every depth, must
 // still satisfy the marker/indent contract and the no-blank-line rule.
 {
-  const list = ul(
-    li('top', ol(
-      li('mid a'),
-      li('mid b', ul(li('deep x'), li('deep y')))
-    )),
-    li('top two')
-  );
-  const { md } = listMd.serializeList(list);
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ul', indent: 0 }, 'top'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'mid a'),
+    liBlock({ id: '2', type: 'ol', indent: 1 }, 'mid b'),
+    liBlock({ id: '3', type: 'ul', indent: 2 }, 'deep x'),
+    liBlock({ id: '4', type: 'ul', indent: 2 }, 'deep y'),
+    liBlock({ id: '5', type: 'ul', indent: 0 }, 'top two'),
+  ]);
   assertGateCompatList(md, 'deep mixed nesting');
   assertGateCompatListRoundTrips(md, 'deep mixed nesting');
 }
@@ -273,28 +351,119 @@ function assertGateCompatListRoundTrips(md, label) {
 // under the old flat-2-space indent this de-nests on re-parse into
 // separate top-level list tokens instead of staying nested.
 {
-  const { md } = listMd.serializeList(ol(li('a', ul(li('b'), li('c')))));
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', type: 'ol', indent: 0 }, 'a'),
+    liBlock({ id: '1', type: 'ul', indent: 1 }, 'b'),
+    liBlock({ id: '2', type: 'ul', indent: 1 }, 'c'),
+  ]);
   assertGateCompatList(md, 'ol-parent nested ul');
   assertGateCompatListRoundTrips(md, 'ol-parent nested ul');
 }
 
-// 12. ed-li-text DOM shape (Task 4 output): line-shape and round-trip
-// invariants must hold for the new <li> format the editor actually produces.
-// A task item's '- [ ] ' marker is 6 chars wide; the nested item indents by
-// 6 spaces — still satisfies /^ *(-|\d+\.) / and re-lexes as one top-level
-// list token (6 ≥ 2, the parent bullet's actual CommonMark attachment width).
+// 12. task-item DOM shape: line-shape and round-trip invariants must hold for
+// the flat blocks the editor actually produces, checkbox chrome included.
+// §3.4 errata: the checkbox is NOT part of the marker width — a '- [ ] '
+// parent still contributes 2 columns, so its child indents by 2.
 {
-  const edLi1 = el('LI', { 'data-block-id': '0' },
-    el('SPAN', { class: 'ed-li-check', 'data-checked': '0' }),
-    el('DIV', { class: 'ed-li-text' }, 'todo item'),
-    ul(el('LI', { 'data-block-id': '1' }, el('DIV', { class: 'ed-li-text' }, 'nested item')))
-  );
-  const edLi2 = el('LI', { 'data-block-id': '2' },
-    el('DIV', { class: 'ed-li-text' }, 'plain item')
-  );
-  const { md } = listMd.serializeList(ul(edLi1, edLi2));
-  assertGateCompatList(md, 'ed-li-text shape');
-  assertGateCompatListRoundTrips(md, 'ed-li-text shape');
+  const { md } = listMd.serializeBlocks([
+    liBlock({ id: '0', task: true, checked: false, indent: 0 }, 'todo item'),
+    liBlock({ id: '1', indent: 1 }, 'nested item'),
+    liBlock({ id: '2', indent: 0 }, 'plain item'),
+  ]);
+  assertGateCompatList(md, 'flat task-block shape');
+  assertGateCompatListRoundTrips(md, 'flat task-block shape');
+  assert.strictEqual(md, '- [ ] todo item\n  - nested item\n- plain item',
+    'a task item contributes its BULLET width (2), not the checkbox width');
+}
+
+// 13. T8 item 5: a MULTI-LINE list item. The "every emitted line is a marker
+// line" half of the contract above was written when a block owned exactly one
+// source line. It stopped being true when the serializer learned to emit
+// CONTINUATION lines: a hard-wrapped ("lazy continuation") item is 22% of this
+// repo's own list items, its .ed-li-text holds a real newline, and
+// serializeBlocks() re-indents every line after the first to the item's own
+// CONTENT column. The contract is therefore restated, not relaxed — a
+// continuation line has a column requirement of its own, and it is the strict
+// one: one column too few and it lexes as a sibling item or as a lazy line of
+// the WRONG item; four too many and it lexes as an indented code block.
+{
+  const { md, lineMeta, unsupported } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'alpha one\ncontinued two'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'child'),
+    liBlock({ id: '2' }, 'plain'),
+  ]);
+  assert.strictEqual(md, '- alpha one\n  continued two\n  1. child\n- plain',
+    'fixture sanity: the continuation must land on the item\'s content column');
+  assertGateCompatList(md, 'multi-line item', lineMeta);
+  assertGateCompatListRoundTrips(md, 'multi-line item');
+  // The emission is still gate-compatible, and the item is still reported as
+  // MULTILINE — that flag is about which STRUCTURAL operations a caller may
+  // run, not about whether the markdown is well-formed. Conflating the two is
+  // what once made a fifth of every real document read-only.
+  assert.ok(unsupported.indexOf('MULTILINE') !== -1,
+    'a multi-line item is still reported for structural gating, got: ' + JSON.stringify(unsupported));
+}
+
+// 13b. The restated contract must still BITE. A gate assertion that accepts
+// everything is worse than none — it reads as coverage. Each shape below is
+// one of the three ways a continuation line goes wrong, and each must be
+// rejected; the correct one must be accepted.
+{
+  const rejects = (md, why) => {
+    assert.throws(() => assertGateCompatList(md, 'negative'), /content column|nothing precedes/,
+      'assertGateCompatList must reject ' + why + ': ' + JSON.stringify(md));
+  };
+  // one column short: marked lexes this as a LAZY line of the wrong item
+  rejects('- alpha\n continued\n- plain', 'a continuation one column short');
+  // four columns long: marked lexes this as an INDENTED CODE BLOCK
+  rejects('- alpha\n      continued\n- plain', 'a continuation four columns too far');
+  // no marker line yet
+  rejects('  orphan\n- alpha', 'a continuation with nothing before it');
+  // and the correct shape is accepted, including under a 3-column '1. ' parent
+  assertGateCompatList('1. alpha\n   continued\n2. plain', 'positive control');
+  // lineMeta disagreement is caught even when the columns happen to be right
+  assert.throws(
+    () => assertGateCompatList('- alpha\n  continued', 'meta mismatch',
+      [{ blockId: '0', marker: '- ' }, { blockId: '1', marker: '' }]),
+    /SAME block/,
+    'a continuation attributed to a DIFFERENT block must be rejected');
+}
+
+// 14. spec §3.12: a HARD BREAK must clear the gate in both emission contexts.
+// This is the assertion that decided the backslash form. The two-space form is
+// markdown's other hard-break spelling and it FAILS here — trailing whitespace
+// is the one thing this fossilized contract has never allowed, and the contract
+// covers serializeInline()'s output as well as list emissions, so the paragraph
+// case is bound by it too. Both halves are pinned: the form that is used, and
+// the form that cannot be.
+{
+  const hardBr = () => el('br', { 'data-hard-break': '1' });
+  // (a) paragraph context
+  const para = inlineMd.serializeInline(el('p', {}, 'one', hardBr(), 'two')).md;
+  assert.strictEqual(para, 'one\\\ntwo');
+  assertNoTrailingWhitespace(para, 'hard break in a paragraph');
+  // (b) list context — line shape, continuation column and re-lex all hold
+  const { md, lineMeta } = listMd.serializeBlocks([
+    liBlock({ id: '0' }, 'one', hardBr(), 'two'),
+    liBlock({ id: '1' }, 'plain'),
+  ]);
+  assert.strictEqual(md, '- one\\\n  two\n- plain',
+    'the continuation lands on the item\'s content column, exactly as a lazy one does');
+  assertGateCompatList(md, 'hard break in a list item', lineMeta);
+  assertGateCompatListRoundTrips(md, 'hard break in a list item');
+  // (c) and it is still a hard break after the round trip, not a literal
+  //     backslash and not a literal '<br>'
+  const item = marked.lexer(md)[0].items[0];
+  assert.ok(item.tokens[0].tokens.some((t) => t.type === 'br'),
+    'the re-lexed item must contain a `br` token, got: ' +
+    JSON.stringify(item.tokens[0].tokens.map((t) => t.type)));
+  assert.ok(md.indexOf('<br>') === -1, 'no literal <br> may be emitted for a hard break');
+  // (d) THE CONTROL: the two-space spelling is rejected by this very contract.
+  //     Without this, "we chose backslash" reads as a preference rather than
+  //     the forced move it is.
+  assert.throws(() => assertNoTrailingWhitespace('one  \ntwo', 'two-space form'),
+    /ends in whitespace/,
+    'the two trailing spaces form is gate-illegal — that is why §3.12 mandates backslash');
 }
 
 console.log('gate-compat.test.js OK');
