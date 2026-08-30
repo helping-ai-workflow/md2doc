@@ -318,6 +318,17 @@ function lexTypes(md) {
   return plainMarked.lexer(md).map((t) => t.type);
 }
 
+// S2 Task 5: the `loose` flag of every LIST token in the saved file, in
+// document order. §4.3 rule 2's whole subject: a blank line between two
+// same-type lists does not separate them, it makes ONE list LOOSE — every
+// item grows a <p>, serializeBlocks() reports 'P' for each (list-md.js:56-70)
+// and the run degrades read-only with no banner. `loose === true` after a
+// conversion IS the defect, so it is asserted directly rather than inferred
+// from the token types (which look identical either way).
+function lexLoose(md) {
+  return plainMarked.lexer(md).filter((t) => t.type === 'list').map((t) => t.loose);
+}
+
 // S2 Task 2: selector for the FIRST block of `type` in document order. Block
 // ids are re-minted on every render, so a conversion scenario must re-resolve
 // between steps rather than hold one selector across a commit.
@@ -2444,6 +2455,315 @@ async function clickInsertMenuItem(page, sel, label) {
         console.log('S2 轉換成: §4.3 rule 1 inserts the blanks at the run’s own edges — OK');
       } finally {
         s4jSrv.close();
+      }
+    }
+
+    // ── S2 Task 5: 轉換成 INTO a list — §4.3 rule 2, the looseness trap.
+    //
+    //    A blank line between two lists of the SAME marker type does NOT
+    //    separate them. MEASURED, and it is the whole reason this rule
+    //    exists:
+    //      marked.lexer('- a\n- b\n- c\n').loose === false
+    //      marked.lexer('- a\n- b\n\n- c\n').loose === true   ← ONE list
+    //    Every item of a loose list renders as <p>…</p>, serializeBlocks()
+    //    reports 'P' for each of them (list-md.js:56-70, :462) and the whole
+    //    run degrades read-only — with NO banner, because nothing refused
+    //    anything. So a conversion whose RESULT is a li must EAT the
+    //    separator to a same-type neighbour.
+    //
+    //    ⚠ Every expected byte string below was MEASURED with marked.lexer
+    //    before it was pinned. ─────────────────────────────────────────────
+    {
+      const { srv: s5aSrv, url: s5aUrl, mdPath: s5aMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5aMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n- bravo\n- charlie\n',
+          '§4.3 rule 2: a same-type li above AND below, so BOTH separators are eaten');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list'], 'one list, not three');
+        assert.deepStrictEqual(lexLoose(out), [false],
+          'a loose list pushes P for every item and degrades the whole run read-only');
+
+        // §3.4: one gesture is one undo op — and this is the WIDEST range
+        // Task 5 ever commits (the block's own lines PLUS a separator at each
+        // end), so it is where a widened range would show up as two ops or as
+        // a partial restore.
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(await saveAndRead(page, s5aMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          'ONE Ctrl+Z restores both eaten separators — the widened range is still one op');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: a paragraph joins the run TIGHTLY — OK');
+      } finally {
+        s5aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5bSrv, url: s5bUrl, mdPath: s5bMdPath } =
+        await setupTableDoc(['# Doc', '', 'bravo', '', '## Tail', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        assert.strictEqual(await saveAndRead(page, s5bMdPath), '# Doc\n\n- bravo\n\n## Tail\n',
+          'nothing to merge with, so the separators stay — rule 2 eats a separator, ' +
+          'it does not glue a list onto whatever happens to be next');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: no adjacent list, blank lines survive — OK');
+      } finally {
+        s5bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5cSrv, url: s5cUrl, mdPath: s5cMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '1. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5cMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n- bravo\n\n1. charlie\n',
+          'the ol below is a different list type, so that separator survives');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list', 'space', 'list'],
+          'still two lists — a marker-type change is a boundary a blank line cannot cross');
+        assert.deepStrictEqual(lexLoose(out), [false, false], 'and both are tight');
+
+        await page.close();
+        console.log('S2 轉換成 › 項目符號列表: only the matching side is merged — OK');
+      } finally {
+        s5cSrv.close();
+      }
+    }
+
+    {
+      // ⚠ The load-bearing one. §4.3 rule 1 (Task 4) and rule 2 (this task)
+      //   are the two ends of ONE path; this is the test that fails if they
+      //   disagree. The intermediate assertion is not decoration: without it
+      //   the scenario would go green if BOTH legs were refused outright and
+      //   the file never changed at all.
+      const { srv: s5dSrv, url: s5dUrl, mdPath: s5dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5dUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s5dMdPath, 'utf8');
+        assert.strictEqual(before, '# Doc\n\n- alpha\n- bravo\n- charlie\n', 'fixture sanity');
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        assert.strictEqual(await saveAndRead(page, s5dMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          'the OUTBOUND leg really happened (rule 1 put a blank on either side)');
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5dMdPath);
+        assert.strictEqual(out, before,
+          '§4.3: rules 1 and 2 are the two ends of one path and must compose byte-exactly');
+        assert.deepStrictEqual(lexLoose(out), [false], 'and the run comes back TIGHT');
+
+        await page.close();
+        console.log('S2 轉換成: convert out and back in is a byte-identical round trip — OK');
+      } finally {
+        s5dSrv.close();
+      }
+    }
+
+    {
+      // The composition the plan does NOT test, flagged by Task 4's
+      // implementer: coming back as a DIFFERENT list type than the
+      // neighbours. Rule 2 must NOT fire — measured,
+      // '# Doc\n\n- alpha\n\n1. bravo\n\n- charlie\n' is THREE tight lists,
+      // and eating either separator would splice bravo into a ul it does not
+      // belong to.
+      const { srv: s5eSrv, url: s5eUrl, mdPath: s5eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5eUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        assert.strictEqual(await saveAndRead(page, s5eMdPath),
+          '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n', 'the outbound leg really happened');
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '編號列表');
+        const out = await saveAndRead(page, s5eMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\n1. bravo\n\n- charlie\n',
+          'a different list type than either neighbour, so NEITHER separator is eaten');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'list', 'space', 'list'],
+          'three lists — bravo did not join the ul above or the one below');
+        assert.deepStrictEqual(lexLoose(out), [false, false, false], 'all three tight');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表: a different type does NOT eat the separators — OK');
+      } finally {
+        s5eSrv.close();
+      }
+    }
+
+    {
+      const { srv: s5fSrv, url: s5fUrl, mdPath: s5fMdPath } =
+        await setupTableDoc(['# Doc', '', '## Sub', '', '- alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5fUrl, { waitUntil: 'networkidle0' });
+
+        const subSel = await page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll('.ed-block[data-block-type="heading"]'));
+          return els.length === 2 ? '.ed-block[data-block-id="' +
+            els[1].getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(subSel, 'fixture must have two headings');
+        await convertVia(page, subSel, '編號列表');
+        const out = await saveAndRead(page, s5fMdPath);
+        assert.strictEqual(out, '# Doc\n\n1. Sub\n\n- alpha\n',
+          'a ul below is a different type, so no merge');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'list', 'space', 'list'],
+          'the heading became an ol of its own; the ul below is untouched');
+
+        await page.close();
+        console.log('S2 轉換成 › 編號列表 on a heading: numbered 1, nothing re-anchored — OK');
+      } finally {
+        s5fSrv.close();
+      }
+    }
+
+    {
+      // ── The li → li defect, measured in the live editor by Task 3's
+      //    implementer and NOT covered by the plan's Task 5 (which only
+      //    implements 非清單 → 清單). §4.3 rule 2's 2026-08-30 revision is
+      //    the ruling that closes it: the trigger is 「轉換結果是 li」, not
+      //    「來源是非清單」.
+      //
+      //    MEASURED before the fix:
+      //      start  '# Doc\n\n- a\n\n1. b\n'  → list|space|list, BOTH tight
+      //      gesture 轉換成 › 項目符號列表 on b
+      //      bytes  '# Doc\n\n- a\n\n- b\n'   → ONE list, loose === true
+      //      after  every structural gesture on that run → 「此清單含不支援的
+      //             格式，無法調整結構」
+      //    One conversion froze a run the user could no longer restructure,
+      //    with no banner.
+      const { srv: s5gSrv, url: s5gUrl, mdPath: s5gMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '', '1. b', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5gUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'b'), '項目符號列表');
+        const out = await saveAndRead(page, s5gMdPath);
+        assert.strictEqual(out, '# Doc\n\n- a\n- b\n',
+          'li → li merges the two runs too: the separator between them must be eaten');
+        assert.deepStrictEqual(lexLoose(out), [false],
+          'this is the byte-level shape of the freeze — loose === true is the defect');
+
+        // The freeze itself, asserted directly rather than inferred from the
+        // bytes: a structural gesture on the merged run still WORKS. Before
+        // the fix this refused with §4.1's banner every time.
+        const bannerNow = () => page.evaluate(() => {
+          const bn = document.querySelector('.ed-conflict');
+          return bn ? bn.querySelector('span').textContent : null;
+        });
+        assert.strictEqual(await bannerNow(), null, 'the conversion itself must not banner');
+        await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
+        assert.strictEqual(await bannerNow(), null,
+          'the run is still restructurable — this is what the defect took away');
+        assert.strictEqual(await saveAndRead(page, s5gMdPath), '# Doc\n\n- a\n\nb\n',
+          'and the follow-up gesture actually landed');
+
+        await page.close();
+        console.log('S2 轉換成: li → li does not freeze the merged run (the S2 T3 defect) — OK');
+      } finally {
+        s5gSrv.close();
+      }
+    }
+
+    {
+      // ── §4.3 rule 2's second half: the gate must hold for BOTH runs before
+      //    merging. '- a' + blank + '- b' is ALREADY one loose list (measured:
+      //    loose === true), so serializeBlocks() reports P,P for it. Merging
+      //    the healthy '1. c' into that would freeze c as well — and NOT
+      //    merging is no escape either, because the marker types match and
+      //    markdown merges them whether or not the separator survives. The
+      //    only correct answer is to refuse the whole gesture.
+      const { srv: s5hSrv, url: s5hUrl, mdPath: s5hMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '', '- b', '', '1. c', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5hUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s5hMdPath, 'utf8');
+        const bannerNow = () => page.evaluate(() => {
+          const bn = document.querySelector('.ed-conflict');
+          return bn ? bn.querySelector('span').textContent : null;
+        });
+
+        await convertVia(page, await liBlockSelByText(page, 'c'), '項目符號列表');
+        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
+          'the run c would merge INTO is degraded, so the merge is refused with §4.1’s banner');
+        assert.strictEqual(await saveAndRead(page, s5hMdPath), before,
+          'a refused conversion must not touch a single byte');
+
+        // Anti-vacuous: c is not frozen in general — only the gesture that
+        // would have merged it into the degraded run is refused. The banner
+        // is dismiss-only (it does not time out and rerenderAll() leaves it
+        // alone — it lives on document.body, outside .content), so it has to
+        // be cleared by hand or the next read would just see this same one.
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        assert.strictEqual(await bannerNow(), null, 'banner cleared before the control gesture');
+        await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
+        assert.strictEqual(await bannerNow(), null, 'a NON-merging target still works');
+        assert.strictEqual(await saveAndRead(page, s5hMdPath), '# Doc\n\n- a\n\n- b\n\nc\n',
+          'and that one landed');
+
+        await page.close();
+        console.log('S2 轉換成: merging into a DEGRADED run is refused, not performed — OK');
+      } finally {
+        s5hSrv.close();
+      }
+    }
+
+    {
+      // ── MEASURED, and it contradicts the plan's Task 5 sketch, which asks
+      //    the IMMEDIATELY PREVIOUS block whether it is a li at indent 0.
+      //    Here it is `beta` at indent 1, so that predicate says "no merge" —
+      //    and the result it would commit,
+      //    '# Doc\n\n- alpha\n  - beta\n\n- gamma\n', is ONE list with
+      //    loose === true. The blank line separates gamma from BETA, but the
+      //    list it would join is ALPHA's, and looseness is a property of the
+      //    whole list token. The question rule 2 has to ask is therefore
+      //    about the neighbour's RUN (listRunOf), not the neighbour block.
+      const { srv: s5iSrv, url: s5iUrl, mdPath: s5iMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '', 'gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5iUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
+        const out = await saveAndRead(page, s5iMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n  - beta\n- gamma\n',
+          'the merge partner is the RUN above, whose head is `alpha` at indent 0');
+        assert.deepStrictEqual(lexLoose(out), [false],
+          'the plan’s previous-BLOCK predicate would leave the separator and go loose');
+
+        await page.close();
+        console.log('S2 轉換成: rule 2 asks the neighbour’s RUN, not the neighbour block — OK');
+      } finally {
+        s5iSrv.close();
       }
     }
 
