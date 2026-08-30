@@ -736,10 +736,12 @@ function countInCode(source, needle) {
     'redo). Every OTHER rollback must go through rollbackFailedRender(), which ' +
     'declines when the commit pushed nothing; found ' + undoCalls);
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
-  // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
-  // so the expected total is DECLARED once + EXPORTED once + 7 uses = 9.
-  assert.strictEqual(helperCalls, 9,
-    'the helper must be DECLARED once, EXPORTED once, and used at all seven ' +
+  // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu)
+  // and S2 Task 4 the eighth (convertListItemAway, which commits its own
+  // spliced range instead of going through commitListStructure), so the
+  // expected total is DECLARED once + EXPORTED once + 8 uses = 10.
+  assert.strictEqual(helperCalls, 10,
+    'the helper must be DECLARED once, EXPORTED once, and used at all eight ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 

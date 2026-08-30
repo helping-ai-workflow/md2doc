@@ -157,10 +157,25 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
 // test/editor-client-runtime.test.js (the B1 cases); what is asserted here is
 // that the wiring still exists, so removing it cannot go unnoticed.
 //
-// `opts.operatedBecomes` still has NO production caller — S2's §3.3
-// conversion is what wires it up. That stays asserted mechanically rather
-// than in prose, because the whole point of writing it down is to be told
-// when it stops being true.
+// `opts.operatedBecomes` was wired up on the same terms by S2 Task 4: the ⠿
+// menu's 轉換成 to a NON-list target routes through convertListItemAway() ->
+// applyIndentClamp(run, li, oldIndent, { operatedBecomes: { type } }), which
+// is what tells the pure function that the operated block is still there but
+// can no longer anchor anything (§3.3 / §3.4 rule 2).
+//
+// ⚠ MEASURED, and worth knowing before trusting the assertion below to mean
+// more than it says: on the SIMPLE orphan shape ('- alpha / (2sp)- child /
+// (4sp)- grandchild', convert alpha away) the clamp changes NO emitted byte.
+// convertListItemAway() serializes the survivors as their own span, and
+// list-md.js rebuilds its marker-width stack from EMPTY per span, so the
+// first survivor emits at column 0 whatever its data-indent says — the same
+// answer the clamp computes. The option earns its place one shape further
+// out, where §3.4 rule 3's scope holds TWO segments with DIFFERENT deltas
+// ('- alpha / (2sp)- beta / (4sp)- gamma / (2sp)- delta / (4sp)- epsilon /
+// - zeta', convert beta away): without it the three survivors come back flat.
+// That end-to-end proof is the 'the §3.4 segment deltas survive the split
+// commit' scenario in test/editor-client-runtime.test.js; what is asserted
+// here is that the wiring still exists, so removing it cannot go unnoticed.
 {
   const fs = require('fs');
   const path = require('path');
@@ -191,9 +206,15 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
     '`opts.removed` must have exactly ONE production caller — the ⠿ delete of a list ' +
     'item (spec §6, S1 期間的已知危險 item 1). Found ' + removedSites.length + ':\n  ' +
     removedSites.join('\n  '));
-  assert.strictEqual(codeLines.filter((l) => l.indexOf('operatedBecomes') !== -1).length, 0,
-    '`operatedBecomes` still has no production caller; S2\'s §3.3 conversion is what ' +
-    'wires it up, and on the day it does, come back and re-read this note.');
+  // Same two halves as `removed` above, for the same two reasons: zero call
+  // sites means Task 4's clamp was reverted, and more than one means a second
+  // gesture grew a conversion clamp without anyone re-reading this note.
+  const becomesSites = codeLines.filter(
+    (l) => /applyIndentClamp\([^\n]*operatedBecomes/.test(l));
+  assert.strictEqual(becomesSites.length, 1,
+    '`opts.operatedBecomes` must have exactly ONE production caller — the ⠿ 轉換成 of a ' +
+    'list item to a NON-list target (spec §3.3, §4.3 rule 1). Found ' + becomesSites.length +
+    ':\n  ' + becomesSites.join('\n  '));
 }
 
 console.log('indent-clamp: spec §3.4 shift-then-clamp — OK');

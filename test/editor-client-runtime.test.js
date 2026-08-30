@@ -93,7 +93,19 @@ async function setup() {
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  // S2 Task 4: an EXPLICIT idle timeout, because this one server is shared by
+  // 33 scenarios spread across the whole file while every scenario in between
+  // runs against its own short-lived server. createEditorServer()'s default is
+  // 30s of no requests, and the S2 轉換 group in the middle now sits idle for
+  // longer than that — the symptom is a bare
+  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0` from the
+  // NEXT shared-server scenario, which reads as a broken test rather than as a
+  // stopwatch. The timeout is the product's own dev-server convenience and
+  // nothing in this suite asserts it; srv.close() at the end still tears it
+  // down deterministically.
+  const srv = await createEditorServer({
+    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+  });
   return { dir, mdPath, srv, url: srv.urlFor(mdPath) };
 }
 
@@ -295,6 +307,15 @@ async function convertVia(page, sel, targetLabel) {
   }, targetLabel);
   await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
   await settleEditor(page);
+}
+
+// S2 Task 4: the token types `marked` reads out of a saved file, top level
+// only. The one shape §3.4 exists to prevent is an unanchored indent lexing
+// as an INDENTED CODE BLOCK, and a type list is the cheapest direct assertion
+// that it did not happen. Runs in NODE against the bytes on disk — not in the
+// page — because the file is the thing under test, not the DOM.
+function lexTypes(md) {
+  return plainMarked.lexer(md).map((t) => t.type);
 }
 
 // S2 Task 2: selector for the FIRST block of `type` in document order. Block
@@ -2098,6 +2119,331 @@ async function clickInsertMenuItem(page, sel, label) {
         console.log('S2 轉換成: the §4.3 gate reaches a DEEPER loose run (listRunOf scope) — OK');
       } finally {
         s3gSrv.close();
+      }
+    }
+
+    // ── S2 Task 4: 轉換成 OUT of a list — the block leaves the run, so the
+    //    span is rebuilt as [survivors before] + [converted lines] +
+    //    [survivors after] with §4.3 rule 1's blank lines between them, and
+    //    the orphaned subtree is shifted by indent-clamp's `operatedBecomes`
+    //    branch (its first production caller, RULING T6-B).
+    //
+    //    ⚠ Every expected byte string below was MEASURED with marked.lexer
+    //    before it was pinned. ─────────────────────────────────────────────
+    {
+      const { srv: s4aSrv, url: s4aUrl, mdPath: s4aMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4aUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        const out = await saveAndRead(page, s4aMdPath);
+        assert.strictEqual(out, '# Doc\n\n1. alpha\n\nbravo\n\n1. charlie\n',
+          '§4.3 rule 1: a blank line either side, or lazy continuation swallows bravo ' +
+          'into alpha; §3.8: the surviving half renumbers from 1');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'paragraph', 'space', 'list'],
+          'bravo is its OWN paragraph, not a continuation of alpha');
+
+        await page.close();
+        console.log('S2 轉換成 › 文字: a middle item splits the list and renumbers — OK');
+      } finally {
+        s4aSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4bSrv, url: s4bUrl, mdPath: s4bMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4bUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '標題 2');
+        const out = await saveAndRead(page, s4bMdPath);
+        assert.strictEqual(out, '# Doc\n\n## alpha\n\n- bravo\n- charlie\n',
+          'the survivors stay ONE run; no blank line is added above the heading ' +
+          'because the line already there is blank');
+        assert.deepStrictEqual(lexTypes(out), ['heading', 'heading', 'list'],
+          'one list token holding both survivors');
+
+        await page.close();
+        console.log('S2 轉換成 › 標題 2: the FIRST item leaves, the rest stay one run — OK');
+      } finally {
+        s4bSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4cSrv, url: s4cUrl, mdPath: s4cMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grandchild', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4cUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
+        const out = await saveAndRead(page, s4cMdPath);
+        assert.strictEqual(out, '# Doc\n\nalpha\n\n- child\n  - grandchild\n- bravo\n',
+          'the orphaned subtree keeps its shape and re-anchors at indent 0');
+        assert.strictEqual(lexTypes(out).includes('code'), false,
+          'NOTHING may become a code block — that is the data-loss shape §3.4 exists to stop');
+
+        await page.close();
+        console.log('S2 轉換成: a converted parent re-anchors its orphaned subtree — OK');
+      } finally {
+        s4cSrv.close();
+      }
+    }
+
+    {
+      // §3.4 rule 3, and the ONE shape in which the clamp changes the emitted
+      // bytes at all — see convertListItemAway()'s own note. `beta` and
+      // `delta` are siblings at indent 1; `gamma` is beta's child and
+      // `epsilon` is delta's. Converting beta away leaves gamma as the
+      // segment head (delta 2 -> 0) while delta's own segment shifts by 0, so
+      // delta stays at 1 and is adopted by gamma, carrying epsilon with it.
+      //
+      // THIS is the scenario that goes red if `{ operatedBecomes: ... }` is
+      // dropped from the applyIndentClamp() call: without it the operated
+      // block still counts as a live anchor, every delta is 0, and the three
+      // survivors come back FLAT ('- gamma / - delta / (2sp)- epsilon').
+      const { srv: s4dSrv, url: s4dUrl, mdPath: s4dMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '    - gamma',
+          '  - delta', '    - epsilon', '- zeta', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4dUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'beta'), '文字');
+        const out = await saveAndRead(page, s4dMdPath);
+        assert.strictEqual(out,
+          '# Doc\n\n- alpha\n\nbeta\n\n- gamma\n  - delta\n    - epsilon\n- zeta\n',
+          '§3.4 rule 3: ONE delta per segment — gamma’s subtree shifts by 2, ' +
+          'delta’s by 0, so the two segments keep their relative depths');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+
+        await page.close();
+        console.log('S2 轉換成: the §3.4 segment deltas survive the split commit — OK');
+      } finally {
+        s4dSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4eSrv, url: s4eUrl, mdPath: s4eMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '  - charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4eUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'beta'), '程式碼');
+        const out = await saveAndRead(page, s4eMdPath);
+        // §3.9: the user has ALREADY accepted that charlie stops being
+        // alpha's child here — a fence cannot live inside a list item that a
+        // paragraph-level block has already closed.
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\n```\nbeta\n```\n\n- charlie\n',
+          '§3.9: converting an indented item to 程式碼 breaks the list, by ruling');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'code', 'space', 'list'],
+          'exactly one fenced code block, and charlie is a list again');
+
+        await page.close();
+        console.log('S2 轉換成 › 程式碼 on an indented item breaks the list (§3.9) — OK');
+      } finally {
+        s4eSrv.close();
+      }
+    }
+
+    {
+      const { srv: s4fSrv, url: s4fUrl, mdPath: s4fMdPath } =
+        await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4fUrl, { waitUntil: 'networkidle0' });
+
+        const before = fs.readFileSync(s4fMdPath, 'utf8');
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        // Assert the conversion LANDED before undoing it. Without this the
+        // scenario is vacuous: a refused conversion leaves the file untouched,
+        // so the post-undo byte comparison below passes for the wrong reason —
+        // measured, it was the one assertion in this group that stayed GREEN
+        // against the pre-Task-4 refusal.
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 2,
+          { timeout: 5000 }).catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => [
+            document.querySelectorAll('.ed-block[data-block-type="li"]').length,
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length,
+          ].join('/')),
+          '2/1', 'bravo left the run and is a paragraph block now');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
+          { timeout: 5000 }).catch(() => {});
+        await settleEditor(page);
+        assert.strictEqual(await saveAndRead(page, s4fMdPath), before,
+          'ONE Ctrl+Z, not two — §3.4: one user gesture is exactly one undo op ' +
+          '(RULING F-J is the only two-op gesture, and this is not it)');
+
+        await page.close();
+        console.log('S2 轉換成: converting away from a list is exactly one undo op — OK');
+      } finally {
+        s4fSrv.close();
+      }
+    }
+
+    {
+      // A HARD-WRAPPED bystander in the same run. §4.1 refuses a multi-line li
+      // as the TARGET of a conversion but keeps it a perfectly good bystander,
+      // and listRunSupportsStructuralEdit() encodes exactly that asymmetry
+      // (MULTILINE is filtered out of the run-wide veto and re-checked against
+      // the target's own line range). The split-span serialization below must
+      // not re-introduce a run-wide veto of its own — measured: a naive
+      // `unsupported.length > 0` check on the two halves refuses this gesture.
+      const { srv: s4gSrv, url: s4gUrl, mdPath: s4gMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4gUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'charlie'), '文字');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-conflict');
+            return b ? b.querySelector('span').textContent : null;
+          }),
+          null, 'a multi-line BYSTANDER must not veto the gesture (§4.1)');
+        assert.strictEqual(await saveAndRead(page, s4gMdPath),
+          '# Doc\n\n- alpha\n  continued\n- bravo\n\ncharlie\n',
+          'the hard-wrapped bystander is replayed byte-for-byte from the file');
+
+        await page.close();
+        console.log('S2 轉換成: a multi-line bystander is replayed, not refused — OK');
+      } finally {
+        s4gSrv.close();
+      }
+    }
+
+    {
+      // ── carry 3, direction A: the SPAN handed to the clamp is NARROWER
+      //    than §3.4 rule 2's scope would be if it were measured over the
+      //    whole document. This is the plan's own worked example. `a` and `b`
+      //    are both indent 0 but of different list types, so §3.8 rule (b)
+      //    ends the run at `b` and listRunOf(a) is [a, a1] — while rule 2's
+      //    scope, which stops only at "indent < operated indent" or a non-li,
+      //    would run on through [a1, b, b1].
+      //
+      //    MEASURED: harmless, and the reason is arithmetic rather than luck.
+      //    Every block rule 2 would reach beyond the span sits at an indent
+      //    <= the operated block's OLD indent (anything deeper is inside the
+      //    span by construction — listRunOf() extends past its last member to
+      //    cover the subtree). A block at or above the operated block's depth
+      //    has a non-zero delta only if its own anchor moved, and its anchor
+      //    is either above the operated block or inside the span, where the
+      //    clamp already settled it. Here b's bound after a1 lands at 0 is 1
+      //    and b is at 0, so the delta is 0 either way — and b/b1 are outside
+      //    the commit range as well, so not one of their bytes can move.
+      const { srv: s4hSrv, url: s4hUrl, mdPath: s4hMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - a1', '1. b', '   - b1', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4hUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'a'), '文字');
+        const out = await saveAndRead(page, s4hMdPath);
+        assert.strictEqual(out, '# Doc\n\na\n\n- a1\n1. b\n   - b1\n',
+          'the adjacent ol run is outside BOTH the span and the commit range, ' +
+          'and needs no clamp of its own');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+
+        await page.close();
+        console.log('S2 轉換成: a run-boundary neighbour outside the clamp span is untouched — OK');
+      } finally {
+        s4hSrv.close();
+      }
+    }
+
+    {
+      // ── carry 3, direction B: a block INSIDE the clamp span but OUTSIDE
+      //    §3.4 rule 2's scope. `d` is at indent 1, the operated block `c` is
+      //    at indent 2, so rule 2's scope ("stop at the first li whose indent
+      //    is SMALLER than the operated block's old indent") is EMPTY and the
+      //    clamp leaves d's data-indent at 1 — correctly, by the rule.
+      //
+      //    MEASURED, and this is the one place the two disagree observably:
+      //    d is the FIRST block of the `after` half, and list-md.js rebuilds
+      //    its marker-width stack from empty per span, so d is EMITTED at
+      //    column 0 regardless. d is therefore promoted out of `a` by the
+      //    serializer, not by the clamp.
+      //
+      //    Not a defect, and not silently divergent: markdown has no way to
+      //    keep d inside `a` once a paragraph has closed that list (§3.9
+      //    accepts exactly this breakage for the 程式碼/引用 targets), and
+      //    the re-render re-derives data-indent from these bytes, so the
+      //    model and the file agree from the next frame on. Pinned so that a
+      //    future change to the width stack — or to §3.4 rule 2's scope — has
+      //    to come past this line.
+      const { srv: s4iSrv, url: s4iUrl, mdPath: s4iMdPath } =
+        await setupTableDoc(['# Doc', '', '- a', '  - b', '    - c', '  - d', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4iUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
+        const out = await saveAndRead(page, s4iMdPath);
+        assert.strictEqual(out, '# Doc\n\n- a\n  - b\n\nc\n\n- d\n',
+          'd is re-anchored at column 0 by the serializer’s per-span width stack');
+        assert.strictEqual(lexTypes(out).includes('code'), false, 'no indented code block');
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return lis.map((el) => el.getAttribute('data-indent')).join(',');
+          }),
+          '0,1,0', 'after the re-render the model matches the bytes — no drift');
+
+        await page.close();
+        console.log('S2 轉換成: a block outside rule 2’s scope re-anchors via the width stack — OK');
+      } finally {
+        s4iSrv.close();
+      }
+    }
+
+    {
+      // ── §4.3 rule 1 at the RUN's own edges, which is where it actually
+      //    bites. `bravo` is an ol between two ul's, so §3.8 rule (b) makes it
+      //    a run of ONE: `before` and `after` are both empty and the '\n\n'
+      //    joins inside the span never fire. The neighbours are still li's,
+      //    with no blank line between them — a marker-type change splits a run
+      //    on its own (measured in Task 3), so the file legitimately has none.
+      //
+      //    MEASURED, and it is the whole reason rule 1 exists:
+      //    marked.lexer('# Doc\n\n- alpha\nbravo\n- charlie\n') returns ONE
+      //    list whose first item's text is "alpha\nbravo" — the converted
+      //    paragraph is swallowed as a LAZY CONTINUATION of the item above it
+      //    and stops existing as a block at all.
+      const { srv: s4jSrv, url: s4jUrl, mdPath: s4jMdPath } =
+        await setupTableDoc(['# Doc', '', '- alpha', '1. bravo', '- charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4jUrl, { waitUntil: 'networkidle0' });
+
+        await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+        const out = await saveAndRead(page, s4jMdPath);
+        assert.strictEqual(out, '# Doc\n\n- alpha\n\nbravo\n\n- charlie\n',
+          '§4.3 rule 1: a blank line is inserted on BOTH edges of the run, because ' +
+          'the neighbouring li belongs to an adjacent run that the span never covers');
+        assert.deepStrictEqual(lexTypes(out),
+          ['heading', 'list', 'space', 'paragraph', 'space', 'list'],
+          'bravo is its own paragraph; without the edge blanks it is alpha’s second line');
+
+        await page.close();
+        console.log('S2 轉換成: §4.3 rule 1 inserts the blanks at the run’s own edges — OK');
+      } finally {
+        s4jSrv.close();
       }
     }
 
