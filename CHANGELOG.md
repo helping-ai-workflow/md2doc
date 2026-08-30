@@ -3,6 +3,47 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.11.1 — 2026-08-31
+
+### Fixed
+
+- **Tab no longer walks out of the document.** Pressing Tab or Shift+Tab moved the
+  browser's own focus ring onto a gutter `＋` or `⠿` button — the caret left the
+  block and the next keystroke went nowhere. Two independent causes: a surface that
+  is still focused and still armed after Ctrl+S has no open burst, and the key
+  handler bailed out of the whole document handler with it; and after a commit,
+  an Escape, a Ctrl+Z, or a click on a bullet marker nothing is focused at all, and
+  there was no Tab branch for that case anywhere. Tab is now consumed in both
+  states, and the two gutter buttons — mouse-only affordances that had become
+  sequential focus stops simply by being `<button>`s — are out of the tab order.
+  Every Tab that already worked still works: indent, outdent, the clamp's no-ops,
+  a run-wide refusal, a hard-wrapped item, and type-then-Tab.
+- **The `⠿` sits closer to the block, and the gutter no longer has a dead band.**
+  The `＋`/`⠿` pair now occupies the geometry the design spec always specified
+  (`[blockLeft−40, blockLeft−4]` instead of `[blockLeft−54, blockLeft−18]`). More
+  importantly the gutter is now one continuous hover zone: moving the pointer out
+  of the text towards the `⠿` used to cross 18px that belonged to neither the block
+  nor a button, so both buttons faded out under the cursor on the way to them
+  (measured: opacity 0 for ~270 ms of a real pointer travel). The same fix closes
+  two related holes — the bottom ~5px of every list row, and the whole vertical
+  middle of a multi-line heading, neither of which could reach a button at all.
+- **Enter then Tab on the new empty list item no longer destroys the item above
+  it.** An empty item is written as a bare `-`, and directly under its parent's own
+  text that line is not a list marker at all: CommonMark reads a line of nothing
+  but dashes at an open paragraph's column as a setext heading underline. Pressing
+  Enter and then Tab on `- beta` therefore saved `- beta` followed by `  -`, which
+  reads back as `<li><h2>beta</h2></li>` — the new item gone and the parent
+  re-typed as a heading, from two ordinary keystrokes. Only that one position is affected and
+  only that one position changes: an empty item nested as the first child of a
+  deeper level now carries a zero-width space, which is content to the parser and
+  invisible to the reader, and is removed again on the way back in so it never
+  becomes part of what the user types.
+
+### Changed
+
+- The `⠿` menu's duplicate item is now labelled `建立副本` (Notion's own
+  Traditional Chinese term), matching `轉換成` and `刪除`.
+
 ## v2.11.0 — 2026-08-30
 
 ### Added
