@@ -16791,6 +16791,527 @@ async function gutterGeometry(page, sel) {
         }, 'T6');
     }
 
+    // ── S3 Task 7: batch Tab / Shift+Tab, and the Delete key ──────────────
+    // >>>T7SECTION  (and <<<T7SECTION at the end of this block: the scratch
+    // subset runner every S3 task has used slices this section out by these two
+    // markers instead of by line numbers, which have drifted on every task.)
+    // §3.5's batch semantics and §3.6's 「Delete 整批刪」.
+    //
+    // The one shape every Tab scenario here is built around: a batch computes
+    // ONE delta, from the member with the MINIMUM old indent, applies it to the
+    // whole set, and only THEN clamps per item. Two different wrong
+    // implementations have to be told apart, and neither can be caught by a
+    // fixture that does not discriminate:
+    //
+    //   * per-item maths (§3.5's own worked example) — visible only on a set
+    //     of SAME-LEVEL siblings, where the correct answer is that nothing
+    //     moves. "Nothing moved" is also what a dead key produces, so that
+    //     scenario carries an anti-vacuity half that proves the key is live.
+    //   * the first member as the anchor instead of the minimum (§3.4 rule 3's
+    //     second worked failure) — visible only on a set that runs DEEP to
+    //     SHALLOW, where the two candidate anchors are different blocks.
+    //
+    // Every expected byte string below was MEASURED against the shipped
+    // single-item Tab / Shift+Tab and the shipped ⠿ 刪除 before it was written
+    // down (this plan's Global Constraint: never author expected markdown from
+    // reasoning alone).
+    {
+      const t7Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t7Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const t7Blocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b, i) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return {
+            i: i,
+            type: el ? el.getAttribute('data-block-type') : null,
+            indent: el ? el.getAttribute('data-indent') : null,
+            lines: [b.startLine, b.endLine],
+          };
+        }));
+      // The LIVE depth of every block, straight off the DOM. Asserted next to
+      // the saved bytes on the no-op scenario: a build that mutated the DOM and
+      // failed to commit is a different defect from one that never moved
+      // anything, and the file alone cannot tell them apart.
+      const t7Indents = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) =>
+          [el.getAttribute('data-block-type'), el.getAttribute('data-indent')]));
+      const t7Set = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+      const t7Undo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+      const t7Tab = async (page, shift) => {
+        if (shift) await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        if (shift) await page.keyboard.up('Shift');
+        await settleEditor(page);
+      };
+      const t7Press = async (page, key) => {
+        await page.keyboard.press(key);
+        await settleEditor(page);
+      };
+      // Each block's OWN text, with the gutter chrome stripped: buildGutterHandle()
+      // and buildGutterInsertButton() put a `⠿` and a `＋` inside every
+      // `.ed-block`, so a bare textContent reads 'alpha＋⠿' and a scenario
+      // asserting on it is asserting about the chrome as much as the content.
+      const t7Texts = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) => {
+          const clone = el.cloneNode(true);
+          [].slice.call(clone.querySelectorAll('.ed-handle, .ed-insert'))
+            .forEach((n) => n.remove());
+          return clone.textContent.replace(/\s+/g, ' ').trim();
+        }));
+
+      // §3.5's own worked example: `- a / (2sp)- b / (2sp)- c`, select b+c and
+      // press Tab. The minimum old indent in the set is 1 (b), b already sits
+      // at its ceiling, so the ONE delta is 0 and NOTHING moves — which is
+      // exactly what keeps b and c the siblings the user selected them as.
+      await s3Scenario('a batch Tab moves the set by ONE delta, so selected siblings stay siblings',
+        '# Doc\n\n- a\n  - b\n  - c\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]]],
+            'fixture shape: §3.5\'s own example — a at indent 0, b and c SAME-LEVEL '
+            + 'siblings at indent 1. A set whose members sit at different depths cannot '
+            + 'express the per-item defect at all');
+
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: b and c really are the set — model AND paint — before the key '
+            + 'is pressed. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.deepStrictEqual(await t7Indents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1']],
+            '§3.5: the delta is computed ONCE, from the member with the minimum old '
+            + 'indent (b, already at its ceiling of 1), and applied to the whole set — so '
+            + 'the set does not move, IN THE DOM as well as on disk. Per-item maths gives '
+            + 'c a ceiling of 2 (because b sits at 1) and moves it there, adopting c as '
+            + 'b\'s CHILD — a restructure of two blocks the user selected as siblings');
+          const afterTab = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterTab, original,
+            'and the file is byte-identical. The per-item answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n')
+            + ' — MEASURED with the shipped single-item Tab on c, not reasoned. Got '
+            + JSON.stringify(afterTab));
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // "Nothing changed" is also what an UNIMPLEMENTED batch Tab produces.
+          // The same fixture and the same selection are therefore driven
+          // through Shift+Tab, which under the same one-delta rule DOES move
+          // (minimum old indent 1 -> delta -1 -> both members land at 0). If
+          // this half fails, the byte-identical assertion above was measuring a
+          // dead key rather than the arithmetic saying zero.
+          const stillSel = await t7Sel(page);
+          assert.deepStrictEqual(stillSel, before,
+            'a zero delta commits nothing, so nothing re-renders and the set stands '
+            + 'exactly as it was. Got ' + JSON.stringify(stillSel));
+
+          await t7Tab(page, true);
+          const afterShift = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterShift, '# Doc\n\n- a\n- b\n- c\n',
+            'ANTI-VACUITY: the very same selection under Shift+Tab moves BOTH members to '
+            + 'indent 0 in one commit (MEASURED). This is what proves the key reaches the '
+            + 'batch path at all — without it the no-op above is satisfied by a build with '
+            + 'no batch Tab in it. Got ' + JSON.stringify(afterShift));
+          const collapsed = await t7Sel(page);
+          assert.deepStrictEqual(collapsed.memberLines, [[4, 4], [5, 5]],
+            '§3.3: the set collapses to the lines the operation covered — a column-only '
+            + 'edit moves no line, so the members keep their range. Got ' +
+            JSON.stringify(collapsed));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op, over the whole batch');
+        }, 'T7');
+
+      // §3.4 rule 3's SECOND worked failure, which is Tab's own: 「批次 Tab 選
+      // b(1)..d(0) 時第一成員 b 已在上界 ⇒ delta 0 ⇒ 整批 no-op，儘管單獨對 d
+      // 按 Tab 合法」. This is the scenario the anchor mutation has to bite on —
+      // Task 6 measured that on a batch DELETE the anchor is UNOBSERVABLE (every
+      // survivor above the set is still a list item, so anchorBefore() answers
+      // the same under either anchor and every segment delta is 0), so nothing
+      // in the T6 set can stand in for this one.
+      await s3Scenario('the batch Tab delta is anchored on the set\'s minimum old indent',
+        '# Doc\n\n- a\n  - b\n    - c\n- d\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '2', [5, 5]], ['li', '0', [6, 6]]],
+            'fixture shape: the set (lines 4..6) runs DEEP to SHALLOW — first member b at '
+            + 'indent 1, minimum old indent 0 (d). The two candidate anchors are different '
+            + 'blocks, which is the whole point: on a set whose first member IS its '
+            + 'minimum the two answers are identical and the defect is inexpressible');
+
+          await t7Set(page, 4, 6);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5], [6, 6]],
+            'precondition: b, c and d really are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
+            '§3.4 rule 3: the anchor is d (indent 0), whose ceiling under c is 3, so the '
+            + 'one delta is +1; the per-item clamp then holds b and c at their own '
+            + 'ceilings and only d actually moves, 0 -> 1. Anchoring on the FIRST member '
+            + '(b, already at its ceiling of 1) yields delta 0 and NO-OPS THE ENTIRE '
+            + 'BATCH — byte-identical output — although Tab on d alone is legal and '
+            + 'produces exactly these bytes (MEASURED with the shipped single-item Tab). '
+            + 'Got ' + JSON.stringify(after));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T7');
+
+      // §3.5's heading row, batched: Tab lowers a heading one level, clamped to
+      // H6; a paragraph in the same set is a documented no-op, not an error.
+      await s3Scenario('a batch Tab over headings changes each level, clamps at H6, one undo op',
+        '# Doc\n\n## alpha\n\nplain\n\n###### deep\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['heading', [3, 3]], ['paragraph', [5, 5]],
+              ['heading', [7, 7]]],
+            'fixture shape: an H2, a PARAGRAPH and an H6 adjacent in `blocks`, so the span '
+            + 'is contiguous and holds two kinds that must be treated differently — and '
+            + 'the H6 is already at the floor the clamp has to respect');
+
+          await t7Set(page, 3, 7);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5], [7, 7]],
+            'precondition: all three blocks really are the set. Got ' +
+            JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          const sel = await t7Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n### alpha\n\nplain\n\n###### deep\n',
+            '§3.5: Tab lowers a heading one level (## -> ###, MEASURED against the shipped '
+            + 'burst Tab on a heading), clamps at H6 so `###### deep` does not move, and '
+            + 'leaves a paragraph alone. All three in ONE commit. Got ' +
+            JSON.stringify(after));
+          // MEASURED, not reasoned (Task 6 carry 5, and this plan's Global
+          // Constraint): marked emits a `space` token for a blank separator but
+          // a HEADING's own trailing blank is absorbed into the heading token,
+          // so there is no `space` between the two headings — only between the
+          // paragraph and the one after it. Authoring this list from the four
+          // blocks a reader counts gives the wrong answer.
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'heading', 'paragraph', 'space', 'heading'],
+            'and the saved bytes still re-lex as heading / heading / paragraph / heading '
+            + '— a stray `#` written onto the paragraph would show up here');
+          assert.deepStrictEqual(sel.memberLines, [[3, 3], [5, 5], [7, 7]],
+            '§3.3: a level change rewrites no line COUNT, so the set collapses onto the '
+            + 'lines it already held. Got ' + JSON.stringify(sel));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op across all three members');
+        }, 'T7');
+
+      // The other end of the same clamp.
+      await s3Scenario('a batch Shift+Tab over headings clamps at H1',
+        '# top\n\n## alpha\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['heading', [3, 3]]],
+            'fixture shape: an H1 already at the ceiling and an H2 that can still rise');
+
+          await t7Set(page, 1, 3);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[1, 1], [3, 3]],
+            'precondition: both headings are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, true);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# top\n\n# alpha\n',
+            '§3.5: Shift+Tab raises a heading one level, clamped to H1 — `# top` cannot '
+            + 'rise and stays put while `## alpha` becomes `# alpha` (MEASURED against '
+            + 'the shipped burst Shift+Tab). A clamp written as an unconditional -1 emits '
+            + 'a zero-# line, which is not a heading at all. Got ' + JSON.stringify(after));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // §3.6's 2026-08-31 ruling, inherited from Task 6 rather than re-invented:
+      // a span holding BOTH list items and non-list blocks is refused with a
+      // banner. It CONTRADICTS this plan's Task 7 text ("a batch containing both
+      // kinds applies each rule to its own kind") — see the carry.
+      await s3Scenario('a batch Tab over a mixed span refuses with Task 6\'s banner',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['li', [5, 5]], ['li', [6, 6]]],
+            'fixture shape: a paragraph adjacent in `blocks` to a two-item run, so the '
+            + 'span is contiguous and the refusal is about the KINDS, not about a gap');
+
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really holds a non-list block AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.strictEqual(await t7Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            '§3.6 (2026-08-31): a mixed span is refused with a BANNER — silently doing '
+            + 'nothing is a defect. This is Task 6\'s existing refusal, not a second one');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and a refusal must not touch one byte');
+          assert.deepStrictEqual(await t7Indents(page),
+            [['heading', null], ['paragraph', null], ['li', '0'], ['li', '0']],
+            'nor leave a half-applied indent in the DOM for the next commit to pick up');
+        }, 'T7');
+
+      // Contiguity in `blocks` does not imply ONE run: two adjacent list tokens
+      // are adjacent blocks with no phantom between them, and a batch Tab that
+      // re-serialized "the run" would rewrite a range that does not cover both.
+      await s3Scenario('a batch Tab spanning two runs refuses, byte-identical',
+        '# Doc\n\n- a\n* b\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t7Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]]],
+            'fixture shape: two list items ADJACENT in `blocks` — no phantom, no gap. Got '
+            + JSON.stringify(shape));
+          assert.deepStrictEqual(await page.evaluate(() =>
+            [].slice.call(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+              .map((el) => el.getAttribute('data-list-start'))), ['1', '1'],
+            'precondition, MEASURED: a marker change interrupts a list, so BOTH items are '
+            + 'their own list-start — that is what makes them two runs rather than one');
+
+          await t7Set(page, 3, 4);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: both items are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.strictEqual(await t7Banner(page), '選取範圍跨越兩個清單，無法整批操作',
+            'the two-run span refuses with its own banner');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T7');
+
+      // ── §3.6 「Delete 整批刪」 ───────────────────────────────────────────
+      // The spec's 2026-08-31 ruling: it goes through the SAME batch path as
+      // the ⠿ menu's 刪除 (deleteListItemsViaGutter, already a contiguous-range
+      // implementation) — never a second deletion path.
+      await s3Scenario('Delete over a standing selection removes every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]], ['li', [5, 5]],
+              ['li', [6, 6]]],
+            'fixture shape: a heading and a four-item run on lines 3..6');
+          assert.deepStrictEqual(await t7Texts(page),
+            ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+            'precondition: all four items are IN the document before the key is pressed — '
+            + 'a delete test that does not state this is green on an empty page');
+
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: a real TWO-member selection stands over bravo and charlie — '
+            + 'model and paint. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          const sel = await t7Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'BOTH members leave in one commit and the survivors are re-serialized as one '
+            + 'run — exactly what the ⠿ 刪除 does with the same set. A path that deleted '
+            + 'only the focus holder leaves ' + JSON.stringify('# Doc\n\n- alpha\n- bravo\n- delta\n')
+            + ' or ' + JSON.stringify('# Doc\n\n- alpha\n- charlie\n- delta\n') + '. Got '
+            + JSON.stringify(after));
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'delta'],
+            'and the two blocks really left the rendered document, not just the file');
+          assert.strictEqual(sel, null,
+            '§3.3 + §4.4: a delete produces no lines, so the collapse range does not '
+            + 'resolve and the set is CLEARED');
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op');
+        }, 'T7');
+
+      // The ruling on Backspace: the same gesture. While a set stands, focus is
+      // on the roving `.ed-block` holder — not on any text surface — so neither
+      // key can mean "delete a character", and Notion, Word and every file
+      // manager treat the pair as one gesture over a whole-object selection.
+      await s3Scenario('Backspace over a standing selection does exactly what Delete does',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await t7Texts(page),
+            ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+            'precondition: all four items are there first');
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5]],
+            'precondition: bravo and charlie are the set. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Backspace');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'Backspace is the same batch delete as Delete. Got ' + JSON.stringify(after));
+          assert.strictEqual(await t7Sel(page), null, 'and it clears the set the same way');
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // The non-li half of the same path: a contiguous span of ordinary blocks
+      // is one line-range removal, blank separators included.
+      await s3Scenario('Delete over a span of non-list blocks removes the whole range',
+        '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['paragraph', [5, 5]],
+              ['paragraph', [7, 7]]],
+            'fixture shape: three paragraphs under a heading');
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: alpha and bravo are the set, charlie is not. Got ' +
+            JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\ncharlie\n',
+            'the span leaves as ONE range — the blank separator between its members goes '
+            + 'with it and exactly one adjacent blank is absorbed on the outside '
+            + '(MEASURED against the ⠿ 刪除 over the same set). Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'charlie'], 'and in the DOM');
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // The ruling on a whole-document selection: it is allowed, and it empties
+      // the document. MEASURED on this branch through the ⠿ 刪除 with the same
+      // set BEFORE the key existed — the file came back '' with `blocks` empty
+      // and no banner. Refusing it only for the KEY would make the two
+      // affordances disagree, which §3.6's 「同一條批次路徑」 forbids; and the
+      // undo below is what makes it a safe thing to allow.
+      await s3Scenario('Delete over the WHOLE document empties it, and one undo brings it back',
+        '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['paragraph', [5, 5]]],
+            'fixture shape: every block in the document is about to be in the set');
+          await t7Set(page, 1, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[1, 1], [3, 3], [5, 5]],
+            'precondition: the set really is EVERY block. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          assert.strictEqual(await t7Banner(page), null,
+            'no refusal: emptying the document is allowed, and is what the ⠿ 刪除 over the '
+            + 'same set already did before this key existed');
+          assert.deepStrictEqual(await page.evaluate(() => window.__edTestBlocks()), [],
+            'every block is gone from the model');
+          assert.strictEqual(await t7Sel(page), null, 'and the set is cleared');
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '',
+            'the file is empty. Got ' + JSON.stringify(after));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and ONE Ctrl+Z brings the whole document back — which is what makes emptying '
+            + 'it a safe thing to allow rather than a trap');
+        }, 'T7');
+
+      // The Delete key inherits the shared preamble's refusals because it goes
+      // through the SAME entry point, not because it re-checks anything.
+      await s3Scenario('Delete over a mixed span refuses with Task 6\'s banner, byte-identical',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set holds a paragraph AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          assert.strictEqual(await t7Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            'the key routes through deleteBlockViaGutter(), so it inherits the mixed-span '
+            + 'refusal rather than carrying a copy of it');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'bravo', 'charlie'],
+            'and nothing left the document');
+        }, 'T7');
+
+      // REGRESSION GUARD (green before the implementation, and named as such —
+      // it cannot be RED before a Delete branch exists). Its bite is proved by
+      // mutation, not by this run: ordering the new branch ABOVE the
+      // `.ed-wys-armed` short-circuit makes the caret's own block get DELETED
+      // by an ordinary editing keystroke.
+      await s3Scenario('Delete inside an armed surface still edits text, and deletes no block',
+        '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.strictEqual(await t7Sel(page), null,
+            'precondition: NO selection stands — this is the resting state every pre-S3 '
+            + 'gesture lives in');
+          const sel = await page.evaluate(() => {
+            const els = [].slice.call(
+              document.querySelectorAll('.ed-block[data-block-type="paragraph"]'));
+            return '.ed-block[data-block-id="' + els[0].getAttribute('data-block-id') +
+              '"] .ed-wys-armed';
+          });
+          await page.click(sel);
+          await page.evaluate((s) => {
+            const el = document.querySelector(s);
+            const r = document.createRange();
+            r.setStart(el.firstChild, 0);
+            r.collapse(true);
+            const s2 = window.getSelection();
+            s2.removeAllRanges();
+            s2.addRange(r);
+          }, sel);
+          assert.strictEqual(await page.evaluate((s) =>
+            document.activeElement === document.querySelector(s), sel), true,
+            'precondition: the caret really is inside the armed paragraph');
+
+          await t7Press(page, 'Delete');
+          await page.keyboard.press('Enter');
+          await settleEditor(page);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\nlpha\n\nbravo\n',
+            'Delete at the caret removes ONE CHARACTER — the burst short-circuit above the '
+            + 'new branch keeps every key on an armed surface belonging to that surface. A '
+            + 'branch ordered above it deletes the whole block instead, giving '
+            + JSON.stringify('# Doc\n\nbravo\n') + '. Got ' + JSON.stringify(after));
+          assert.strictEqual(await t7Sel(page), null,
+            'and no selection was created by a keystroke that has nothing to do with one');
+          assert.notStrictEqual(after, original, 'sanity: the keystroke did reach the surface');
+        }, 'T7');
+    }
+    // <<<T7SECTION
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();

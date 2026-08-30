@@ -782,8 +782,19 @@ function countInCode(source, needle) {
   // commitBlockInsertion() tail, which was already one of the ten. If a
   // future task grows an eleventh, migrate this number WITH the reason;
   // never relax the assertion.
-  assert.strictEqual(helperCalls, 12,
-    'the helper must be DECLARED once, EXPORTED once, and used at all ten ' +
+  //
+  // MIGRATED by S3 Task 7 (12 -> 13), with the reason: §3.5's batch Tab over a
+  // span of NON-list blocks (changeHeadingDepthsInSpan()) is a genuinely NEW
+  // commit-then-render site — it rewrites the heading lines inside the span's
+  // own range with commitRangeEdit() and renders, which is neither
+  // commitListStructure()'s site nor commitBlockInsertion()'s. S3 Tasks 1-6
+  // added NONE, and that was checked rather than assumed: Task 6 generalized
+  // every batch operation IN PLACE (Task 6 carry 12), and Task 7's LIST half
+  // reuses commitListStructure()'s existing site the way every other list
+  // structural edit does. The expected total is therefore DECLARED once +
+  // EXPORTED once + 11 uses = 13.
+  assert.strictEqual(helperCalls, 13,
+    'the helper must be DECLARED once, EXPORTED once, and used at all eleven ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
