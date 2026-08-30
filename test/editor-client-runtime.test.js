@@ -11059,6 +11059,123 @@ async function clickInsertMenuItem(page, sel, label) {
       } finally { msrv.close(); }
     }
 
+    // ── Branch review, BLOCKING 1: ⠿ → 刪除 on a LIST ITEM ────────────────
+    //
+    // S1 is the branch that first gives a li a ⠿ (armEditables() used to
+    // `return` before the handle for `li`), and the ⠿ menu's 刪除 was not
+    // gated for one at all — it went straight into the block-type-agnostic
+    // line-range splice with NEITHER §3.4's applyIndentClamp() NOR
+    // listRunSupportsStructuralEdit(). Spec §6, "S1 期間的已知危險" item 1,
+    // names `deleteBlockViaGutter` verbatim as the function that must walk
+    // both, and both pure functions were front-loaded into S1 precisely for
+    // this — it simply never got wired up.
+    //
+    // Every row below was measured as a real gesture (hover ⠿, click 刪除,
+    // Ctrl+S) on the pre-fix build:
+    //
+    //   (a) the run's own separator blank line was ABSORBED by
+    //       commitRangeRemoval()'s blank-line contract — which is correct for
+    //       "this block's lines and nothing else" and wrong for a run, since
+    //       the surviving items still need it. 'Para.\n\n1. a\n2. b\n3. c\n'
+    //       came back as 'Para.\n2. b\n3. c\n', which re-lexes as ONE
+    //       paragraph reading "Para. 2. b 3. c". Three items, no banner.
+    //   (b) a child was left at its old indent with its parent gone:
+    //       '# T\n\n- a\n    - deep\n- b\n' -> '# T\n    - deep\n- b\n', and
+    //       four dangling columns after a heading is an INDENTED CODE BLOCK.
+    //   (S7) the surviving ordered run was never re-serialized, so the file
+    //       kept '2. b / 3. c' while the CSS counter on screen showed 1,2 —
+    //       reader mode and edit mode permanently disagreeing about the same
+    //       file until somebody happens to type in that run.
+    //
+    // The fix routes a li through the same sequence
+    // convertEmptyTopLevelLiToParagraph() already uses (run span -> clamp ->
+    // remove -> commitListStructure with the PRE-mutation range and the
+    // bystander carry-over), so the assertions below are stated as exact file
+    // bytes: the marker line is always re-stated by the serializer, which is
+    // what closes S7 as a side effect of closing S1.
+    {
+      // Prefix match rather than liBlockSelByText()'s exact/first-line match:
+      // a hard-wrapped item's surface holds a <br>, whose textContent is '',
+      // so its "first line" is the two source lines run together.
+      const liSelByPrefix = async (page, prefix) => {
+        const sel = await page.evaluate((p) => {
+          const li = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .find((el) => {
+              const t = el.querySelector(':scope > .ed-li-text');
+              return !!t && t.textContent.indexOf(p) === 0;
+            });
+          return li ? '.ed-block[data-block-type="li"][data-block-id="' +
+            li.getAttribute('data-block-id') + '"]' : null;
+        }, prefix);
+        assert.ok(sel, 'fixture: no li whose text starts with ' + JSON.stringify(prefix));
+        return sel;
+      };
+      const CASES = [
+        { name: '(a) the separator blank line survives, and the ordered run is renumbered (S7)',
+          rows: ['Para.', '', '1. a', '2. b', '3. c', ''],
+          target: 'a',
+          expect: 'Para.\n\n1. b\n2. c\n' },
+        { name: '(b) an orphaned child is clamped instead of becoming an indented code block',
+          rows: ['# T', '', '- a', '    - deep', '- b', ''],
+          target: 'a',
+          expect: '# T\n\n- deep\n- b\n' },
+        { name: '(c) a child that still has an anchor keeps it (§3.4 rule 3 is max(0, …))',
+          rows: ['- x', '- a', '    - deep', '- b', ''],
+          target: 'a',
+          expect: '- x\n  - deep\n- b\n' },
+        { name: '(d) removing a run\'s LAST item still absorbs exactly one blank separator',
+          rows: ['# Doc', '', '- Only', '', 'Trailer', ''],
+          target: 'Only',
+          expect: '# Doc\n\nTrailer\n' },
+        { name: '(e) a MULTI-LINE target refuses (§4.1: delete rewrites its line range)',
+          rows: ['# L', '', '- hard one  ', '  hard two', '- other', ''],
+          target: 'hard one',
+          refuse: true },
+        { name: '(f) an unsupported bystander refuses RUN-WIDE (RULING F-R)',
+          rows: ['# L', '', '- a', '', '- b', '', 'tail', ''],
+          target: 'a',
+          refuse: true },
+      ];
+      for (const c of CASES) {
+        const { srv: dsrv, url: durl, mdPath: dmdPath, original: dOriginal } =
+          await setupListDoc(c.rows);
+        try {
+          const page = await newPage(browser);
+          await page.goto(durl, { waitUntil: 'networkidle0' });
+          const sel = await liSelByPrefix(page, c.target);
+          await clickGutterMenuItem(page, sel, '刪除');
+          await settleEditor(page);
+          const after = await saveAndRead(page, dmdPath);
+          if (c.refuse) {
+            const banner = await page.evaluate(() => {
+              const el = document.querySelector('.ed-conflict');
+              return el ? el.textContent : null;
+            });
+            assert.ok(banner && banner.indexOf('無法調整結構') !== -1,
+              'B1 ' + c.name + ': expected the structural refusal banner, got ' +
+              JSON.stringify(banner));
+            assert.strictEqual(after, dOriginal,
+              'B1 ' + c.name + ': a refused delete must leave the file byte-identical, got:\n' +
+              JSON.stringify(after));
+          } else {
+            assert.strictEqual(after, c.expect,
+              'B1 ' + c.name + ':\n  expected ' + JSON.stringify(c.expect) +
+              '\n  got      ' + JSON.stringify(after));
+            // The bytes are the contract, but state the CONSEQUENCE too: no
+            // shape below may re-lex into a code block or collapse the list
+            // into a paragraph, which is exactly how (a) and (b) presented.
+            const kinds = plainMarked.lexer(after).map((t) => t.type);
+            assert.strictEqual(kinds.indexOf('code'), -1,
+              'B1 ' + c.name + ': the survivors must not lex as a code block; tokens ' +
+              JSON.stringify(kinds) + ' from\n' + JSON.stringify(after));
+          }
+          await page.close();
+          console.log('B1: ' + c.name + ' — OK');
+        } finally { dsrv.close(); }
+      }
+    }
+
     // ── Task 7 fix round 1: the hard-break sweep ──────────────────────────
     //
     // WHY A SWEEP, AND WHY THIS FIXTURE. Round 0 offered the real

@@ -136,44 +136,64 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
 
 // ── T8 item 5: what this module's coverage IS, and what it is NOT ────────
 //
-// INSURANCE, NOT COVERAGE. Every case above is a unit test of a pure
-// function. None of them proves that any USER GESTURE reaches the behaviour
-// being asserted, and in S1 none does: clampIndents() is a provable no-op for
-// every gesture the editor can currently produce. Tab/Shift+Tab move exactly
-// one item by exactly one level and re-anchor it themselves, so the span they
-// hand the clamp is already legal and case 12's fixed-point result is the
-// answer every time (measured over an exhaustive item x gesture simulation of
-// this plan's fixtures: 1091 gestures, zero indent changed by the clamp).
+// PARTLY INSURANCE, PARTLY COVERAGE — and the line between the two moved on
+// 2026-08-30, so read this before trusting either half.
 //
-// The two option branches — `removed` and `operatedBecomes` — have NO
-// production caller at all. That is asserted mechanically below rather than
-// asserted in prose, because the whole point of writing it down is to be told
-// when it stops being true: S2's §3.3 conversion is what wires them up, and
-// on the day it does, this check fails and whoever is holding the branch has
-// to come back and re-read this note instead of inheriting a stale one.
+// Every case above is a unit test of a pure function. For the INDENT KEYS,
+// none of them proves that a user gesture reaches the behaviour being
+// asserted, and none does: Tab/Shift+Tab move exactly one item by exactly one
+// level and re-anchor it themselves, so the span they hand the clamp is
+// already legal and case 12's fixed-point result is the answer every time
+// (measured over an exhaustive item x gesture simulation of this plan's
+// fixtures: 1091 gestures, zero indent changed by the clamp).
+//
+// `opts.removed` is DIFFERENT as of the whole-branch review's BLOCKING 1: the
+// ⠿ menu's 刪除 on a list item now routes through
+// deleteListItemViaGutter() -> applyIndentClamp(run, li, oldIndent,
+// { removed: true }), and that IS a real gesture that changes indents — the
+// measured case is '# T\n\n- a\n    - deep\n- b\n', where deleting `a`
+// without the clamp leaves '    - deep' four columns after a heading, i.e. an
+// indented code block. Its end-to-end proof lives in
+// test/editor-client-runtime.test.js (the B1 cases); what is asserted here is
+// that the wiring still exists, so removing it cannot go unnoticed.
+//
+// `opts.operatedBecomes` still has NO production caller — S2's §3.3
+// conversion is what wires it up. That stays asserted mechanically rather
+// than in prose, because the whole point of writing it down is to be told
+// when it stops being true.
 {
   const fs = require('fs');
   const path = require('path');
   const clientSrc = fs.readFileSync(
     path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
   // T8 review LOW-1: comment lines are dropped BEFORE counting, and the line
-  // that is checked for the empty options object is the matched CALL line —
-  // not `indexOf`'s first textual hit, which a mention in a comment would win.
+  // that is checked for the options object is the matched CALL line — not
+  // `indexOf`'s first textual hit, which a mention in a comment would win.
   // A source check that counts its own explanation produces a failure message
   // asserting a defect that is not there.
-  const callLines = clientSrc.split('\n').filter((l) => {
+  const codeLines = clientSrc.split('\n').filter((l) => {
     const t = l.trim();
-    if (t === '' || t.indexOf('//') === 0 || t.indexOf('*') === 0) return false;
-    return t.indexOf('clampIndents(') !== -1;
+    return !(t === '' || t.indexOf('//') === 0 || t.indexOf('*') === 0);
   });
+  const callLines = codeLines.filter((l) => l.indexOf('clampIndents(') !== -1);
   assert.strictEqual(callLines.length, 1,
     'S1 has exactly ONE production call into clampIndents(); found ' + callLines.length +
     ':\n  ' + callLines.join('\n  ') +
     '\nIf S2 added another, update this note — do not just bump the number.');
-  assert.ok(/clampIndents\([^\n]*,\s*\{\s*\}\s*\)/.test(callLines[0]),
-    'that call passes an EMPTY options object, which is what makes `removed` and ' +
-    '`operatedBecomes` unreachable in production and this file insurance rather than ' +
-    'coverage; got: ' + JSON.stringify(callLines[0]));
+  assert.ok(/clampIndents\([^\n]*,\s*opts \|\| \{\s*\}\s*\)/.test(callLines[0]),
+    'that one call forwards its caller\'s options (it used to hardcode `{}`, which is ' +
+    'what made `removed` unreachable in production); got: ' + JSON.stringify(callLines[0]));
+  // `removed` is now reachable, from exactly one gesture. Both halves matter:
+  // zero call sites means BLOCKING 1's fix was reverted, and more than one
+  // means a second gesture grew a clamp without anyone re-reading this note.
+  const removedSites = codeLines.filter((l) => /applyIndentClamp\([^\n]*removed:\s*true/.test(l));
+  assert.strictEqual(removedSites.length, 1,
+    '`opts.removed` must have exactly ONE production caller — the ⠿ delete of a list ' +
+    'item (spec §6, S1 期間的已知危險 item 1). Found ' + removedSites.length + ':\n  ' +
+    removedSites.join('\n  '));
+  assert.strictEqual(codeLines.filter((l) => l.indexOf('operatedBecomes') !== -1).length, 0,
+    '`operatedBecomes` still has no production caller; S2\'s §3.3 conversion is what ' +
+    'wires it up, and on the day it does, come back and re-read this note.');
 }
 
 console.log('indent-clamp: spec §3.4 shift-then-clamp — OK');
