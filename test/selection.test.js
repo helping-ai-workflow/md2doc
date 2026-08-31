@@ -132,13 +132,23 @@ eq(nlStep3, { anchorLine: 1, focusLine: 3 },
   'and the third step clamps at the last block rather than wrapping — an ANTI-VACUITY '
   + 'partner for the two above: a stepFocus() that simply refused to move would satisfy '
   + 'neither of them');
-// The same chain upward, so "it can reach 3" is not an artefact of the one
-// direction: the phantom must be skipped on the way back too.
+// The same chain upward. ⚠ These two DO NOT discriminate, and an earlier version
+// of this comment claimed they did — measured, filtered and unfiltered agree in
+// this direction at every step (3 -> 2 -> 1 both ways). `findIndex(b =>
+// b.startLine === focus)` hits the phantom at index 1 when focus is 2, and the
+// block above it is {1,1} either way, so the filter changes nothing going up.
+//
+// They are kept as documentation of the upward chain, NOT as a guard: the only
+// assertion that bites the missing filter is nlStep2 above. Nor can a fixture be
+// built that discriminates upward — a phantom is the OUTER block of a same-line
+// nest (`- - b`), so its startLine always equals its inner child's by
+// construction, and "the phantom and the next real block share a startLine" is
+// the whole reason the downward step is the discriminating one.
 eq(S.stepFocus({ anchorLine: 3, focusLine: 3 }, NOLINE_MID, -1), { anchorLine: 3, focusLine: 2 },
-  'Shift+Up from the last block lands on the real {2,2}, not the phantom');
+  'Shift+Up from the last block lands on line 2 (documentation, not a mutation guard)');
 eq(S.stepFocus({ anchorLine: 3, focusLine: 2 }, NOLINE_MID, -1), { anchorLine: 3, focusLine: 1 },
-  'and the step above THAT reaches line 1 — an unfiltered nav would stop at the '
-  + 'phantom (also startLine 2) and answer 2 forever');
+  'and the step above THAT reaches line 1 (documentation, not a mutation guard — '
+  + 'both the filtered and unfiltered navs answer 1 here)');
 
 // --- §3.3 membership rules --------------------------------------------
 const sel = { anchorLine: 5, focusLine: 7 };
