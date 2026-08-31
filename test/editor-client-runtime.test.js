@@ -6346,8 +6346,15 @@ async function gutterGeometry(page, sel) {
           return { gTop: g.top, gLeft: g.left, gH: g.height, gW: g.width,
                    hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
         }, table0);
-        expectApprox(hg.gLeft + hg.gW / 2, hg.tLeft,
-          'header row grip straddles the table border like any other row (centreline ON it)');
+        // MIGRATED (S4 T1, spec §5.2a item 2): this asserted the grip's
+        // CENTRELINE was on the table's left border. §4.2 hit-test conflict 2
+        // reversed that — the grip's LEFT EDGE is on the border now, so the
+        // whole grip is inside the table and shares no pixel with the block
+        // gutter's ⠿. Same rule for every row, header included; only the
+        // expected number moved.
+        expectApprox(hg.gLeft, hg.tLeft,
+          'header row grip sits ENTIRELY INSIDE the table like any other row '
+          + '(its LEFT EDGE on the border, §4.2 conflict 2)');
         expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2,
           'header row grip is centred on its OWN row, exactly like a body row (no header-only offset)');
         // The column grip must still work over the header row's own cells
@@ -6357,10 +6364,14 @@ async function gutterGeometry(page, sel) {
           'hovering the header row must still reveal the COLUMN grip for that column');
 
         // Position (uniform geometry): the row grip STRADDLES the table's
-        // left border — its horizontal centreline ON that border — mirroring
-        // what the column grip does on the top border. The block's own
-        // gutter ⠿ is kept clear of it by the edit-mode-only content padding
-        // in lib/md2doc.js, not by insetting the grip.
+        // left border — its LEFT EDGE on that border, so the whole grip is
+        // inside the table (§4.2 hit-test conflict 2, landed S4 T1). This is
+        // NOT what the column grip does on the top border: nothing of the
+        // page's own chrome lives above a table, but the block's ⠿ lives
+        // immediately left of one, and a straddling row grip ate its right
+        // 6px. The grip is kept off the first cell's TEXT by the edit-mode
+        // first-column padding (--ed-te-cell-pad-left) in lib/md2doc.js —
+        // the 14px default is narrower than the grip.
         // expectApprox(actual, expected) allows ±1px for subpixel rounding.
         // Re-hover body row 0 first — the header hover above moved the
         // (shared, singleton) row grip onto the header row, so reading it
@@ -6381,11 +6392,11 @@ async function gutterGeometry(page, sel) {
         }, table0);
         {
           const { gr, tableRect, rowRect } = rowGripRects;
-          // row grip 的水平中心線落在表格左邊界上——與 colGrip 落在上邊界
-          // 的規則完全一樣；block 自己的 ⠿ 由 edit-mode 專用的 content
-          // padding 讓出空間，不靠把 grip 塞進表格內側。
-          expectApprox(gr.left + gr.width / 2, tableRect.left,
-            'row grip centreline sits ON the table\'s left border (straddling it)');
+          // row grip 的左緣落在表格左邊界上，整個 grip 在表格內側
+          // （§4.2 衝突 2，S4 T1 落地）；colGrip 仍跨在上邊界，兩軸不再對稱。
+          expectApprox(gr.left, tableRect.left,
+            'row grip\'s LEFT EDGE sits ON the table\'s left border (the whole '
+            + 'grip inside the table, §4.2 conflict 2)');
           expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
             'a body row grip stays vertically centred on its own row');
         }
@@ -6440,20 +6451,197 @@ async function gutterGeometry(page, sel) {
         }
 
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); one border-straddling position for every row — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); one position for every row, inside the table\'s left border — OK');
       } finally {
         tsrv.close();
       }
     }
 
+    // >>>T1CONFLICT2
+    // spec §4.2 hit-test conflict 2 — the OTHER direction, which had no
+    // coverage at all until S4 Task 1.
+    //
+    // The scenario above asserts elementFromPoint(row grip centre) is the row
+    // grip and not the block ⠿. That guards the grip. Nothing guarded the ⠿:
+    // MEASURED on main at v2.12.0 (1400x900, table block at blockLeft=412),
+    // .ed-handle occupied [390, 408] = [blockLeft-22, blockLeft-4] while the
+    // row grip parked on the HEADER row occupied [402, 422] x [236.22,
+    // 264.22], overlapping the ⠿'s own box [390, 408] x [231.09, 251.09].
+    // elementFromPoint() walked across the ⠿ at its own vertical centre
+    // answered ed-handle for x 390..401 and the ROW GRIP for x 402..407 —
+    // the right 6px of the ⠿ belonged to the table. S4 turns the ⠿ into a
+    // drag handle, so those 6px would start a TABLE ROW drag instead of a
+    // block move. This fixture has no heading, so it renders with no sidebar
+    // and its own numbers are shifted: blockLeft=80, ⠿ [58, 76], header row
+    // grip [70, 90], strays at x 70..75.5. Same 6px, same cause — the offset
+    // is [blockLeft-10, blockLeft-4] either way.
+    //
+    // The grip is position:fixed z-index:7 on document.body, so it wins that
+    // hit test whenever it is showing — i.e. whenever the pointer has
+    // recently been over a table cell, which is exactly when a user is about
+    // to reach for the table block's own ⠿.
+    //
+    // Asserted for EVERY pixel of the ⠿'s box (not just its centre: the
+    // centre, x=399, was never the broken half) at three heights, in three
+    // states: grip hidden, grip parked on the header row, grip parked on
+    // body row 0. Both the table's OWN block and the paragraph above it are
+    // probed — the paragraph is the control, since its ⠿ never shared a Y
+    // band with any grip and answered ed-handle throughout even on main.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        'Alpha paragraph.', '',
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const para0 = await page.evaluate(() => {
+          const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
+            .find((el) => (el.textContent || '').indexOf('Alpha') >= 0);
+          return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(para0, 'fixture: the paragraph above the table must exist');
+
+        // Walks the ⠿'s box and reports what answered at every probe point.
+        //
+        // Two probe sets, because .ed-handle carries border-radius: 4px and
+        // the browser hit-tests the ROUNDED shape: at y = top+1 the box's own
+        // right edge is genuinely outside the button, and answers the block's
+        // .ed-block::before gutter hover zone instead. That is not the defect
+        // and never was — a press there was never on the ⠿ under ANY geometry
+        // — so the "every pixel is the ⠿" assertion probes the rounded box's
+        // interior (rows inset by the radius), while a SECOND assertion
+        // covers the full box corners included and only forbids the elements
+        // that would steal the S4 gesture. Neither set is a subset of the
+        // other's claim: the first would pass a geometry that let a grip take
+        // a corner, the second would pass one where the ⠿'s middle answered
+        // main.content.
+        const HANDLE_RADIUS_PX = 4;
+        const probeHandle = (page, sel) => page.evaluate((s, rad) => {
+          const b = document.querySelector(s);
+          const h = b.querySelector(':scope > .ed-handle');
+          const r = h.getBoundingClientRect();
+          const xs = [];
+          for (let x = Math.ceil(r.left); x <= Math.floor(r.right) - 1; x++) xs.push(x);
+          xs.push(r.left + 0.5, (r.left + r.right) / 2, r.right - 0.5);
+          const cy = (r.top + r.bottom) / 2;
+          // `inset` rows avoid the four rounded corners; `edge` rows are the
+          // box's own top/bottom pixel rows and are corner-bearing.
+          const rows = [
+            { y: r.top + rad, inset: true }, { y: cy, inset: true },
+            { y: r.bottom - rad, inset: true },
+            { y: r.top + 1, inset: false }, { y: r.bottom - 1, inset: false },
+          ];
+          const out = [];
+          for (const row of rows) {
+            for (const x of xs) {
+              const el = document.elementFromPoint(x, row.y);
+              const owner = el && el.closest ? el.closest('.ed-handle') : null;
+              out.push({
+                x: Math.round(x * 100) / 100, y: Math.round(row.y * 100) / 100,
+                inset: row.inset,
+                own: owner === h,
+                got: !el ? 'null'
+                  : el.closest('.ed-te-grip-row') ? 'ROW-GRIP'
+                  : el.closest('.ed-te-grip-col') ? 'COL-GRIP'
+                  : el.closest('.ed-insert') ? 'ed-insert'
+                  : owner === h ? 'ed-handle'
+                  : owner ? 'a DIFFERENT block\'s ed-handle'
+                  : (el.className && typeof el.className === 'string'
+                      ? el.tagName + '.' + el.className.split(' ')[0] : el.tagName),
+              });
+            }
+          }
+          return { box: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+                   samples: out };
+        }, sel, HANDLE_RADIUS_PX);
+
+        const boxStr = (res) => '[' + res.box.left.toFixed(2) + ', ' +
+          res.box.right.toFixed(2) + '] x [' + res.box.top.toFixed(2) + ', ' +
+          res.box.bottom.toFixed(2) + ']';
+        const assertAllHandle = (label, res) => {
+          const inset = res.samples.filter((p) => p.inset);
+          assert.ok(inset.length >= 3 * 18,
+            'ANTI-VACUITY (' + label + '): the probe must actually cover the ⠿ — ' +
+            'only ' + inset.length + ' interior points were sampled over ' + boxStr(res));
+          const stray = inset.filter((p) => !p.own);
+          assert.strictEqual(stray.length, 0,
+            'spec §4.2 conflict 2 — ' + label + ': EVERY pixel inside the ⠿ box ' +
+            boxStr(res) + ' must answer that block\'s own .ed-handle, or S4\'s ' +
+            'drag gesture starts on whatever else answers. ' + stray.length +
+            ' of ' + inset.length + ' interior points did not: ' +
+            JSON.stringify(stray.slice(0, 12)));
+          const grabbed = res.samples.filter((p) => p.got === 'ROW-GRIP' || p.got === 'COL-GRIP');
+          assert.strictEqual(grabbed.length, 0,
+            'spec §4.2 conflict 2 — ' + label + ': no point of the ⠿ box ' + boxStr(res) +
+            ', corners included, may answer a TABLE GRIP — a press there would start a ' +
+            'table row/column drag instead of a block move. ' + grabbed.length + ' did: ' +
+            JSON.stringify(grabbed.slice(0, 12)));
+        };
+
+        // ── State 1: no grip showing (pointer parked well away) ──────────
+        await page.mouse.move(1200, 850);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'precondition: with the pointer away from the table no row grip is showing');
+        assertAllHandle('row grip hidden, table block', await probeHandle(page, table0));
+        assertAllHandle('row grip hidden, paragraph block', await probeHandle(page, para0));
+
+        // ── State 2: the HEADER row's grip is showing ────────────────────
+        // This is the state the defect lives in: the header row's grip is
+        // the only one whose Y band reaches the table block's own ⠿ (the ⠿
+        // occupies the block's top 20px).
+        await headerGripCoords(page, table0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: the header row grip must actually be SHOWING — an ' +
+          'assertion about which element wins a hit test is vacuous if the ' +
+          'competing element is display:none');
+        const yOverlap = await page.evaluate((s) => {
+          const h = document.querySelector(s + ' > .ed-handle').getBoundingClientRect();
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return Math.min(h.bottom, g.bottom) - Math.max(h.top, g.top);
+        }, table0);
+        assert.ok(yOverlap > 0,
+          'precondition (ANTI-VACUITY): the header row grip\'s Y band must actually ' +
+          'overlap the table block\'s ⠿ — otherwise the x-walk below can never ' +
+          'reach the grip and would pass on any geometry whatsoever. Overlap was ' +
+          yOverlap.toFixed(2) + 'px');
+        assertAllHandle('header row grip showing, table block', await probeHandle(page, table0));
+        assertAllHandle('header row grip showing, paragraph block', await probeHandle(page, para0));
+
+        // ── State 3: body row 0's grip is showing ────────────────────────
+        await hoverBodyRowCell(page, table0, 0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: body row 0\'s grip must be showing');
+        assertAllHandle('body row 0 grip showing, table block', await probeHandle(page, table0));
+        assertAllHandle('body row 0 grip showing, paragraph block', await probeHandle(page, para0));
+
+        await page.close();
+        console.log('spec §4.2 conflict 2: every pixel of a block ⠿ answers the ⠿, row grip showing or not — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+    // <<<T1CONFLICT2
+
     // User acceptance (v2.10.2): the row grip must never sit ON the first
-    // cell's TEXT. With the uniform border-straddling geometry the grip's
-    // centreline is the table's left border, so its right edge lands inside
-    // the cell's own left padding — strictly left of where text starts. The
-    // v2.10.1 inside-the-table geometry (grip's LEFT edge flush with the
-    // table's left border, extending 20px inward) covered the whole 14px
-    // padding plus ~6px of the text itself, which is the defect this asserts
-    // against.
+    // cell's TEXT. This is the guard that got the FIRST attempt at §4.2
+    // conflict 2 reverted in v2.10.2 — a 20px grip whose left edge is flush
+    // with the table's left border covers the whole of a 14px cell padding
+    // plus ~6px of the text itself.
+    //
+    // S4 T1 lands that ruling anyway, and this assertion is exactly why it
+    // could not be landed by moving the grip alone: the first column's LEFT
+    // PADDING is widened in edit mode to --ed-te-cell-pad-left (the grip's
+    // own width plus --ed-gutter-gap) so the inset grip ends inside the
+    // padding again. The assertion below is unchanged and is now the guard
+    // on that padding — if the padding token is dropped or drifts below the
+    // grip's width, this goes red rather than the defect shipping.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -6855,6 +7043,7 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // >>>T1CORRIDOR
     // Grip reachability by a REAL (non-teleporting) pointer.
     //
     // COLUMN grip (unchanged): it still sits ON the table's top border (P0-a
@@ -6996,13 +7185,65 @@ async function gutterGeometry(page, sel) {
           'moving to the left margin at a DIFFERENT row\'s height must hide row 1\'s grip, ' +
           'not keep it visible at its stale position');
 
+        // ANTI-VACUITY PARTNER (S4 T1). spec §4.6 predicted precisely this:
+        // once §4.2 conflict 2 moves the row grip inside the table,
+        // pointInRowGripZone()'s corridor (`x >= gr.left && x <= tableRect.left`)
+        // collapses to an empty set, and the assertion above stops
+        // DISCRIMINATING — with no corridor at any height, "hidden at a
+        // different row's height" is true of every geometry, including one
+        // that ignored the anchor row entirely. It goes vacuous, not red.
+        //
+        // The probe that actually changed answer with the ruling is the SAME
+        // x at the ANCHOR row's own height. MEASURED on v2.12.0 (grip
+        // straddling, corridor live) it was inside row 1's corridor and the
+        // grip stayed up: hidden === false. With the grip inside the table
+        // there is no corridor to be in, and leaving the table on the left is
+        // a genuine exit at every height — including the one the grip is
+        // anchored to. Asserting both halves is what keeps the pair honest;
+        // if a future change restores a corridor, THIS is the assertion that
+        // notices.
+        await hoverBodyRowCell(page, table0, 0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: re-hovering row 1 must arm its grip again');
+        const sameRow = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left - 5, y: r.top + r.height / 2 };
+        }, table0);
+        await page.mouse.move(sameRow.x, sameRow.y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'spec §4.2 conflict 2 / §4.6: with the row grip inside the table there is no '
+          + 'corridor outside it, so the left margin at the ANCHOR row\'s own height must '
+          + 'hide the grip too. This is the half that changed answer with the ruling — the '
+          + 'assertion above it passes either way and is vacuous on its own');
+
+        // And the reason the row axis needs no corridor at all: the grip is
+        // inside the table, so a pointer travelling from a cell to it never
+        // leaves. Asserted directly rather than left as prose.
+        await hoverBodyRowCell(page, table0, 0);
+        const inside = await page.evaluate((ts) => {
+          const t = document.querySelector(ts + ' table').getBoundingClientRect();
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return { gLeft: g.left, gRight: g.right, tLeft: t.left, tRight: t.right };
+        }, table0);
+        assert.ok(inside.gLeft >= inside.tLeft - 1 && inside.gRight <= inside.tRight + 1,
+          'the row grip must lie inside the table\'s own horizontal extent — that is what '
+          + 'makes the corridor unnecessary rather than merely deleted. grip ['
+          + inside.gLeft.toFixed(2) + ', ' + inside.gRight.toFixed(2) + '] vs table ['
+          + inside.tLeft.toFixed(2) + ', ' + inside.tRight.toFixed(2) + ']');
+
         await page.close();
-        console.log('table grips: hover corridor is anchored to its own row, not the whole table — OK');
+        console.log('table grips: no corridor outside the table on the row axis; the keep-zone is the grip itself — OK');
       } finally {
         tsrv.close();
       }
     }
+    // <<<T1CORRIDOR
 
+    // >>>T1ROWDRAG
     // Row drag-reorder: press-and-drag from the LAST body row's left edge to
     // ABOVE the first body row -> a drop indicator tracks the pointer, and
     // dropping reorders the actual <tr> (never a clone) once committed.
@@ -7053,6 +7294,7 @@ async function gutterGeometry(page, sel) {
         tsrv.close();
       }
     }
+    // <<<T1ROWDRAG
 
     // Row drag lands on disk once actually committed (no undo this time),
     // and Esc DURING a drag cancels it with NO mutation at all — distinct
