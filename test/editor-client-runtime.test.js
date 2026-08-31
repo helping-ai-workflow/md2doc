@@ -17332,7 +17332,12 @@ async function gutterGeometry(page, sel) {
     //      really holds the member count the row claims, that a "degraded"
     //      run really reports something unsupported, that a "phantom"
     //      fixture really has an INVERTED range between two members, and
-    //      that a table span really covers the table's whole four-line body.
+    //      that a row about a WITHHELD block type really holds a block of
+    //      that type, covered WHOLE by the set. (That last precondition read
+    //      "the table's whole four-line body" until 2026-08-31: T8_TBL's
+    //      table owns THREE lines — header, delimiter, one data row — and the
+    //      assertion has always derived the count from the row's own
+    //      declared range, so the prose was the only thing that was wrong.)
     //   2. **A refusal is an OUTCOME, not a skip.** §3.6's 2026-08-31 ruling
     //      is explicit that 「靜默不動作是缺陷」, so a cell that comes back
     //      byte-identical with no banner is a DEFECT unless the row names it
@@ -17354,6 +17359,8 @@ async function gutterGeometry(page, sel) {
       const T8_MIX = '# Doc\n\nalpha\n\n- bravo\n- charlie\n';
       const T8_DEG = '# Doc\n\n- a\n\n- b\n';
       const T8_TBL = '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n';
+      const T8_HR = '# Doc\n\nalpha\n\n---\n\nbravo\n';
+      const T8_HTML = '# Doc\n\nalpha\n\n<div>x</div>\n\nbravo\n';
       const T8_GAP = '# Doc\n\n- a\n- - b\n- c\n';
       const T8_EDGE = 'alpha\n\nbravo\n\ncharlie\n';
       const T8_WHOLE = 'alpha\n\nbravo\n';
@@ -17366,10 +17373,20 @@ async function gutterGeometry(page, sel) {
       const RUN_GATE = '此清單含不支援的格式，無法調整結構';
       const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
       const GAP = '選取範圍不連續，無法整批操作';
-      // Stage-closure gap 2 (2026-08-31): §3.7 / §7 give a table block NO
-      // 轉換成 at all — no target can carry its cells — and that reason does
-      // not stop applying because the table happens to be one member of a set.
+      // Stage-closure gaps 2 and 3 (2026-08-31). §3.7 / §7 withhold 轉換成
+      // from THREE block types on a single block's ⠿ — a table because no
+      // target can carry its cells, an hr and a raw html block because they
+      // have no content to strip and none to re-host — and not one of those
+      // reasons stops applying because the block happens to be one member of
+      // a set. The batch path refuses all three, and each names ITSELF: a
+      // user with an hr in the selection must not be told it holds a table.
+      // Spelled out as three literals on purpose. Deriving them from the
+      // production formula (a label plugged into one template) would make
+      // this assert only that the code equals itself, and every wording
+      // regression would stay green.
       const TABLE_CONVERT = '選取範圍含有表格，無法整批轉換';
+      const HR_CONVERT = '選取範圍含有分隔線，無法整批轉換';
+      const HTML_CONVERT = '選取範圍含有 HTML 區塊，無法整批轉換';
       const refused = (m) => ({ kind: 'refused', message: m });
       const noop = (why) => ({ kind: 'noop', why: why });
       const applied = { kind: 'applied' };
@@ -17450,9 +17467,48 @@ async function gutterGeometry(page, sel) {
         // are — which is what makes this row the guard against the refusal
         // being widened by accident as well as against it being dropped.
         { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
-          members: [[3, 3], [5, 7]], tableLines: [5, 7], expect: {
+          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] }, expect: {
             'convert-quote': refused(TABLE_CONVERT),
             'convert-ul': refused(TABLE_CONVERT),
+            duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        // The same rule, two axes over — and the reason these are ONE rule
+        // and not three anecdotes. 'hr' and 'html' are withheld from a single
+        // block's 轉換成 for a reason of their own: convert-md strips a
+        // block's MARKER to get its content, and these two HAVE no content —
+        // the source line IS the marker. MEASURED on these exact fixtures
+        // while the batch path gated only 'table' (2026-08-31, stage-closure
+        // gap 3), with the grip on a paragraph and NO banner in any of them:
+        //   hr   → 引用        wrote '# Doc\n\n> alpha\n\n> ---\n\n> bravo\n'
+        //   hr   → 項目符號列表 wrote '# Doc\n\n- alpha\n- ---\n- bravo\n'
+        //   html → 引用        wrote '# Doc\n\n> alpha\n\n> <div>x</div>\n\n> bravo\n'
+        // The second of those is '- ---' — the exact byte sequence the
+        // single-block reason names as why the item is not offered: marked
+        // re-lexes it as an hr, so the file's bytes moved and the block's
+        // type did not. The gesture changed the file and said nothing, which
+        // §3.6's ruling calls a defect outright.
+        //
+        // ⇒ 轉換成 REFUSES, with the banner that names what is ACTUALLY in
+        // the span (not the table's), file byte-identical. Scoped to 轉換成
+        // exactly as the table row is: the other five cells are measured
+        // correct, and they stay applying so a widening of the predicate into
+        // resolveGutterOperands() shows up here as a failure too.
+        { id: 'hr in span', md: T8_HR, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]],
+          withheld: { type: 'hr', lines: [5, 5] }, expect: {
+            'convert-quote': refused(HR_CONVERT),
+            'convert-ul': refused(HR_CONVERT),
+            duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        { id: 'html in span', md: T8_HTML, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]],
+          withheld: { type: 'html', lines: [5, 5] }, expect: {
+            'convert-quote': refused(HTML_CONVERT),
+            'convert-ul': refused(HTML_CONVERT),
             duplicate: applied,
             'delete-menu': applied, 'delete-key': applied,
             tab: PARA_TAB, 'shift-tab': PARA_TAB,
@@ -17584,17 +17640,27 @@ async function gutterGeometry(page, sel) {
                 'PRECONDITION ' + cell + ': the members must be NON-adjacent in `blocks` '
                 + '(indices ' + JSON.stringify(memberIdx) + '), or there is no gap to refuse');
             }
-            if (shape.tableLines) {
-              const tbl = blocksNow.find((b) => b.type === 'table');
-              assert.ok(tbl, 'PRECONDITION ' + cell + ': the fixture must hold a table block');
-              assert.deepStrictEqual([tbl.startLine, tbl.endLine], shape.tableLines,
-                'PRECONDITION ' + cell + ': the table must own all '
-                + (shape.tableLines[1] - shape.tableLines[0] + 1) + ' of its source lines');
+            // The anti-vacuity precondition for every row whose subject is a
+            // block type 轉換成 is WITHHELD from. A refusal cell is worthless
+            // unless the fixture is PROVEN to hold the type in question: if
+            // '---' had lexed as a setext heading, or '<div>x</div>' as a
+            // paragraph, the row would refuse for some other reason (or not
+            // at all) and be green either way. Type, whole line range, and
+            // membership — all three, per cell.
+            if (shape.withheld) {
+              const w = shape.withheld;
+              const blk = blocksNow.find((b) => b.type === w.type);
+              assert.ok(blk, 'PRECONDITION ' + cell + ': the fixture must hold a '
+                + JSON.stringify(w.type) + ' block. Got '
+                + JSON.stringify(blocksNow.map((b) => b.type)));
+              assert.deepStrictEqual([blk.startLine, blk.endLine], w.lines,
+                'PRECONDITION ' + cell + ': the ' + w.type + ' block must own all '
+                + (w.lines[1] - w.lines[0] + 1) + ' of its source lines');
               assert.ok(shape.members.some((m) =>
-                m[0] === tbl.startLine && m[1] === tbl.endLine),
-                'PRECONDITION ' + cell + ': the SET must cover the table WHOLE — a member '
-                + 'range that stopped short of its last line would be a different shape '
-                + 'from the one this row claims to sweep');
+                m[0] === blk.startLine && m[1] === blk.endLine),
+                'PRECONDITION ' + cell + ': the SET must cover the ' + w.type
+                + ' block WHOLE — a member range that stopped short of its last line '
+                + 'would be a different shape from the one this row claims to sweep');
             }
             if (shape.mixed) {
               const kinds = blocksNow

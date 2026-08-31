@@ -30,10 +30,14 @@ All notable changes to this project will be documented here. This project adhere
   mix list items with other blocks, that skip a block in the middle, that span two
   separate lists, or that cover a list already frozen read-only are refused with a
   message on screen, and not one byte of the file is written. `轉換成` over a
-  selection that contains a **table** is refused the same way: a table's own ⠿ has
-  never offered `轉換成` — no target can carry its cells — and a set the table
-  happens to be part of does not change that. Duplicating, deleting or indenting a
-  selection containing a table is unaffected.
+  selection that contains a **table**, a **horizontal rule** or a **raw HTML block**
+  is refused the same way, naming which of the three it found: none of those three
+  has ever offered `轉換成` on its own ⠿ — no target can carry a table's cells, and
+  a rule or an HTML block has no content to move into one — and a set they happen to
+  be part of does not change that. Previously such a selection was converted
+  silently: a selected rule became the line `- ---`, which is read back as a rule
+  again, so the file changed and the block did not. Duplicating, deleting or
+  indenting a selection containing any of the three is unaffected.
 - **`MD 原始碼` is withheld while several blocks are selected.** It rewrites one
   block's source lines, so over a set it would silently answer for the block the ⠿
   was pressed on and ignore the rest. A set of exactly one block, or a set standing
