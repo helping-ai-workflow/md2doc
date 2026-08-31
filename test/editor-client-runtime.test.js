@@ -14443,6 +14443,1057 @@ async function gutterGeometry(page, sel) {
       } finally { srv.close(); }
     }
 
+    // ── S3 Task 2: the block-selection tint and a real focus holder ────────
+    // There is no gesture that CREATES a selection until Task 4, so these
+    // scenarios drive the state through client.js's own test-only hooks
+    // (window.__edTestSetSelection / __edTestClearSelection).
+    //
+    // Each scenario gets its OWN doc/server — same isolation reasoning as
+    // setupTableDoc()/setupListDoc() above (no undo-stack or save state can
+    // leak between them, and the shared setup() doc's fixed block indices
+    // stay undisturbed).
+    // `tag` names the task the scenario belongs to (T3 reuses this helper
+    // unchanged); it defaults to T2 so every pre-existing call site keeps the
+    // exact console line it had.
+    const s3Scenario = async (label, md, fn, tag) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-s3-'));
+      const mdPath = path.join(dir, 'doc.md');
+      fs.writeFileSync(mdPath, md, 'utf8');
+      const ssrv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await settleEditor(page);
+        await fn(page, mdPath);
+        await page.close();
+        console.log('S3 ' + (tag || 'T2') + ' ' + label + ' — OK');
+      } finally { ssrv.close(); }
+    };
+
+    await s3Scenario('a selected block is tinted, and the tint is semi-transparent',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const got = await page.evaluate(() => {
+          const els = [].slice.call(document.querySelectorAll('.ed-block'));
+          return els.map((b) => ({
+            type: b.getAttribute('data-block-type'),
+            selected: b.classList.contains('ed-selected'),
+            bg: getComputedStyle(b).backgroundColor,
+          }));
+        });
+        assert.deepStrictEqual(got.map((g) => g.selected), [false, true, true],
+          'only the two blocks in the line range are selected, got ' + JSON.stringify(got));
+        const tint = got[1].bg;
+        console.log('S3 T2 measured tint on a selected paragraph: ' + tint);
+        assert.ok(/^rgba\(/.test(tint), 'the tint must be rgba, not opaque — the user must still '
+          + 'read the text under it. Got ' + tint);
+        const alpha = Number(tint.match(/rgba\([^)]*,\s*([\d.]+)\)/)[1]);
+        assert.ok(alpha > 0 && alpha < 0.5, 'tint alpha must be visibly transparent, got ' + alpha);
+        // The UNSELECTED block must not have picked up a tint of its own —
+        // otherwise "everything is tinted" would satisfy the assertion above.
+        assert.ok(!/^rgba\([^)]*,\s*0?\.\d+\)$/.test(got[0].bg),
+          'an UNSELECTED block must carry no tint, got ' + got[0].bg);
+      });
+
+    await s3Scenario('the selection survives inside a table and over a code block',
+      // Two BODY rows, not one: with a single body row there is no
+      // `tr:nth-child(even)` anywhere in the document, the zebra-stripe probe
+      // below `continue`s past a null element and the whole check is vacuous.
+      // The even row's FIRST cell is where the two strongest opaque rules
+      // compound (zebra #fafbfc at (0,3,4) on top of the sticky column's
+      // #ffffff at z-index 1), so it gets its own probe.
+      '# Doc\n\n```\ncode\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n',
+      async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(1, 99));
+        const measured = await page.evaluate(() => {
+          // The sticky first column paints at z-index 1 over anything beneath
+          // it, and <pre>/<th>/zebra rows carry opaque backgrounds. If the tint
+          // loses to any of them the selection is invisible exactly where a
+          // user is most likely to be selecting.
+          const out = [];
+          for (const sel of ['pre', 'th', 'tbody td:first-child',
+            'tr:nth-child(even)', 'tbody tr:nth-child(even) td:first-child']) {
+            const el = document.querySelector('.ed-selected ' + sel);
+            out.push({ sel: sel, found: !!el, bg: el ? getComputedStyle(el).backgroundColor : null });
+          }
+          return out;
+        });
+        console.log('S3 T2 measured backgrounds inside the selection:\n  ' +
+          measured.map((m) => m.sel + ' -> ' + m.bg).join('\n  '));
+        const missing = measured.filter((m) => !m.found).map((m) => m.sel);
+        assert.deepStrictEqual(missing, [],
+          'fixture must actually contain every probed element, missing: ' + missing);
+        const unreadable = measured
+          .filter((m) => !/rgba\(/.test(m.bg) || /,\s*1\)$/.test(m.bg))
+          .map((m) => m.sel + ':' + m.bg);
+        assert.deepStrictEqual(unreadable, [],
+          'every opaque background inside a selected block must let the tint through: ' +
+          unreadable);
+      });
+
+    await s3Scenario('the selection has a real focus holder, not document.body',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const focus = await page.evaluate(() => ({
+          tag: document.activeElement.tagName,
+          isBlock: document.activeElement.classList.contains('ed-block'),
+          selected: document.activeElement.classList.contains('ed-selected'),
+          id: document.activeElement.getAttribute('data-block-id'),
+          tabindex: document.activeElement.getAttribute('tabindex'),
+          tabindexCount: document.querySelectorAll('.ed-block[tabindex]').length,
+          // §4.4's focus holder is the FOCUS endpoint, not the anchor — the
+          // last block of the 3..5 range here.
+          focusEndpointId: (function () {
+            const els = [].slice.call(document.querySelectorAll('.ed-block'));
+            return els[els.length - 1].getAttribute('data-block-id');
+          })(),
+        }));
+        assert.strictEqual(focus.isBlock, true,
+          'spec 4.4: the selection needs a REAL focus holder, not <body>. Got ' + focus.tag);
+        assert.strictEqual(focus.tabindexCount, 1,
+          'roving tabindex: exactly one block is focusable at a time, got ' + focus.tabindexCount);
+        assert.strictEqual(focus.tabindex, '-1',
+          'the roving tabindex must be -1 (script-reachable, not in the Tab order), got ' +
+          focus.tabindex);
+        assert.strictEqual(focus.id, focus.focusEndpointId,
+          'the holder must be the FOCUS endpoint block, not the anchor');
+        assert.strictEqual(focus.selected, true, 'the focus holder is itself in the set');
+      });
+
+    await s3Scenario('clearing the selection removes every trace',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        await page.evaluate(() => window.__edTestClearSelection());
+        const left = await page.evaluate(() => ({
+          selected: document.querySelectorAll('.ed-selected').length,
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+        }));
+        assert.deepStrictEqual(left, { selected: 0, tabindexed: 0 }, 'no residue');
+      });
+
+    // The ⠿ gutter handle must NOT appear just because its block holds the
+    // roving focus. `.ed-block:hover .ed-handle, .ed-handle:focus` couples the
+    // handle's OWN focus to its visibility — a block-level :focus is a
+    // different thing, and a selection's focus endpoint moves on every
+    // Shift+arrow (Task 4), which would flicker the handle across the
+    // document. The tint is the selection's affordance; the handle stays a
+    // hover/handle-focus affordance.
+    await s3Scenario('the roving focus does not reveal the block handle',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const got = await page.evaluate(() => {
+          const holder = document.activeElement;
+          const handle = holder.querySelector && holder.querySelector('.ed-handle');
+          return {
+            hasHandle: !!handle,
+            opacity: handle ? getComputedStyle(handle).opacity : null,
+            outline: getComputedStyle(holder).outlineStyle,
+          };
+        });
+        assert.strictEqual(got.hasHandle, true, 'sanity: the focus holder has a gutter handle');
+        assert.strictEqual(got.opacity, '0',
+          'focusing a block must not reveal its handle, got opacity ' + got.opacity);
+        assert.strictEqual(got.outline, 'none',
+          'the tint is the selection affordance; the default focus ring is suppressed, got ' +
+          got.outline);
+      });
+
+    // ── S3 Task 3: the keydown dispatch priority prologue ────────────────
+    // Spec §4.4: Escape is `drag > menu > selection > burst`. Before this task
+    // the two target-based short-circuits in the global keydown listener
+    // (.ed-wys-cell / .ed-wys-armed) sat ABOVE the gutter menu's own Escape
+    // branch and returned for EVERY key, so a burst that held focus owned
+    // every keystroke unconditionally. Two measured consequences, both of
+    // which these scenarios pin.
+
+    // Defect A. The ⠿ handle's mousedown deliberately preventDefault()s (see
+    // wireBlockSelection() — it stops a dirty burst's own ⠿ click from racing
+    // its blur-commit), so opening the menu leaves the burst focused and open.
+    // Escape then reached handleBurstKeydown() → revertBurstAndEnd(): measured
+    // on 2026-08-30, the paragraph went from "alpha EDITED" back to "alpha"
+    // AND the menu stayed on screen. The user's uncommitted edit was destroyed
+    // by the keystroke they pressed to dismiss a menu.
+    await s3Scenario('Escape with the ⠿ menu open closes the menu and KEEPS the edit',
+      '# Doc\n\nalpha\n', async (page) => {
+        const psel = await blockSelByType(page, 'paragraph');
+        await openWysiwyg(page, psel);
+        await page.keyboard.type(' EDITED');
+        // Anti-vacuity: if the typing never landed, "the edit survived" below
+        // could only fail — but "the menu closed" would still be trivially
+        // green if the menu never opened at all. Both preconditions are
+        // asserted here, before the keystroke under test.
+        const typed = await page.evaluate((s) => document.querySelector(s).textContent, psel);
+        assert.ok(/EDITED/.test(typed), 'precondition: the burst must hold the typed text, got ' +
+          JSON.stringify(typed));
+        await page.hover(psel);
+        await page.click(psel + ' .ed-handle');
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+          { timeout: 5000 }, psel);
+        const preState = await page.evaluate(() => ({
+          menu: !!document.querySelector('.ed-handle-menu'),
+          // The ⠿ mousedown preventDefault() is what makes this scenario the
+          // one the spec cares about: focus is STILL inside the burst while
+          // the menu is up, which is exactly when the old dispatch misrouted.
+          armed: !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-wys-armed')),
+        }));
+        assert.deepStrictEqual(preState, { menu: true, armed: true },
+          'precondition: the menu is open AND the burst still holds focus, got ' +
+          JSON.stringify(preState));
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+        assert.strictEqual(
+          await page.evaluate(() => !!document.querySelector('.ed-handle-menu')), false,
+          'spec §4.4: menu beats burst, so Escape closes the menu');
+        const text = await page.evaluate(() => {
+          const el = document.querySelector('.ed-block[data-block-type="paragraph"]');
+          return el ? el.textContent : null;
+        });
+        assert.ok(/EDITED/.test(text),
+          'the uncommitted edit must SURVIVE — before this task Escape reached ' +
+          'revertBurstAndEnd() and destroyed it. Got ' + JSON.stringify(text));
+      }, 'T3');
+
+    // Escape's `selection` rung. No gesture creates a selection until Task 4,
+    // so the state is driven through client.js's own test-only hook.
+    await s3Scenario('Escape with a selection clears the selection, not the burst',
+      '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        // Anti-vacuity: "zero tinted blocks after Escape" is trivially true if
+        // the selection never painted in the first place.
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 2,
+          'precondition: lines 3..5 must actually select both paragraphs');
+        await page.keyboard.press('Escape');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 0,
+          'spec §4.4: selection is cleared by Escape');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-block[tabindex]').length), 0,
+          'the roving tabindex goes with it — no focus holder without a selection');
+      }, 'T3');
+
+    // Defect B — pre-existing on main, fixed here because it lives in the same
+    // dispatch. MEASURED CORRECTION to this task's plan: the plan says "after a
+    // save the surface stays focused and .ed-wys-armed". That is only true when
+    // the burst was CLEAN at save time. A DIRTY burst's Ctrl+S commits, and the
+    // commit's rerenderAll() replaces .content, so the focused surface is
+    // detached and document.activeElement falls back to <body> — measured, and
+    // the plan's own literal test shape is therefore GREEN before the fix.
+    // The state that actually triggers the bug is `.ed-wys-armed` (or
+    // `.ed-wys-cell`) holding native focus while `currentBurst` is null, which
+    // is what resolveBurst()'s zero-edit path leaves behind: it calls
+    // endBurstWithoutResolve() and returns WITHOUT re-rendering, so a second
+    // Ctrl+S on an untouched burst — an ordinary habit keystroke — arms the
+    // trap. The next Ctrl+Z then matched the short-circuit, reached
+    // handleBurstKeydown()/handleTableCellKeydown(), and was swallowed by their
+    // `!currentBurst` bail on the very first line: a silent no-op.
+    await s3Scenario('Ctrl+S then Ctrl+Z undoes the save, for every block type',
+      '# Doc\n\nalpha\n\n- item\n\n| A |\n| --- |\n| one |\n', async (page, mdPath) => {
+        // Blurs whatever holds focus, then re-opens a burst on the FIRST block
+        // of `type` through the same surface a user would click. Re-resolved
+        // per call: every commit re-mints block ids.
+        const focusSurfaceOf = async (type) => {
+          await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
+          await page.waitForFunction(() => document.activeElement === document.body,
+            { timeout: 5000 });
+          await settleEditor(page);
+          const id = await page.evaluate((t) => {
+            const el = document.querySelector('.ed-block[data-block-type="' + t + '"]');
+            return el ? el.getAttribute('data-block-id') : null;
+          }, type);
+          assert.ok(id !== null, 'no block of type ' + type + ' on the page');
+          const bsel = '.ed-block[data-block-id="' + id + '"]';
+          if (type === 'table') {
+            // A table's editable surface is a CELL (.ed-wys-cell), not the
+            // block box — the other half of the short-circuit pair under test.
+            const box = await page.evaluate((s) => {
+              const c = document.querySelector(s + ' table tbody td');
+              const r = c.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }, bsel);
+            await page.mouse.click(box.x, box.y);
+            await page.waitForFunction((s) => !!(document.activeElement.closest &&
+              document.activeElement.closest(s + ' .ed-wys-cell')), { timeout: 5000 }, bsel);
+          } else {
+            await openWysiwyg(page, type === 'li' ? liSel(id) : bsel);
+          }
+          return bsel;
+        };
+        for (const type of ['paragraph', 'li', 'table']) {
+          const before = fs.readFileSync(mdPath, 'utf8');
+          await focusSurfaceOf(type);
+          await page.keyboard.type('Z');
+          const afterEdit = await saveAndRead(page, mdPath);
+          // The anti-vacuity line the plan calls out: without it the Ctrl+Z
+          // assertion below is green whenever the typing silently failed.
+          assert.notStrictEqual(afterEdit, before,
+            'the edit must have landed first (' + type + '), file is still ' +
+            JSON.stringify(before));
+          // Arm the trap: a SECOND Ctrl+S on the now-untouched surface.
+          await focusSurfaceOf(type);
+          await saveAndRead(page, mdPath);
+          const held = await page.evaluate(() => ({
+            armed: !!(document.activeElement.closest &&
+              document.activeElement.closest('.ed-wys-armed')),
+            cell: !!(document.activeElement.closest &&
+              document.activeElement.closest('.ed-wys-cell')),
+          }));
+          assert.ok(held.armed || held.cell,
+            'precondition for ' + type + ': the surface must still hold focus and its ' +
+            'armed/cell class after a clean Ctrl+S — otherwise the short-circuit under ' +
+            'test is never reached and this scenario proves nothing. Got ' +
+            JSON.stringify(held));
+          await page.keyboard.down('Control');
+          await page.keyboard.press('KeyZ');
+          await page.keyboard.up('Control');
+          await settleEditor(page);
+          const afterUndo = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterUndo, before,
+            'Ctrl+S then Ctrl+Z was a SILENT no-op for ' + type + ' — the surface stays ' +
+            'focused and armed with currentBurst null, so the keydown short-circuit ' +
+            'swallowed the key before the global undo() was reached. Got ' +
+            JSON.stringify(afterUndo) + ', expected ' + JSON.stringify(before));
+        }
+      }, 'T3');
+
+
+    // ── S3 Task 4: the entry and exit GESTURES ────────────────────────────
+    // Spec §4.4. Entries: (a) press inside a block and drag across its
+    // boundary; (b) Shift+Click; (c) Shift+↑↓. Exits: Escape (Task 3) and a
+    // click inside any block without Shift. Scrolling and window blur must
+    // NOT clear.
+    //
+    // Every scenario below asserts the resulting member set BY LINE RANGE
+    // (window.__edTestGetSelection(), added for this task), never by counting
+    // `.ed-selected` nodes: a node count is an assertion about Task 2's CSS,
+    // and would stay green for a gesture that built the WRONG range as long as
+    // it built one of the right size. `domSelectedLines` is asserted alongside
+    // it so the model and the paint cannot drift apart unnoticed either.
+    const DOC3 = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n'; // heading{1,1} p{3,3} p{5,5} p{7,7}
+
+    const selSnapshot = (page) => page.evaluate(() => window.__edTestGetSelection());
+    const selRange = (s) => (s === null ? null
+      : { anchorLine: s.anchorLine, focusLine: s.focusLine, memberLines: s.memberLines });
+    // Every `.ed-block`'s geometry plus a point safely INSIDE it (25% across,
+    // vertically centred). Index order is document order, which is also
+    // buildBlockMap()'s id order.
+    const blockGeom = (page) => page.evaluate(() =>
+      [].slice.call(document.querySelectorAll('.ed-block')).map((el, i) => {
+        const r = el.getBoundingClientRect();
+        return {
+          i: i, id: el.getAttribute('data-block-id'), type: el.getAttribute('data-block-type'),
+          x: Math.round(r.left + r.width * 0.25), y: Math.round(r.top + r.height / 2),
+          left: Math.round(r.left), right: Math.round(r.right),
+          top: Math.round(r.top), bottom: Math.round(r.bottom),
+        };
+      }));
+    // "Assert the click landed where you think": which block is actually under
+    // a coordinate, asked the same way client.js's own drag asks it.
+    const blockIdAtPoint = (page, x, y) => page.evaluate((px, py) => {
+      const el = document.elementFromPoint(px, py);
+      const b = el && el.closest ? el.closest('.ed-block') : null;
+      return b ? b.getAttribute('data-block-id') : null;
+    }, x, y);
+    const nativeSelInfo = (page) => page.evaluate(() => {
+      const s = window.getSelection();
+      const anchorEl = s && s.anchorNode
+        ? (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement) : null;
+      return {
+        rangeCount: s ? s.rangeCount : 0,
+        text: s ? String(s) : '',
+        anchorInTable: !!(anchorEl && anchorEl.closest && anchorEl.closest('table')),
+      };
+    });
+    // A real press-move-release. One rAF between steps so client.js's
+    // pointermove (and the rAF-coalesced mousemove chrome it has to share the
+    // gesture with) actually processes each intermediate point — the same
+    // reason movePointerAndSettle() exists for the grip scenarios above.
+    // `hold: true` stops before the release, for the abort scenarios.
+    const dragAcross = async (page, from, to, opts) => {
+      const o = opts || {};
+      const steps = o.steps || 6;
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      for (let i = 1; i <= steps; i++) {
+        await page.mouse.move(Math.round(from.x + (to.x - from.x) * i / steps),
+          Math.round(from.y + (to.y - from.y) * i / steps));
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+      }
+      if (!o.hold) await page.mouse.up();
+    };
+    const shiftClickAt = async (page, x, y) => {
+      await page.keyboard.down('Shift');
+      await page.mouse.click(x, y);
+      await page.keyboard.up('Shift');
+    };
+    const pressShiftKey = async (page, key) => {
+      await page.keyboard.down('Shift');
+      await page.keyboard.press(key);
+      await page.keyboard.up('Shift');
+    };
+
+    // Entry (a). The drag's own threshold is CROSSING THE BLOCK BOUNDARY, not
+    // a pixel distance — dragging inside one block is text selection and must
+    // stay text selection (the scenario right after this one).
+    await s3Scenario('a drag across a block boundary enters block multi-select',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        assert.deepStrictEqual(g.map((b) => b.type),
+          ['heading', 'paragraph', 'paragraph', 'paragraph'], 'fixture shape');
+        assert.strictEqual(await selSnapshot(page), null,
+          'precondition: nothing is selected BEFORE the gesture — otherwise a green ' +
+          'assertion below could be measuring a selection this gesture never made');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 0,
+          'precondition: nothing is tinted before the gesture');
+        assert.strictEqual(await blockIdAtPoint(page, g[1].x, g[1].y), g[1].id,
+          'precondition: the press point is really inside "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, g[2].x, g[2].y), g[2].id,
+          'precondition: the release point is really inside "bravo"');
+        assert.ok(g[2].y - g[1].y > 5,
+          'precondition: the drag must actually travel between two distinct blocks, got dy=' +
+          (g[2].y - g[1].y));
+        await dragAcross(page, g[1], g[2]);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'spec §4.4 entry (a): pressing in "alpha" (line 3) and dragging into "bravo" ' +
+          '(line 5) anchors on the press and puts both blocks in the set. Got ' +
+          JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 3], [5, 5]],
+          'the paint must agree with the model');
+        assert.strictEqual(sel.focusHolderId, g[2].id,
+          'the focus endpoint is the block the drag ENDED in');
+        assert.strictEqual(await nativeSelInfo(page).then((n) => n.text), '',
+          'the native text selection the press started must be dropped once the gesture ' +
+          'becomes a BLOCK selection — otherwise both are painted at once');
+      }, 'T4');
+
+    // The other half of entry (a)'s threshold. Anti-vacuity: the scenario
+    // above proves this exact helper DOES enter a selection once the boundary
+    // is crossed, so "no selection here" is a statement about the boundary
+    // rule, not about a drag that silently never happened.
+    await s3Scenario('a drag that stays inside one block keeps native text selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        const from = { x: g[1].left + 2, y: g[1].y };
+        const to = { x: g[1].left + 60, y: g[1].y };
+        assert.strictEqual(await blockIdAtPoint(page, from.x, from.y), g[1].id,
+          'precondition: the press point is inside "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, to.x, to.y), g[1].id,
+          'precondition: the release point is inside the SAME block');
+        assert.ok(to.x - from.x >= 30, 'precondition: the drag travels far enough to select text');
+        await dragAcross(page, from, to);
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4: the entry threshold is the block BOUNDARY — a drag inside one block ' +
+          'is ordinary text selection and must not enter block multi-select');
+        const native = await nativeSelInfo(page);
+        console.log('S3 T4 in-block drag left native selection: ' + JSON.stringify(native.text));
+        assert.ok(native.text.length > 0,
+          'the drag must have actually selected text (otherwise this scenario proves ' +
+          'nothing about the boundary rule), got ' + JSON.stringify(native));
+      }, 'T4');
+
+    // Entry (b).
+    await s3Scenario('Shift+Click extends from the block that holds the caret',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await openWysiwyg(page, '.ed-block[data-block-id="' + g[1].id + '"]');
+        assert.strictEqual(await selSnapshot(page), null,
+          'precondition: a plain click starts a burst, it does not select blocks');
+        assert.strictEqual(
+          await page.evaluate((id) => !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-block[data-block-id="' + id + '"]')), g[1].id),
+          true, 'precondition: the caret is in "alpha"');
+        assert.strictEqual(await blockIdAtPoint(page, g[3].x, g[3].y), g[3].id,
+          'precondition: the Shift+Click point is inside "charlie"');
+        await shiftClickAt(page, g[3].x, g[3].y);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]] },
+          'spec §4.4 entry (b): Shift+Click anchors on the block that held the caret ' +
+          '(line 3) and takes everything through the clicked block (line 7) — the ' +
+          'paragraph BETWEEN them is in the set too. Got ' + JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 3], [5, 5], [7, 7]],
+          'the paint must agree with the model');
+      }, 'T4');
+
+    // Shift+Click INSIDE the block that already holds the caret is the one
+    // Shift+Click that must stay native: it is how a user extends a text
+    // selection to a point, and there is no second block to select.
+    await s3Scenario('Shift+Click inside the caret\'s own block stays native text selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await openWysiwyg(page, '.ed-block[data-block-id="' + g[1].id + '"]');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const x = g[1].left + 60;
+        assert.strictEqual(await blockIdAtPoint(page, x, g[1].y), g[1].id,
+          'precondition: the Shift+Click lands in the SAME block the caret is in');
+        await shiftClickAt(page, x, g[1].y);
+        assert.strictEqual(await selSnapshot(page), null,
+          'a Shift+Click inside the focused block must not build a one-block block-selection ' +
+          '— it is a text-selection gesture');
+      }, 'T4');
+
+    // Entry (c) as an EXTENSION of a standing selection, and the clamp at both
+    // ends. Task 1 carry 3: stepFocus() skips blocks that own no source line,
+    // so every step must MOVE — "the first Shift+↓ does nothing, the second
+    // one moves" is the failure this pins.
+    await s3Scenario('Shift+↓ and Shift+↑ move the focus endpoint one block at a time',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag built exactly lines 3..5 before any key is pressed');
+        await pressShiftKey(page, 'ArrowDown');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]] },
+          'the FIRST Shift+↓ must move the focus endpoint one block down');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'Shift+↑ contracts back');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 3, memberLines: [[3, 3]] },
+          'contracting onto the anchor leaves exactly one member');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 1, memberLines: [[1, 1], [3, 3]] },
+          'crossing the anchor extends upward, heading included');
+        await pressShiftKey(page, 'ArrowUp');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 1, memberLines: [[1, 1], [3, 3]] },
+          'stepping past the first block is a clamp, never a wrap and never an error');
+      }, 'T4');
+
+    // Entry (c) as an ENTRY, from the state Escape leaves behind.
+    // MEASURED, and it contradicts Task 2 carry 7 / Task 3 carry 7 ("focus
+    // stays on a .ed-block that no longer has a tabindex"): removing the
+    // roving tabindex from the focused block BLURS it, so after a clear
+    // document.activeElement is <body> and there is no DOM anchor left. The
+    // anchor is client.js's `lastSelectionFocusLine` instead — the line the
+    // cleared selection ended on. Both halves are asserted below so a future
+    // change that restores a DOM focus holder cannot silently make this
+    // scenario stop testing the memory path.
+    await s3Scenario('Shift+↓ with nothing selected enters from where the last selection ended',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: a real selection stands before Escape');
+        await page.keyboard.press('Escape');
+        const cleared = await page.evaluate(() => ({
+          sel: window.__edTestGetSelection(),
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+          activeIsBody: document.activeElement === document.body,
+        }));
+        assert.deepStrictEqual(cleared,
+          { sel: null, tabindexed: 0, activeIsBody: true },
+          'precondition: Escape really cleared the selection (Task 3) AND — measured — the ' +
+          'tabindex removal blurred the holder, so nothing in the DOM anchors the keyboard. ' +
+          'Got ' + JSON.stringify(cleared));
+        await pressShiftKey(page, 'ArrowDown');
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 5, focusLine: 7, memberLines: [[5, 5], [7, 7]] },
+          'spec §4.4 entry (c): with no selection and no focused block, Shift+↓ anchors on ' +
+          'the line the last selection ended on (5) and steps to the next block (7)');
+      }, 'T4');
+
+    // Exit: a click inside any block without Shift.
+    await s3Scenario('a click inside a block without Shift clears the selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection stands before the click that must clear it');
+        assert.strictEqual(await blockIdAtPoint(page, g[3].x, g[3].y), g[3].id,
+          'precondition: the click point is inside "charlie"');
+        await page.mouse.click(g[3].x, g[3].y);
+        await settleEditor(page);
+        const after = await page.evaluate((id) => ({
+          sel: window.__edTestGetSelection(),
+          tinted: document.querySelectorAll('.ed-selected').length,
+          tabindexed: document.querySelectorAll('.ed-block[tabindex]').length,
+          caretInClicked: !!(document.activeElement.closest &&
+            document.activeElement.closest('.ed-block[data-block-id="' + id + '"]')),
+        }), g[3].id);
+        assert.deepStrictEqual(after,
+          { sel: null, tinted: 0, tabindexed: 0, caretInClicked: true },
+          'spec §4.4 exit: a plain click inside a block clears the whole selection AND ' +
+          'still places the caret where the user clicked. Got ' + JSON.stringify(after));
+      }, 'T4');
+
+    // Escape as an exit for a selection a real GESTURE built (Task 3 pinned the
+    // same rung against a selection built by the test hook).
+    await s3Scenario('Escape clears a selection a drag built',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag built a real selection');
+        await page.keyboard.press('Escape');
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4: Escape clears the selection');
+      }, 'T4');
+
+    // Spec §4.4: "捲動與視窗失焦不清除".
+    await s3Scenario('scrolling and window blur do not clear the selection',
+      '# Doc\n\nalpha\n\nbravo\n\n' + 'pad\n\n'.repeat(60), async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2]);
+        const built = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(built,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection is built before anything is scrolled');
+        const scrolled = await page.evaluate(() => {
+          window.scrollTo(0, 400);
+          window.dispatchEvent(new Event('scroll'));
+          return window.scrollY;
+        });
+        assert.ok(scrolled > 0,
+          'precondition: the page must actually scroll, or this proves nothing. scrollY=' +
+          scrolled);
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), built,
+          'spec §4.4: scrolling must not clear the selection');
+        await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), built,
+          'spec §4.4: window blur must not clear the selection — the window `blur` listener ' +
+          'exists to tear down an in-flight DRAG, and Task 4 adds the selection drag to it; ' +
+          'the SELECTION itself survives');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-selected').length), 2,
+          'the tint survives with it');
+      }, 'T4');
+
+    // Hazard 2 from the recon: there is no `mouseup` listener anywhere in
+    // client.js, so a drag that ends outside the window arrives (if at all) as
+    // `pointercancel` or a window `blur`. Either must END THE DRAG without
+    // half-building the selection — and, crucially, without leaving the drag
+    // live so the next stray pointer move keeps extending it.
+    await s3Scenario('a drag aborted by pointercancel leaves a complete selection, not a live drag',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2], { hold: true });
+        const mid = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(mid,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag is engaged and mid-gesture before it is aborted');
+        await page.evaluate(() => document.dispatchEvent(
+          new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 })));
+        // The pointer keeps moving over a THIRD block. If the abort left the
+        // drag live, the selection would silently grow to lines 3..7.
+        await page.mouse.move(g[3].x, g[3].y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), mid,
+          'the aborted drag must be torn down: the selection stays exactly what it was ' +
+          'when the abort arrived, and later pointer movement no longer extends it');
+      }, 'T4');
+
+    // Same hazard through the window `blur` path.
+    await s3Scenario('a drag the window loses focus mid-gesture is torn down, selection intact',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        await dragAcross(page, g[1], g[2], { hold: true });
+        const mid = selRange(await selSnapshot(page));
+        assert.deepStrictEqual(mid,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the drag is engaged before the window loses focus');
+        await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+        await page.mouse.move(g[3].x, g[3].y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        assert.deepStrictEqual(selRange(await selSnapshot(page)), mid,
+          'window blur ends the DRAG (mirroring the table row drag\'s own blur cleanup) ' +
+          'but keeps the selection — §4.4 says blur does not clear');
+      }, 'T4');
+
+    // wireBlockSelection()'s click handler calls switchAwayFrom() for any click
+    // OUTSIDE a block, and its Task 4 exit rule clears the selection for any
+    // click INSIDE one. A drag's own release fires a click on the common
+    // ancestor of press and release, so both branches are reachable by the very
+    // gesture that just built the selection — it must be excluded explicitly.
+    await s3Scenario('a drag released on the page margin keeps its selection',
+      DOC3, async (page) => {
+        const g = await blockGeom(page);
+        const margin = { x: 2, y: g[2].y };
+        assert.strictEqual(await blockIdAtPoint(page, margin.x, margin.y), null,
+          'precondition: the release point is outside every block');
+        await dragAcross(page, g[1], { x: g[2].x, y: g[2].y }, { hold: true });
+        assert.deepStrictEqual(selRange(await selSnapshot(page)),
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] },
+          'precondition: the selection is built before the pointer leaves for the margin');
+        await page.mouse.move(margin.x, margin.y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
+        await page.mouse.up();
+        await settleEditor(page);
+        const after = await page.evaluate(() => ({
+          sel: window.__edTestGetSelection(),
+          tinted: document.querySelectorAll('.ed-selected').length,
+        }));
+        assert.deepStrictEqual(
+          { r: selRange(after.sel), tinted: after.tinted },
+          { r: { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]] }, tinted: 2 },
+          'the release on the margin must not clear the selection, and must not run the ' +
+          'outside-a-block switchAwayFrom() branch whose commit would re-render the tint ' +
+          'away. Got ' + JSON.stringify(after));
+      }, 'T4');
+
+    // ── the table exception ───────────────────────────────────────────────
+    // '# Doc'{1,1} | table{3,6} | 'after'{8,8}
+    const DOCTABLE = '# Doc\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nafter\n';
+
+    await s3Scenario('a drag inside one table stays native text selection',
+      DOCTABLE, async (page) => {
+        const g = await blockGeom(page);
+        assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'table', 'paragraph'],
+          'fixture shape');
+        const cells = await page.evaluate(() => {
+          const t = document.querySelector('.ed-block[data-block-type="table"] table');
+          return [].slice.call(t.tBodies[0].rows).map((row) =>
+            [].slice.call(row.cells).map((c) => {
+              const r = c.getBoundingClientRect();
+              return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+                text: c.textContent };
+            }));
+        });
+        assert.deepStrictEqual(cells.map((r) => r.map((c) => c.text)), [['1', '2'], ['3', '4']],
+          'precondition: the fixture has two body rows of two cells');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const from = cells[0][0], to = cells[1][1];
+        assert.strictEqual(await blockIdAtPoint(page, from.x, from.y), g[1].id,
+          'precondition: the press is inside the table block');
+        assert.strictEqual(await blockIdAtPoint(page, to.x, to.y), g[1].id,
+          'precondition: the release is still inside the SAME table block');
+        await dragAcross(page, from, to);
+        const native = await nativeSelInfo(page);
+        console.log('S3 T4 in-table drag left native selection: ' + JSON.stringify(native));
+        assert.strictEqual(await selSnapshot(page), null,
+          'spec §4.4 table exception: a drag whose origin is a cell and which never leaves ' +
+          'that table keeps NATIVE text selection — no block selection at all');
+        assert.strictEqual(native.anchorInTable, true,
+          'and the native selection must still be inside the table (not blown away)');
+      }, 'T4');
+
+    await s3Scenario('a drag out of a table takes the whole table block as one unit',
+      DOCTABLE, async (page) => {
+        const g = await blockGeom(page);
+        const cell = await page.evaluate(() => {
+          const c = document.querySelector('.ed-block[data-block-type="table"] table tbody tr td');
+          const r = c.getBoundingClientRect();
+          return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+            text: c.textContent };
+        });
+        assert.strictEqual(cell.text, '1', 'precondition: the press starts in the first body cell');
+        assert.strictEqual(await blockIdAtPoint(page, cell.x, cell.y), g[1].id,
+          'precondition: that cell belongs to the table block');
+        assert.strictEqual(await blockIdAtPoint(page, g[2].x, g[2].y), g[2].id,
+          'precondition: the release point is inside the paragraph BELOW the table');
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        await dragAcross(page, cell, g[2]);
+        const sel = await selSnapshot(page);
+        assert.deepStrictEqual(selRange(sel),
+          { anchorLine: 3, focusLine: 8, memberLines: [[3, 6], [8, 8]] },
+          'spec §4.4 table exception: dragging OUT of the table puts the WHOLE table block ' +
+          'in the set as one unit — the anchor is the table block\'s startLine (3), not the ' +
+          'cell\'s line, and the member range covers all four of its source lines. Got ' +
+          JSON.stringify(sel));
+        assert.deepStrictEqual(sel.domSelectedLines, [[3, 6], [8, 8]],
+          'the paint must agree with the model');
+        assert.strictEqual(await nativeSelInfo(page).then((n) => n.text), '',
+          'the native cell selection is dropped once the gesture leaves the table');
+      }, 'T4');
+
+    // Recon hazard 1: `pointerdown` fires on every left click and the table
+    // grip gesture is the incumbent. A grip press must still win — the
+    // selection drag is armed only where hitTestGrip() returned nothing.
+    await s3Scenario('a row-grip drag still drags the row and builds no selection',
+      DOCTABLE, async (page, mdPath) => {
+        const tsel = await blockSelByType(page, 'table');
+        const before = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\| 1 \| 2 \|[\s\S]*\| 3 \| 4 \|/.test(before),
+          'precondition: row "1|2" starts above row "3|4", got ' + JSON.stringify(before));
+        assert.strictEqual(await selSnapshot(page), null, 'precondition: nothing selected');
+        const grip = await rowGripCoords(page, tsel, 0);
+        const drop = await rowBoundaryCoords(page, tsel, 1);
+        await dragRowTo(page, grip, drop);
+        await settleEditor(page);
+        assert.strictEqual(await selSnapshot(page), null,
+          'a grip drag must not build a block selection: the selection pointerdown is armed ' +
+          'INSIDE the existing handler, only on the branch where hitTestGrip() found nothing');
+        const after = await saveAndRead(page, mdPath);
+        assert.ok(/\| 3 \| 4 \|[\s\S]*\| 1 \| 2 \|/.test(after),
+          'and the row drag itself must still work — the rows must have swapped. Got ' +
+          JSON.stringify(after));
+      }, 'T4');
+
+    // ── S3 Task 5: surviving rerenderAll() ────────────────────────────────
+    // Spec §4.4's ordered three steps: (1) armEditables(); (2) rebuild the
+    // member set from the LINE RANGE the operation declared (clear it if that
+    // range no longer resolves); (3) give the focus endpoint a real roving
+    // `tabindex="-1"` holder. Every batch operation in Tasks 6/7 ends in a
+    // rerenderAll(), so without these the blue tint and the keyboard both die
+    // on the operation that was supposed to act on the set.
+    //
+    // MEASURED baseline on this branch before the rebuild landed, with a
+    // selection over lines 3-4 standing and a forced render:
+    //   before {memberLines:[[3,3],[4,4]], domSelectedLines:[[3,3],[4,4]], activeElement: the li block}
+    //   after  {memberLines:[[3,3],[4,4]], domSelectedLines:[],             activeElement: <body>}
+    // i.e. the MODEL survives for free (its identity is a line range, which no
+    // render can invalidate) and the PAINT does not. The plan's own assertion
+    // message has this backwards — it claims "the tint survives (it is
+    // re-derived from lines) but focus falls back to <body>". Nothing
+    // re-derives the tint; contentEl.innerHTML throws the classes away with
+    // the nodes that carried them.
+    //
+    // Focus is asserted BY IDENTITY (which block, by document-order index and
+    // by its own text) and never by counting `[tabindex]` attributes: Task 4
+    // carry 1 records two earlier carries that were simply WRONG because
+    // their tests only counted the attribute. `focusHolderId` from
+    // __edTestGetSelection() is deliberately NOT used as a focus assertion
+    // either — it reports which element WOULD hold the focus, and it still
+    // answered "2" in the baseline above while activeElement was <body>.
+    const t5Focus = (page) => page.evaluate(() => {
+      const ae = document.activeElement;
+      if (!ae || ae === document.body) return { where: 'body' };
+      const b = ae.closest ? ae.closest('.ed-block') : null;
+      if (!b) return { where: 'other', tag: ae.tagName };
+      const all = [].slice.call(document.querySelectorAll('.ed-block'));
+      return {
+        where: 'block',
+        isTheBlockItself: ae === b,
+        index: all.indexOf(b),
+        type: b.getAttribute('data-block-type'),
+        // The rendered table shows only its header and body cells — the markdown
+        // separator row is not text in the DOM (measured: 'AB12', not 'AB---12').
+        // The ⠿ handle and the ＋ insert affordance are children of the block,
+        // so their glyphs are in textContent; strip braille + whitespace so
+        // the assertion reads as the block's own visible text.
+        text: (b.textContent || '').replace(/[\s⠀-⣿＋+]/g, ''),
+        tabindex: b.getAttribute('tabindex'),
+      };
+    });
+    const t5Blocks = (page) => page.evaluate(() =>
+      [].slice.call(document.querySelectorAll('.ed-block')).map((el, i) => ({
+        i: i,
+        type: el.getAttribute('data-block-type'),
+        selected: el.classList.contains('ed-selected'),
+        text: (el.textContent || '').replace(/[\s⠀-⣿＋+]/g, ''),
+      })));
+    const t5Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+    const t5TabindexCount = (page) =>
+      page.evaluate(() => document.querySelectorAll('.ed-block[tabindex]').length);
+    const T5LIST = '# Doc\n\n- a\n- b\n- c\n'; // heading{1,1} li{3,3} li{4,4} li{5,5}
+
+    await s3Scenario('a selection survives the rerender that a batch operation causes',
+      T5LIST, async (page) => {
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => [b.type, b.text]),
+          [['heading', 'Doc'], ['li', 'a'], ['li', 'b'], ['li', 'c']],
+          'fixture shape: four blocks, the three list items on lines 3/4/5');
+        assert.strictEqual(await t5Sel(page), null, 'precondition: nothing selected yet');
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 4));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+            domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+          'precondition: the selection really covers "a" and "b" BEFORE the render, in the '
+          + 'model AND in the paint — a test that only looks after the render would pass '
+          + 'on a selection that never existed. Got ' + JSON.stringify(before));
+        const focusBefore = await t5Focus(page);
+        assert.deepStrictEqual(focusBefore,
+          { where: 'block', isTheBlockItself: true, index: 2, type: 'li', text: 'b',
+            tabindex: '-1' },
+          'precondition: the focus endpoint block "b" really holds DOM focus before the '
+          + 'render. Got ' + JSON.stringify(focusBefore));
+
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have SUCCEEDED — every assertion below is about what '
+          + 'survives a successful swap');
+
+        const after = await t5Sel(page);
+        assert.deepStrictEqual(after, before,
+          'spec 4.4 step 2: the member set is re-derived from the LINE RANGE against the '
+          + 'freshly built blocks, so it must come back identical — model and paint both. '
+          + 'Got ' + JSON.stringify(after));
+        const focusAfter = await t5Focus(page);
+        assert.deepStrictEqual(focusAfter, focusBefore,
+          'spec 4.4 step 3: the roving focus holder must be rebuilt onto the SAME block '
+          + '("b"), not left on <body> with the keyboard dead. Got ' +
+          JSON.stringify(focusAfter));
+        assert.strictEqual(await t5TabindexCount(page), 1,
+          'exactly one block is focusable at a time — the tabindex is roving');
+      }, 'T5');
+
+    await s3Scenario('a selection whose lines no longer parse is cleared, not left dangling',
+      T5LIST, async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(4, 5));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+            domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+          'precondition: the selection over "b" and "c" really EXISTS before the lines are '
+          + 'taken away — otherwise "it was cleared" is green for a set that was never '
+          + 'built. Got ' + JSON.stringify(before));
+        assert.deepStrictEqual((await t5Focus(page)).text, 'c',
+          'precondition: and it has a real focus holder to lose');
+
+        await page.evaluate(() => window.__edTestTruncateTo(3));
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have succeeded');
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => [b.type, b.text]),
+          [['heading', 'Doc'], ['li', 'a']],
+          'precondition: lines 4 and 5 really are gone from the rendered document — '
+          + 'without this the clear below could be about any other cause');
+
+        assert.strictEqual(await t5Sel(page), null,
+          'spec 4.4: if the range no longer resolves the selection is CLEARED. This is an '
+          + 'assertion about the STATE, not about the paint: the innerHTML swap removes '
+          + 'every .ed-selected class on its own, so a node count is 0 whether or not the '
+          + 'selection was cleared, and a stale blockSelection left standing would still '
+          + 'answer Shift+arrow from a range the document no longer has');
+        assert.strictEqual(await page.evaluate(() =>
+          document.querySelectorAll('.ed-selected').length), 0, 'and nothing is tinted');
+        assert.strictEqual(await t5TabindexCount(page), 0,
+          'and no block is left focusable');
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'and there is no focus holder — Task 4 carry 1: clearing the roving tabindex '
+          + 'blurs the block it was on, so a cleared selection ends on <body>');
+      }, 'T5');
+
+    // The plan asks for this one explicitly: the failure exits inside
+    // rerenderAll() `return false` without touching any reset state, so a
+    // line-range selection survives a failed render for free. It is GREEN
+    // before the implementation (nothing cleared it either), so it is proved
+    // to BITE by mutation instead — see the transcript in the task report:
+    // adding clearBlockSelection() to the malformed-response exit turns it RED.
+    await s3Scenario('a render that FAILS leaves the selection exactly as it was',
+      T5LIST, async (page) => {
+        await page.evaluate(() => window.__edTestSetSelection(3, 4));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+            domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+          'precondition: a real selection stands before the failing render. Got ' +
+          JSON.stringify(before));
+        const focusBefore = await t5Focus(page);
+        assert.strictEqual(focusBefore.text, 'b', 'precondition: with a real focus holder');
+
+        const ok = await page.evaluate(() => {
+          const realFetch = window.fetch;
+          window.fetch = function (u, o) {
+            if (String(u).indexOf('/api/render') !== -1) {
+              return Promise.reject(new Error('render offline (test)'));
+            }
+            return realFetch.call(window, u, o);
+          };
+          return window.__edTestForceRerender().then((r) => { window.fetch = realFetch; return r; });
+        });
+        assert.strictEqual(ok, false,
+          'precondition: the render must actually have FAILED — otherwise this scenario is '
+          + 'just the success path again');
+        assert.ok(await page.evaluate(() => !!document.querySelector('.ed-conflict')),
+          'precondition: and it must have surfaced its banner, so the failure went through '
+          + 'the real exit rather than being swallowed somewhere else');
+
+        assert.deepStrictEqual(await t5Sel(page), before,
+          'a failed render leaves .content and `blocks` untouched, so the selection it was '
+          + 'built against is still exactly true — clearing it would throw away a set the '
+          + 'user can still see');
+        assert.deepStrictEqual(await t5Focus(page), focusBefore,
+          'and the focus holder is untouched too — the DOM was never swapped');
+      }, 'T5');
+
+    // §4.4 step 3 against the shape Tasks 6/7 will actually produce:
+    // collapseTo() hands back a range's END line, and a table owns four lines
+    // for one block, so the focus endpoint routinely lands INSIDE a block
+    // rather than on its startLine. Task 2 carry 5: selectionFocusBlockEl()
+    // answers null for such a line, which is a selection with no focus holder
+    // at all and a dead keyboard.
+    await s3Scenario('a focus endpoint that is not a startLine gets a real holder anyway',
+      '# Doc\n\nalpha\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n', async (page) => {
+        assert.deepStrictEqual((await t5Blocks(page)).map((b) => b.type),
+          ['heading', 'paragraph', 'table'],
+          'fixture shape: heading{1,1} paragraph{3,3} table{5,7}');
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 6));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 6, memberLines: [[3, 3], [5, 7]],
+            domSelectedLines: [[3, 3], [5, 7]], focusHolderId: null },
+          'precondition: line 6 is the table\'s SEPARATOR row — inside the block, not its '
+          + 'startLine — so this selection has NO focus holder to begin with. Got ' +
+          JSON.stringify(before));
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'precondition: and therefore nothing is focused before the render');
+
+        assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true,
+          'the forced render must have succeeded');
+
+        const after = await t5Sel(page);
+        assert.deepStrictEqual([after.memberLines, after.domSelectedLines],
+          [[[3, 3], [5, 7]], [[3, 3], [5, 7]]],
+          'the member set must be IDENTICAL — snapping the focus endpoint onto a startLine '
+          + 'must never quietly change which blocks a batch operation would write to — and '
+          + 'the paint must agree with it. Got ' + JSON.stringify(after));
+        assert.deepStrictEqual([after.anchorLine, after.focusLine], [3, 5],
+          'the focus endpoint moved to the table\'s own startLine (the anchor never moves)');
+        const focusAfter = await t5Focus(page);
+        assert.deepStrictEqual(focusAfter,
+          { where: 'block', isTheBlockItself: true, index: 2, type: 'table', text: 'AB12',
+            tabindex: '-1' },
+          'spec 4.4 step 3: the rebuilt selection has a REAL focus holder — the table '
+          + 'block — not <body>. Got ' + JSON.stringify(focusAfter));
+      }, 'T5');
+
+    // §4.4: "undo / redo 一律清空選取集合". UndoStack's op is exactly
+    // {startLine, endLine, before, after} and carries no selection state, so
+    // there is nothing to restore a set to. Without an explicit declaration
+    // the rebuild above would keep the old line range standing over a document
+    // that just changed underneath it.
+    await s3Scenario('undo clears the selection instead of standing it over a changed doc',
+      '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+        const original = fs.readFileSync(mdPath, 'utf8');
+        const pid = await page.evaluate(() =>
+          document.querySelector('.ed-block[data-block-type="paragraph"]')
+            .getAttribute('data-block-id'));
+        await openWysiwyg(page, '.ed-block[data-block-id="' + pid + '"]');
+        await page.keyboard.type('Z');
+        const edited = await saveAndRead(page, mdPath);
+        assert.notStrictEqual(edited, original,
+          'precondition: the edit must have landed and pushed a real undo op, file is '
+          + 'still ' + JSON.stringify(original));
+
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const before = await t5Sel(page);
+        assert.deepStrictEqual(before,
+          { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [5, 5]],
+            domSelectedLines: [[3, 3], [5, 5]], focusHolderId: '2' },
+          'precondition: a real two-block selection stands before Ctrl+Z. Got ' +
+          JSON.stringify(before));
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        assert.strictEqual(await saveAndRead(page, mdPath), original,
+          'precondition: the undo must actually have LANDED — otherwise "the selection was '
+          + 'cleared" would be green for a keystroke that did nothing');
+        assert.strictEqual(await t5Sel(page), null,
+          'spec 4.4: undo/redo always clears the selection. The op records no selection '
+          + 'state, so a set left standing is a range against a document that no longer '
+          + 'produced it');
+        assert.deepStrictEqual(await t5Focus(page), { where: 'body' },
+          'and no block is left holding the roving focus');
+      }, 'T5');
     // ── v2.11.1 acceptance item 1: Tab / Shift+Tab must never reach the
     //    browser's own sequential focus navigation ────────────────────────
     // Spec §3.5 states it outright ("必須 preventDefault()，否則 Tab 在 body 上
@@ -14966,6 +16017,2290 @@ async function gutterGeometry(page, sel) {
       } finally { setSrv.close(); }
     }
 
+
+    // ── Task 4b: an icon at the head of every ⠿ menu item, and the 轉換成
+    //    submenu opens on HOVER (both user requests, 2026-08-31) ───────────
+    //
+    //    Every hover scenario below drives REAL `page.mouse.move()` steps
+    //    THROUGH the geometry under test. A test that jumps the pointer
+    //    straight to the submenu's centre fires one mouseover on the target
+    //    and proves nothing about the band the pointer had to cross — which
+    //    is the whole defect this half exists to prevent.
+    {
+      // Rects for the open menu, its visible items, and the submenu if one is
+      // up. `cx`/`cy` are viewport centres, ready for page.mouse.move().
+      const menuGeo = (page) => page.evaluate(() => {
+        const r = (e) => {
+          const b = e.getBoundingClientRect();
+          return { l: b.left, r: b.right, t: b.top, b: b.bottom,
+            cx: b.left + b.width / 2, cy: b.top + b.height / 2 };
+        };
+        const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+        if (!menu) return null;
+        const g = { menu: r(menu), items: {} };
+        Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((b) => !b.hidden && !b.closest('.ed-handle-submenu'))
+          .forEach((b) => { g.items[b.textContent] = r(b); });
+        const sub = document.querySelector('.ed-handle-submenu');
+        if (sub) {
+          g.sub = r(sub);
+          g.subRows = Array.prototype.slice.call(sub.querySelectorAll('.ed-handle-menu-btn'))
+            .map((b) => Object.assign({ label: b.textContent }, r(b)));
+        }
+        return g;
+      });
+      const subOpen = (page) => page.evaluate(() => !!document.querySelector('.ed-handle-submenu'));
+      const menuOpen = (page) => page.evaluate(() =>
+        !!document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)'));
+      // What the pointer is standing on, in the only three terms that matter to
+      // the hover rule: the 轉換成 item, the submenu, or neither.
+      const hitZone = (page, x, y) => page.evaluate(({ x, y }) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el || !el.closest) return 'none';
+        if (el.closest('.ed-handle-submenu')) return 'sub';
+        const btn = el.closest('.ed-handle-menu-btn');
+        if (btn && btn.textContent === '轉換成 ›') return 'convert';
+        if (btn) return 'item:' + btn.textContent;
+        if (el.closest('.ed-handle-menu')) return 'menu';
+        return 'outside';
+      }, { x, y });
+      // A real pointer walk: `steps` samples along the segment, `pauseMs` of
+      // real wall-clock between them. Returns the zone trail so a scenario can
+      // assert the path really crossed what it claims to have crossed.
+      const walk = async (page, x0, y0, x1, y1, steps, pauseMs, collect) => {
+        const trail = [];
+        for (let i = 0; i <= steps; i++) {
+          const x = x0 + (x1 - x0) * i / steps, y = y0 + (y1 - y0) * i / steps;
+          await page.mouse.move(x, y);
+          if (collect) trail.push({ x, y, zone: await hitZone(page, x, y) });
+          if (pauseMs) await new Promise((res) => setTimeout(res, pauseMs));
+        }
+        return trail;
+      };
+
+      // ─ Half 1: the icons ─────────────────────────────────────────────────
+      await s3Scenario('every ⠿ menu item leads with one 16px icon that inherits the menu colour',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const info = await page.evaluate(() => {
+            const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+            return Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden).map((b) => {
+                const svgs = b.querySelectorAll('svg');
+                const svg = svgs[0] || null;
+                const kids = Array.prototype.slice.call(b.childNodes);
+                const box = svg ? svg.getBoundingClientRect() : null;
+                return {
+                  label: b.textContent,
+                  svgCount: svgs.length,
+                  svgIdx: kids.findIndex((n) => n.nodeType === 1 &&
+                    n.tagName.toLowerCase() === 'svg'),
+                  textIdx: kids.findIndex((n) => n.nodeType === 3 && n.textContent.trim() !== ''),
+                  stroke: svg ? getComputedStyle(svg).stroke : null,
+                  fill: svg ? getComputedStyle(svg).fill : null,
+                  strokeWidth: svg ? parseFloat(getComputedStyle(svg).strokeWidth) : null,
+                  linecap: svg ? getComputedStyle(svg).strokeLinecap : null,
+                  box: box ? [Math.round(box.width), Math.round(box.height)] : null,
+                  shapes: svg ? svg.querySelectorAll('path,rect,circle,line,polyline').length : 0,
+                  color: getComputedStyle(b).color,
+                };
+              });
+          });
+          assert.deepStrictEqual(info.map((i) => i.label),
+            ['轉換成 ›', '建立副本', '刪除', 'MD 原始碼'],
+            'the icons must not disturb §3.7\'s four labels or their order — every helper in ' +
+            'this file finds a menu item by EXACT textContent, so an icon that contributed ' +
+            'any text of its own would break clickGutterMenuItem()/convertVia() everywhere. ' +
+            'Got ' + JSON.stringify(info.map((i) => i.label)));
+          for (const i of info) {
+            assert.strictEqual(i.svgCount, 1,
+              i.label + ': exactly one inline <svg> per item, got ' + i.svgCount);
+            assert.strictEqual(i.svgIdx, 0,
+              i.label + ': the icon must be the button\'s FIRST child node, got index ' + i.svgIdx);
+            assert.ok(i.textIdx > i.svgIdx,
+              i.label + ': the <svg> must PRECEDE the label text node (svg at ' + i.svgIdx +
+              ', text at ' + i.textIdx + ')');
+            assert.ok(i.shapes >= 1, i.label + ': the icon must draw something, got ' +
+              i.shapes + ' shape elements');
+            assert.deepStrictEqual(i.box, [16, 16],
+              i.label + ': Notion\'s icons are 16x16, got ' + JSON.stringify(i.box));
+            assert.strictEqual(i.strokeWidth, 1.5,
+              i.label + ': 1.5px stroke, got ' + i.strokeWidth);
+            assert.strictEqual(i.fill, 'none', i.label + ': fill must be none, got ' + i.fill);
+            assert.strictEqual(i.linecap, 'round',
+              i.label + ': round caps, got ' + i.linecap);
+            // The RELATIONSHIP, not a hex literal: currentColor is the whole
+            // point — retheme the menu and the icons follow.
+            assert.strictEqual(i.stroke, i.color,
+              i.label + ': the icon\'s computed stroke must EQUAL the button\'s computed ' +
+              'color (stroke="currentColor"). stroke=' + i.stroke + ' color=' + i.color);
+            // ...and that relationship is only worth anything if the menu
+            // really does set a colour of its own. Without this the assertion
+            // above is green on two defaulted blacks.
+            assert.notStrictEqual(i.color, 'rgb(0, 0, 0)',
+              i.label + ': the menu must carry its own light-on-dark colour for the ' +
+              'currentColor assertion above to mean anything, got ' + i.color);
+          }
+          // S2's two layout invariants survive the icons.
+          const inv = await page.evaluate(() => {
+            const menu = document.querySelector('.ed-handle-menu:not(.ed-handle-submenu)');
+            const btns = Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+              .filter((b) => !b.hidden);
+            return {
+              lefts: Array.from(new Set(btns.map((b) =>
+                Math.round(b.getBoundingClientRect().left)))),
+              monotonicTop: btns.every((b, i, a) => i === 0 ||
+                b.getBoundingClientRect().top >= a[i - 1].getBoundingClientRect().bottom - 1),
+              flexDir: getComputedStyle(menu).flexDirection,
+              widths: Array.from(new Set(btns.map((b) =>
+                Math.round(b.getBoundingClientRect().width)))),
+            };
+          });
+          assert.strictEqual(inv.lefts.length, 1,
+            'S2 invariant: one left edge, got ' + JSON.stringify(inv.lefts));
+          assert.strictEqual(inv.monotonicTop, true,
+            'S2 invariant: each item still sits below the previous one');
+          assert.strictEqual(inv.flexDir, 'column',
+            'S2 invariant: the MENU is still a column, got ' + inv.flexDir);
+          assert.strictEqual(inv.widths.length, 1,
+            'the icons must not make the rows ragged, got widths ' + JSON.stringify(inv.widths));
+        }, 'T4b');
+
+      // ─ Half 2: the submenu opens on hover ────────────────────────────────
+      await s3Scenario('hovering 轉換成 opens the submenu with no click at all',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          assert.strictEqual(await subOpen(page), false,
+            'precondition: the submenu must be SHUT before the hover — an "it is open" ' +
+            'assertion is vacuous against a panel that was already up');
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          // In from outside the menu, 20 real steps — never a jump.
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(
+            await page.evaluate(() => document.querySelectorAll(
+              '.ed-handle-submenu .ed-handle-menu-btn').length), 12,
+            'the hover-opened panel must be the real §3.2 twelve-target submenu');
+          assert.strictEqual(
+            await page.evaluate(() => document.querySelectorAll('.ed-handle-submenu').length),
+            1, 'exactly one submenu, not one per mouseover along the walk');
+        }, 'T4b');
+
+      await s3Scenario('crossing the gap between 轉換成 and the submenu keeps the panel open',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          // FIXTURE SANITY: there must actually BE a band belonging to neither
+          // the item nor the panel, or this scenario crosses nothing. Measured
+          // on 2.11.1: `.ed-handle-submenu { left: 100%; margin-left: 4px }`
+          // over a menu with 4px of padding leaves x in [item.right+4,
+          // sub.left) answering the BLOCK underneath.
+          const x0 = Math.ceil(it.r), x1 = Math.floor(g.sub.l);
+          const band = [];
+          for (let x = x0; x <= x1; x++) band.push({ x, zone: await hitZone(page, x, it.cy) });
+          const dead = band.filter((p) => p.zone !== 'convert' && p.zone !== 'sub');
+          assert.ok(dead.length >= 3,
+            'fixture sanity: there must be a real dead band to cross between the 轉換成 item ' +
+            'and the submenu, otherwise this scenario proves nothing. Got ' +
+            JSON.stringify(band));
+          // Now cross it for real, one pixel at a time, with wall-clock time
+          // between the steps — and assert the panel is still up at EVERY
+          // sample, the dead ones included. "Still open at the far end" alone
+          // would be green against a panel that closed and re-opened.
+          const flick = [];
+          for (const p of band) {
+            await page.mouse.move(p.x, it.cy);
+            await new Promise((res) => setTimeout(res, 30));
+            if (!(await subOpen(page))) flick.push(p);
+          }
+          assert.deepStrictEqual(flick, [],
+            'the submenu must stay up for the whole crossing — it closed at ' +
+            JSON.stringify(flick) + ' (dead band was ' + JSON.stringify(dead.map((d) => d.x)) + ')');
+          assert.strictEqual(await hitZone(page, x1, it.cy), 'sub',
+            'the walk must have finished INSIDE the submenu');
+        }, 'T4b');
+
+      await s3Scenario('a backward tremor while crossing the gap does not shut the panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          // A real hand does not travel monotonically. The aim rule is a
+          // DIRECTION test on consecutive samples, so a single backward sample
+          // mid-gap reads as "not on the way in" — and there is nothing under
+          // the pointer there to say otherwise. The grace period is what makes
+          // that survivable; with it at 0 this scenario is RED.
+          const x0 = Math.ceil(it.r), x1 = Math.floor(g.sub.l);
+          const mid = Math.round((x0 + x1) / 2);
+          const path = [];
+          for (let x = x0; x <= mid; x++) path.push({ x, y: it.cy });
+          path.push({ x: mid - 2, y: it.cy });          // the tremor: back...
+          path.push({ x: mid - 2, y: it.cy - 1 });      // ...and a wobble
+          for (let x = mid - 1; x <= x1; x++) path.push({ x, y: it.cy });
+          const flick = [];
+          for (const p of path) {
+            await page.mouse.move(p.x, p.y);
+            await new Promise((res) => setTimeout(res, 25));
+            if (!(await subOpen(page))) flick.push(p.x);
+          }
+          assert.ok(path.some((p, i) => i > 0 && p.x < path[i - 1].x),
+            'fixture sanity: the path must really contain a BACKWARD step, or this scenario ' +
+            'is just the gap crossing again');
+          assert.deepStrictEqual(flick, [],
+            'a momentary backward sample mid-gap must not shut the panel; it closed at x=' +
+            JSON.stringify(flick));
+          assert.strictEqual(await hitZone(page, x1, it.cy), 'sub',
+            'the walk must have finished INSIDE the submenu');
+        }, 'T4b');
+
+      await s3Scenario('a diagonal to a submenu row further down keeps the panel open',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          const last = g.subRows[g.subRows.length - 1];
+          // ~8px per sample at ~600 px/s — measured on this branch as a 344px
+          // path taking ~570ms, of which ~370ms is spent over other parent
+          // items and over bare page. See the Task 4b carries.
+          const dist = Math.hypot(last.cx - it.cx, last.cy - it.cy);
+          const steps = Math.max(2, Math.round(dist / 8));
+          const trail = await walk(page, it.cx, it.cy, last.cx, last.cy, steps,
+            Math.round((dist / 600) * 1000 / steps), true);
+          const zones = trail.map((p) => p.zone);
+          // FIXTURE SANITY, both halves: the diagonal is only interesting
+          // because it leaves the cluster, and it leaves it in TWO different
+          // ways. If either stops happening the geometry moved and this
+          // scenario has quietly stopped testing the thing.
+          assert.ok(zones.some((z) => z.startsWith('item:')),
+            'fixture sanity: the diagonal must pass over OTHER parent menu items — that is ' +
+            'what makes it hard. Trail: ' + JSON.stringify(zones));
+          assert.ok(zones.some((z) => z === 'outside'),
+            'fixture sanity: the diagonal must also pass over bare page below the menu. ' +
+            'Trail: ' + JSON.stringify(zones));
+          assert.strictEqual(await subOpen(page), true,
+            'the submenu must survive a diagonal to its last row. Trail: ' +
+            JSON.stringify(zones));
+          assert.strictEqual(await hitZone(page, last.cx, last.cy), 'sub',
+            'the pointer must have landed on the last submenu row');
+        }, 'T4b');
+
+      await s3Scenario('hovering a different parent item closes the submenu',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          const dup = g0.items['建立副本'];
+          // Straight DOWN the menu's own column — x is held constant, which is
+          // exactly what says "not on my way to the submenu".
+          await walk(page, it.cx, it.cy, it.cx, dup.cy, 12, 20);
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-submenu'),
+            { timeout: 3000 });
+          assert.strictEqual(await menuOpen(page), true,
+            'only the SUBMENU closes — a hover never closes the ⠿ menu itself (§3.7: click ' +
+            'outside or Esc)');
+          assert.strictEqual(await hitZone(page, it.cx, dup.cy), 'item:建立副本',
+            'the pointer must have finished on 建立副本');
+        }, 'T4b');
+
+      await s3Scenario('leaving the item and the submenu together closes the panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g0 = await menuGeo(page);
+          const it = g0.items['轉換成 ›'];
+          await walk(page, g0.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          const g = await menuGeo(page);
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          // Into the panel FIRST — otherwise this scenario only ever proves the
+          // pointer left the ITEM, which the "different parent item" one above
+          // already covers, and the "and the submenu together" half of the rule
+          // goes untested.
+          const row = g.subRows[3];
+          await walk(page, it.cx, it.cy, row.cx, row.cy, 16, 12);
+          assert.strictEqual(await hitZone(page, row.cx, row.cy), 'sub',
+            'precondition: the pointer must really be standing in the panel');
+          assert.strictEqual(await subOpen(page), true, 'precondition: still up inside the panel');
+          // ...and now out of the panel's own right-hand side and away, so the
+          // pointer leaves the item and the submenu together and touches no
+          // other menu row on the way.
+          await walk(page, row.cx, row.cy, g.sub.r + 140, g.sub.b + 140, 24, 12);
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-submenu'),
+            { timeout: 3000 });
+          assert.strictEqual(await menuOpen(page), true,
+            'the ⠿ menu itself stays open — §3.7 closes it by Esc or an outside CLICK only');
+        }, 'T4b');
+
+      await s3Scenario('the click toggle still works, and a click never shuts a hover-opened panel',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const clickConvert = () => page.evaluate(() => {
+            Array.prototype.slice.call(document.querySelectorAll(
+              '.ed-handle-menu:not(.ed-handle-submenu) .ed-handle-menu-btn'))
+              .find((b) => b.textContent === '轉換成 ›').click();
+          });
+          // The pointer is parked on the ⠿ handle here, NOT on the item, so
+          // these are pure clicks with no hover in play — the exact path
+          // clickGutterMenuItem()/convertVia() drive throughout this file.
+          assert.strictEqual(await subOpen(page), false, 'precondition: shut');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), true, 'click 1 opens');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), false, 'click 2 folds it back up');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), true, 'click 3 opens again');
+          await clickConvert();
+          assert.strictEqual(await subOpen(page), false, 'click 4 folds it back up');
+
+          // A real mouse click on an item the pointer is ALREADY hovering must
+          // not fold up the panel that hover just opened — that would make the
+          // panel unreachable by mouse, which is the opposite of the request.
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          await page.mouse.down();
+          await page.mouse.up();
+          await new Promise((res) => setTimeout(res, 400));
+          assert.strictEqual(await subOpen(page), true,
+            'a click on a hover-opened 轉換成 must leave the panel standing');
+        }, 'T4b');
+
+      await s3Scenario('Escape closes a hover-opened submenu together with its menu',
+        '# Doc\n\nalpha\n', async (page) => {
+          const sel = '.ed-block[data-block-type="paragraph"]';
+          await openGutterMenu(page, sel);
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: the panel is up');
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+            { timeout: 3000 });
+          assert.strictEqual(await subOpen(page), false,
+            'Escape must take the submenu down with the menu');
+        }, 'T4b');
+
+      await s3Scenario('re-opening the ⠿ menu on another block inherits no hover-opened panel',
+        '# Doc\n\nalpha\n\nbravo\n', async (page) => {
+          const selA = '.ed-block[data-block-id="1"]';
+          const selB = '.ed-block[data-block-id="2"]';
+          await openGutterMenu(page, selA);
+          const g = await menuGeo(page);
+          const it = g.items['轉換成 ›'];
+          await walk(page, g.menu.r + 80, it.cy + 130, it.cx, it.cy, 20, 8);
+          await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 3000 });
+          assert.strictEqual(await subOpen(page), true, 'precondition: A\'s panel is up');
+          await page.hover(selB);
+          await page.click(selB + ' .ed-handle');
+          await page.waitForFunction((s) => !!document.querySelector(
+            s + ' .ed-handle-menu-btn'), { timeout: 5000 }, selB);
+          assert.strictEqual(await subOpen(page), false,
+            'S2 invariant: the submenu\'s targets close over gutterMenuBlockEl at click time, ' +
+            'so a panel inherited from another block converts the WRONG block');
+          assert.strictEqual(
+            await page.evaluate((s) => !!document.querySelector(s + ' .ed-handle-menu'), selB),
+            true, 'the menu really did move to the second block');
+        }, 'T4b');
+    }
+
+
+    // ── S3 Task 6: batch convert / duplicate / delete ──────────────────────
+    // The plan's central constraint, re-measured on this branch:
+    // convertListItemAway() split its run at `run.indexOf(liEl)` and
+    // deleteListItemViaGutter() did `run.filter((el) => el !== liEl)` — both
+    // hard-coded EXACTLY ONE operated item. Batching means rewriting them to
+    // take a contiguous index RANGE, never calling them in a loop: a loop
+    // re-renders between items and invalidates every id in between, which is
+    // the defect class recorded twice in client.js (a fenced block raw-edited
+    // into two paragraphs changes the BLOCK count without changing the LINE
+    // count, so an id-indexed delete hit the wrong block; and the same shape
+    // silently rewrote a neighbouring table).
+    //
+    // Every scenario below states its preconditions before the gesture: what
+    // the file held, that the selection really existed with the members it
+    // claims, and — for a refusal — that the fixture really is in the state
+    // that triggers the refusal. A refusal test whose fixture cannot express
+    // the shape under test is green on a build that refuses everything.
+    {
+      const t6Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t6Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      // Every block's identity as the batch machinery sees it: the id the DOM
+      // addresses it by, its type, its indent, and the source line range off
+      // `blocks`. A phantom (the outer item of a same-line nest) shows up here
+      // with an INVERTED range, which is how the gap scenario proves its own
+      // fixture rather than asserting a gap it merely believes in.
+      const t6Blocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b, i) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return {
+            i: i,
+            type: el ? el.getAttribute('data-block-type') : null,
+            indent: el ? el.getAttribute('data-indent') : null,
+            lines: [b.startLine, b.endLine],
+          };
+        }));
+      const t6Undo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+      const t6Sel3 = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+
+      // §3.6 「整批轉換」 + §4.3 rule 1. Three list items out of a four-item
+      // run become three paragraphs in ONE commit. The ⠿ is pressed on the
+      // MIDDLE member, which is what separates "operates on the set" from
+      // "operates on the block you clicked".
+      await s3Scenario('a batch convert rewrites every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]], ['li', [5, 5]],
+              ['li', [6, 6]]],
+            'fixture shape: a heading and a four-item run on lines 3..6');
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 3, focusLine: 5, memberLines: [[3, 3], [4, 4], [5, 5]],
+              domSelectedLines: [[3, 3], [4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: a real THREE-member selection stands — model and paint — before '
+            + 'the menu is touched. Got ' + JSON.stringify(before));
+
+          await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
+
+          // Captured BEFORE the save: the collapse is what the operation declared,
+          // and nothing a Ctrl+S does should be able to stand in for it.
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\n- delta\n',
+            'all THREE members convert in one commit, each its own paragraph, and the '
+            + 'fourth item is left as a list. A one-item-short range leaves a member '
+            + 'behind or duplicates it. Got ' + JSON.stringify(after));
+          // MEASURED, not reasoned: marked emits a `space` token for each blank
+          // separator, and the heading's own trailing newline is absorbed into it.
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'paragraph', 'space', 'paragraph', 'space', 'paragraph', 'space',
+              'list'],
+            'and the saved bytes re-lex as three separate paragraphs plus the surviving '
+            + 'list — not as a lazy continuation of the item above (§4.3 rule 1)');
+
+          assert.deepStrictEqual(sel,
+            { anchorLine: 3, focusLine: 7, memberLines: [[3, 3], [5, 5], [7, 7]],
+              domSelectedLines: [[3, 3], [5, 5], [7, 7]], focusHolderId: '3' },
+            '§3.3: 操作後集合塌縮為操作結果所涵蓋的行區間 — the three CONVERTED blocks, '
+            + 'not the whole commit range (which is the entire run, bystander included). '
+            + 'Got ' + JSON.stringify(sel));
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op. Three ops would leave this '
+            + 'partially converted after a single Ctrl+Z');
+        }, 'T6');
+
+      // §3.6 「Delete 整批刪」. Two members out of a four-item run.
+      await s3Scenario('a batch delete removes every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 4, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: bravo and charlie really are the set. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'charlie'), '刪除');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'both members leave in one commit and the survivors are re-serialized as one '
+            + 'run. Got ' + JSON.stringify(after));
+          assert.strictEqual(sel, null,
+            '§3.3 + §4.4: a delete produces no lines, so the collapse range does not '
+            + 'resolve and the set is CLEARED rather than left standing over lines that '
+            + 'now belong to somebody else');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T6');
+
+      // §3.6 「建立副本」 over a set, on an ORDERED run so §3.8's renumbering
+      // has to run across the copies too.
+      await s3Scenario('a batch duplicate copies the whole set, renumbered, in one undo op',
+        '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+              domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+            'precondition: alpha and bravo really are the set. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after,
+            '# Doc\n\n1. alpha\n2. bravo\n3. alpha\n4. bravo\n5. charlie\n',
+            'BOTH members are copied, in their own order, after everything the set owns — '
+            + 'and §3.8 renumbers the whole run over the copies. Got ' +
+            JSON.stringify(after));
+
+          assert.deepStrictEqual(sel,
+            { anchorLine: 3, focusLine: 4, memberLines: [[3, 3], [4, 4]],
+              domSelectedLines: [[3, 3], [4, 4]], focusHolderId: '2' },
+            '§3.3: the copies land BELOW everything the set owns, so the collapse range is '
+            + 'the originals\' own lines. Got ' + JSON.stringify(sel));
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T6');
+
+      // §3.4's clamp under a BATCH delete: the whole operand set is handed to
+      // clampIndents() as one array of operated indices, so the survivors that
+      // lost their parent form ONE segment and move by ONE delta. Clamping them
+      // item-by-item is what adopts sibling #2 into sibling #1 (§3.4 rule 3's
+      // own worked example).
+      await s3Scenario('a batch delete re-anchors every survivor that lost its parent',
+        '# Doc\n\n- a\n  - a1\n  - a2\n  - a3\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '1', [6, 6]]],
+            'fixture shape: one indent-0 parent with three indent-1 children — deleting '
+            + 'the parent AND the first child is what leaves a2/a3 with no anchor');
+
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: a and a1 really are the set. Got ' + JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'a1'), '刪除');
+          await settleEditor(page);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- a2\n- a3\n',
+            'both survivors move left TOGETHER. Two columns of dangling indent after a '
+            + 'heading is not a display glitch — at four it lexes as an indented code '
+            + 'block, and at two it is a list whose items the file and the screen '
+            + 'disagree about. Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(lexTypes(after), ['heading', 'list'],
+            'and nothing was left dangling for marked to read as something else');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op');
+        }, 'T6');
+
+      // §3.4 rule 3, the batch ANCHOR. 「多 block 操作的錨點 = 選取集合中最小的
+      // 舊 indent，不是第一個成員」. The set here runs DEEP → SHALLOW (b at
+      // indent 1, then c at indent 0), so the two answers differ, and the
+      // survivors d and e are same-level siblings whose relationship is what
+      // the rule protects: with the minimum anchor they form ONE segment and
+      // move together; with the first member's anchor they are segmented one
+      // at a time and `e` gets ADOPTED by `d`.
+      await s3Scenario('the batch anchor is the set\'s minimum old indent, not its first member',
+        '# Doc\n\n- a\n  - b\n- c\n  - d\n  - e\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t6Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '0', [5, 5]], ['li', '1', [6, 6]], ['li', '1', [7, 7]]],
+            'fixture shape: the set (lines 4-5) runs indent 1 then indent 0, so its '
+            + 'minimum old indent (0) is NOT its first member\'s (1) — that is the whole '
+            + 'point of this fixture and a set that does not have that shape cannot '
+            + 'express the defect');
+
+          await t6Sel3(page, 4, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5]],
+            'precondition: b and c really are the set. Got ' + JSON.stringify(before));
+
+          await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- a\n\nb\n\nc\n\n- d\n- e\n',
+            '§3.4 rule 3: d and e lost the same anchor at the same time, so ONE delta '
+            + 'applies to the whole segment and they stay SIBLINGS. Anchoring on the '
+            + 'first member (indent 1) segments them separately — d moves to 0, e\'s '
+            + 'bound is then 1 so it keeps indent 1 and is adopted as d\'s child, which '
+            + 'is a restructure of content the user never selected. Got ' +
+            JSON.stringify(after));
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'list', 'space', 'paragraph', 'space', 'paragraph', 'space', 'list'],
+            'and no dangling indent lexed as an indented code block');
+
+          await t6Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op');
+        }, 'T6');
+
+      // §3.3's second membership rule: 「grip 在集合外 → 先把集合換成該單一
+      // block 再作用」. The bytes are what prove it — a build that answered
+      // 'batch' here would duplicate alpha and bravo as well.
+      await s3Scenario('a grip OUTSIDE the set operates on that block alone and becomes the set',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t6Sel3(page, 3, 4);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: alpha and bravo are the set, and delta is NOT in it. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'delta'), '建立副本');
+          await settleEditor(page);
+
+          const sel = await t6Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n- delta\n',
+            'only DELTA is duplicated — the standing selection over alpha/bravo is '
+            + 'discarded, not operated on. Got ' + JSON.stringify(after));
+
+          assert.deepStrictEqual(sel.memberLines, [[6, 6]],
+            '§3.3: 先把集合換成該單一 block 再作用 — the set is now delta alone, not the '
+            + 'two blocks the user had selected. Got ' + JSON.stringify(sel));
+        }, 'T6');
+
+      // Task 1 carry 2: a gap in `blocks` is NOT only what a disjoint
+      // selection produces. A no-line PHANTOM (the outer item of a same-line
+      // nest) sits between two real members, so an entirely natural line range
+      // cannot be expressed as one contiguous index range.
+      await s3Scenario('a set with a phantom between its members refuses, byte-identical',
+        '# Doc\n\n- a\n- - b\n- c\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t6Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 3]], ['li', [4, 4]],
+              ['li', [5, 5]]],
+            'fixture shape: the same-line nest `- - b` emits a PHANTOM at index 2 whose '
+            + 'range is INVERTED ({startLine:4, endLine:3} — it owns no source line), '
+            + 'sitting BETWEEN the two real members. Got ' + JSON.stringify(shape));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4], [5, 5]],
+            'precondition: three real members — the phantom is excluded from the set '
+            + '(membersOf() drops a block that owns no line) but it is still THERE, at '
+            + 'index 2, which is exactly the gap. Got ' + JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'c'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page), '選取範圍不連續，無法整批操作',
+            'the gap must refuse with its OWN banner — "nothing selected" and "a set with '
+            + 'a hole in it" are different states and spanIsContiguous([]) is true, so '
+            + 'they cannot share a gate');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and a refusal must not touch one byte');
+        }, 'T6');
+
+      // §4.3's run-wide gate under a batch: every member is a target, so a run
+      // that cannot be structurally edited refuses the whole gesture. The
+      // degradation is asserted through the serializer itself, not assumed
+      // from the fixture's shape.
+      await s3Scenario('a batch over a degraded run refuses, byte-identical',
+        '# Doc\n\n- alpha\n\n- bravo\n\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const degraded = await page.evaluate(() => {
+            const lis = [].slice.call(
+              document.querySelectorAll('.ed-block[data-block-type="li"]'));
+            return window.md2docListMd.serializeBlocks(lis).unsupported;
+          });
+          assert.ok(degraded.length > 0 && degraded.indexOf('P') !== -1,
+            'precondition: the blank lines make this ONE LOOSE list, so every item renders '
+            + 'as a <p> and serializeBlocks() reports it unsupported — that is what makes '
+            + 'the run structurally un-editable. Got unsupported = ' +
+            JSON.stringify(degraded));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: a real two-member selection stands over the degraded run. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'bravo'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page), '此清單含不支援的格式，無法調整結構',
+            '§4.1/§4.3: the run-wide gate answers before any mutation');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T6');
+
+      // Scope boundary, stated as a refusal rather than guessed at: a span
+      // holding BOTH list items and non-list blocks is neither a run
+      // re-serialization nor a plain line splice, and the blank-line policy at
+      // the seam between them has no ruling in the spec.
+      await s3Scenario('a set mixing list items and other blocks refuses, byte-identical',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t6Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['li', [5, 5]], ['li', [6, 6]]],
+            'fixture shape: a paragraph immediately above a two-item run, adjacent in '
+            + '`blocks` so the span is contiguous and the refusal is about the KINDS, not '
+            + 'about a gap. Got ' + JSON.stringify(shape));
+
+          await t6Sel3(page, 3, 5);
+          const before = await t6Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really holds the paragraph AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await clickGutterMenuItem(page, await liBlockSelByText(page, 'bravo'), '刪除');
+          await settleEditor(page);
+
+          assert.strictEqual(await t6Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            'the mixed span refuses with its own banner, distinct from the gap one');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T6');
+    }
+
+    // ── S3 Task 7: batch Tab / Shift+Tab, and the Delete key ──────────────
+    // >>>T7SECTION  (and <<<T7SECTION at the end of this block: the scratch
+    // subset runner every S3 task has used slices this section out by these two
+    // markers instead of by line numbers, which have drifted on every task.)
+    // §3.5's batch semantics and §3.6's 「Delete 整批刪」.
+    //
+    // The one shape every Tab scenario here is built around: a batch computes
+    // ONE delta for the whole set and only THEN clamps per item. ⚠ UPDATED
+    // 2026-08-31 (review defect D1): that one delta is the minimum available
+    // HEAD-ROOM across the members, measured against their pre-move indents —
+    // NOT the head-room of the member with the minimum old indent, which is
+    // what shipped in T7 and which half-moved a set whose shallowest member
+    // could move and whose first member could not. Three wrong implementations
+    // have to be told apart, and none can be caught by a fixture that does not
+    // discriminate:
+    //
+    //   * per-item maths (§3.5's own worked example) — visible only on a set
+    //     of SAME-LEVEL siblings, where the correct answer is that nothing
+    //     moves. "Nothing moved" is also what a dead key produces, so that
+    //     scenario carries an anti-vacuity half that proves the key is live.
+    //   * the delta taken from the shallowest member instead of the least
+    //     mobile one (review defect D1) — visible only on a set holding a
+    //     member at its ceiling AND a shallower member with head-room. The
+    //     two D1 scenarios live in the T10 section below; the deep-to-shallow
+    //     scenario here is the third such fixture and was MIGRATED to the new
+    //     answer rather than deleted.
+    //   * a batch that refuses everything — which every no-op scenario in this
+    //     section and in T10 pairs with a partner set that legitimately MOVES,
+    //     on the same fixture and through the same code path.
+    //
+    // Every expected byte string below was MEASURED against the shipped
+    // single-item Tab / Shift+Tab and the shipped ⠿ 刪除 before it was written
+    // down (this plan's Global Constraint: never author expected markdown from
+    // reasoning alone).
+    {
+      const t7Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t7Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const t7Blocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b, i) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return {
+            i: i,
+            type: el ? el.getAttribute('data-block-type') : null,
+            indent: el ? el.getAttribute('data-indent') : null,
+            lines: [b.startLine, b.endLine],
+          };
+        }));
+      // The LIVE depth of every block, straight off the DOM. Asserted next to
+      // the saved bytes on the no-op scenario: a build that mutated the DOM and
+      // failed to commit is a different defect from one that never moved
+      // anything, and the file alone cannot tell them apart.
+      const t7Indents = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) =>
+          [el.getAttribute('data-block-type'), el.getAttribute('data-indent')]));
+      const t7Set = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+      const t7Undo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+      const t7Tab = async (page, shift) => {
+        if (shift) await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        if (shift) await page.keyboard.up('Shift');
+        await settleEditor(page);
+      };
+      const t7Press = async (page, key) => {
+        await page.keyboard.press(key);
+        await settleEditor(page);
+      };
+      // Each block's OWN text, with the gutter chrome stripped: buildGutterHandle()
+      // and buildGutterInsertButton() put a `⠿` and a `＋` inside every
+      // `.ed-block`, so a bare textContent reads 'alpha＋⠿' and a scenario
+      // asserting on it is asserting about the chrome as much as the content.
+      const t7Texts = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) => {
+          const clone = el.cloneNode(true);
+          [].slice.call(clone.querySelectorAll('.ed-handle, .ed-insert'))
+            .forEach((n) => n.remove());
+          return clone.textContent.replace(/\s+/g, ' ').trim();
+        }));
+
+      // §3.5's own worked example: `- a / (2sp)- b / (2sp)- c`, select b+c and
+      // press Tab. Both members sit at indent 1 and b is at its ceiling under
+      // a, so the minimum head-room across the set is 0, the ONE delta is 0
+      // and NOTHING moves — which is exactly what keeps b and c the siblings
+      // the user selected them as. (This fixture cannot express D1: c's own
+      // head-room is 1, but there is no SHALLOWER member for the old rule to
+      // take a non-zero delta from, so both rules answer 0 here.)
+      await s3Scenario('a batch Tab moves the set by ONE delta, so selected siblings stay siblings',
+        '# Doc\n\n- a\n  - b\n  - c\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]]],
+            'fixture shape: §3.5\'s own example — a at indent 0, b and c SAME-LEVEL '
+            + 'siblings at indent 1. A set whose members sit at different depths cannot '
+            + 'express the per-item defect at all');
+
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: b and c really are the set — model AND paint — before the key '
+            + 'is pressed. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.deepStrictEqual(await t7Indents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1']],
+            '§3.5: the delta is computed ONCE, as the minimum head-room across the '
+            + 'set (b is already at its ceiling of 1, so it is 0), and applied to the '
+            + 'whole set — so the set does not move, IN THE DOM as well as on disk. '
+            + 'Per-item maths gives '
+            + 'c a ceiling of 2 (because b sits at 1) and moves it there, adopting c as '
+            + 'b\'s CHILD — a restructure of two blocks the user selected as siblings');
+          const afterTab = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterTab, original,
+            'and the file is byte-identical. The per-item answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n')
+            + ' — MEASURED with the shipped single-item Tab on c, not reasoned. Got '
+            + JSON.stringify(afterTab));
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // "Nothing changed" is also what an UNIMPLEMENTED batch Tab produces.
+          // The same fixture and the same selection are therefore driven
+          // through Shift+Tab, which under the same one-delta rule DOES move
+          // (minimum old indent 1 -> delta -1 -> both members land at 0). If
+          // this half fails, the byte-identical assertion above was measuring a
+          // dead key rather than the arithmetic saying zero.
+          const stillSel = await t7Sel(page);
+          assert.deepStrictEqual(stillSel, before,
+            'a zero delta commits nothing, so nothing re-renders and the set stands '
+            + 'exactly as it was. Got ' + JSON.stringify(stillSel));
+
+          await t7Tab(page, true);
+          const afterShift = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterShift, '# Doc\n\n- a\n- b\n- c\n',
+            'ANTI-VACUITY: the very same selection under Shift+Tab moves BOTH members to '
+            + 'indent 0 in one commit (MEASURED). This is what proves the key reaches the '
+            + 'batch path at all — without it the no-op above is satisfied by a build with '
+            + 'no batch Tab in it. Got ' + JSON.stringify(afterShift));
+          const collapsed = await t7Sel(page);
+          assert.deepStrictEqual(collapsed.memberLines, [[4, 4], [5, 5]],
+            '§3.3: the set collapses to the lines the operation covered — a column-only '
+            + 'edit moves no line, so the members keep their range. Got ' +
+            JSON.stringify(collapsed));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op, over the whole batch');
+        }, 'T7');
+
+      // ⚠ MIGRATED 2026-08-31 (review defect D1). This scenario asserted
+      // '# Doc\n\n- a\n  - b\n    - c\n  - d\n' — only d moving, b and c
+      // clamped back — as §3.4 rule 3's answer for a set anchored on the
+      // MINIMUM old indent. The review ruled that shape a HALF-MOVE and
+      // §3.4 rule 4 (「段內相對關係必須保持」) the higher rule: the batch delta
+      // is now the minimum available HEAD-ROOM across all members, so b, at
+      // its ceiling under a, floors the whole set at 0 and NOTHING moves.
+      //
+      // The migration is a real behaviour change, not a relaxed assertion, and
+      // it is the same answer Shift+Tab has always given (T7 carry 5) and the
+      // one CHANGELOG v2.12.0 already promises ("a set that cannot move as a
+      // whole does not move at all rather than half-moving"). §3.4 rule 3's
+      // own second worked example is written the other way round and is
+      // superseded here — the two rules cannot both hold on this fixture, and
+      // rule 4 is the one that protects the user's blocks.
+      //
+      // The scenario is KEPT rather than deleted because the deep-to-shallow
+      // shape is still the one that separates "the set is floored by a member
+      // at its ceiling" from "the set is floored by its shallowest member":
+      // here d, the shallowest, has +1 of head-room and still does not move.
+      // Its anti-vacuity half is the SAME fixture with a set of just d, which
+      // produces exactly the bytes this scenario used to expect.
+      await s3Scenario('a batch Tab is floored by the member with the LEAST head-room, not the shallowest',
+        '# Doc\n\n- a\n  - b\n    - c\n- d\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '2', [5, 5]], ['li', '0', [6, 6]]],
+            'fixture shape: the set (lines 4..6) runs DEEP to SHALLOW — b at indent 1 '
+            + 'with NO head-room (its ceiling under a is 1), c at 2 with none either '
+            + '(its ceiling under b is 2), and d at 0 WITH head-room. The shallowest '
+            + 'member and the least-mobile member are different blocks, which is what '
+            + 'makes the two candidate rules distinguishable here');
+
+          await t7Set(page, 4, 6);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5], [6, 6]],
+            'precondition: b, c and d really are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, original,
+            'D1 / §3.4 rule 4: b and c both sit at their ceilings, so the minimum '
+            + 'head-room across the set is 0 and the whole batch is a no-op. Taking the '
+            + 'delta from the shallowest member instead (d, +1) moves all three and lets '
+            + 'the clamp pull b and c back — d moves, they do not, and the set the user '
+            + 'selected has been half-moved. That answer, '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n  - d\n')
+            + ', is what this scenario asserted until 2026-08-31; it is the ANTI-VACUITY '
+            + 'half below that is entitled to those bytes. Got ' + JSON.stringify(after));
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // The same fixture and the same batch path with a set of ONE — d,
+          // the only member with head-room — must move it, and must produce
+          // exactly the bytes the whole-set gesture is refused. Without this
+          // half, "byte-identical" is satisfied by a dead key.
+          await t7Set(page, 6, 6);
+          const dOnly = await t7Sel(page);
+          assert.deepStrictEqual(dOnly.memberLines, [[6, 6]],
+            'ANTI-VACUITY precondition: the set is now d alone. Got '
+            + JSON.stringify(dOnly));
+          await t7Tab(page, false);
+          const dMoved = await saveAndRead(page, mdPath);
+          assert.strictEqual(dMoved, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
+            'ANTI-VACUITY: Tab on d alone IS legal and moves it 0 -> 1 (MEASURED — this '
+            + 'answer is unchanged by D1). §3.4 rule 3\'s worked example calls the '
+            + 'whole-set no-op wrong BECAUSE this is legal; the ruling is that a legal '
+            + 'move for one member does not entitle a set to move around the members '
+            + 'that cannot. Got ' + JSON.stringify(dMoved));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op for the whole batch');
+        }, 'T7');
+
+      // §3.5's heading row, batched: Tab lowers a heading one level, clamped to
+      // H6; a paragraph in the same set is a documented no-op, not an error.
+      await s3Scenario('a batch Tab over headings changes each level, clamps at H6, one undo op',
+        '# Doc\n\n## alpha\n\nplain\n\n###### deep\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['heading', [3, 3]], ['paragraph', [5, 5]],
+              ['heading', [7, 7]]],
+            'fixture shape: an H2, a PARAGRAPH and an H6 adjacent in `blocks`, so the span '
+            + 'is contiguous and holds two kinds that must be treated differently — and '
+            + 'the H6 is already at the floor the clamp has to respect');
+
+          await t7Set(page, 3, 7);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5], [7, 7]],
+            'precondition: all three blocks really are the set. Got ' +
+            JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          const sel = await t7Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n### alpha\n\nplain\n\n###### deep\n',
+            '§3.5: Tab lowers a heading one level (## -> ###, MEASURED against the shipped '
+            + 'burst Tab on a heading), clamps at H6 so `###### deep` does not move, and '
+            + 'leaves a paragraph alone. All three in ONE commit. Got ' +
+            JSON.stringify(after));
+          // MEASURED, not reasoned (Task 6 carry 5, and this plan's Global
+          // Constraint): marked emits a `space` token for a blank separator but
+          // a HEADING's own trailing blank is absorbed into the heading token,
+          // so there is no `space` between the two headings — only between the
+          // paragraph and the one after it. Authoring this list from the four
+          // blocks a reader counts gives the wrong answer.
+          assert.deepStrictEqual(lexTypes(after),
+            ['heading', 'heading', 'paragraph', 'space', 'heading'],
+            'and the saved bytes still re-lex as heading / heading / paragraph / heading '
+            + '— a stray `#` written onto the paragraph would show up here');
+          assert.deepStrictEqual(sel.memberLines, [[3, 3], [5, 5], [7, 7]],
+            '§3.3: a level change rewrites no line COUNT, so the set collapses onto the '
+            + 'lines it already held. Got ' + JSON.stringify(sel));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'exactly ONE undo op across all three members');
+        }, 'T7');
+
+      // The other end of the same clamp.
+      await s3Scenario('a batch Shift+Tab over headings clamps at H1',
+        '# top\n\n## alpha\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['heading', [3, 3]]],
+            'fixture shape: an H1 already at the ceiling and an H2 that can still rise');
+
+          await t7Set(page, 1, 3);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[1, 1], [3, 3]],
+            'precondition: both headings are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, true);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# top\n\n# alpha\n',
+            '§3.5: Shift+Tab raises a heading one level, clamped to H1 — `# top` cannot '
+            + 'rise and stays put while `## alpha` becomes `# alpha` (MEASURED against '
+            + 'the shipped burst Shift+Tab). A clamp written as an unconditional -1 emits '
+            + 'a zero-# line, which is not a heading at all. Got ' + JSON.stringify(after));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // §3.6's 2026-08-31 ruling, inherited from Task 6 rather than re-invented:
+      // a span holding BOTH list items and non-list blocks is refused with a
+      // banner. It CONTRADICTS this plan's Task 7 text ("a batch containing both
+      // kinds applies each rule to its own kind") — see the carry.
+      await s3Scenario('a batch Tab over a mixed span refuses with Task 6\'s banner',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['li', [5, 5]], ['li', [6, 6]]],
+            'fixture shape: a paragraph adjacent in `blocks` to a two-item run, so the '
+            + 'span is contiguous and the refusal is about the KINDS, not about a gap');
+
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really holds a non-list block AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.strictEqual(await t7Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            '§3.6 (2026-08-31): a mixed span is refused with a BANNER — silently doing '
+            + 'nothing is a defect. This is Task 6\'s existing refusal, not a second one');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and a refusal must not touch one byte');
+          assert.deepStrictEqual(await t7Indents(page),
+            [['heading', null], ['paragraph', null], ['li', '0'], ['li', '0']],
+            'nor leave a half-applied indent in the DOM for the next commit to pick up');
+        }, 'T7');
+
+      // Contiguity in `blocks` does not imply ONE run: two adjacent list tokens
+      // are adjacent blocks with no phantom between them, and a batch Tab that
+      // re-serialized "the run" would rewrite a range that does not cover both.
+      await s3Scenario('a batch Tab spanning two runs refuses, byte-identical',
+        '# Doc\n\n- a\n* b\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          const shape = await t7Blocks(page);
+          assert.deepStrictEqual(shape.map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]]],
+            'fixture shape: two list items ADJACENT in `blocks` — no phantom, no gap. Got '
+            + JSON.stringify(shape));
+          assert.deepStrictEqual(await page.evaluate(() =>
+            [].slice.call(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+              .map((el) => el.getAttribute('data-list-start'))), ['1', '1'],
+            'precondition, MEASURED: a marker change interrupts a list, so BOTH items are '
+            + 'their own list-start — that is what makes them two runs rather than one');
+
+          await t7Set(page, 3, 4);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [4, 4]],
+            'precondition: both items are the set. Got ' + JSON.stringify(before));
+
+          await t7Tab(page, false);
+
+          assert.strictEqual(await t7Banner(page), '選取範圍跨越兩個清單，無法整批操作',
+            'the two-run span refuses with its own banner');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+        }, 'T7');
+
+      // ── §3.6 「Delete 整批刪」 ───────────────────────────────────────────
+      // The spec's 2026-08-31 ruling: it goes through the SAME batch path as
+      // the ⠿ menu's 刪除 (deleteListItemsViaGutter, already a contiguous-range
+      // implementation) — never a second deletion path.
+      await s3Scenario('Delete over a standing selection removes every member, in one undo op',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]], ['li', [5, 5]],
+              ['li', [6, 6]]],
+            'fixture shape: a heading and a four-item run on lines 3..6');
+          assert.deepStrictEqual(await t7Texts(page),
+            ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+            'precondition: all four items are IN the document before the key is pressed — '
+            + 'a delete test that does not state this is green on an empty page');
+
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 5, memberLines: [[4, 4], [5, 5]],
+              domSelectedLines: [[4, 4], [5, 5]], focusHolderId: '3' },
+            'precondition: a real TWO-member selection stands over bravo and charlie — '
+            + 'model and paint. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          const sel = await t7Sel(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'BOTH members leave in one commit and the survivors are re-serialized as one '
+            + 'run — exactly what the ⠿ 刪除 does with the same set. A path that deleted '
+            + 'only the focus holder leaves ' + JSON.stringify('# Doc\n\n- alpha\n- bravo\n- delta\n')
+            + ' or ' + JSON.stringify('# Doc\n\n- alpha\n- charlie\n- delta\n') + '. Got '
+            + JSON.stringify(after));
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'delta'],
+            'and the two blocks really left the rendered document, not just the file');
+          assert.strictEqual(sel, null,
+            '§3.3 + §4.4: a delete produces no lines, so the collapse range does not '
+            + 'resolve and the set is CLEARED');
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op');
+        }, 'T7');
+
+      // The ruling on Backspace: the same gesture. While a set stands, focus is
+      // on the roving `.ed-block` holder — not on any text surface — so neither
+      // key can mean "delete a character", and Notion, Word and every file
+      // manager treat the pair as one gesture over a whole-object selection.
+      await s3Scenario('Backspace over a standing selection does exactly what Delete does',
+        '# Doc\n\n- alpha\n- bravo\n- charlie\n- delta\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await t7Texts(page),
+            ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+            'precondition: all four items are there first');
+          await t7Set(page, 4, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5]],
+            'precondition: bravo and charlie are the set. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Backspace');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- alpha\n- delta\n',
+            'Backspace is the same batch delete as Delete. Got ' + JSON.stringify(after));
+          assert.strictEqual(await t7Sel(page), null, 'and it clears the set the same way');
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // The non-li half of the same path: a contiguous span of ordinary blocks
+      // is one line-range removal, blank separators included.
+      await s3Scenario('Delete over a span of non-list blocks removes the whole range',
+        '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['paragraph', [5, 5]],
+              ['paragraph', [7, 7]]],
+            'fixture shape: three paragraphs under a heading');
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: alpha and bravo are the set, charlie is not. Got ' +
+            JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\ncharlie\n',
+            'the span leaves as ONE range — the blank separator between its members goes '
+            + 'with it and exactly one adjacent blank is absorbed on the outside '
+            + '(MEASURED against the ⠿ 刪除 over the same set). Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'charlie'], 'and in the DOM');
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+        }, 'T7');
+
+      // The ruling on a whole-document selection: it is allowed, and it empties
+      // the document. MEASURED on this branch through the ⠿ 刪除 with the same
+      // set BEFORE the key existed — the file came back '' with `blocks` empty
+      // and no banner. Refusing it only for the KEY would make the two
+      // affordances disagree, which §3.6's 「同一條批次路徑」 forbids; and the
+      // undo below is what makes it a safe thing to allow.
+      await s3Scenario('Delete over the WHOLE document empties it, and one undo brings it back',
+        '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
+            [['heading', [1, 1]], ['paragraph', [3, 3]], ['paragraph', [5, 5]]],
+            'fixture shape: every block in the document is about to be in the set');
+          await t7Set(page, 1, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[1, 1], [3, 3], [5, 5]],
+            'precondition: the set really is EVERY block. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          assert.strictEqual(await t7Banner(page), null,
+            'no refusal: emptying the document is allowed, and is what the ⠿ 刪除 over the '
+            + 'same set already did before this key existed');
+          assert.deepStrictEqual(await page.evaluate(() => window.__edTestBlocks()), [],
+            'every block is gone from the model');
+          assert.strictEqual(await t7Sel(page), null, 'and the set is cleared');
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '',
+            'the file is empty. Got ' + JSON.stringify(after));
+
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and ONE Ctrl+Z brings the whole document back — which is what makes emptying '
+            + 'it a safe thing to allow rather than a trap');
+        }, 'T7');
+
+      // The Delete key inherits the shared preamble's refusals because it goes
+      // through the SAME entry point, not because it re-checks anything.
+      await s3Scenario('Delete over a mixed span refuses with Task 6\'s banner, byte-identical',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set holds a paragraph AND a list item. Got ' +
+            JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          assert.strictEqual(await t7Banner(page),
+            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+            'the key routes through deleteBlockViaGutter(), so it inherits the mixed-span '
+            + 'refusal rather than carrying a copy of it');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'bravo', 'charlie'],
+            'and nothing left the document');
+        }, 'T7');
+
+      // REGRESSION GUARD (green before the implementation, and named as such —
+      // it cannot be RED before a Delete branch exists). Its bite is proved by
+      // mutation, not by this run: ordering the new branch ABOVE the
+      // `.ed-wys-armed` short-circuit makes the caret's own block get DELETED
+      // by an ordinary editing keystroke.
+      await s3Scenario('Delete inside an armed surface still edits text, and deletes no block',
+        '# Doc\n\nalpha\n\nbravo\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.strictEqual(await t7Sel(page), null,
+            'precondition: NO selection stands — this is the resting state every pre-S3 '
+            + 'gesture lives in');
+          const sel = await page.evaluate(() => {
+            const els = [].slice.call(
+              document.querySelectorAll('.ed-block[data-block-type="paragraph"]'));
+            return '.ed-block[data-block-id="' + els[0].getAttribute('data-block-id') +
+              '"] .ed-wys-armed';
+          });
+          await page.click(sel);
+          await page.evaluate((s) => {
+            const el = document.querySelector(s);
+            const r = document.createRange();
+            r.setStart(el.firstChild, 0);
+            r.collapse(true);
+            const s2 = window.getSelection();
+            s2.removeAllRanges();
+            s2.addRange(r);
+          }, sel);
+          assert.strictEqual(await page.evaluate((s) =>
+            document.activeElement === document.querySelector(s), sel), true,
+            'precondition: the caret really is inside the armed paragraph');
+
+          await t7Press(page, 'Delete');
+          await page.keyboard.press('Enter');
+          await settleEditor(page);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\nlpha\n\nbravo\n',
+            'Delete at the caret removes ONE CHARACTER — the burst short-circuit above the '
+            + 'new branch keeps every key on an armed surface belonging to that surface. A '
+            + 'branch ordered above it deletes the whole block instead, giving '
+            + JSON.stringify('# Doc\n\nbravo\n') + '. Got ' + JSON.stringify(after));
+          assert.strictEqual(await t7Sel(page), null,
+            'and no selection was created by a keystroke that has nothing to do with one');
+          assert.notStrictEqual(after, original, 'sanity: the keystroke did reach the surface');
+        }, 'T7');
+    }
+    // <<<T7SECTION
+
+    // ── S3 Task 8: the selection-shape × operation sweep ──────────────────
+    // >>>T8SWEEP  (and <<<T8SWEEP at the end: the scratch subset runner every
+    // S3 task has used slices a section out by markers, never by line number.)
+    //
+    // THIRTEEN selection SHAPES against seven batch OPERATIONS — 91 cells.
+    // (Corrected 2026-08-31: this header read "Eleven" and "all 77 cells"
+    // because the stage-closure follow-up added the `hr in span` and
+    // `html in span` rows without re-counting the prose. Every total the
+    // sweep PRINTS is derived from T8_SHAPES.length x T8_OPS.length, so the
+    // comments were the only thing that was ever wrong.)
+    // Tasks 6 and 7
+    // each pinned exact bytes for the shapes their own arithmetic lives in;
+    // this is the cross product, and its job is different — it asks every
+    // shape the same seven questions and refuses to let a cell be green for
+    // being silent.
+    //
+    // Three rules the sweep is built around, all of them lessons this plan
+    // has already paid for:
+    //
+    //   1. **Preconditions are asserted per CELL, before the operation.** A
+    //      sweep whose fixture cannot express the shape under test reports
+    //      green and removes the pressure to look — eleven vacuous tests
+    //      across S1–S3 got in that way. So every cell first proves the set
+    //      really holds the member count the row claims, that a "degraded"
+    //      run really reports something unsupported, that a "phantom"
+    //      fixture really has an INVERTED range between two members, and
+    //      that a row about a WITHHELD block type really holds a block of
+    //      that type, covered WHOLE by the set. (That last precondition read
+    //      "the table's whole four-line body" until 2026-08-31: T8_TBL's
+    //      table owns THREE lines — header, delimiter, one data row — and the
+    //      assertion has always derived the count from the row's own
+    //      declared range, so the prose was the only thing that was wrong.)
+    //   2. **A refusal is an OUTCOME, not a skip.** §3.6's 2026-08-31 ruling
+    //      is explicit that 「靜默不動作是缺陷」, so a cell that comes back
+    //      byte-identical with no banner is a DEFECT unless the row names it
+    //      as a documented no-op with a reason. Every refusing cell asserts
+    //      both halves: the banner's exact text AND a byte-identical file.
+    //   3. **The assertions are on the SAVED BYTES**, read back off disk
+    //      after a real Ctrl+S (Task 6 carry 4: a ⠿ gesture's bytes are not
+    //      on disk until then, and a bare readFileSync straight afterwards
+    //      reads the original — five write scenarios "failed" that way once).
+    //      lexLooseDeep(), not lexLoose(): the shallow one cannot see a
+    //      NESTED list going loose and that has already caused a false green.
+    {
+      // The thirteen shapes. `md` is the fixture, `anchor`/`focus` the selection
+      // (a LINE range — the selection's identity is lines, never ids), and
+      // `members` what membersOf() must answer for it. Measured with
+      // buildBlockMap() before being written down.
+      const T8_P = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
+      const T8_L = '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n4. delta\n';
+      const T8_MIX = '# Doc\n\nalpha\n\n- bravo\n- charlie\n';
+      const T8_DEG = '# Doc\n\n- a\n\n- b\n';
+      const T8_TBL = '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n';
+      const T8_HR = '# Doc\n\nalpha\n\n---\n\nbravo\n';
+      const T8_HTML = '# Doc\n\nalpha\n\n<div>x</div>\n\nbravo\n';
+      const T8_GAP = '# Doc\n\n- a\n- - b\n- c\n';
+      const T8_EDGE = 'alpha\n\nbravo\n\ncharlie\n';
+      const T8_WHOLE = 'alpha\n\nbravo\n';
+
+      // Outcome vocabulary. `applied` = the file changed and no banner was
+      // raised. `refused:<message>` = the file is byte-identical AND that
+      // banner stands. `noop:<reason>` = byte-identical, no banner, and the
+      // row states WHY the spec says nothing should happen. Anything else is
+      // a defect, `SILENT` above all.
+      const RUN_GATE = '此清單含不支援的格式，無法調整結構';
+      const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+      const GAP = '選取範圍不連續，無法整批操作';
+      // Stage-closure gaps 2 and 3 (2026-08-31). §3.7 / §7 withhold 轉換成
+      // from THREE block types on a single block's ⠿ — a table because no
+      // target can carry its cells, an hr and a raw html block because they
+      // have no content to strip and none to re-host — and not one of those
+      // reasons stops applying because the block happens to be one member of
+      // a set. The batch path refuses all three, and each names ITSELF: a
+      // user with an hr in the selection must not be told it holds a table.
+      // Spelled out as three literals on purpose. Deriving them from the
+      // production formula (a label plugged into one template) would make
+      // this assert only that the code equals itself, and every wording
+      // regression would stay green.
+      const TABLE_CONVERT = '選取範圍含有表格，無法整批轉換';
+      const HR_CONVERT = '選取範圍含有分隔線，無法整批轉換';
+      const HTML_CONVERT = '選取範圍含有 HTML 區塊，無法整批轉換';
+      const refused = (m) => ({ kind: 'refused', message: m });
+      const noop = (why) => ({ kind: 'noop', why: why });
+      const applied = { kind: 'applied' };
+      // §3.5: 「段落 no-op」— a span with no heading and no list item in it has
+      // nothing for Tab to change, and that is the spec's answer, not a
+      // dropped gesture.
+      const PARA_TAB = noop('§3.5: a span of paragraphs has nothing Tab can change');
+      const allRefuse = (m) => ({
+        'convert-quote': refused(m), 'convert-ul': refused(m), duplicate: refused(m),
+        'delete-menu': refused(m), 'delete-key': refused(m),
+        tab: refused(m), 'shift-tab': refused(m),
+      });
+      const paraOps = {
+        'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+        'delete-menu': applied, 'delete-key': applied,
+        tab: PARA_TAB, 'shift-tab': PARA_TAB,
+      };
+
+      const T8_SHAPES = [
+        { id: '1 block', md: T8_P, anchor: 3, focus: 3, members: [[3, 3]],
+          expect: paraOps },
+        { id: '2 blocks', md: T8_P, anchor: 3, focus: 5, members: [[3, 3], [5, 5]],
+          expect: paraOps },
+        { id: 'N blocks', md: T8_P, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]], expect: paraOps },
+        // A span of list items, deliberately NOT starting at the run's first
+        // item: an anchor that is the list's own start has delta 0 by
+        // indentListItem()'s list-start clause, and the Tab cell would then be
+        // a no-op for a reason that has nothing to do with the batch.
+        { id: 'list-item span', md: T8_L, anchor: 4, focus: 6,
+          members: [[4, 4], [5, 5], [6, 6]],
+          expect: {
+            'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied, tab: applied,
+            // T7 carry 5: the delta is measured from the set's MINIMUM old
+            // indent and a member already at 0 can move −1 nowhere, so the
+            // whole batch is a no-op. The alternative (a max(0,…) floor) would
+            // move the deeper members and make a's child its sibling — the
+            // same unasked-for restructure §3.5 rules out for Tab.
+            'shift-tab': noop('T7 carry 5: minimum old indent is already 0, so the '
+              + 'one delta is 0 and §3.5 forbids a per-item floor'),
+          } },
+        // §3.6's 2026-08-31 ruling. Every one of the seven refuses.
+        { id: 'crossing kinds', md: T8_MIX, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], mixed: true, expect: allRefuse(MIXED) },
+        // §4.3's run-wide gate. The fixture is one LOOSE list, so
+        // serializeBlocks() reports 'P' for every item and the gate refuses
+        // ahead of the columnOnly bail — which is why Tab refuses here too.
+        { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], degraded: true, expect: allRefuse(RUN_GATE) },
+        // Task 1 carry 2 / Task 6 carry 15: a no-line PHANTOM sits BETWEEN two
+        // real members, so the set cannot be expressed as one contiguous index
+        // range in `blocks`.
+        { id: 'phantom in span', md: T8_GAP, anchor: 3, focus: 5,
+          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2, expect: allRefuse(GAP) },
+        // A table is ONE block owning four source lines. The anchor is put on
+        // the table's startLine and the FOCUS on the paragraph, so the roving
+        // holder — and therefore the ⠿ the menu opens on — is the paragraph:
+        // §3.7 gives a table block no 轉換成 at all, and a grip that could not
+        // offer the item would make two of the seven cells unreachable rather
+        // than answered.
+        // ⚠ RULED 2026-08-31 (stage-closure gap 2), and this row is where the
+        // ruling is enforced. The two conversion cells used to APPLY and to
+        // rewrite the TABLE along with the rest of the span — 引用 gave
+        // '> | A | B |' … and 項目符號列表 gave '- | A | B |' with its other
+        // two lines carried as continuations. Nothing was LOST (both still lex
+        // as a table, nested in the blockquote / in the list item), but §3.7
+        // and §7 withhold 轉換成 from a table block ENTIRELY, on the grounds
+        // that no target can carry its cells — and that reason does not stop
+        // applying because the table is a member of a set. Two affordances
+        // giving opposite answers to the same question is exactly the shape
+        // §3.6's 「不得另寫一條」 ruling exists to prevent, and a user selecting
+        // a stretch of prose to quote it would almost never mean to wrap an
+        // intervening table in a blockquote with nothing on screen saying so.
+        // ⇒ 轉換成 REFUSES with its own banner; the file stays byte-identical.
+        // Scoped to 轉換成 alone: the other five cells of this row are measured
+        // correct and have no equivalent objection, and they stay where they
+        // are — which is what makes this row the guard against the refusal
+        // being widened by accident as well as against it being dropped.
+        { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
+          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] }, expect: {
+            'convert-quote': refused(TABLE_CONVERT),
+            'convert-ul': refused(TABLE_CONVERT),
+            duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        // The same rule, two axes over — and the reason these are ONE rule
+        // and not three anecdotes. 'hr' and 'html' are withheld from a single
+        // block's 轉換成 for a reason of their own: convert-md strips a
+        // block's MARKER to get its content, and these two HAVE no content —
+        // the source line IS the marker. MEASURED on these exact fixtures
+        // while the batch path gated only 'table' (2026-08-31, stage-closure
+        // gap 3), with the grip on a paragraph and NO banner in any of them:
+        //   hr   → 引用        wrote '# Doc\n\n> alpha\n\n> ---\n\n> bravo\n'
+        //   hr   → 項目符號列表 wrote '# Doc\n\n- alpha\n- ---\n- bravo\n'
+        //   html → 引用        wrote '# Doc\n\n> alpha\n\n> <div>x</div>\n\n> bravo\n'
+        // The second of those is '- ---' — the exact byte sequence the
+        // single-block reason names as why the item is not offered: marked
+        // re-lexes it as an hr, so the file's bytes moved and the block's
+        // type did not. The gesture changed the file and said nothing, which
+        // §3.6's ruling calls a defect outright.
+        //
+        // ⇒ 轉換成 REFUSES, with the banner that names what is ACTUALLY in
+        // the span (not the table's), file byte-identical. Scoped to 轉換成
+        // exactly as the table row is: the other five cells are measured
+        // correct, and they stay applying so a widening of the predicate into
+        // resolveGutterOperands() shows up here as a failure too.
+        { id: 'hr in span', md: T8_HR, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]],
+          withheld: { type: 'hr', lines: [5, 5] }, expect: {
+            'convert-quote': refused(HR_CONVERT),
+            'convert-ul': refused(HR_CONVERT),
+            duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        { id: 'html in span', md: T8_HTML, anchor: 3, focus: 7,
+          members: [[3, 3], [5, 5], [7, 7]],
+          withheld: { type: 'html', lines: [5, 5] }, expect: {
+            'convert-quote': refused(HTML_CONVERT),
+            'convert-ul': refused(HTML_CONVERT),
+            duplicate: applied,
+            'delete-menu': applied, 'delete-key': applied,
+            tab: PARA_TAB, 'shift-tab': PARA_TAB,
+          } },
+        { id: 'document start', md: T8_EDGE, anchor: 1, focus: 3,
+          members: [[1, 1], [3, 3]], expect: paraOps },
+        { id: 'document end', md: T8_EDGE, anchor: 3, focus: 5,
+          members: [[3, 3], [5, 5]], expect: paraOps },
+        // T7 carry 7: a whole-document set is allowed and its delete empties
+        // the file. One Ctrl+Z brings it back, which is what makes it safe.
+        { id: 'whole document', md: T8_WHOLE, anchor: 1, focus: 3,
+          members: [[1, 1], [3, 3]], empties: true, expect: paraOps },
+      ];
+
+      // The seven operations. Two conversions — one list target and one
+      // non-list target, the two sides of §4.3's rules 1 and 2 — plus the ⠿'s
+      // other two set operations and the three keyboard ones.
+      const T8_OPS = [
+        { id: 'convert-quote', run: (page, sel) => convertVia(page, sel, '引用') },
+        { id: 'convert-ul', run: (page, sel) => convertVia(page, sel, '項目符號列表') },
+        { id: 'duplicate', run: (page, sel) => clickGutterMenuItem(page, sel, '建立副本') },
+        { id: 'delete-menu', run: (page, sel) => clickGutterMenuItem(page, sel, '刪除') },
+        { id: 'delete-key', run: (page) => page.keyboard.press('Delete') },
+        { id: 'tab', run: (page) => page.keyboard.press('Tab') },
+        { id: 'shift-tab', run: async (page) => {
+          await page.keyboard.down('Shift');
+          await page.keyboard.press('Tab');
+          await page.keyboard.up('Shift');
+        } },
+      ];
+
+      const t8Banner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const t8Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const t8Blocks = (page) => page.evaluate(() => window.__edTestBlocks());
+      // §4.3's own gate, asked of the live DOM: which blocks serializeBlocks()
+      // cannot round-trip. `[]` means every run in the document is
+      // structurally editable — the precondition twelve of the thirteen rows need,
+      // and the one thing the 'degraded run' row needs to be NON-empty.
+      const t8Unsupported = (page) => page.evaluate(() =>
+        window.md2docListMd.serializeBlocks(Array.prototype.slice.call(
+          document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported);
+
+      const t8Rows = [];
+      const t8Defects = [];
+
+      for (const shape of T8_SHAPES) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s3-t8-'));
+        const mdPath = path.join(dir, 'doc.md');
+        fs.writeFileSync(mdPath, shape.md, 'utf8');
+        // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
+        // has one: seven cells on one server outlive createEditorServer()'s
+        // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
+        // that reads as a broken test.
+        const srv8 = await createEditorServer({
+          files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+        });
+        try {
+          const page = await newPage(browser);
+          // The batch paths are async handlers with no catch of their own, so
+          // a throw inside one is silent and looks exactly like "the gesture
+          // did nothing" (Task 6 carry 17).
+          const thrown = [];
+          page.on('pageerror', (e) => thrown.push(String(e && e.message)));
+
+          for (const op of T8_OPS) {
+            const cell = shape.id + ' × ' + op.id;
+            const want = shape.expect[op.id];
+            assert.ok(want, 'FIXTURE SANITY ' + cell + ': every cell of the matrix must '
+              + 'state an expected outcome — an unlisted cell is a hole in the sweep');
+            thrown.length = 0;
+            // Every cell starts from the same bytes; only the navigation is
+            // repeated. A cell that DID write despite refusing therefore
+            // cannot poison the next one.
+            fs.writeFileSync(mdPath, shape.md, 'utf8');
+            await page.goto(srv8.urlFor(mdPath), { waitUntil: 'networkidle0' });
+            await settleEditor(page);
+
+            // ── PRECONDITIONS ────────────────────────────────────────────
+            await page.evaluate((a, f) => window.__edTestSetSelection(a, f),
+              shape.anchor, shape.focus);
+            const before = await t8Sel(page);
+            assert.ok(before, 'PRECONDITION ' + cell + ': a selection must actually stand');
+            assert.deepStrictEqual(before.memberLines, shape.members,
+              'PRECONDITION ' + cell + ': the set must really hold ' + shape.members.length
+              + ' member(s) at ' + JSON.stringify(shape.members) + ' — a row whose fixture '
+              + 'cannot express its own shape sweeps nothing. Got '
+              + JSON.stringify(before.memberLines));
+            assert.deepStrictEqual(before.domSelectedLines, shape.members,
+              'PRECONDITION ' + cell + ': the PAINT must agree with the model. A count of '
+              + '.ed-selected nodes is an assertion about Task 2\'s CSS; the pair is what '
+              + 'catches the two drifting apart. Got '
+              + JSON.stringify(before.domSelectedLines));
+            assert.ok(before.focusHolderId !== null,
+              'PRECONDITION ' + cell + ': the set must have a roving focus holder, or the '
+              + 'three keyboard operations have no receiver at all and their cells would '
+              + 'be green for having no keyboard');
+            const unsupported = await t8Unsupported(page);
+            if (shape.degraded) {
+              assert.ok(unsupported.length > 0,
+                'PRECONDITION ' + cell + ': this row\'s whole subject is a run §4.3\'s gate '
+                + 'REFUSES. serializeBlocks().unsupported must be non-empty, or the row is '
+                + 'sweeping an ordinary healthy list and every refusal below would be '
+                + 'measuring something else. Got ' + JSON.stringify(unsupported));
+            } else {
+              assert.deepStrictEqual(unsupported, [],
+                'PRECONDITION ' + cell + ': every list run in the fixture must be '
+                + 'structurally EDITABLE at the start of this cell — a degraded run refuses '
+                + 'all seven operations and this whole row would be green without a single '
+                + 'one of them happening. Got ' + JSON.stringify(unsupported));
+            }
+            const blocksNow = await t8Blocks(page);
+            if (shape.phantomAt !== undefined) {
+              const ph = blocksNow[shape.phantomAt];
+              assert.ok(ph && ph.endLine === ph.startLine - 1,
+                'PRECONDITION ' + cell + ': index ' + shape.phantomAt + ' of `blocks` must '
+                + 'be a no-line PHANTOM (an INVERTED range) sitting BETWEEN two members, '
+                + 'which is the only thing that makes this a GAP. Nothing in the DOM '
+                + 'carries that fact — the phantom\'s element is there, its missing line '
+                + 'range is not. Got ' + JSON.stringify(ph));
+              const memberIdx = blocksNow
+                .map((b, i) => ({ b: b, i: i }))
+                .filter((x) => shape.members
+                  .some((m) => m[0] === x.b.startLine && m[1] === x.b.endLine))
+                .map((x) => x.i);
+              assert.ok(memberIdx[memberIdx.length - 1] - memberIdx[0] + 1 !== memberIdx.length,
+                'PRECONDITION ' + cell + ': the members must be NON-adjacent in `blocks` '
+                + '(indices ' + JSON.stringify(memberIdx) + '), or there is no gap to refuse');
+            }
+            // The anti-vacuity precondition for every row whose subject is a
+            // block type 轉換成 is WITHHELD from. A refusal cell is worthless
+            // unless the fixture is PROVEN to hold the type in question: if
+            // '---' had lexed as a setext heading, or '<div>x</div>' as a
+            // paragraph, the row would refuse for some other reason (or not
+            // at all) and be green either way. Type, whole line range, and
+            // membership — all three, per cell.
+            if (shape.withheld) {
+              const w = shape.withheld;
+              const blk = blocksNow.find((b) => b.type === w.type);
+              assert.ok(blk, 'PRECONDITION ' + cell + ': the fixture must hold a '
+                + JSON.stringify(w.type) + ' block. Got '
+                + JSON.stringify(blocksNow.map((b) => b.type)));
+              assert.deepStrictEqual([blk.startLine, blk.endLine], w.lines,
+                'PRECONDITION ' + cell + ': the ' + w.type + ' block must own all '
+                + (w.lines[1] - w.lines[0] + 1) + ' of its source lines');
+              assert.ok(shape.members.some((m) =>
+                m[0] === blk.startLine && m[1] === blk.endLine),
+                'PRECONDITION ' + cell + ': the SET must cover the ' + w.type
+                + ' block WHOLE — a member range that stopped short of its last line '
+                + 'would be a different shape from the one this row claims to sweep');
+            }
+            if (shape.mixed) {
+              const kinds = blocksNow
+                .filter((b) => shape.members
+                  .some((m) => m[0] === b.startLine && m[1] === b.endLine))
+                .map((b) => b.type);
+              assert.ok(kinds.indexOf('li') !== -1 && kinds.some((k) => k !== 'li'),
+                'PRECONDITION ' + cell + ': the set must really hold BOTH a list item and a '
+                + 'non-list block, or there is no mixed span to refuse. Got '
+                + JSON.stringify(kinds));
+            }
+            assert.strictEqual(await t8Banner(page), null,
+              'PRECONDITION ' + cell + ': no banner may be standing before the operation, or '
+              + 'the refusal read below is somebody else\'s');
+
+            // ── THE OPERATION ────────────────────────────────────────────
+            const gripSel = '.ed-block[data-block-id="' + before.focusHolderId + '"]';
+            await op.run(page, gripSel);
+            await settleEditor(page);
+
+            const nAfter = (await t8Blocks(page)).length;
+            const banner = await t8Banner(page);
+            const after = await saveAndRead(page, mdPath);
+            const changed = after !== shape.md;
+            assert.deepStrictEqual(thrown, [],
+              cell + ': the batch handlers are async with no catch, so an exception inside '
+              + 'one is silent and reads exactly like "the gesture did nothing"');
+
+            let outcome;
+            if (changed && banner) outcome = 'WROTE+BANNER';
+            else if (changed) outcome = 'applied';
+            else if (banner) outcome = 'refused';
+            else outcome = 'no-op';
+            t8Rows.push({ cell: cell, outcome: outcome, banner: banner,
+                          why: want.kind === 'noop' ? want.why : '' });
+
+            // How many BLOCKS the operation may create or destroy, stated as a
+            // rule rather than as 91 hand-copied numbers: a duplicate adds one
+            // block per member, a delete removes one per member, and a
+            // conversion or an indent change neither creates nor destroys any.
+            // This is the only assertion in the sweep that can tell a batch
+            // that operated on the WHOLE set from one that operated on part of
+            // it — "the file changed" is satisfied by an operand set one item
+            // too short (T7 carry 10's M6), and so is every byte-level
+            // invariant below it. Measured to hold in all 91 cells before it
+            // was written down; a cell that ever needs a different number is a
+            // finding, not a constant to edit.
+            const n = shape.members.length;
+            const wantDelta = want.kind !== 'applied' ? 0
+              : op.id === 'duplicate' ? n
+                : (op.id === 'delete-menu' || op.id === 'delete-key') ? -n : 0;
+            assert.strictEqual(nAfter - blocksNow.length, wantDelta,
+              cell + ': ' + (want.kind === 'applied'
+                ? 'the operation must act on the WHOLE set of ' + n + ' member(s)'
+                : 'this cell writes nothing, so the document\'s block count must not move')
+              + ' — expected the block count to move by ' + wantDelta + ', it moved by '
+              + (nAfter - blocksNow.length) + ' (' + blocksNow.length + ' -> ' + nAfter
+              + '). An operand set one item short still changes the file and still passes '
+              + 'every byte-level invariant; this is what notices');
+            // Every member's OWN source lines, taken from the fixture rather
+            // than authored. A conversion REWRITES each member and a delete
+            // REMOVES it, so after either one not a single one of those lines
+            // may still be in the file. This is what makes the two conversion
+            // columns sensitive to a short operand set — the block count above
+            // cannot see it there (a conversion creates and destroys no
+            // blocks), and "the file changed" is satisfied by converting only
+            // the first member.
+            if (want.kind === 'applied' && op.id !== 'duplicate' && op.id !== 'tab'
+                && op.id !== 'shift-tab') {
+              const src = shape.md.split('\n');
+              const gone = [];
+              shape.members.forEach((m) => {
+                for (let ln = m[0]; ln <= m[1]; ln++) gone.push(src[ln - 1]);
+              });
+              const left = after.split('\n');
+              gone.forEach((line) => {
+                assert.strictEqual(left.indexOf(line), -1,
+                  cell + ': ' + JSON.stringify(line) + ' belonged to a member of the set, so '
+                  + 'the operation either rewrote it or removed it and it must be gone from '
+                  + 'the saved file. Got\n' + JSON.stringify(after));
+              });
+            }
+
+            // ── OUTCOME ──────────────────────────────────────────────────
+            if (outcome === 'WROTE+BANNER') {
+              t8Defects.push(cell + ': the file was rewritten AND a banner was shown ('
+                + banner + ') — a refusal that wrote bytes');
+            }
+            if (want.kind === 'refused') {
+              // §3.6's ruling, in as many words: 「拒絕必須有 banner（靜默不
+              // 動作是缺陷）」. Both halves, always.
+              assert.strictEqual(banner, want.message,
+                cell + ': this shape REFUSES, and a refusal must carry its own banner — '
+                + '§3.6\'s 2026-08-31 ruling says 「靜默不動作是缺陷」, so a cell that '
+                + 'quietly did nothing is a defect and not a pass. Expected '
+                + JSON.stringify(want.message) + ', got ' + JSON.stringify(banner));
+              assert.strictEqual(after, shape.md,
+                cell + ': a refusal must leave the file BYTE-IDENTICAL — no partial apply. '
+                + 'Got ' + JSON.stringify(after));
+            } else if (want.kind === 'noop') {
+              assert.strictEqual(banner, null,
+                cell + ': a documented no-op is not a refusal and must raise no banner ('
+                + want.why + '). Got ' + JSON.stringify(banner));
+              assert.strictEqual(after, shape.md,
+                cell + ': ' + want.why + ' — the file must be byte-identical. Got '
+                + JSON.stringify(after));
+            } else {
+              assert.strictEqual(banner, null,
+                cell + ': this shape is supported and must not refuse. Got '
+                + JSON.stringify(banner));
+              assert.notStrictEqual(after, shape.md,
+                cell + ': the operation is expected to APPLY, and the file came back '
+                + 'byte-identical with no banner — a silently dropped gesture, which '
+                + '§3.6\'s ruling calls a defect outright');
+            }
+
+            // ── CORRUPTION, on the SAVED BYTES ───────────────────────────
+            // lexLooseDeep(), never lexLoose(): inserting a blank-line-
+            // separated sibling under a NESTED item leaves the TOP-level list
+            // tight and makes only the nested one loose, and the shallow scan
+            // reports [false] for exactly the file the deep one reports
+            // [false, true] for. That miss has already produced a false green
+            // in this suite.
+            const loose = lexLooseDeep(after);
+            const baseLoose = lexLooseDeep(shape.md);
+            if (changed && loose.some(Boolean)) {
+              t8Defects.push(cell + ': a list went LOOSE (§4.3 rule 2) — lexLooseDeep '
+                + JSON.stringify(loose) + ' against a baseline of '
+                + JSON.stringify(baseLoose) + ', from\n' + JSON.stringify(after));
+            }
+            // No fixture holds a code token and no operation in this matrix
+            // targets 程式碼, so ANY code token in the output is §3.4's
+            // corruption: an indent of >= 4 columns left behind with no list
+            // to anchor it, which marked lexes as an INDENTED code block and
+            // `t.type` cannot tell apart from a deliberate fence.
+            assert.deepStrictEqual(lexCodeRaws(shape.md), [],
+              'FIXTURE SANITY ' + cell + ': the fixture must hold no code token at '
+              + 'baseline, or "a token became a code block" is not what the next '
+              + 'assertion measures');
+            const codes = lexCodeRaws(after);
+            if (codes.length) {
+              t8Defects.push(cell + ': ' + codes.length + ' code token(s) appeared where the '
+                + 'baseline had none — ' + JSON.stringify(codes) + ' (fenced: '
+                + JSON.stringify(codes.map(isFencedCode)) + ') from\n' + JSON.stringify(after));
+            }
+
+            // §3.4: 「一次使用者手勢 = 恰好一個 undo op」, over the whole
+            // batch. Asked of every cell that actually wrote, so no shape can
+            // grow a second commit unnoticed.
+            if (outcome === 'applied') {
+              await page.keyboard.down('Control');
+              await page.keyboard.press('KeyZ');
+              await page.keyboard.up('Control');
+              await settleEditor(page);
+              const undone = await saveAndRead(page, mdPath);
+              assert.strictEqual(undone, shape.md,
+                cell + ': ONE Ctrl+Z must restore the whole batch — §3.4\'s 「一次使用者手勢 '
+                + '= 恰好一個 undo op」. Got ' + JSON.stringify(undone));
+            }
+            if (shape.empties && (op.id === 'delete-menu' || op.id === 'delete-key')) {
+              // T7 carry 7's ruling, re-asked here on the ⠿ path as well as
+              // the key: a whole-document set is allowed and it empties the
+              // file. Asserted on the OPERATION's own output, before the undo
+              // above restored it — hence the re-read of what `after` held.
+              assert.strictEqual(after, '',
+                cell + ': §3.6 allows a set that covers every block, and its delete empties '
+                + 'the document. Got ' + JSON.stringify(after));
+            }
+          }
+          await page.close();
+        } finally { srv8.close(); }
+      }
+
+      // The matrix, printed whole. A sweep whose result nobody can read is a
+      // sweep nobody re-reads when a later stage changes one of these paths.
+      console.log('S3 T8 sweep — ' + t8Rows.length + ' cells (' + T8_SHAPES.length
+        + ' shapes × ' + T8_OPS.length + ' operations):');
+      t8Rows.forEach((r) => {
+        console.log('  ' + (r.cell + '                                        ').slice(0, 34)
+          + ' ' + (r.outcome + '        ').slice(0, 9)
+          + (r.banner ? '  ' + r.banner : (r.why ? '  ' + r.why : '')));
+      });
+      assert.deepStrictEqual(t8Defects, [],
+        'S3 T8 sweep found corruption in the saved bytes:\n  ' + t8Defects.join('\n  '));
+      console.log('S3 T8 sweep: ' + t8Rows.length + ' cells, no corruption — OK');
+    }
+    // <<<T8SWEEP
+
+    // >>>T9SECTION  (and <<<T9SECTION at the end: same marker-sliced scratch
+    // subset runner every S3 task has used.)
+    //
+    // ── S3 stage-closure gap 1: §3.7's 「多選時不顯示 `MD 原始碼`」 ─────────
+    //
+    // Written verbatim in §3.7 and delivered by none of S3's eight tasks. The
+    // only assignment to that item is `gutterMenuMd.hidden = (blockType ===
+    // 'li')`, with no `blockSelection` term in it, so with a set standing the
+    // row was still offered — and pressing it opened the raw editor for the
+    // GRIP's block alone. The risk is low (a raw commit rewrites only that
+    // block's lines, and a line-range selection re-resolves or clears on the
+    // next render), but it is a written contract and the point of the item is
+    // that it answers for the thing the ⠿ was pressed on. Over a set, it does
+    // not.
+    //
+    // ANTI-VACUITY, stated because "the item is hidden" is worth nothing on
+    // its own — a menu that never opened, an item renamed, a selector typo and
+    // a wholesale `hidden = true` all produce it. Every phase asserts the WHOLE
+    // item list with its per-item hidden flag, so the other three items are
+    // proved present and VISIBLE in the same breath; and the same fixture is
+    // asked three more times, in states where the item must be SHOWN — with no
+    // selection at all, with a set of exactly one, and with a set standing
+    // somewhere else in the document. Dropping the condition from client.js
+    // turns phase 2 red; widening it turns phases 1, 3 and 4 red.
+    {
+      const T9_MENU = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
+      // The items of the OPEN menu belonging to `sel`, each with its own hidden
+      // flag. `null` = no menu is open on that block at all, which every phase
+      // rejects before it looks at a single flag.
+      const t9Items = (page, sel) => page.evaluate((s) => {
+        const menu = document.querySelector(s + ' .ed-handle-menu');
+        if (!menu) return null;
+        return Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+          .map((b) => ({ label: b.textContent, hidden: !!b.hidden }));
+      }, sel);
+      // §3.7's four items, in §3.7's order. Spelt out rather than derived, so a
+      // silently reordered or renamed menu is a failure here too.
+      const t9Menu = (mdHidden) => [
+        { label: '轉換成 ›', hidden: false },
+        { label: '建立副本', hidden: false },
+        { label: '刪除', hidden: false },
+        { label: 'MD 原始碼', hidden: mdHidden },
+      ];
+      const t9CloseMenu = async (page) => {
+        // Escape closes the menu and — per Task 3's ordered prologue, one rung
+        // per press — leaves any standing selection alone, which is what lets
+        // the phases below re-open on the SAME block without toggling.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+      };
+
+      await s3Scenario('§3.7: the ⠿ menu withholds MD 原始碼 only while a multi-block '
+        + 'set stands', T9_MENU, async (page) => {
+        const blockSelFor = (line) => page.evaluate((ln) => {
+          const b = window.__edTestBlocks().find((x) => x.startLine === ln);
+          return b ? '.ed-block[data-block-id="' + b.id + '"]' : null;
+        }, line);
+        const p3 = await blockSelFor(3);
+        const p5 = await blockSelFor(5);
+        const p7 = await blockSelFor(7);
+        assert.ok(p3 && p5 && p7,
+          'FIXTURE SANITY: the three paragraphs must start on lines 3 / 5 / 7 — every '
+          + 'phase below addresses its grip by that block record. Got '
+          + JSON.stringify([p3, p5, p7]));
+
+        // ── Phase 1: nothing selected — all four items are offered ───────
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 1: with NO selection standing the ⠿ menu on a paragraph offers all '
+          + 'four items, MD 原始碼 included. This row is the anti-vacuity partner of '
+          + 'phase 2 — if it is wrong, phase 2 is measuring a menu that never opened '
+          + 'rather than the selection condition');
+        await t9CloseMenu(page);
+
+        // ── Phase 2: a set of TWO — that one item, and only it, is withheld ─
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const two = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(two && two.memberLines, [[3, 3], [5, 5]],
+          '§3.7 phase 2 PRECONDITION: a set of TWO members must really stand, or the '
+          + 'assertion below is being made against no selection at all. Got '
+          + JSON.stringify(two));
+        assert.deepStrictEqual(two.domSelectedLines, [[3, 3], [5, 5]],
+          '§3.7 phase 2 PRECONDITION: the PAINT must agree with the model (Task 4 carry '
+          + '8) — the pair is what catches the two drifting apart. Got '
+          + JSON.stringify(two.domSelectedLines));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(true),
+          '§3.7 「多選時不顯示 `MD 原始碼`」: with a set of two standing and the ⠿ pressed '
+          + 'on a MEMBER of it, MD 原始碼 is withheld and the other three items stay '
+          + 'offered. A raw commit rewrites the GRIP block\'s lines only, so over a set '
+          + 'the item answers for one member and silently ignores the rest');
+        await t9CloseMenu(page);
+
+        // ── Phase 3: a set of exactly ONE is not a multi-selection ───────
+        await page.evaluate(() => window.__edTestSetSelection(3, 3));
+        const one = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(one && one.memberLines, [[3, 3]],
+          '§3.7 phase 3 PRECONDITION: a set of exactly ONE member must stand. Got '
+          + JSON.stringify(one));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 3: a set of exactly one block is not 多選 — the raw editor rewrites '
+          + 'that block\'s own lines and nothing else is in the set, so the item stays. '
+          + 'A condition written as "any selection standing" fails here');
+        await t9CloseMenu(page);
+
+        // ── Phase 4: a set standing ELSEWHERE — §3.3 makes this single ───
+        await page.evaluate(() => window.__edTestSetSelection(5, 7));
+        const away = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(away && away.memberLines, [[5, 5], [7, 7]],
+          '§3.7 phase 4 PRECONDITION: a set of two must stand on the OTHER two '
+          + 'paragraphs, so the grip below is genuinely outside it. Got '
+          + JSON.stringify(away));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 4: the ⠿ is OUTSIDE the set, and §3.3 says that gesture first '
+          + 'replaces the set with the single grip block — so it is a single-block '
+          + 'operation and MD 原始碼 belongs on it. Membership is the question, not '
+          + '"is anything selected"');
+        await t9CloseMenu(page);
+      }, 'T9');
+    }
+    // <<<T9SECTION
+
+    // >>>T10SECTION  (and <<<T10SECTION at the end: same marker-sliced scratch
+    // subset runner every S3 task has used.)
+    //
+    // ── S3 review defect D1: a batch Tab re-parented members of the set ────
+    //
+    // MEASURED on 8486ecd, before the fix: `# Doc\n\n- a\n  - b\n  - c\n- d\n`
+    // with lines 4..6 (b, c, d) selected and Tab pressed came back
+    // `# Doc\n\n- a\n  - b\n    - c\n  - d\n` — c ADOPTED by b, two blocks the
+    // user had selected as siblings. No banner; the DOM and the file agreed, so
+    // it was a clean silent restructure rather than a divergence.
+    //
+    // The mechanism: the delta was measured from the MINIMUM-indent member
+    // alone (d, at 0, whose ceiling under c is 2 ⇒ +1) and applied to the whole
+    // set; applyIndentClamp() then walked the operated blocks in document order
+    // and pulled b back to its own ceiling of 1 — but recomputed c's ceiling
+    // against the just-settled b, so c was allowed to STAY at 2. Only the
+    // constrained member came back. That is the 「半移動」 §3.4 rule 4 forbids
+    // (「段內相對關係必須保持」).
+    //
+    // RULING (2026-08-31 review): the batch delta is the MINIMUM AVAILABLE
+    // HEAD-ROOM across all members, measured against their PRE-move indents. If
+    // any member has no head-room the whole batch is a no-op. That is what
+    // Shift+Tab already did (T7 carry 5 — a member already at indent 0 floors
+    // the whole set), and it is what CHANGELOG v2.12.0 already promises: "a set
+    // that cannot move as a whole does not move at all rather than half-moving".
+    //
+    // WHY T7's OWN FIXTURES DID NOT CATCH IT, measured: T7's b+c fixture has
+    // both members at indent 1, so the delta is 0 either way — a no-op; and
+    // T7's b(1)/c(2)/d(0) fixture has BOTH deep members already at their
+    // ceilings, so they clamp back together and their relation survives by
+    // accident. The shape that bites needs TWO members at the SAME indent where
+    // the FIRST is at its ceiling, PLUS a shallower member in the set.
+    //
+    // Every expected byte string below was MEASURED (on the pre-fix build for
+    // the moving halves, whose answer the ruling does not change, and against
+    // the fixture itself for the no-op halves) before it was written down.
+    {
+      const tXSel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const tXBanner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const tXBlocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return [el ? el.getAttribute('data-block-type') : null,
+            el ? el.getAttribute('data-indent') : null, [b.startLine, b.endLine]];
+        }));
+      const tXIndents = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) =>
+          [el.getAttribute('data-block-type'), el.getAttribute('data-indent')]));
+      const tXSet = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+      const tXTab = async (page, shift) => {
+        if (shift) await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        if (shift) await page.keyboard.up('Shift');
+        await settleEditor(page);
+      };
+      const tXUndo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+
+      // D1's own reproducer. TWO members at indent 1 (b, c) where the FIRST is
+      // at its ceiling, plus a SHALLOWER member (d) that has head-room — the
+      // exact shape neither of T7's two fixtures can express.
+      await s3Scenario('D1: a batch Tab whose first member is at its ceiling moves NOTHING',
+        '# Doc\n\n- a\n  - b\n  - c\n- d\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '0', [6, 6]]],
+            'fixture shape: b and c are SAME-LEVEL siblings at indent 1 (b already at '
+            + 'its ceiling under a) and d is SHALLOWER at 0 with head-room of its own. '
+            + 'T7\'s b+c fixture lacks the shallow member and T7\'s b(1)/c(2)/d(0) '
+            + 'fixture has no two members at the same indent, so neither can express '
+            + 'this');
+
+          await tXSet(page, 4, 6);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 6, memberLines: [[4, 4], [5, 5], [6, 6]],
+              domSelectedLines: [[4, 4], [5, 5], [6, 6]], focusHolderId: '4' },
+            'precondition: b, c and d really are the set — model AND paint. Got '
+            + JSON.stringify(before));
+          assert.strictEqual(await tXBanner(page), null,
+            'precondition: no banner is standing, so the null asserted after the key '
+            + 'is this gesture\'s own answer');
+
+          await tXTab(page, false);
+
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1'], ['li', '0']],
+            'D1 / §3.4 rule 4: b has NO head-room (its ceiling under a is 1 and it is '
+            + 'already there), so the minimum head-room across the set is 0 and the '
+            + 'WHOLE batch is a no-op — in the DOM as well as on disk. Measuring the '
+            + 'delta from the minimum-INDENT member (d, +1) instead moves all three and '
+            + 'lets the clamp pull only b back, leaving c at indent 2 as b\'s CHILD');
+          const afterTab = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterTab, original,
+            'and the file is byte-identical. The min-indent-member answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n  - d\n')
+            + ' — MEASURED on 8486ecd, not reasoned: c is re-parented under b while d, '
+            + 'the member the delta was taken from, moves as asked. Got '
+            + JSON.stringify(afterTab));
+          assert.strictEqual(await tXBanner(page), null,
+            'a boundary no-op is not a refusal and must not raise a banner — the same '
+            + 'answer the single-item Tab gives at its own ceiling. A "fix" that turned '
+            + 'this into a refusal would be caught here');
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // "Nothing moved" is also what a dead key, a refusing batch, or an
+          // implementation that returns 0 unconditionally produces. The SAME
+          // fixture and the SAME code path are therefore driven with a set
+          // that DOES have head-room in every member — c(1) and d(0), whose
+          // ceilings under b(1) and c(1) are 2 — and it must move.
+          const stillSel = await tXSel(page);
+          assert.deepStrictEqual(stillSel, before,
+            'a zero delta commits nothing, so nothing re-renders and the set stands '
+            + 'exactly as it was. Got ' + JSON.stringify(stillSel));
+
+          await tXSet(page, 5, 6);
+          const partnerBefore = await tXSel(page);
+          assert.deepStrictEqual(partnerBefore.memberLines, [[5, 5], [6, 6]],
+            'ANTI-VACUITY precondition: the second set is c and d — every member with '
+            + 'head-room. Got ' + JSON.stringify(partnerBefore));
+          await tXTab(page, false);
+          const afterPartner = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterPartner, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
+            'ANTI-VACUITY: the same batch Tab path, one member less, moves the whole set '
+            + 'by +1 (MEASURED — this answer is the same before and after the fix, which '
+            + 'is what makes it a control). Without this half the byte-identical '
+            + 'assertion above is satisfied by a build that refuses every batch Tab, or '
+            + 'has no batch Tab at all');
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '2'], ['li', '1']],
+            'ANTI-VACUITY: and each member moved exactly one level in the DOM too — '
+            + 'c 1 -> 2 and d 0 -> 1 — so the move is a real one-delta shift and not a '
+            + 'clamp accident. MEASURED');
+
+          await tXUndo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op, over the whole batch');
+        }, 'T10');
+
+      // The three-sibling version. The defect is not an artefact of a two-item
+      // set: with b, c, d all at indent 1 and e at 0, the min-indent-member
+      // delta made b the parent of BOTH c and d.
+      await s3Scenario('D1: three selected siblings stay siblings — the batch refuses to half-move',
+        '# Doc\n\n- a\n  - b\n  - c\n  - d\n- e\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '1', [6, 6]], ['li', '0', [7, 7]]],
+            'fixture shape: THREE siblings at indent 1 (b, c, d) with b at its ceiling, '
+            + 'plus a shallower e');
+
+          await tXSet(page, 4, 7);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5], [6, 6], [7, 7]],
+            'precondition: all four of b, c, d, e are the set. Got '
+            + JSON.stringify(before));
+
+          await tXTab(page, false);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, original,
+            'D1: b has no head-room, so the whole batch is a no-op. The '
+            + 'min-indent-member answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n    - d\n  - e\n')
+            + ' — MEASURED on 8486ecd — in which b has become the PARENT of both c and '
+            + 'd. Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1'], ['li', '1'],
+              ['li', '0']],
+            'and the DOM did not move either — a build that mutated the DOM and failed '
+            + 'to commit is a different defect from one that moved nothing');
+          assert.strictEqual(await tXBanner(page), null,
+            'a boundary no-op raises no banner');
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          await tXSet(page, 5, 7);
+          const partnerBefore = await tXSel(page);
+          assert.deepStrictEqual(partnerBefore.memberLines, [[5, 5], [6, 6], [7, 7]],
+            'ANTI-VACUITY precondition: c, d and e — all three with head-room. Got '
+            + JSON.stringify(partnerBefore));
+          await tXTab(page, false);
+          const afterPartner = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterPartner,
+            '# Doc\n\n- a\n  - b\n    - c\n    - d\n  - e\n',
+            'ANTI-VACUITY: the same path with a set that CAN move moves all three by +1 '
+            + '(MEASURED, and unchanged by the fix). Note the bytes are the ones the '
+            + 'DEFECT produced for the four-member set above — the difference is which '
+            + 'selection is entitled to them');
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '2'], ['li', '2'],
+              ['li', '1']],
+            'ANTI-VACUITY: c and d are still at the SAME indent as each other — the '
+            + 'relative relationship §3.4 rule 4 requires, preserved through a move '
+            + 'rather than through a refusal');
+
+          await tXUndo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'one undo op for the whole batch');
+        }, 'T10');
+
+      // ── review recommendation 5: a refusal banner must not outlive its
+      // gesture ──────────────────────────────────────────────────────────
+      // refuseStructuralListEdit() -> showBanner(msg, null, null) is
+      // dismiss-only and has been since S1, so the message stayed on screen
+      // until the user clicked ✕. S3 made it far more reachable (7 of the T8
+      // sweep's 13 shapes refuse), and a stale 「無法整批操作」 standing over a
+      // later gesture that DID work is a straightforward lie about the state
+      // of the document.
+      await s3Scenario('a refusal banner is cleared by the next gesture that succeeds',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['paragraph', null, [3, 3]], ['li', '0', [5, 5]],
+              ['li', '0', [6, 6]]],
+            'fixture shape: a paragraph and a list run, so a span across them is §3.6\'s '
+            + 'mixed span and refuses');
+          assert.strictEqual(await tXBanner(page), null,
+            'precondition: the page starts with no banner');
+
+          await tXSet(page, 3, 5);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really spans the paragraph AND a list item. Got '
+            + JSON.stringify(before));
+          await clickGutterMenuItem(page,
+            '.ed-block[data-block-id="' + before.focusHolderId + '"]', '刪除');
+          await settleEditor(page);
+          assert.strictEqual(await tXBanner(page), MIXED,
+            'precondition: the mixed span really did refuse, with its own banner. '
+            + 'Without this the "cleared" assertion below is green for a banner that '
+            + 'never appeared');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'precondition: a refusal writes nothing');
+
+          await page.keyboard.press('Escape');
+          await settleEditor(page);
+          assert.strictEqual(await tXSel(page), null,
+            'precondition: Escape cleared the set, so the next gesture is an ordinary '
+            + 'single-block one');
+          assert.strictEqual(await tXBanner(page), MIXED,
+            'and Escape alone does NOT clear it — dismissing the selection is not the '
+            + 'same event as a later gesture succeeding, and a fix that cleared the '
+            + 'banner on Escape would answer the wrong question');
+
+          // A perfectly ordinary, perfectly successful single-block gesture.
+          await clickGutterMenuItem(page, '.ed-block[data-block-id="1"]', '刪除');
+          await settleEditor(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- bravo\n- charlie\n',
+            'ANTI-VACUITY: the later gesture must really have SUCCEEDED — the paragraph '
+            + 'is gone from the file. A banner-clearing fix hung off a path that never '
+            + 'ran would be green on the assertion below and wrong. Got '
+            + JSON.stringify(after));
+          assert.strictEqual(await tXBanner(page), null,
+            'review recommendation 5: the stale refusal must be gone. MEASURED on '
+            + '8486ecd: it was still on screen, still reading '
+            + JSON.stringify(MIXED) + ', over a document the user had just '
+            + 'successfully edited');
+        }, 'T10');
+    }
+    // <<<T10SECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {

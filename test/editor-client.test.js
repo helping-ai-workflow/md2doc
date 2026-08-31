@@ -180,7 +180,17 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.
 for (const needle of ['__ED__', 'Ctrl', 'beforeunload', '/api/save',
                       '/api/render', '/api/ping', '409',
                       '__md2docInitDiagrams', 'ed-raw',
-                      'ed-wys-cell', 'ed-tb-insert', 'wireBlockSelection']) {
+                      'ed-wys-cell', 'ed-tb-insert', 'wireBlockSelection',
+                      // S3 Task 2: 'ed-selected' is BACK, and it is a
+                      // different feature wearing a recycled name. It used to
+                      // be the retired click-select edit bar's single-block
+                      // blue OUTLINE (`.ed-block.ed-selected { outline: 2px
+                      // solid #3b82f6 }`, commit 4bfafd5) and was on the
+                      // must-NOT-reference list below for that reason. Spec
+                      // §4.4 names the same class for block MULTI-select's
+                      // semi-transparent tint, so the guard had to move sides
+                      // rather than be deleted — see the note on that list.
+                      'ed-selected', 'md2docSelection']) {
   assert.ok(src.includes(needle), `client.js must reference ${needle}`);
 }
 // The old hover-gutter DOM wiring must be gone (replaced by the click-bar,
@@ -190,7 +200,15 @@ assert.ok(!/attachGutters/.test(src), 'client.js must not reference the removed 
 // Task 5: the click-select edit bar (its last consumer, tables, is retired
 // in this task — T2 already retired it for paragraph/heading) must be
 // fully gone, not just unused.
-for (const needle of ['ed-bar', 'ed-selected', 'openTableEditor', 'runTableStructureOp',
+// 'ed-selected' was on this list until S3 Task 2 and is now on the
+// must-reference list above: the retired bar owned that class name, and the
+// block multi-select tint (spec §4.4) now owns it. The retirement guarantee is
+// unweakened — it never rested on the CSS class alone. Every piece of the
+// bar's actual WIRING is still named here ('selectedBlockEl' held the one
+// selected element, 'showBarFor'/'dismissBar'/'updateBarButtons' were its
+// whole lifecycle, 'ed-bar' its own root class), so resurrecting the bar
+// without tripping this list is not possible.
+for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
                       'selectedBlockEl', 'dismissBar', 'showBarFor', 'updateBarButtons']) {
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
 }
@@ -764,8 +782,19 @@ function countInCode(source, needle) {
   // commitBlockInsertion() tail, which was already one of the ten. If a
   // future task grows an eleventh, migrate this number WITH the reason;
   // never relax the assertion.
-  assert.strictEqual(helperCalls, 12,
-    'the helper must be DECLARED once, EXPORTED once, and used at all ten ' +
+  //
+  // MIGRATED by S3 Task 7 (12 -> 13), with the reason: §3.5's batch Tab over a
+  // span of NON-list blocks (changeHeadingDepthsInSpan()) is a genuinely NEW
+  // commit-then-render site — it rewrites the heading lines inside the span's
+  // own range with commitRangeEdit() and renders, which is neither
+  // commitListStructure()'s site nor commitBlockInsertion()'s. S3 Tasks 1-6
+  // added NONE, and that was checked rather than assumed: Task 6 generalized
+  // every batch operation IN PLACE (Task 6 carry 12), and Task 7's LIST half
+  // reuses commitListStructure()'s existing site the way every other list
+  // structural edit does. The expected total is therefore DECLARED once +
+  // EXPORTED once + 11 uses = 13.
+  assert.strictEqual(helperCalls, 13,
+    'the helper must be DECLARED once, EXPORTED once, and used at all eleven ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
