@@ -62,11 +62,19 @@ eq(S.membersOf({ anchorLine: 5, focusLine: 5 }, NOLINE).map((b) => b.id), [1],
 eq(S.membersOf({ anchorLine: 1, focusLine: 99 }, NOLINE).map((b) => b.id), [1],
   'the no-line exclusion holds for a range that spans the whole document too');
 
-eq(S.isSelected({ anchorLine: 5, focusLine: 7 }, BLOCKS[3]), true, 'isSelected true');
-eq(S.isSelected({ anchorLine: 5, focusLine: 7 }, BLOCKS[5]), false, 'isSelected false');
-eq(S.isSelected(null, BLOCKS[3]), false, 'nothing is selected when there is no selection');
-eq(S.isSelected({ anchorLine: 1, focusLine: 99 }, NOLINE[0]), false,
-  'a no-line block is never isSelected either');
+// `isSelected` was REMOVED on 2026-08-31 (review recommendation 4). It had no
+// production caller in `lib/` and every one of its four assertions used a
+// SINGLE-line block, so intersection-vs-containment — the one rule it did not
+// share trivially with membersOf() — was never pinned through it; the MULTI
+// fixture above is what actually holds that rule down. This guard keeps it from
+// coming back as an untested export: a re-added `isSelected` must arrive with a
+// production caller AND a multi-line fixture, at which point this line is
+// deleted deliberately rather than silently satisfied.
+assert.strictEqual(typeof S.isSelected, 'undefined',
+  'selection.js must not export a per-block isSelected() with no production caller — '
+  + 're-add it together with the caller and a MULTI-line fixture, and delete this guard '
+  + 'in the same commit');
+checks += 1;
 
 // --- extendTo / stepFocus ---------------------------------------------
 eq(S.extendTo({ anchorLine: 3, focusLine: 3 }, 7), { anchorLine: 3, focusLine: 7 },
@@ -100,8 +108,37 @@ const NOLINE_MID = [
   { id: 2, type: 'li', startLine: 2, endLine: 2, indent: 1 },
   { id: 3, type: 'li', startLine: 3, endLine: 3, indent: 0 },
 ];
-eq(S.stepFocus({ anchorLine: 1, focusLine: 1 }, NOLINE_MID, 1), { anchorLine: 1, focusLine: 2 },
+// ⚠ ONE step does not discriminate, and the version of this test that shipped
+// with Task 1 took exactly one (review recommendation 2, 2026-08-31). The
+// phantom is {startLine: 2, endLine: 1} and the real block behind it is
+// {startLine: 2, endLine: 2} — the SAME startLine — so a build with
+// `.filter(ownsALine)` deleted from stepFocus() lands on the phantom and still
+// answers focusLine 2. The mutant only separates from the shipped code on the
+// step AFTER that: it re-finds index 1 (the phantom, whose startLine is 2),
+// steps to index 2 — the real {2,2} block — and answers 2 again, FOREVER, while
+// the shipped code walks 1 -> 2 -> 3. So the chain is driven three times and
+// every intermediate answer is asserted.
+const nlStep1 = S.stepFocus({ anchorLine: 1, focusLine: 1 }, NOLINE_MID, 1);
+eq(nlStep1, { anchorLine: 1, focusLine: 2 },
   'stepping skips a block that owns no source line');
+const nlStep2 = S.stepFocus(nlStep1, NOLINE_MID, 1);
+eq(nlStep2, { anchorLine: 1, focusLine: 3 },
+  'MUTATION GUARD: the second step is the one that bites. Without the ownsALine '
+  + 'filter the phantom {2,1} is index 1, so this step lands on the real {2,2} and '
+  + 'answers 2 again — the focus never leaves line 2 however many times Shift+Down is '
+  + 'pressed. With the filter, nav is [{1,1},{2,2},{3,3}] and the focus reaches 3');
+const nlStep3 = S.stepFocus(nlStep2, NOLINE_MID, 1);
+eq(nlStep3, { anchorLine: 1, focusLine: 3 },
+  'and the third step clamps at the last block rather than wrapping — an ANTI-VACUITY '
+  + 'partner for the two above: a stepFocus() that simply refused to move would satisfy '
+  + 'neither of them');
+// The same chain upward, so "it can reach 3" is not an artefact of the one
+// direction: the phantom must be skipped on the way back too.
+eq(S.stepFocus({ anchorLine: 3, focusLine: 3 }, NOLINE_MID, -1), { anchorLine: 3, focusLine: 2 },
+  'Shift+Up from the last block lands on the real {2,2}, not the phantom');
+eq(S.stepFocus({ anchorLine: 3, focusLine: 2 }, NOLINE_MID, -1), { anchorLine: 3, focusLine: 1 },
+  'and the step above THAT reaches line 1 — an unfiltered nav would stop at the '
+  + 'phantom (also startLine 2) and answer 2 forever');
 
 // --- §3.3 membership rules --------------------------------------------
 const sel = { anchorLine: 5, focusLine: 7 };
@@ -122,6 +159,32 @@ eq(S.resolveMembership({ anchorLine: 6, focusLine: 6 }, BLOCKS, BLOCKS[3]).mode,
 // through the null-selection path.
 eq(S.resolveMembership(sel, BLOCKS, BLOCKS[0]).mode, 'single',
   'a grip above the set also collapses the set');
+// Task 1 carry 4 says membership is by REFERENCE, "not by id and not by line
+// tuple" — and until 2026-08-31 nothing in the suite could tell the difference
+// (review recommendation 3). Task 6 carry 10's mutation transcript uses
+// `Object.assign({}, rec)`, which carries the id AND the lines across, so it
+// does not separate `indexOf` from `some((m) => m.id === opBlock.id)` either.
+// This is the fixture that does: a record with a MATCHING id and matching lines
+// that is not in `blocks`. By reference it is 'single' (the conservative
+// answer); by id it would be 'batch' and would silently operate on all three
+// members on behalf of a block the caller never found in the list.
+const ID_TWIN = { id: 3, type: 'li', startLine: 6, endLine: 6, indent: 1 };
+eq(S.resolveMembership(sel, BLOCKS, ID_TWIN).mode, 'single',
+  'MUTATION GUARD: identity is by REFERENCE. A record carrying the same id (3) and the '
+  + 'same lines (6,6) as BLOCKS[3] — but not the object in `blocks` — is NOT a member. '
+  + '`members.some((m) => m.id === opBlock.id)` answers batch here and is green against '
+  + 'every other fixture in this file');
+eq(S.resolveMembership(sel, BLOCKS, ID_TWIN).members, [ID_TWIN],
+  'and the single member it answers with is the record it was handed, not the '
+  + 'same-id record out of `blocks`');
+// ANTI-VACUITY for the pair above: the very same LINES, asked with the record
+// that really is in `blocks`, must answer 'batch' with all three members. A
+// resolveMembership() that had degraded to answering 'single' for everything
+// would pass the two assertions above and fail this one.
+eq(S.resolveMembership(sel, BLOCKS, BLOCKS[3]).members.map((b) => b.id), [2, 3, 4],
+  'ANTI-VACUITY: the identical selection, asked with the record FROM `blocks`, is still '
+  + 'a batch of three — so the by-reference guard above is not green merely because this '
+  + 'function stopped answering batch at all');
 
 // --- collapse after an operation --------------------------------------
 eq(S.collapseTo({ startLine: 5, endLine: 8 }), { anchorLine: 5, focusLine: 8 },

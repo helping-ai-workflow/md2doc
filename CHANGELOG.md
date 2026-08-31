@@ -16,11 +16,14 @@ All notable changes to this project will be documented here. This project adhere
   single Ctrl+Z, however many blocks it touched — including selecting the whole
   document and pressing Delete, which empties it and takes one Ctrl+Z to bring back.
 - **Tab over a selection keeps the blocks' relationship to each other.** The whole
-  set moves by one shared step, measured from its shallowest item, so three
-  selected siblings stay siblings instead of folding into one another — and a set
-  that cannot move as a whole does not move at all rather than half-moving. On
-  headings the same key steps every heading in the set a level down or up, stopping
-  at 標題 1 and 標題 6.
+  set moves by one shared step — the largest step every item in the set can take on
+  its own — so three selected siblings stay siblings instead of folding into one
+  another, and a set holding an item that cannot move does not move at all rather
+  than half-moving. Selecting three items that are already as deep as their parent
+  allows and pressing Tab is a no-op, even when a shallower item further down the
+  selection could have moved on its own; pressing Tab on that item by itself still
+  moves it. On headings the same key steps every heading in the set a level down or
+  up, stopping at 標題 1 and 標題 6.
 - **The selection stays put across the redraw its own operation causes.** After a
   batch convert, duplicate or indent the set lands on the lines the operation
   produced, the keyboard still works without touching the mouse, and the page does
@@ -63,6 +66,13 @@ All notable changes to this project will be documented here. This project adhere
   focused with no edit in progress, and in that state the undo key was captured by
   the block and then discarded. Undo and redo now reach the document whenever there
   is no edit in progress to own them.
+- **A refusal message no longer outlives the gesture that raised it.** "This
+  selection cannot be operated on as a batch" and its siblings are dismiss-only
+  notices, so one could still be sitting on screen after a later gesture had
+  successfully changed the document — describing a state that no longer existed.
+  Any structural edit that succeeds now clears a standing refusal. Conflict,
+  render-failure and save-failure banners are untouched: those describe the file or
+  the connection, not one gesture, and still wait to be dismissed.
 
 ## v2.11.1 — 2026-08-31
 

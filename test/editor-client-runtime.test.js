@@ -16798,18 +16798,28 @@ async function gutterGeometry(page, sel) {
     // §3.5's batch semantics and §3.6's 「Delete 整批刪」.
     //
     // The one shape every Tab scenario here is built around: a batch computes
-    // ONE delta, from the member with the MINIMUM old indent, applies it to the
-    // whole set, and only THEN clamps per item. Two different wrong
-    // implementations have to be told apart, and neither can be caught by a
-    // fixture that does not discriminate:
+    // ONE delta for the whole set and only THEN clamps per item. ⚠ UPDATED
+    // 2026-08-31 (review defect D1): that one delta is the minimum available
+    // HEAD-ROOM across the members, measured against their pre-move indents —
+    // NOT the head-room of the member with the minimum old indent, which is
+    // what shipped in T7 and which half-moved a set whose shallowest member
+    // could move and whose first member could not. Three wrong implementations
+    // have to be told apart, and none can be caught by a fixture that does not
+    // discriminate:
     //
     //   * per-item maths (§3.5's own worked example) — visible only on a set
     //     of SAME-LEVEL siblings, where the correct answer is that nothing
     //     moves. "Nothing moved" is also what a dead key produces, so that
     //     scenario carries an anti-vacuity half that proves the key is live.
-    //   * the first member as the anchor instead of the minimum (§3.4 rule 3's
-    //     second worked failure) — visible only on a set that runs DEEP to
-    //     SHALLOW, where the two candidate anchors are different blocks.
+    //   * the delta taken from the shallowest member instead of the least
+    //     mobile one (review defect D1) — visible only on a set holding a
+    //     member at its ceiling AND a shallower member with head-room. The
+    //     two D1 scenarios live in the T10 section below; the deep-to-shallow
+    //     scenario here is the third such fixture and was MIGRATED to the new
+    //     answer rather than deleted.
+    //   * a batch that refuses everything — which every no-op scenario in this
+    //     section and in T10 pairs with a partner set that legitimately MOVES,
+    //     on the same fixture and through the same code path.
     //
     // Every expected byte string below was MEASURED against the shipped
     // single-item Tab / Shift+Tab and the shipped ⠿ 刪除 before it was written
@@ -16869,9 +16879,12 @@ async function gutterGeometry(page, sel) {
         }));
 
       // §3.5's own worked example: `- a / (2sp)- b / (2sp)- c`, select b+c and
-      // press Tab. The minimum old indent in the set is 1 (b), b already sits
-      // at its ceiling, so the ONE delta is 0 and NOTHING moves — which is
-      // exactly what keeps b and c the siblings the user selected them as.
+      // press Tab. Both members sit at indent 1 and b is at its ceiling under
+      // a, so the minimum head-room across the set is 0, the ONE delta is 0
+      // and NOTHING moves — which is exactly what keeps b and c the siblings
+      // the user selected them as. (This fixture cannot express D1: c's own
+      // head-room is 1, but there is no SHALLOWER member for the old rule to
+      // take a non-zero delta from, so both rules answer 0 here.)
       await s3Scenario('a batch Tab moves the set by ONE delta, so selected siblings stay siblings',
         '# Doc\n\n- a\n  - b\n  - c\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
@@ -16894,9 +16907,10 @@ async function gutterGeometry(page, sel) {
 
           assert.deepStrictEqual(await t7Indents(page),
             [['heading', null], ['li', '0'], ['li', '1'], ['li', '1']],
-            '§3.5: the delta is computed ONCE, from the member with the minimum old '
-            + 'indent (b, already at its ceiling of 1), and applied to the whole set — so '
-            + 'the set does not move, IN THE DOM as well as on disk. Per-item maths gives '
+            '§3.5: the delta is computed ONCE, as the minimum head-room across the '
+            + 'set (b is already at its ceiling of 1, so it is 0), and applied to the '
+            + 'whole set — so the set does not move, IN THE DOM as well as on disk. '
+            + 'Per-item maths gives '
             + 'c a ceiling of 2 (because b sits at 1) and moves it there, adopting c as '
             + 'b\'s CHILD — a restructure of two blocks the user selected as siblings');
           const afterTab = await saveAndRead(page, mdPath);
@@ -16936,23 +16950,39 @@ async function gutterGeometry(page, sel) {
             '§3.4: one user gesture = exactly ONE undo op, over the whole batch');
         }, 'T7');
 
-      // §3.4 rule 3's SECOND worked failure, which is Tab's own: 「批次 Tab 選
-      // b(1)..d(0) 時第一成員 b 已在上界 ⇒ delta 0 ⇒ 整批 no-op，儘管單獨對 d
-      // 按 Tab 合法」. This is the scenario the anchor mutation has to bite on —
-      // Task 6 measured that on a batch DELETE the anchor is UNOBSERVABLE (every
-      // survivor above the set is still a list item, so anchorBefore() answers
-      // the same under either anchor and every segment delta is 0), so nothing
-      // in the T6 set can stand in for this one.
-      await s3Scenario('the batch Tab delta is anchored on the set\'s minimum old indent',
+      // ⚠ MIGRATED 2026-08-31 (review defect D1). This scenario asserted
+      // '# Doc\n\n- a\n  - b\n    - c\n  - d\n' — only d moving, b and c
+      // clamped back — as §3.4 rule 3's answer for a set anchored on the
+      // MINIMUM old indent. The review ruled that shape a HALF-MOVE and
+      // §3.4 rule 4 (「段內相對關係必須保持」) the higher rule: the batch delta
+      // is now the minimum available HEAD-ROOM across all members, so b, at
+      // its ceiling under a, floors the whole set at 0 and NOTHING moves.
+      //
+      // The migration is a real behaviour change, not a relaxed assertion, and
+      // it is the same answer Shift+Tab has always given (T7 carry 5) and the
+      // one CHANGELOG v2.12.0 already promises ("a set that cannot move as a
+      // whole does not move at all rather than half-moving"). §3.4 rule 3's
+      // own second worked example is written the other way round and is
+      // superseded here — the two rules cannot both hold on this fixture, and
+      // rule 4 is the one that protects the user's blocks.
+      //
+      // The scenario is KEPT rather than deleted because the deep-to-shallow
+      // shape is still the one that separates "the set is floored by a member
+      // at its ceiling" from "the set is floored by its shallowest member":
+      // here d, the shallowest, has +1 of head-room and still does not move.
+      // Its anti-vacuity half is the SAME fixture with a set of just d, which
+      // produces exactly the bytes this scenario used to expect.
+      await s3Scenario('a batch Tab is floored by the member with the LEAST head-room, not the shallowest',
         '# Doc\n\n- a\n  - b\n    - c\n- d\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.indent, b.lines]),
             [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
               ['li', '2', [5, 5]], ['li', '0', [6, 6]]],
-            'fixture shape: the set (lines 4..6) runs DEEP to SHALLOW — first member b at '
-            + 'indent 1, minimum old indent 0 (d). The two candidate anchors are different '
-            + 'blocks, which is the whole point: on a set whose first member IS its '
-            + 'minimum the two answers are identical and the defect is inexpressible');
+            'fixture shape: the set (lines 4..6) runs DEEP to SHALLOW — b at indent 1 '
+            + 'with NO head-room (its ceiling under a is 1), c at 2 with none either '
+            + '(its ceiling under b is 2), and d at 0 WITH head-room. The shallowest '
+            + 'member and the least-mobile member are different blocks, which is what '
+            + 'makes the two candidate rules distinguishable here');
 
           await t7Set(page, 4, 6);
           const before = await t7Sel(page);
@@ -16962,14 +16992,34 @@ async function gutterGeometry(page, sel) {
           await t7Tab(page, false);
 
           const after = await saveAndRead(page, mdPath);
-          assert.strictEqual(after, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
-            '§3.4 rule 3: the anchor is d (indent 0), whose ceiling under c is 3, so the '
-            + 'one delta is +1; the per-item clamp then holds b and c at their own '
-            + 'ceilings and only d actually moves, 0 -> 1. Anchoring on the FIRST member '
-            + '(b, already at its ceiling of 1) yields delta 0 and NO-OPS THE ENTIRE '
-            + 'BATCH — byte-identical output — although Tab on d alone is legal and '
-            + 'produces exactly these bytes (MEASURED with the shipped single-item Tab). '
-            + 'Got ' + JSON.stringify(after));
+          assert.strictEqual(after, original,
+            'D1 / §3.4 rule 4: b and c both sit at their ceilings, so the minimum '
+            + 'head-room across the set is 0 and the whole batch is a no-op. Taking the '
+            + 'delta from the shallowest member instead (d, +1) moves all three and lets '
+            + 'the clamp pull b and c back — d moves, they do not, and the set the user '
+            + 'selected has been half-moved. That answer, '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n  - d\n')
+            + ', is what this scenario asserted until 2026-08-31; it is the ANTI-VACUITY '
+            + 'half below that is entitled to those bytes. Got ' + JSON.stringify(after));
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // The same fixture and the same batch path with a set of ONE — d,
+          // the only member with head-room — must move it, and must produce
+          // exactly the bytes the whole-set gesture is refused. Without this
+          // half, "byte-identical" is satisfied by a dead key.
+          await t7Set(page, 6, 6);
+          const dOnly = await t7Sel(page);
+          assert.deepStrictEqual(dOnly.memberLines, [[6, 6]],
+            'ANTI-VACUITY precondition: the set is now d alone. Got '
+            + JSON.stringify(dOnly));
+          await t7Tab(page, false);
+          const dMoved = await saveAndRead(page, mdPath);
+          assert.strictEqual(dMoved, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
+            'ANTI-VACUITY: Tab on d alone IS legal and moves it 0 -> 1 (MEASURED — this '
+            + 'answer is unchanged by D1). §3.4 rule 3\'s worked example calls the '
+            + 'whole-set no-op wrong BECAUSE this is legal; the ruling is that a legal '
+            + 'move for one member does not entitle a set to move around the members '
+            + 'that cannot. Got ' + JSON.stringify(dMoved));
 
           await t7Undo(page);
           assert.strictEqual(await saveAndRead(page, mdPath), original,
@@ -17316,7 +17366,13 @@ async function gutterGeometry(page, sel) {
     // >>>T8SWEEP  (and <<<T8SWEEP at the end: the scratch subset runner every
     // S3 task has used slices a section out by markers, never by line number.)
     //
-    // Eleven selection SHAPES against seven batch OPERATIONS. Tasks 6 and 7
+    // THIRTEEN selection SHAPES against seven batch OPERATIONS — 91 cells.
+    // (Corrected 2026-08-31: this header read "Eleven" and "all 77 cells"
+    // because the stage-closure follow-up added the `hr in span` and
+    // `html in span` rows without re-counting the prose. Every total the
+    // sweep PRINTS is derived from T8_SHAPES.length x T8_OPS.length, so the
+    // comments were the only thing that was ever wrong.)
+    // Tasks 6 and 7
     // each pinned exact bytes for the shapes their own arithmetic lives in;
     // this is the cross product, and its job is different — it asks every
     // shape the same seven questions and refuses to let a cell be green for
@@ -17350,7 +17406,7 @@ async function gutterGeometry(page, sel) {
     //      lexLooseDeep(), not lexLoose(): the shallow one cannot see a
     //      NESTED list going loose and that has already caused a false green.
     {
-      // The eleven shapes. `md` is the fixture, `anchor`/`focus` the selection
+      // The thirteen shapes. `md` is the fixture, `anchor`/`focus` the selection
       // (a LINE range — the selection's identity is lines, never ids), and
       // `members` what membersOf() must answer for it. Measured with
       // buildBlockMap() before being written down.
@@ -17548,7 +17604,7 @@ async function gutterGeometry(page, sel) {
       const t8Blocks = (page) => page.evaluate(() => window.__edTestBlocks());
       // §4.3's own gate, asked of the live DOM: which blocks serializeBlocks()
       // cannot round-trip. `[]` means every run in the document is
-      // structurally editable — the precondition ten of the eleven rows need,
+      // structurally editable — the precondition twelve of the thirteen rows need,
       // and the one thing the 'degraded run' row needs to be NON-empty.
       const t8Unsupported = (page) => page.evaluate(() =>
         window.md2docListMd.serializeBlocks(Array.prototype.slice.call(
@@ -17698,14 +17754,14 @@ async function gutterGeometry(page, sel) {
                           why: want.kind === 'noop' ? want.why : '' });
 
             // How many BLOCKS the operation may create or destroy, stated as a
-            // rule rather than as 77 hand-copied numbers: a duplicate adds one
+            // rule rather than as 91 hand-copied numbers: a duplicate adds one
             // block per member, a delete removes one per member, and a
             // conversion or an indent change neither creates nor destroys any.
             // This is the only assertion in the sweep that can tell a batch
             // that operated on the WHOLE set from one that operated on part of
             // it — "the file changed" is satisfied by an operand set one item
             // too short (T7 carry 10's M6), and so is every byte-level
-            // invariant below it. Measured to hold in all 77 cells before it
+            // invariant below it. Measured to hold in all 91 cells before it
             // was written down; a cell that ever needs a different number is a
             // finding, not a constant to edit.
             const n = shape.members.length;
@@ -17973,6 +18029,278 @@ async function gutterGeometry(page, sel) {
       }, 'T9');
     }
     // <<<T9SECTION
+
+    // >>>T10SECTION  (and <<<T10SECTION at the end: same marker-sliced scratch
+    // subset runner every S3 task has used.)
+    //
+    // ── S3 review defect D1: a batch Tab re-parented members of the set ────
+    //
+    // MEASURED on 8486ecd, before the fix: `# Doc\n\n- a\n  - b\n  - c\n- d\n`
+    // with lines 4..6 (b, c, d) selected and Tab pressed came back
+    // `# Doc\n\n- a\n  - b\n    - c\n  - d\n` — c ADOPTED by b, two blocks the
+    // user had selected as siblings. No banner; the DOM and the file agreed, so
+    // it was a clean silent restructure rather than a divergence.
+    //
+    // The mechanism: the delta was measured from the MINIMUM-indent member
+    // alone (d, at 0, whose ceiling under c is 2 ⇒ +1) and applied to the whole
+    // set; applyIndentClamp() then walked the operated blocks in document order
+    // and pulled b back to its own ceiling of 1 — but recomputed c's ceiling
+    // against the just-settled b, so c was allowed to STAY at 2. Only the
+    // constrained member came back. That is the 「半移動」 §3.4 rule 4 forbids
+    // (「段內相對關係必須保持」).
+    //
+    // RULING (2026-08-31 review): the batch delta is the MINIMUM AVAILABLE
+    // HEAD-ROOM across all members, measured against their PRE-move indents. If
+    // any member has no head-room the whole batch is a no-op. That is what
+    // Shift+Tab already did (T7 carry 5 — a member already at indent 0 floors
+    // the whole set), and it is what CHANGELOG v2.12.0 already promises: "a set
+    // that cannot move as a whole does not move at all rather than half-moving".
+    //
+    // WHY T7's OWN FIXTURES DID NOT CATCH IT, measured: T7's b+c fixture has
+    // both members at indent 1, so the delta is 0 either way — a no-op; and
+    // T7's b(1)/c(2)/d(0) fixture has BOTH deep members already at their
+    // ceilings, so they clamp back together and their relation survives by
+    // accident. The shape that bites needs TWO members at the SAME indent where
+    // the FIRST is at its ceiling, PLUS a shallower member in the set.
+    //
+    // Every expected byte string below was MEASURED (on the pre-fix build for
+    // the moving halves, whose answer the ruling does not change, and against
+    // the fixture itself for the no-op halves) before it was written down.
+    {
+      const tXSel = (page) => page.evaluate(() => window.__edTestGetSelection());
+      const tXBanner = (page) => page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict');
+        return b ? b.querySelector('span').textContent : null;
+      });
+      const tXBlocks = (page) => page.evaluate(() =>
+        window.__edTestBlocks().map((b) => {
+          const el = document.querySelector('.ed-block[data-block-id="' + b.id + '"]');
+          return [el ? el.getAttribute('data-block-type') : null,
+            el ? el.getAttribute('data-indent') : null, [b.startLine, b.endLine]];
+        }));
+      const tXIndents = (page) => page.evaluate(() =>
+        [].slice.call(document.querySelectorAll('.ed-block')).map((el) =>
+          [el.getAttribute('data-block-type'), el.getAttribute('data-indent')]));
+      const tXSet = (page, a, f) =>
+        page.evaluate((x, y) => window.__edTestSetSelection(x, y), a, f);
+      const tXTab = async (page, shift) => {
+        if (shift) await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        if (shift) await page.keyboard.up('Shift');
+        await settleEditor(page);
+      };
+      const tXUndo = async (page) => {
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settleEditor(page);
+      };
+
+      // D1's own reproducer. TWO members at indent 1 (b, c) where the FIRST is
+      // at its ceiling, plus a SHALLOWER member (d) that has head-room — the
+      // exact shape neither of T7's two fixtures can express.
+      await s3Scenario('D1: a batch Tab whose first member is at its ceiling moves NOTHING',
+        '# Doc\n\n- a\n  - b\n  - c\n- d\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '0', [6, 6]]],
+            'fixture shape: b and c are SAME-LEVEL siblings at indent 1 (b already at '
+            + 'its ceiling under a) and d is SHALLOWER at 0 with head-room of its own. '
+            + 'T7\'s b+c fixture lacks the shallow member and T7\'s b(1)/c(2)/d(0) '
+            + 'fixture has no two members at the same indent, so neither can express '
+            + 'this');
+
+          await tXSet(page, 4, 6);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before,
+            { anchorLine: 4, focusLine: 6, memberLines: [[4, 4], [5, 5], [6, 6]],
+              domSelectedLines: [[4, 4], [5, 5], [6, 6]], focusHolderId: '4' },
+            'precondition: b, c and d really are the set — model AND paint. Got '
+            + JSON.stringify(before));
+          assert.strictEqual(await tXBanner(page), null,
+            'precondition: no banner is standing, so the null asserted after the key '
+            + 'is this gesture\'s own answer');
+
+          await tXTab(page, false);
+
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1'], ['li', '0']],
+            'D1 / §3.4 rule 4: b has NO head-room (its ceiling under a is 1 and it is '
+            + 'already there), so the minimum head-room across the set is 0 and the '
+            + 'WHOLE batch is a no-op — in the DOM as well as on disk. Measuring the '
+            + 'delta from the minimum-INDENT member (d, +1) instead moves all three and '
+            + 'lets the clamp pull only b back, leaving c at indent 2 as b\'s CHILD');
+          const afterTab = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterTab, original,
+            'and the file is byte-identical. The min-indent-member answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n  - d\n')
+            + ' — MEASURED on 8486ecd, not reasoned: c is re-parented under b while d, '
+            + 'the member the delta was taken from, moves as asked. Got '
+            + JSON.stringify(afterTab));
+          assert.strictEqual(await tXBanner(page), null,
+            'a boundary no-op is not a refusal and must not raise a banner — the same '
+            + 'answer the single-item Tab gives at its own ceiling. A "fix" that turned '
+            + 'this into a refusal would be caught here');
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          // "Nothing moved" is also what a dead key, a refusing batch, or an
+          // implementation that returns 0 unconditionally produces. The SAME
+          // fixture and the SAME code path are therefore driven with a set
+          // that DOES have head-room in every member — c(1) and d(0), whose
+          // ceilings under b(1) and c(1) are 2 — and it must move.
+          const stillSel = await tXSel(page);
+          assert.deepStrictEqual(stillSel, before,
+            'a zero delta commits nothing, so nothing re-renders and the set stands '
+            + 'exactly as it was. Got ' + JSON.stringify(stillSel));
+
+          await tXSet(page, 5, 6);
+          const partnerBefore = await tXSel(page);
+          assert.deepStrictEqual(partnerBefore.memberLines, [[5, 5], [6, 6]],
+            'ANTI-VACUITY precondition: the second set is c and d — every member with '
+            + 'head-room. Got ' + JSON.stringify(partnerBefore));
+          await tXTab(page, false);
+          const afterPartner = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterPartner, '# Doc\n\n- a\n  - b\n    - c\n  - d\n',
+            'ANTI-VACUITY: the same batch Tab path, one member less, moves the whole set '
+            + 'by +1 (MEASURED — this answer is the same before and after the fix, which '
+            + 'is what makes it a control). Without this half the byte-identical '
+            + 'assertion above is satisfied by a build that refuses every batch Tab, or '
+            + 'has no batch Tab at all');
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '2'], ['li', '1']],
+            'ANTI-VACUITY: and each member moved exactly one level in the DOM too — '
+            + 'c 1 -> 2 and d 0 -> 1 — so the move is a real one-delta shift and not a '
+            + 'clamp accident. MEASURED');
+
+          await tXUndo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            '§3.4: one user gesture = exactly ONE undo op, over the whole batch');
+        }, 'T10');
+
+      // The three-sibling version. The defect is not an artefact of a two-item
+      // set: with b, c, d all at indent 1 and e at 0, the min-indent-member
+      // delta made b the parent of BOTH c and d.
+      await s3Scenario('D1: three selected siblings stay siblings — the batch refuses to half-move',
+        '# Doc\n\n- a\n  - b\n  - c\n  - d\n- e\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['li', '0', [3, 3]], ['li', '1', [4, 4]],
+              ['li', '1', [5, 5]], ['li', '1', [6, 6]], ['li', '0', [7, 7]]],
+            'fixture shape: THREE siblings at indent 1 (b, c, d) with b at its ceiling, '
+            + 'plus a shallower e');
+
+          await tXSet(page, 4, 7);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [5, 5], [6, 6], [7, 7]],
+            'precondition: all four of b, c, d, e are the set. Got '
+            + JSON.stringify(before));
+
+          await tXTab(page, false);
+
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, original,
+            'D1: b has no head-room, so the whole batch is a no-op. The '
+            + 'min-indent-member answer is '
+            + JSON.stringify('# Doc\n\n- a\n  - b\n    - c\n    - d\n  - e\n')
+            + ' — MEASURED on 8486ecd — in which b has become the PARENT of both c and '
+            + 'd. Got ' + JSON.stringify(after));
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '1'], ['li', '1'],
+              ['li', '0']],
+            'and the DOM did not move either — a build that mutated the DOM and failed '
+            + 'to commit is a different defect from one that moved nothing');
+          assert.strictEqual(await tXBanner(page), null,
+            'a boundary no-op raises no banner');
+
+          // ── ANTI-VACUITY ────────────────────────────────────────────────
+          await tXSet(page, 5, 7);
+          const partnerBefore = await tXSel(page);
+          assert.deepStrictEqual(partnerBefore.memberLines, [[5, 5], [6, 6], [7, 7]],
+            'ANTI-VACUITY precondition: c, d and e — all three with head-room. Got '
+            + JSON.stringify(partnerBefore));
+          await tXTab(page, false);
+          const afterPartner = await saveAndRead(page, mdPath);
+          assert.strictEqual(afterPartner,
+            '# Doc\n\n- a\n  - b\n    - c\n    - d\n  - e\n',
+            'ANTI-VACUITY: the same path with a set that CAN move moves all three by +1 '
+            + '(MEASURED, and unchanged by the fix). Note the bytes are the ones the '
+            + 'DEFECT produced for the four-member set above — the difference is which '
+            + 'selection is entitled to them');
+          assert.deepStrictEqual(await tXIndents(page),
+            [['heading', null], ['li', '0'], ['li', '1'], ['li', '2'], ['li', '2'],
+              ['li', '1']],
+            'ANTI-VACUITY: c and d are still at the SAME indent as each other — the '
+            + 'relative relationship §3.4 rule 4 requires, preserved through a move '
+            + 'rather than through a refusal');
+
+          await tXUndo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'one undo op for the whole batch');
+        }, 'T10');
+
+      // ── review recommendation 5: a refusal banner must not outlive its
+      // gesture ──────────────────────────────────────────────────────────
+      // refuseStructuralListEdit() -> showBanner(msg, null, null) is
+      // dismiss-only and has been since S1, so the message stayed on screen
+      // until the user clicked ✕. S3 made it far more reachable (7 of the T8
+      // sweep's 13 shapes refuse), and a stale 「無法整批操作」 standing over a
+      // later gesture that DID work is a straightforward lie about the state
+      // of the document.
+      await s3Scenario('a refusal banner is cleared by the next gesture that succeeds',
+        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+          const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+          const original = fs.readFileSync(mdPath, 'utf8');
+          assert.deepStrictEqual(await tXBlocks(page),
+            [['heading', null, [1, 1]], ['paragraph', null, [3, 3]], ['li', '0', [5, 5]],
+              ['li', '0', [6, 6]]],
+            'fixture shape: a paragraph and a list run, so a span across them is §3.6\'s '
+            + 'mixed span and refuses');
+          assert.strictEqual(await tXBanner(page), null,
+            'precondition: the page starts with no banner');
+
+          await tXSet(page, 3, 5);
+          const before = await tXSel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set really spans the paragraph AND a list item. Got '
+            + JSON.stringify(before));
+          await clickGutterMenuItem(page,
+            '.ed-block[data-block-id="' + before.focusHolderId + '"]', '刪除');
+          await settleEditor(page);
+          assert.strictEqual(await tXBanner(page), MIXED,
+            'precondition: the mixed span really did refuse, with its own banner. '
+            + 'Without this the "cleared" assertion below is green for a banner that '
+            + 'never appeared');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'precondition: a refusal writes nothing');
+
+          await page.keyboard.press('Escape');
+          await settleEditor(page);
+          assert.strictEqual(await tXSel(page), null,
+            'precondition: Escape cleared the set, so the next gesture is an ordinary '
+            + 'single-block one');
+          assert.strictEqual(await tXBanner(page), MIXED,
+            'and Escape alone does NOT clear it — dismissing the selection is not the '
+            + 'same event as a later gesture succeeding, and a fix that cleared the '
+            + 'banner on Escape would answer the wrong question');
+
+          // A perfectly ordinary, perfectly successful single-block gesture.
+          await clickGutterMenuItem(page, '.ed-block[data-block-id="1"]', '刪除');
+          await settleEditor(page);
+          const after = await saveAndRead(page, mdPath);
+          assert.strictEqual(after, '# Doc\n\n- bravo\n- charlie\n',
+            'ANTI-VACUITY: the later gesture must really have SUCCEEDED — the paragraph '
+            + 'is gone from the file. A banner-clearing fix hung off a path that never '
+            + 'ran would be green on the assertion below and wrong. Got '
+            + JSON.stringify(after));
+          assert.strictEqual(await tXBanner(page), null,
+            'review recommendation 5: the stale refusal must be gone. MEASURED on '
+            + '8486ecd: it was still on screen, still reading '
+            + JSON.stringify(MIXED) + ', over a document the user had just '
+            + 'successfully edited');
+        }, 'T10');
+    }
+    // <<<T10SECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
