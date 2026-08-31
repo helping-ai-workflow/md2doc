@@ -17366,6 +17366,10 @@ async function gutterGeometry(page, sel) {
       const RUN_GATE = '此清單含不支援的格式，無法調整結構';
       const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
       const GAP = '選取範圍不連續，無法整批操作';
+      // Stage-closure gap 2 (2026-08-31): §3.7 / §7 give a table block NO
+      // 轉換成 at all — no target can carry its cells — and that reason does
+      // not stop applying because the table happens to be one member of a set.
+      const TABLE_CONVERT = '選取範圍含有表格，無法整批轉換';
       const refused = (m) => ({ kind: 'refused', message: m });
       const noop = (why) => ({ kind: 'noop', why: why });
       const applied = { kind: 'applied' };
@@ -17427,21 +17431,29 @@ async function gutterGeometry(page, sel) {
         // §3.7 gives a table block no 轉換成 at all, and a grip that could not
         // offer the item would make two of the seven cells unreachable rather
         // than answered.
-        // ⚠ MEASURED and recorded rather than changed: the two conversion cells
-        // of this row APPLY, and they convert the TABLE with the rest of the
-        // span — 引用 gives '> | A | B |' … and 項目符號列表 gives
-        // '- | A | B |' with its other two lines carried as continuations. Both
-        // still lex as a table (nested in a blockquote / in the list item), so
-        // no cells are lost — but §3.7 withholds 轉換成 from a table block
-        // ENTIRELY, on the grounds that no target could carry its cells, and a
-        // batch whose grip is a paragraph reaches the table anyway. That is a
-        // scope question the spec has not ruled on for a SET, and inventing an
-        // answer at stage closure is the mistake §3.6's own 2026-08-31 ruling
-        // was written to avoid. Pinned as it behaves today so the next change
-        // to it is visible.
+        // ⚠ RULED 2026-08-31 (stage-closure gap 2), and this row is where the
+        // ruling is enforced. The two conversion cells used to APPLY and to
+        // rewrite the TABLE along with the rest of the span — 引用 gave
+        // '> | A | B |' … and 項目符號列表 gave '- | A | B |' with its other
+        // two lines carried as continuations. Nothing was LOST (both still lex
+        // as a table, nested in the blockquote / in the list item), but §3.7
+        // and §7 withhold 轉換成 from a table block ENTIRELY, on the grounds
+        // that no target can carry its cells — and that reason does not stop
+        // applying because the table is a member of a set. Two affordances
+        // giving opposite answers to the same question is exactly the shape
+        // §3.6's 「不得另寫一條」 ruling exists to prevent, and a user selecting
+        // a stretch of prose to quote it would almost never mean to wrap an
+        // intervening table in a blockquote with nothing on screen saying so.
+        // ⇒ 轉換成 REFUSES with its own banner; the file stays byte-identical.
+        // Scoped to 轉換成 alone: the other five cells of this row are measured
+        // correct and have no equivalent objection, and they stay where they
+        // are — which is what makes this row the guard against the refusal
+        // being widened by accident as well as against it being dropped.
         { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
           members: [[3, 3], [5, 7]], tableLines: [5, 7], expect: {
-            'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
+            'convert-quote': refused(TABLE_CONVERT),
+            'convert-ul': refused(TABLE_CONVERT),
+            duplicate: applied,
             'delete-menu': applied, 'delete-key': applied,
             tab: PARA_TAB, 'shift-tab': PARA_TAB,
           } },
@@ -17770,6 +17782,131 @@ async function gutterGeometry(page, sel) {
       console.log('S3 T8 sweep: ' + t8Rows.length + ' cells, no corruption — OK');
     }
     // <<<T8SWEEP
+
+    // >>>T9SECTION  (and <<<T9SECTION at the end: same marker-sliced scratch
+    // subset runner every S3 task has used.)
+    //
+    // ── S3 stage-closure gap 1: §3.7's 「多選時不顯示 `MD 原始碼`」 ─────────
+    //
+    // Written verbatim in §3.7 and delivered by none of S3's eight tasks. The
+    // only assignment to that item is `gutterMenuMd.hidden = (blockType ===
+    // 'li')`, with no `blockSelection` term in it, so with a set standing the
+    // row was still offered — and pressing it opened the raw editor for the
+    // GRIP's block alone. The risk is low (a raw commit rewrites only that
+    // block's lines, and a line-range selection re-resolves or clears on the
+    // next render), but it is a written contract and the point of the item is
+    // that it answers for the thing the ⠿ was pressed on. Over a set, it does
+    // not.
+    //
+    // ANTI-VACUITY, stated because "the item is hidden" is worth nothing on
+    // its own — a menu that never opened, an item renamed, a selector typo and
+    // a wholesale `hidden = true` all produce it. Every phase asserts the WHOLE
+    // item list with its per-item hidden flag, so the other three items are
+    // proved present and VISIBLE in the same breath; and the same fixture is
+    // asked three more times, in states where the item must be SHOWN — with no
+    // selection at all, with a set of exactly one, and with a set standing
+    // somewhere else in the document. Dropping the condition from client.js
+    // turns phase 2 red; widening it turns phases 1, 3 and 4 red.
+    {
+      const T9_MENU = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
+      // The items of the OPEN menu belonging to `sel`, each with its own hidden
+      // flag. `null` = no menu is open on that block at all, which every phase
+      // rejects before it looks at a single flag.
+      const t9Items = (page, sel) => page.evaluate((s) => {
+        const menu = document.querySelector(s + ' .ed-handle-menu');
+        if (!menu) return null;
+        return Array.prototype.slice.call(menu.querySelectorAll('.ed-handle-menu-btn'))
+          .map((b) => ({ label: b.textContent, hidden: !!b.hidden }));
+      }, sel);
+      // §3.7's four items, in §3.7's order. Spelt out rather than derived, so a
+      // silently reordered or renamed menu is a failure here too.
+      const t9Menu = (mdHidden) => [
+        { label: '轉換成 ›', hidden: false },
+        { label: '建立副本', hidden: false },
+        { label: '刪除', hidden: false },
+        { label: 'MD 原始碼', hidden: mdHidden },
+      ];
+      const t9CloseMenu = async (page) => {
+        // Escape closes the menu and — per Task 3's ordered prologue, one rung
+        // per press — leaves any standing selection alone, which is what lets
+        // the phases below re-open on the SAME block without toggling.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'),
+          { timeout: 5000 });
+      };
+
+      await s3Scenario('§3.7: the ⠿ menu withholds MD 原始碼 only while a multi-block '
+        + 'set stands', T9_MENU, async (page) => {
+        const blockSelFor = (line) => page.evaluate((ln) => {
+          const b = window.__edTestBlocks().find((x) => x.startLine === ln);
+          return b ? '.ed-block[data-block-id="' + b.id + '"]' : null;
+        }, line);
+        const p3 = await blockSelFor(3);
+        const p5 = await blockSelFor(5);
+        const p7 = await blockSelFor(7);
+        assert.ok(p3 && p5 && p7,
+          'FIXTURE SANITY: the three paragraphs must start on lines 3 / 5 / 7 — every '
+          + 'phase below addresses its grip by that block record. Got '
+          + JSON.stringify([p3, p5, p7]));
+
+        // ── Phase 1: nothing selected — all four items are offered ───────
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 1: with NO selection standing the ⠿ menu on a paragraph offers all '
+          + 'four items, MD 原始碼 included. This row is the anti-vacuity partner of '
+          + 'phase 2 — if it is wrong, phase 2 is measuring a menu that never opened '
+          + 'rather than the selection condition');
+        await t9CloseMenu(page);
+
+        // ── Phase 2: a set of TWO — that one item, and only it, is withheld ─
+        await page.evaluate(() => window.__edTestSetSelection(3, 5));
+        const two = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(two && two.memberLines, [[3, 3], [5, 5]],
+          '§3.7 phase 2 PRECONDITION: a set of TWO members must really stand, or the '
+          + 'assertion below is being made against no selection at all. Got '
+          + JSON.stringify(two));
+        assert.deepStrictEqual(two.domSelectedLines, [[3, 3], [5, 5]],
+          '§3.7 phase 2 PRECONDITION: the PAINT must agree with the model (Task 4 carry '
+          + '8) — the pair is what catches the two drifting apart. Got '
+          + JSON.stringify(two.domSelectedLines));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(true),
+          '§3.7 「多選時不顯示 `MD 原始碼`」: with a set of two standing and the ⠿ pressed '
+          + 'on a MEMBER of it, MD 原始碼 is withheld and the other three items stay '
+          + 'offered. A raw commit rewrites the GRIP block\'s lines only, so over a set '
+          + 'the item answers for one member and silently ignores the rest');
+        await t9CloseMenu(page);
+
+        // ── Phase 3: a set of exactly ONE is not a multi-selection ───────
+        await page.evaluate(() => window.__edTestSetSelection(3, 3));
+        const one = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(one && one.memberLines, [[3, 3]],
+          '§3.7 phase 3 PRECONDITION: a set of exactly ONE member must stand. Got '
+          + JSON.stringify(one));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 3: a set of exactly one block is not 多選 — the raw editor rewrites '
+          + 'that block\'s own lines and nothing else is in the set, so the item stays. '
+          + 'A condition written as "any selection standing" fails here');
+        await t9CloseMenu(page);
+
+        // ── Phase 4: a set standing ELSEWHERE — §3.3 makes this single ───
+        await page.evaluate(() => window.__edTestSetSelection(5, 7));
+        const away = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(away && away.memberLines, [[5, 5], [7, 7]],
+          '§3.7 phase 4 PRECONDITION: a set of two must stand on the OTHER two '
+          + 'paragraphs, so the grip below is genuinely outside it. Got '
+          + JSON.stringify(away));
+        await openGutterMenu(page, p3);
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          '§3.7 phase 4: the ⠿ is OUTSIDE the set, and §3.3 says that gesture first '
+          + 'replaces the set with the single grip block — so it is a single-block '
+          + 'operation and MD 原始碼 belongs on it. Membership is the question, not '
+          + '"is anything selected"');
+        await t9CloseMenu(page);
+      }, 'T9');
+    }
+    // <<<T9SECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
