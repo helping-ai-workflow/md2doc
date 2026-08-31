@@ -18544,6 +18544,458 @@ async function gutterGeometry(page, sel) {
     }
     // <<<T10SECTION
 
+    // >>>S4T2SECTION  (and <<<S4T2SECTION at the end: same marker-sliced
+    // scratch subset runner every S3 task has used.)
+    //
+    // ── S4 Task 2: the drag gesture on ⠿ — MOTION ONLY, the drop is a no-op ─
+    //
+    // spec §4.5 says to reuse the table row drag's skeleton, and this does:
+    // TE_DRAG_THRESHOLD_PX, pointer capture, a discriminated-union drop
+    // target, ONE document.body singleton indicator, and the same five
+    // cancellation paths. Nothing writes bytes until Task 3, so every
+    // scenario below ends by proving the file is byte-identical.
+    //
+    // MEASURED on cc4eece before the implementation landed (the RED phase):
+    // a pointerdown on `.ed-handle` recorded NO state at all — hitTestGrip()
+    // misses (the ⠿ is not `.ed-te-grip-*`) and armBlockSelDrag()'s very
+    // first line returns for `.ed-handle`, which is a member of
+    // ED_SEL_GESTURE_CHROME. There was no `.ed-block-drop-indicator` node in
+    // the document either. So a "press the ⠿ and drag" gesture was
+    // indistinguishable from a press that never moved: the ⠿ menu opened on
+    // release, every time, however far the pointer had travelled.
+    //
+    // ANTI-VACUITY, stated per shape because three of the four claims below
+    // are NEGATIVE and a negative is exactly what a missed press satisfies:
+    //   * "the menu did not open" is satisfied by a press that landed on
+    //     `main.content` 2px left of the ⠿. Every scenario therefore asserts
+    //     document.elementFromPoint(press point) IS that block's own
+    //     `.ed-handle` before it presses, and the sub-threshold scenario
+    //     asserts the menu DOES open from the same coordinates — the partner
+    //     that proves the coordinates are live.
+    //   * "the indicator is showing" is satisfied by an indicator that was
+    //     already showing. Every scenario reads it back BEFORE the press and
+    //     asserts it is hidden, and the tracking scenario asserts the four
+    //     probe positions are pairwise DISTINCT — a frozen line satisfies
+    //     "it is showing" at all four.
+    //   * "nothing was written" is satisfied by a gesture that never started.
+    //     Every write assertion is preceded by a live-drag precondition (the
+    //     indicator visible with the pointer still down).
+    const S4_DOC = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\ndelta\n';
+
+    // Same isolation / one-server-per-scenario reasoning as s3Scenario()
+    // above; the viewport is pinned because every assertion here is
+    // geometric.
+    const s4Scenario = async (label, md, fn, tag) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-s4-'));
+      const mdPath = path.join(dir, 'doc.md');
+      fs.writeFileSync(mdPath, md, 'utf8');
+      const ssrv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await settleEditor(page);
+        await fn(page, mdPath);
+        await page.close();
+        console.log('S4 ' + (tag || 'T2') + ' ' + label + ' — OK');
+      } finally { ssrv.close(); }
+    };
+
+    // Every TOP-LEVEL block's own box plus its ⠿'s centre, in document order.
+    // MEASURED on this branch: every `.ed-block` — list items and the
+    // zero-line phantom outer of a same-line nest included — is a DIRECT
+    // child of `main.content` (S1 flattened the <ul>/<ol> containers away),
+    // so this array is the document's block sequence with no nesting to
+    // flatten.
+    const s4Geometry = (page) => page.evaluate(() => {
+      const content = document.querySelector('main.content');
+      return Array.prototype.slice.call(content.querySelectorAll('.ed-block')).map((el) => {
+        const r = el.getBoundingClientRect();
+        const h = el.querySelector(':scope > .ed-handle');
+        const hr = h ? h.getBoundingClientRect() : null;
+        return {
+          id: el.getAttribute('data-block-id'),
+          type: el.getAttribute('data-block-type'),
+          text: (el.textContent || '').replace(/[＋⠿]/g, '').trim(),
+          top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+          mid: r.top + r.height / 2,
+          handle: hr ? { x: (hr.left + hr.right) / 2, y: (hr.top + hr.bottom) / 2 } : null,
+        };
+      });
+    });
+
+    // What actually answers at a point — the PRECONDITION every scenario
+    // below asserts before it presses.
+    const s4ElementAt = (page, x, y) => page.evaluate((px, py) => {
+      const el = document.elementFromPoint(px, py);
+      if (!el) return null;
+      const b = el.closest ? el.closest('.ed-block') : null;
+      return {
+        tag: el.tagName,
+        isHandle: !!(el.closest && el.closest('.ed-handle')),
+        blockId: b ? b.getAttribute('data-block-id') : null,
+      };
+    }, x, y);
+
+    // The block drop indicator's own state. `present:false` is the RED
+    // answer — the node does not exist at all before Task 2 lands.
+    const s4Indicator = (page) => page.evaluate(() => {
+      const el = document.querySelector('.ed-block-drop-indicator');
+      if (!el) return { present: false, hidden: true };
+      const r = el.getBoundingClientRect();
+      return { present: true, hidden: !!el.hidden,
+        top: r.top, left: r.left, width: r.width, height: r.height };
+    });
+
+    // The TABLE drop indicator, read the same way — the cross-guard below
+    // asserts the two gestures never raise each other's line.
+    const s4TeIndicator = (page) => page.evaluate(() => {
+      const el = document.querySelector('.ed-te-drop-indicator');
+      return el ? { present: true, hidden: !!el.hidden } : { present: false, hidden: true };
+    });
+
+    // The whole content column's markup. Task 2's central invariant is that a
+    // drag mutates NOTHING in the DOM (only the indicator, which lives on
+    // document.body and is therefore outside this string) — that is what lets
+    // every cancellation path below be unconditional with nothing to revert.
+    const s4Content = (page) => page.evaluate(
+      () => document.querySelector('main.content').innerHTML);
+
+    const s4MenuOpen = (page) => page.evaluate(
+      () => !!document.querySelector('.ed-handle-menu'));
+
+    // ── the threshold: a press is a click, a drag is a drag ──────────────
+    await s4Scenario('a sub-threshold press on ⠿ still opens the menu; a press that '
+      + 'crosses the threshold does not', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 5,
+        'FIXTURE SANITY: the doc must render as five top-level blocks '
+        + '(heading, alpha, bravo, charlie, delta). Got ' + JSON.stringify(g.map((b) => b.text)));
+      const src = g[1];
+      assert.strictEqual(src.text, 'alpha',
+        'FIXTURE SANITY: block index 1 must be the "alpha" paragraph, got ' + JSON.stringify(src.text));
+      assert.ok(src.handle, 'FIXTURE SANITY: the alpha block must carry a ⠿');
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must actually be alpha\'s OWN ⠿. Every negative '
+        + 'claim below ("no menu", "no bytes") is satisfied by a press that missed the '
+        + 'button entirely — this is what rules that out. Got ' + JSON.stringify(at));
+      const idle = await s4Indicator(page);
+      assert.strictEqual(idle.present, true,
+        'ANTI-VACUITY: the block drop indicator SINGLETON must exist (Task 2 appends it '
+        + 'to document.body once at startup, exactly as the table\'s own indicator is). '
+        + 'Without this, every "the indicator is hidden" claim below is satisfied by a '
+        + 'node that was never created. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.hidden, true,
+        'ANTI-VACUITY: the drop indicator must be hidden before any gesture. Got '
+        + JSON.stringify(idle));
+
+      // ── sub-threshold: 2.83px of travel, under TE_DRAG_THRESHOLD_PX = 5 ──
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x + 2, src.handle.y + 2);
+      const wiggle = await s4Indicator(page);
+      assert.strictEqual(wiggle.hidden, true,
+        'a press that has not crossed TE_DRAG_THRESHOLD_PX is still a CLICK — the drop '
+        + 'indicator must not appear. Got ' + JSON.stringify(wiggle));
+      await page.mouse.up();
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + src.id + '"]');
+      assert.strictEqual(await s4MenuOpen(page), true,
+        'the ⠿ menu must still open on a press that never crossed the drag threshold — '
+        + 'this is the ANTI-VACUITY PARTNER of the "no menu after a drag" assertion '
+        + 'below: it proves these very coordinates do open the menu');
+
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+
+      // ── over-threshold: the same coordinates, 120px of travel ───────────
+      const before = await s4Content(page);
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, src.handle.y + 120, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const during = await s4Indicator(page);
+      assert.strictEqual(during.hidden, false,
+        'PRECONDITION for everything below: the drag must actually have ENGAGED. Without '
+        + 'this, "the menu did not open" and "no bytes were written" are both satisfied '
+        + 'by a gesture that never started. Got ' + JSON.stringify(during));
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4MenuOpen(page), false,
+        'a press that crossed the drag threshold is a DRAG, not a click — its trailing '
+        + 'click must not open the ⠿ menu');
+      assert.strictEqual((await s4Indicator(page)).hidden, true,
+        'the drop indicator must be hidden again once the pointer is released');
+      assert.strictEqual(await s4Content(page), before,
+        'Task 2 delivers MOTION ONLY — the drop is a no-op, so the content column must '
+        + 'be byte-identical across the whole gesture');
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'Task 2 writes no bytes at all. Got:\n' + fileText);
+    });
+
+    // ── the drop target: {mode:'before-block', blockIndex, y} | {mode:'append', y} ──
+    // nearestBlockDropTarget() is internal (a window test hook would be
+    // test-only surface in production code — the same call the table's own
+    // §4.6 threshold scenario made). This drives an ACTUAL drag to each probe
+    // coordinate, holding without releasing, and reads the singleton
+    // indicator's on-screen box back. `before-block i` puts the line on block
+    // i's TOP; `append` puts it on the LAST block's BOTTOM, which is a
+    // position no `before-block` target can produce.
+    await s4Scenario('the drop indicator appears on threshold and tracks the pointer '
+      + 'across the before-block / append union', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const idle = await s4Indicator(page);
+      assert.strictEqual(idle.present, true,
+        'ANTI-VACUITY: the singleton must EXIST before "it is hidden" means anything. Got '
+        + JSON.stringify(idle));
+      assert.strictEqual(idle.hidden, true,
+        'ANTI-VACUITY: the indicator must be HIDDEN before the drag — "the indicator is '
+        + 'showing" proves nothing about the gesture if it was already showing. Got '
+        + JSON.stringify(idle));
+
+      // Press, drag (WITHOUT releasing) to `y`, read the indicator back, then
+      // cancel via Escape so nothing can land — the table's own §4.6
+      // threshold scenario uses exactly this shape.
+      const indicatorAt = async (y, label) => {
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, src.handle.y + (y - src.handle.y) / 2, { steps: 5 });
+        await page.mouse.move(src.handle.x, y, { steps: 5 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const r = await s4Indicator(page);
+        assert.strictEqual(r.hidden, false, label + ' PRECONDITION: the drag must be live');
+        await page.keyboard.press('Escape');
+        await page.mouse.up();
+        return r;
+      };
+
+      const first = await indicatorAt(1, 'above every block');
+      expectApprox(first.top, g[0].top,
+        'above the first block\'s midline the target is before-block 0 — the line snaps '
+        + 'to the heading\'s own top');
+      const beforeBravo = await indicatorAt(g[2].mid - 2, 'before bravo');
+      expectApprox(beforeBravo.top, g[2].top,
+        'above bravo\'s midline (and below alpha\'s) the target is before-block 2 — the '
+        + 'line snaps to bravo\'s top');
+      const beforeDelta = await indicatorAt(g[3].mid + 2, 'before delta');
+      expectApprox(beforeDelta.top, g[4].top,
+        'below charlie\'s midline (and above delta\'s) the target is before-block 4 — the '
+        + 'line snaps to delta\'s top');
+      const append = await indicatorAt(g[4].bottom + 200, 'append');
+      expectApprox(append.top, g[4].bottom,
+        'below the LAST block the target is {mode:\'append\'} — the line snaps to the last '
+        + 'block\'s bottom, a position no before-block target can produce');
+
+      // A frozen line satisfies every "it is showing" assertion above.
+      const tops = [first.top, beforeBravo.top, beforeDelta.top, append.top];
+      const uniq = tops.filter((t, i) => tops.every((u, j) => j >= i || Math.abs(t - u) > 1));
+      assert.strictEqual(uniq.length, 4,
+        'ANTI-VACUITY: the four probe positions must be pairwise DISTINCT — an indicator '
+        + 'that never moves is "showing" at all four. Got ' + JSON.stringify(tops));
+
+      // ...and it must be a real horizontal rule over the content column, not
+      // a zero-width leftover.
+      expectApprox(append.left, g[4].left,
+        'the indicator spans the block it marks — its left edge is that block\'s left edge');
+      expectApprox(append.width, g[4].right - g[4].left,
+        'the indicator spans the block it marks — its width is that block\'s width');
+      expectApprox(append.height, 3,
+        'the indicator is a 3px horizontal rule (the table row drop indicator\'s own '
+        + 'thickness); a vertical line here would mean a column drag\'s width leaked in');
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'every probe above was cancelled via Escape — the file must be byte-identical. Got:\n'
+        + fileText);
+    });
+
+    // ── the three abort paths ────────────────────────────────────────────
+    await s4Scenario('Escape, pointercancel and window blur each cancel a block drag '
+      + 'with no DOM change and no bytes', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const before = await s4Content(page);
+
+      const cancelVia = async (label, fire) => {
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const during = await s4Indicator(page);
+        assert.strictEqual(during.hidden, false,
+          label + ' PRECONDITION: a drag must actually be IN FLIGHT before the abort — '
+          + 'every claim below is satisfied by a gesture that never started');
+        await fire();
+        await new Promise((r) => setTimeout(r, 100));
+        assert.strictEqual((await s4Indicator(page)).hidden, true,
+          label + ' must hide the drop indicator');
+        await page.mouse.up(); // the drag state is already gone — an inert no-op
+        await settleEditor(page);
+        assert.strictEqual(await s4Content(page), before,
+          label + ' must leave the content column byte-identical: nothing in the DOM is '
+          + 'ever mutated during a drag, which is exactly why this path can clean up '
+          + 'unconditionally');
+        assert.strictEqual(await s4MenuOpen(page), false,
+          label + ' must not leave (or open) a ⠿ menu — the aborted gesture\'s trailing '
+          + 'click belongs to the drag, not to the button');
+      };
+
+      await cancelVia('Escape mid-drag', () => page.keyboard.press('Escape'));
+      await cancelVia('pointercancel mid-drag', () => page.evaluate(
+        () => document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }))));
+      await cancelVia('window blur mid-drag', () => page.evaluate(
+        () => window.dispatchEvent(new Event('blur'))));
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'a cancelled drag must never touch the file. Got:\n' + fileText);
+    });
+
+    // ── released where it started ────────────────────────────────────────
+    await s4Scenario('a block drag released where it started is a byte no-op',
+      S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const before = await s4Content(page);
+
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const away = await s4Indicator(page);
+      assert.strictEqual(away.hidden, false,
+        'PRECONDITION: the drag must have engaged before it is brought home');
+      await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+      const home = await s4Indicator(page);
+      assert.strictEqual(home.hidden, false,
+        'PRECONDITION: the drag must still be live at the moment of release');
+      expectApprox(home.top, src.top,
+        'PRECONDITION: the drop target at release must be the SOURCE block\'s OWN '
+        + 'position — otherwise this is not the "released where it started" case at all');
+      assert.ok(Math.abs(away.top - home.top) > 1,
+        'ANTI-VACUITY: the indicator must genuinely have travelled away and come back — '
+        + 'a gesture that never moved satisfies "released where it started" trivially. '
+        + 'away=' + away.top + ' home=' + home.top);
+
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4Content(page), before,
+        'a drop that lands where it started changes nothing in the DOM');
+      assert.strictEqual(await s4MenuOpen(page), false,
+        'the drag\'s trailing click must not open the ⠿ menu even when the pointer came '
+        + 'back to (near) the button it started on');
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'a drop that lands where it started must be a BYTE no-op. Got:\n' + fileText);
+    });
+
+    // ── the two incumbent drags must be untouched ────────────────────────
+    // §4.5 reuses the table drag's skeleton; S3's selection drag is armed on
+    // the very next line of the same pointerdown branch. Both are guarded
+    // here in the one place that can see all three at once: the ⠿ arm runs
+    // FIRST, so the failure mode is that it swallows presses that belong to
+    // one of the others.
+    await s4Scenario('the S3 selection drag still builds a set, and never raises the '
+      + 'block drop indicator', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 4,
+        'FIXTURE SANITY: heading + three paragraphs. Got ' + JSON.stringify(g.map((b) => b.text)));
+      const a = g[1], c = g[3];
+      const at = await s4ElementAt(page, a.left + 20, a.mid);
+      assert.ok(at && !at.isHandle && at.blockId === a.id,
+        'PRECONDITION: the press point must be INSIDE alpha\'s own body and NOT on its ⠿ '
+        + '— that is what makes this the S3 gesture rather than the S4 one. Got '
+        + JSON.stringify(at));
+
+      await page.mouse.move(a.left + 20, a.mid);
+      await page.mouse.down();
+      await page.mouse.move(c.left + 20, c.mid, { steps: 8 });
+      const ind = await s4Indicator(page);
+      // MEASURED: without this line the whole scenario was GREEN on cc4eece, before a
+      // single line of Task 2 existed — `hidden` is trivially true for a node that was
+      // never created. This is the assertion that makes the scenario name a Task 2
+      // deliverable rather than merely restate S3's own coverage.
+      assert.strictEqual(ind.present, true,
+        'ANTI-VACUITY: the block drop indicator singleton must EXIST for "it stayed '
+        + 'hidden during a selection drag" to mean anything at all. Got ' + JSON.stringify(ind));
+      assert.strictEqual(ind.hidden, true,
+        'a press inside a block\'s BODY is an S3 selection drag — the S4 block drop '
+        + 'indicator must stay hidden throughout. Got ' + JSON.stringify(ind));
+      await page.mouse.up();
+      await settleEditor(page);
+      const sel = await page.evaluate(() => window.__edTestGetSelection());
+      assert.deepStrictEqual(sel && sel.memberLines, [[3, 3], [5, 5], [7, 7]],
+        'the S3 selection drag must still build the whole set it crossed — the S4 arm '
+        + 'runs one line ABOVE armBlockSelDrag() in the same pointerdown branch, so a '
+        + 'too-wide arm swallows this gesture. Got ' + JSON.stringify(sel));
+    });
+
+    await s4Scenario('the table row drag still reorders, and the two drop indicators '
+      + 'never raise each other', '# Doc\n\n| A |\n|---|\n| 1 |\n| 2 |\n| 3 |\n',
+      async (page, mdPath) => {
+      const table0 = await tableBlockSel(page, 0);
+      const from = await rowGripCoords(page, table0, 2); // the "3" row's own grip
+      const to = await rowBoundaryCoords(page, table0, -1); // just under the header
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 8 });
+      await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+      const teInd = await s4TeIndicator(page);
+      const blockInd = await s4Indicator(page);
+      assert.strictEqual(teInd.hidden, false,
+        'PRECONDITION: the TABLE drag must really be in flight');
+      assert.strictEqual(blockInd.present, true,
+        'ANTI-VACUITY: the singleton must EXIST for "the table drag did not raise it" to '
+        + 'mean anything. Got ' + JSON.stringify(blockInd));
+      assert.strictEqual(blockInd.hidden, true,
+        'a table row drag must not raise the BLOCK drop indicator. Got ' + JSON.stringify(blockInd));
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(
+        await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' tbody td'))
+          .map((c) => c.textContent).join(','), table0),
+        '3,1,2',
+        'the table row drag must still reorder — S4 Task 2 adds a third pointer gesture '
+        + 'to the same pointerdown listener and must not disturb the incumbent');
+
+      // ...and the converse, on the SAME page: a ⠿ drag must not raise the
+      // table's line.
+      const g = await s4Geometry(page);
+      const para = g.find((b) => b.type !== 'table' && b.handle);
+      assert.ok(para && para.handle, 'FIXTURE SANITY: a non-table block with a ⠿ must exist');
+      const at = await s4ElementAt(page, para.handle.x, para.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === para.id,
+        'PRECONDITION: the press point must be that block\'s own ⠿ (spec §4.2 conflict 2, '
+        + 'landed in Task 1, is what makes this true while a table is on the page). Got '
+        + JSON.stringify(at));
+      await page.mouse.move(para.handle.x, para.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(para.handle.x, para.handle.y + 120, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      assert.strictEqual((await s4TeIndicator(page)).hidden, true,
+        'a ⠿ drag must not raise the TABLE drop indicator. The two are separate singleton '
+        + 'nodes precisely so neither gesture can leak the other\'s axis');
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual((await s4Indicator(page)).hidden, true,
+        'Escape must cancel the ⠿ drag here too');
+    });
+    // <<<S4T2SECTION
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
