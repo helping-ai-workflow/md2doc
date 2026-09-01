@@ -20,7 +20,9 @@ duplicated, deleted, selected as part of a set — and, from this release, **mov
   a delete and a re-type. A press that never travels far enough to count as a drag still
   opens the ⠿ menu, so nothing that worked before works differently. Pressing Escape
   mid-drag, releasing outside the window, or switching away from the window all abandon
-  the gesture and leave the document exactly as it was.
+  the gesture and leave the document exactly as it was. Dropping a block onto one you
+  were in the middle of typing in keeps both halves: the edit is saved and the block
+  still moves where you aimed it.
 - **Dragging one block of a selection moves the whole selection.** With a set standing,
   pressing the ⠿ of any block in it moves every block in the set — together, in their own
   order, in one Ctrl+Z — and the blue wash follows them to their new position, so the
@@ -35,6 +37,12 @@ duplicated, deleted, selected as part of a set — and, from this release, **mov
   refuses a drag exactly as it already refuses a conversion.
 - **The pointer shows the drag.** The cursor becomes a grabbing hand for as long as the
   gesture is live, and goes back on every way out of it.
+- **Holding Shift, Ctrl or Alt changes nothing about the ⠿.** A modified press drags
+  exactly like an unmodified one, which is what a table's row and column grips have
+  always done; a modified press that never travels far enough still opens the ⠿ menu.
+  Before this release a modified press on the handle did nothing at all until it was
+  released, so nothing has been taken away — it is written down here because it had
+  never been written down anywhere.
 - **A move that cannot be made says so, and says which problem it hit.** Four separate
   messages, because they have four opposite remedies and one sentence would send most
   people to fix the wrong end of the gesture:

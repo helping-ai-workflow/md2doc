@@ -21563,6 +21563,394 @@ async function gutterGeometry(page, sel) {
 
     // <<<S4T7SECTION
 
+    // >>>S4RVSECTION  (and <<<S4RVSECTION at the end: same marker-sliced
+    // scratch subset runner every S3/S4 task has used.)
+    //
+    // ── S4 review round (2026-09-01) ──────────────────────────────────────
+    //
+    // An independent review of the finished stage returned "ship, no blocking
+    // items" plus one MEDIUM user-facing defect and five tests that survived
+    // their own mutation. Every scenario below exists because something was
+    // GREEN when it should not have been, so each one was RED-proved against
+    // the tree as it stood at e2a2b9f before a line of the fix was written.
+    const rvSel = (page) => page.evaluate(() => {
+      const s = window.__edTestGetSelection();
+      return s === null ? null : s.memberLines;
+    });
+    const rvIndents = (page) => page.evaluate(() => Array.prototype.slice.call(
+      document.querySelectorAll('main.content .ed-block'))
+      .map((el) => (el.getAttribute('data-block-type') === 'li'
+        ? Number(el.getAttribute('data-indent')) || 0 : null)));
+
+    // ── RV1: a drop onto a block whose OWN burst is dirty ─────────────────
+    //
+    // MEASURED on e2a2b9f, as a real gesture: open '# Doc\n\nalpha\n\nbravo\n\n
+    // charlie\n', click into `charlie`, type ' EDITED', then drag `alpha`'s ⠿
+    // onto charlie's top edge. Result: the banner '文件已更新，請重試這個操作'
+    // and the file '# Doc\n\nalpha\n\nbravo\n\ncharlie EDITED\n' — THE EDIT
+    // COMMITTED AND THE MOVE DID NOT.
+    //
+    // The cause is an ASYMMETRY, not a race. performBlockDrop() captures the
+    // destination's identity and re-resolves it with reresolveBlockEl(), whose
+    // fingerprint is the block's SOURCE — and that fingerprint MUST miss here,
+    // because the commit that changed the source is the drop's own
+    // resolveGutterOperands() → switchAwayFrom(). The SOURCE side has had
+    // reresolveBlockElAfterSelfCommit() for exactly this since S2 (gated on
+    // ownsOpenSession, so no other caller loses the fingerprint); the
+    // destination side had no counterpart at all.
+    await s4Scenario('a drop onto a block with an OPEN DIRTY burst of its own completes '
+      + 'the move — the destination gets the same self-commit re-resolve the source has '
+      + 'had since S2', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      assert.deepStrictEqual(g0.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'charlie'],
+        'FIXTURE SANITY: four top-level blocks in this order. Got '
+        + JSON.stringify(g0.map((b) => b.text)));
+      const destSel = '.ed-block[data-block-id="' + g0[3].id + '"]';
+      await openWysiwyg(page, destSel);
+      await page.keyboard.press('End');
+      await page.keyboard.type(' EDITED');
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'),
+          destSel), true,
+        'PRECONDITION: the burst must be open and DIRTY on the DESTINATION block before '
+        + 'the drag — the whole defect is that the drop\'s own switchAwayFrom() is what '
+        + 'rewrites that block\'s source, so a clean burst cannot express it');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent,
+          destSel), 'charlie EDITED',
+        'PRECONDITION: and the typed text really is in the surface');
+
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top,
+        'PRECONDITION: the drop indicator is on CHARLIE\'s own top edge — the block that '
+        + 'owns the dirty burst, which is what makes this the destination-side case');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE DEFECT: e2a2b9f raised 文件已更新，請重試這個操作 here, for a gesture in '
+        + 'which nothing whatsoever went wrong — the fingerprint missed because the '
+        + 'drop itself had just rewritten the block it was fingerprinting. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const out = await saveAndRead(page, mdPath);
+      assert.strictEqual(out, '# Doc\n\nbravo\n\nalpha\n\ncharlie EDITED\n',
+        'and BOTH halves land: the burst\'s edit AND the move. e2a2b9f wrote only the '
+        + 'edit. Got:\n' + JSON.stringify(out));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'charlie EDITED'],
+        'and the DOM agrees with the file');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nalpha\n\nbravo\n\ncharlie EDITED\n',
+        'ONE Ctrl+Z takes back the MOVE and leaves the burst\'s own commit standing — '
+        + 'they are two gestures and therefore two ops');
+    }, 'RV');
+
+    // ── RV1b: the CONTROL the review measured, kept as a partner ──────────
+    // A burst open on the destination but NOT dirty. switchAwayFrom() cancels
+    // it instead of committing, so nothing re-renders, `destEl` is still
+    // attached and no re-resolve is attempted at all. Without this partner
+    // "the move landed" above is satisfied by an implementation that stopped
+    // re-resolving the destination altogether.
+    await s4Scenario('a drop onto a block with a CLEAN burst open on it was never broken '
+      + '— the partner that proves RV1 is about the COMMIT, not about the burst',
+      '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      const destSel = '.ed-block[data-block-id="' + g0[3].id + '"]';
+      await openWysiwyg(page, destSel);
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'),
+          destSel), true, 'PRECONDITION: the burst is open on charlie');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent,
+          destSel), 'charlie',
+        'PRECONDITION: and it is CLEAN — nothing was typed, which is the ONE difference '
+        + 'from RV1');
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top, 'PRECONDITION: the indicator is on charlie\'s top edge');
+      assert.strictEqual(await s4Banner(page), null,
+        'no banner. Got ' + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nbravo\n\nalpha\n\ncharlie\n',
+        'and the move lands with charlie\'s own text untouched');
+    }, 'RV');
+
+    // ── RV1c: the SOURCE-side control ─────────────────────────────────────
+    // The asymmetry cuts one way only, and this is the half that already
+    // worked. Kept so a fix that "unified" the two re-resolves and lost the
+    // source's own gate fails here rather than in review.
+    await s4Scenario('a drop whose SOURCE owns the dirty burst still completes — the '
+      + 'S2 half of the asymmetry, pinned', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n',
+      async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      const srcSel = '.ed-block[data-block-id="' + g0[1].id + '"]';
+      await openWysiwyg(page, srcSel);
+      await page.keyboard.press('End');
+      await page.keyboard.type(' EDITED');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent, srcSel),
+        'alpha EDITED', 'PRECONDITION: the dirty burst is on the SOURCE block this time');
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top, 'PRECONDITION: the indicator is on charlie\'s top edge');
+      assert.strictEqual(await s4Banner(page), null,
+        'no banner — reresolveBlockElAfterSelfCommit() has covered the source since S2. '
+        + 'Got ' + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\nbravo\n\nalpha EDITED\n\ncharlie\n',
+        'and the edit travels with the block it was made in');
+    }, 'RV');
+
+    // ── RV2: writeIndentClamp() — the write, not the computation ──────────
+    //
+    // The review measured that `writeIndentClamp(clamp);` can be DELETED from
+    // performListItemDrop() and all 39 S4 scenarios stay green, the four T7
+    // ones named after the clamp included. That was true, and the reason is
+    // that every T7 fixture moves a SINGLE item: re-run over the whole
+    // 4067-drop space with the real serializeBlocks(), `count === 1` never
+    // produces a byte difference at all — serializeBlocks() rebuilds its width
+    // stack per span (`widths.length = indent + 1` after every block), so an
+    // over-deep `data-indent` is emitted at its anchor's column anyway, which
+    // is the same column the clamp would have written.
+    //
+    // It is NOT true for a BATCH set. 53 of the 4053 admitted drops differ in
+    // bytes on a `ul` and 123 on an `ol`, every one of them `count > 1`. This
+    // is the smallest `ul` shape that does (measured, not reasoned):
+    //
+    //   - x0            move {x1, x2} past the end of the run
+    //   - x1              with the write:  - x0 / ␣␣- x3 / - x4 / - x1 / ␣␣- x2
+    //     - x2            without it:      - x0 / ␣␣- x3 / ␣␣- x4 / - x1 / ␣␣- x2
+    //       - x3
+    //     - x4          x4's parent left the run, so it belongs at depth 0 —
+    //                   without the write it is ADOPTED BY x0, an item the
+    //                   user never touched. That is rule 3's own worked
+    //                   failure, produced by dropping the write.
+    await s4Scenario('a BATCH li move writes the clamped indents of the orphans it leaves '
+      + 'behind — the shape that discriminates the WRITE from the computation',
+      '# Doc\n\n- x0\n- x1\n  - x2\n    - x3\n  - x4\n', async (page, mdPath) => {
+      const original = '# Doc\n\n- x0\n- x1\n  - x2\n    - x3\n  - x4\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'x0', 'x1', 'x2', 'x3', 'x4'],
+        'FIXTURE SANITY: six blocks in this order. Got ' + JSON.stringify(g.map((b) => b.text)));
+      assert.deepStrictEqual(await rvIndents(page), [null, 0, 0, 1, 2, 1],
+        'FIXTURE PRECONDITION: the indent array is 0,0,1,2,1 — the shape the sweep named. '
+        + 'A fixture that stopped expressing it would pass this scenario while testing '
+        + 'nothing. Got ' + JSON.stringify(await rvIndents(page)));
+      await page.evaluate(() => window.__edTestSetSelection(4, 5));
+      assert.deepStrictEqual(await rvSel(page), [[4, 4], [5, 5]],
+        'PRECONDITION: the standing set is {x1, x2} — TWO members, which is what makes '
+        + 'this a batch. Got ' + JSON.stringify(await rvSel(page)));
+      await s4ArmedOn(page, g[2], 'x1');
+      const ind = await s4DragHandleTo(page, g[2], g[5].bottom + 200);
+      expectApprox(ind.top, g[5].bottom,
+        'PRECONDITION: the drop target is the {mode:\'append\'} one — the indicator sits '
+        + 'on the LAST block\'s bottom edge, which is how the end of this run is named');
+      assert.strictEqual(await s4Banner(page), null,
+        'the drop is admitted — spanIndentsAreAnchored() answers true on the CLAMPED '
+        + 'span, so this is not one of the 14 residual refusals. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- x0\n  - x3\n- x4\n- x1\n  - x2\n',
+        'THE MUTATION THIS KILLS: with `writeIndentClamp(clamp);` removed the file comes '
+        + 'back \'# Doc\\n\\n- x0\\n  - x3\\n  - x4\\n- x1\\n  - x2\\n\' — x4 keeps the '
+        + 'depth its departed parent gave it and is adopted by x0. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(await rvIndents(page), [null, 0, 1, 0, 0, 1],
+        'and the SCREEN agrees with the bytes: x3 settled at 1 and x4 at 0. A clamp that '
+        + 'writes only one of the two is the "looks right, cannot be saved" bug in '
+        + 'whichever direction it missed. Got ' + JSON.stringify(await rvIndents(page)));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false, false],
+        'and nothing went loose — the outer run and its two sublists. Stated for '
+        + 'completeness and NOT as the discriminator: the mutant emits three tight '
+        + 'lists too. The bytes and the data-indent readback above are what bite');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z restores the file byte-for-byte');
+    }, 'RV');
+
+    // ── RV3: declareCollapse() must NOT invent a selection ────────────────
+    //
+    // The review measured that mutating `declareCollapse(...)` to
+    // `declareSelectionRange(...)` survives on BOTH drop paths. The mutant's
+    // consequence is exactly what declareCollapse()'s own `if (blockSelection)`
+    // guard exists to stop: a single-block drag with NO selection standing
+    // CREATES one ({anchorLine:7, focusLine:7} on the non-li path), tinting a
+    // block and pulling the roving focus onto it. One assertion closes both
+    // paths: the selection is still null after a single-block drag.
+    await s4Scenario('a single PARAGRAPH drag with no selection standing leaves no '
+      + 'selection behind — declareCollapse()\'s guard, pinned', S4_DOC,
+      async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(await rvSel(page), null,
+        'PRECONDITION: nothing is selected before the gesture — "no selection after" is '
+        + 'worth nothing without it');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[4].top + 1);
+      expectApprox(ind.top, g[4].top, 'PRECONDITION: the indicator is on delta\'s top edge');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+        'ANTI-VACUITY: the drag must actually have MOVED the block — "no selection was '
+        + 'created" is trivially true of a gesture that never ran');
+      assert.strictEqual(await rvSel(page), null,
+        'THE MUTATION THIS KILLS: with declareCollapse() replaced by '
+        + 'declareSelectionRange() this answers [[7,7]] — a set the user never made, '
+        + 'which changes the resting state of every following gesture. Got '
+        + JSON.stringify(await rvSel(page)));
+      assert.deepStrictEqual(await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block.ed-selected')).length), 0,
+        'and nothing is tinted on screen either');
+    }, 'RV');
+
+    await s4Scenario('a single LIST ITEM drag with no selection standing leaves no '
+      + 'selection behind — the li path\'s own half of the same guard',
+      '# Doc\n\n- a\n- b\n- c\n', async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'a', 'b', 'c'],
+        'FIXTURE SANITY: four blocks. Got ' + JSON.stringify(g.map((b) => b.text)));
+      assert.strictEqual(await rvSel(page), null,
+        'PRECONDITION: nothing is selected before the gesture');
+      await s4ArmedOn(page, g[1], 'a');
+      const ind = await s4DragHandleTo(page, g[1], g[3].bottom + 200);
+      expectApprox(ind.top, g[3].bottom,
+        'PRECONDITION: the drop target is the {mode:\'append\'} one, i.e. the end of the run');
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- b\n- c\n- a\n',
+        'ANTI-VACUITY: the item must actually have MOVED — this is the li path, which '
+        + 'declares its collapse from a DIFFERENT call site');
+      assert.strictEqual(await rvSel(page), null,
+        'THE MUTATION THIS KILLS: declareSelectionRange() in place of declareCollapse() '
+        + 'in performListItemDrop() creates a set on a gesture that had none. Got '
+        + JSON.stringify(await rvSel(page)));
+    }, 'RV');
+
+    // ── RV4: the FIRST home position is MEMBERSHIP, not "the first member" ─
+    //
+    // The review measured that narrowing `opEls.indexOf(liveDestEl) !== -1` to
+    // `opEls[0] === liveDestEl` survives every existing scenario. Its
+    // consequence: a three-member set dropped on its own SECOND member raises
+    // '文件已更新，請重試這個操作' — the destination is not in the source-less
+    // array, so its index is -1 — for a gesture in which nothing went wrong.
+    await s4Scenario('a set dropped on a NON-FIRST member of itself is a silent byte '
+      + 'no-op, not a dropped gesture', S4_DOC, async (page, mdPath) => {
+      const original = S4_DOC;
+      const g = await s4Geometry(page);
+      await page.evaluate(() => window.__edTestSetSelection(3, 7));
+      assert.deepStrictEqual(await rvSel(page), [[3, 3], [5, 5], [7, 7]],
+        'PRECONDITION: the standing set is alpha+bravo+charlie — THREE members, so a '
+        + '"drop on the SECOND member" is expressible at all. Got '
+        + JSON.stringify(await rvSel(page)));
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[2], g[2].top + 1);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: the indicator is on BRAVO\'s top edge — the set\'s SECOND member, '
+        + 'which is the whole point: a first-member drop cannot tell the two predicates '
+        + 'apart');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE MUTATION THIS KILLS: with the membership test narrowed to '
+        + '`opEls[0] === liveDestEl` this raises 文件已更新，請重試這個操作. Any '
+        + 'member\'s top edge is the SET\'S OWN FOOTPRINT — dropping there is "put it '
+        + 'back", which §4.5 rules is a byte no-op and not a refusal. Got '
+        + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'], 'and so is the DOM');
+      assert.deepStrictEqual(await rvSel(page), [[3, 3], [5, 5], [7, 7]],
+        'and the set is still standing, unchanged');
+
+      // THE ACCEPTED PARTNER, same page, same set, same drop path — without
+      // it "no banner" is satisfied by a drop path that answers nothing at all.
+      const ind2 = await s4DragHandleTo(page, g[1], g[4].bottom + 200);
+      expectApprox(ind2.top, g[4].bottom, 'PARTNER PRECONDITION: aimed past delta');
+      assert.strictEqual(await s4Banner(page), null, 'accepted');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\ndelta\n\nalpha\n\nbravo\n\ncharlie\n',
+        'and the very same set really does move when it is aimed somewhere else');
+    }, 'RV');
+
+    // ── RV5: Shift / Ctrl / Alt + ⠿ starts a drag ─────────────────────────
+    //
+    // RECORDED, because nobody had. Before S4 a modified press on ⠿ did
+    // NOTHING (armBlockSelDrag() and beginShiftClickSelection() both return
+    // for `.ed-handle`, a member of ED_SEL_GESTURE_CHROME) and its trailing
+    // click opened the menu. armBlockDrag() checks no modifiers and is ordered
+    // above the Shift branch, so a modified press now drags.
+    //
+    // THE RULING: keep it. It is exactly what the table row/column grips do —
+    // their pointerdown branch reads no modifier either — and ⠿ behaving
+    // differently from every other grip in the editor would be the surprise.
+    // Nothing in §3.3 or §4.5 assigns a modified ⠿ press a meaning of its own,
+    // and the sub-threshold press still opens the menu with any modifier held,
+    // so nothing was taken away.
+    await s4Scenario('a ⠿ drag engages and completes with Shift, Ctrl or Alt held — the '
+      + 'same answer the table grips give, pinned rather than left unrecorded', S4_DOC,
+      async (page, mdPath) => {
+      const original = S4_DOC;
+      const moved = '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n';
+      for (const mod of ['Shift', 'Control', 'Alt']) {
+        const g = await s4Geometry(page);
+        assert.deepStrictEqual(g.map((b) => b.text),
+          ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+          mod + ': PRECONDITION — the document is back to its original order before this '
+          + 'pass. Got ' + JSON.stringify(g.map((b) => b.text)));
+        await s4ArmedOn(page, g[1], mod + ' + alpha');
+        await page.keyboard.down(mod);
+        try {
+          await page.mouse.move(g[1].handle.x, g[1].handle.y);
+          await page.mouse.down();
+          await page.mouse.move(g[1].handle.x, g[4].top + 1, { steps: 8 });
+          // Deliberately NOT a bare waitForSelector: the failure this scenario
+          // exists to name is "the modified press engaged nothing", and a raw
+          // puppeteer TimeoutError says none of that. Swallow the wait and let
+          // the assertion below speak.
+          await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 })
+            .catch(() => {});
+          const ind = await s4Indicator(page);
+          assert.strictEqual(ind.hidden, false,
+            mod + ': the drag must ENGAGE with the modifier held — before S4 a modified '
+            + 'press on ⠿ recorded no pointer state at all, and a modifier check added '
+            + 'to armBlockDrag() puts it back there. Got ' + JSON.stringify(ind));
+          expectApprox(ind.top, g[4].top,
+            mod + ': and the drop target is delta\'s top edge');
+          await page.mouse.up();
+          await settleEditor(page);
+        } finally { await page.keyboard.up(mod); }
+        assert.strictEqual(await s4Banner(page), null,
+          mod + ': no banner. Got ' + JSON.stringify(await s4Banner(page)));
+        assert.strictEqual(await s4MenuOpen(page), false,
+          mod + ': and the trailing click does not open the ⠿ menu — a drag is a drag '
+          + 'whatever is held');
+        assert.strictEqual(await saveAndRead(page, mdPath), moved,
+          mod + ': the block really moved. Got:\n' + JSON.stringify(await saveAndRead(page, mdPath)));
+        await s4UndoOnce(page);
+        assert.strictEqual(await saveAndRead(page, mdPath), original,
+          mod + ': and one Ctrl+Z puts it back, ready for the next modifier');
+      }
+      // THE PARTNER that keeps the sub-threshold half honest: a modified press
+      // that never crosses TE_DRAG_THRESHOLD_PX is still a CLICK and still
+      // opens the menu, so the ruling above took nothing away.
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'Shift + alpha (sub-threshold)');
+      await page.keyboard.down('Shift');
+      try {
+        await page.mouse.move(g[1].handle.x, g[1].handle.y);
+        await page.mouse.down();
+        await page.mouse.move(g[1].handle.x + 2, g[1].handle.y + 2);
+        assert.strictEqual((await s4Indicator(page)).hidden, true,
+          'a sub-threshold press is not a drag, modifier or not');
+        await page.mouse.up();
+      } finally { await page.keyboard.up('Shift'); }
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + g[1].id + '"]');
+      assert.strictEqual(await s4MenuOpen(page), true,
+        'and the ⠿ menu still opens from a Shift-held press that never moved');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and nothing was written by any of it');
+    }, 'RV');
+
+    // <<<S4RVSECTION
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();

@@ -1186,6 +1186,110 @@ function countInCode(source, needle) {
     + 'before it is re-pinned. Got ' + residual.length);
 }
 
+// -- S4 review round: WHY writeIndentClamp()'s WRITE needs a BATCH fixture ---
+// The review measured that `writeIndentClamp(clamp);` could be deleted from
+// performListItemDrop() with all 39 S4 scenarios still green — the four T7 ones
+// named after the clamp included — and concluded the write might be inert.
+//
+// It is not. This re-runs the sweep above with the REAL serializeBlocks() on
+// both sides, once with the clamp's answer written back into `data-indent` and
+// once without, and counts the drops whose emitted BYTES differ. Two numbers
+// come out and both are load-bearing:
+//
+//   * `count === 1` never differs, on either list type. serializeBlocks()
+//     rebuilds its width stack as it walks (`widths.length = indent + 1` after
+//     every block), so an over-deep `data-indent` is emitted at its anchor's
+//     own column anyway — which is the column the clamp would have written.
+//     THAT is why every single-item T7 fixture stayed green, and why any test
+//     for the write has to be a BATCH one.
+//   * `count > 1` differs on 53 `ul` drops and 123 `ol` ones. If either falls
+//     to zero the write really has become inert and RV2 has gone vacuous —
+//     re-measure before deleting anything.
+{
+  const { serializeBlocks } = require('../lib/editor/list-md.js');
+  const { clampIndents } = require('../lib/editor/indent-clamp.js');
+  const stub = (name, attrs, kids) => ({
+    nodeType: 1, nodeName: name.toUpperCase(), childNodes: kids || [],
+    getAttribute: (k) => (attrs[k] !== undefined ? attrs[k] : null),
+    classList: { contains: (c) => (attrs.class || '').split(/\s+/).indexOf(c) !== -1 },
+    get textContent() { return this.childNodes.map((c) => c.textContent).join(''); },
+  });
+  const liStub = (id, listType, indent, listStart) => stub('div', {
+    class: 'ed-block', 'data-block-id': String(id), 'data-block-type': 'li',
+    'data-list-type': listType, 'data-task': '0', 'data-indent': String(indent),
+    'data-list-start': listStart ? '1' : null,
+  }, [
+    stub('span', { class: 'ed-li-marker' }, [{ nodeType: 3, textContent: '\u2022' }]),
+    stub('div', { class: 'ed-li-text' }, [{ nodeType: 3, textContent: 'x' + id }]),
+  ]);
+  const legalShapes = (n) => {
+    const out = [];
+    (function rec(a) {
+      if (a.length === n) { out.push(a.slice()); return; }
+      for (let d = 0; d <= Math.min(3, a[a.length - 1] + 1); d++) rec(a.concat(d));
+    })([0]);
+    return out;
+  };
+  const sibsOf = (ds, i) => {
+    const d = ds[i]; const out = [];
+    for (let j = i; j >= 0; j--) { if (ds[j] < d) break; if (ds[j] === d) out.unshift(j); }
+    for (let j = i + 1; j < ds.length; j++) { if (ds[j] < d) break; if (ds[j] === d) out.push(j); }
+    return out;
+  };
+  const subtreeEnd = (ds, j) => { let k = j; while (k + 1 < ds.length && ds[k + 1] > ds[j]) k++; return k; };
+  const counts = {};
+  ['ul', 'ol'].forEach((listType) => {
+    let single = 0, batch = 0, admitted = 0;
+    for (let n = 2; n <= 6; n++) {
+      legalShapes(n).forEach((ds) => {
+        for (let from = 0; from < n; from++) {
+          for (let count = 1; from + count <= n; count++) {
+            const sibs = sibsOf(ds, from);
+            const dests = sibs.concat([subtreeEnd(ds, sibs[sibs.length - 1]) + 1]);
+            dests.forEach((insertAt) => {
+              const order = reorderSpanRange(n, from, count, insertAt);
+              if (!order) return;
+              const idxs = [];
+              for (let k = from; k < from + count; k++) idxs.push(k);
+              const opOld = Math.min.apply(null, idxs.map((k) => ds[k]));
+              const after = ds.slice();
+              clampIndents(ds.map((d, k) => ({ id: k, type: 'li', indent: d })),
+                idxs, opOld, { removed: true }).forEach((r) => { after[r.blockId] = r.indent; });
+              // performListItemDrop() asks its predicate on the CLAMPED span,
+              // so a drop it refuses never reaches the write at all.
+              if (!spanIndentsAreAnchored(order.map((k) => ({ type: 'li', indent: after[k] })))) return;
+              admitted++;
+              // `data-list-start` follows the run's first SIBLING across the
+              // reorder — the transfer performListItemDrop() performs.
+              const head = order.filter((k) => sibs.indexOf(k) !== -1)[0];
+              const emit = (ind) => serializeBlocks(
+                order.map((k) => liStub(k, listType, ind[k], k === head)), {}).md;
+              if (emit(after) === emit(ds)) return;
+              if (count === 1) single++; else batch++;
+            });
+          }
+        }
+      });
+    }
+    counts[listType] = { admitted, single, batch };
+  });
+  assert.strictEqual(counts.ul.admitted, 4053,
+    'ANTI-VACUITY: the same space the sweep above enumerates, minus the 14 the orphan '
+    + 'predicate refuses. Got ' + counts.ul.admitted);
+  assert.strictEqual(counts.ul.single, 0,
+    'a SINGLE-item move never needs the write — serializeBlocks() bounds the emitted '
+    + 'column at the anchor\'s own depth whatever data-indent says. This is why the T7 '
+    + 'fixtures could not see the write, and why RV2 is a batch. Got ' + counts.ul.single);
+  assert.strictEqual(counts.ol.single, 0, 'and the same on an ordered list. Got ' + counts.ol.single);
+  assert.strictEqual(counts.ul.batch, 53,
+    'THE WRITE IS LOAD-BEARING: 53 batch drops on a `ul` emit different bytes without it '
+    + '(the smallest is indents 0,0,1,2,1 moving {1,2} — the orphan that kept its depth '
+    + 'gets ADOPTED by a block the user never touched). If this reaches 0 the write has '
+    + 'become inert and RV2 has gone vacuous. Got ' + counts.ul.batch);
+  assert.strictEqual(counts.ol.batch, 123,
+    'and 123 on an `ol`, where the ordinal moves too. Got ' + counts.ol.batch);
+}
+
 // -- S4 Task 5: blockMoveSeamRefusal() ---------------------------------------
 // The cross-boundary enumeration's whole ruling, as one pure predicate. Every
 // row below is a MEASURED marked.lexer answer, not a reasoned one — the
@@ -1291,11 +1395,38 @@ function countInCode(source, needle) {
   assert.ok(from > 0 && to > from,
     'PRECONDITION: both drag-path functions must be locatable by content — line numbers '
     + 'have drifted every stage, so nothing here may be pinned to one');
+  const BANNER_RE = /showBanner\(|refuseStructuralListEdit\(/;
+  const RETURN_RE = /(^|[^\w.])return\s*;/;
+  const isCommentLine = (l) => l.trim().indexOf('//') === 0;
+  // Does the banner belong to THIS exit? On the return's own line
+  // (`{ refuse…; return; }`), or anywhere between it and the `{` that opens
+  // the statement it stands in (the three-line block form) — with no OTHER
+  // `return;` in between, because a banner above a different exit belongs to
+  // that one.
+  //
+  // MEASURED BLIND SPOT (S4 review round, 2026-09-01). This used to scan a
+  // FIXED WINDOW — the return's own line plus the two above it — so a silent
+  // `return;` two lines BELOW a bannered exit read as bannered. Proved by
+  // planting `const rvProbe = 1;` / `if (rvProbe > 99) return;` immediately
+  // under the `if (si < 0 || sj < 0 || di < 0) { showBanner(…); return; }`
+  // line: this whole file stayed green. Widening the fixed window does not
+  // fix it — the same trick one line lower defeats any width — so the window
+  // is the ENCLOSING STATEMENT instead, which has no width to outrun.
+  //
+  // Comment lines are skipped rather than scanned: they carry both braces and
+  // the names of banner helpers, and either would be read as code.
   const raises = (i) => {
-    // A banner raised on the same line, or in the two lines above it (the
-    // `{ refuse…; return; }` and the three-line block forms both occur).
-    for (let k = Math.max(from, i - 2); k <= i; k++) {
-      if (/showBanner\(|refuseStructuralListEdit\(/.test(lines[k])) return true;
+    if (BANNER_RE.test(lines[i])) return true;
+    let depth = 0;
+    for (let k = i - 1; k >= from; k--) {
+      const l = lines[k];
+      if (isCommentLine(l)) continue;
+      depth += (l.match(/\}/g) || []).length - (l.match(/\{/g) || []).length;
+      // depth < 0 means THIS line opened the block the return stands in.
+      // Reading past it would start attributing somebody else's banner.
+      if (depth < 0) return BANNER_RE.test(l);
+      if (RETURN_RE.test(l)) return false;
+      if (BANNER_RE.test(l)) return true;
     }
     return false;
   };
