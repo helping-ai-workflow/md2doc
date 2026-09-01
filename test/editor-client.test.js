@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanIndices, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -904,12 +904,12 @@ function countInCode(source, needle) {
   }
 }
 
-// -- S4 Task 4: reorderSpanIndices() / spanIndentsAreAnchored() --------------
+// -- S4 Task 4/6: reorderSpanRange() / spanMoveRange() / spanIndentsAreAnchored()
 // The pure half of a LIST ITEM's ⠿ drop. The runtime scenarios drive the
 // gesture and pin the saved bytes; these two answer the questions a gesture
 // scenario cannot discriminate.
 //
-// reorderSpanIndices() is the arithmetic that turns "the item at `from` goes
+// reorderSpanRange() is the arithmetic that turns "the `count` members at `from` go
 // before the item at `insertAt`" into the span array serializeBlocks() emits
 // in. It is not the obvious `splice(from,1); splice(insertAt,0,…)`: `insertAt`
 // names a slot in the array BEFORE the removal, so a downward move has to be
@@ -931,37 +931,117 @@ function countInCode(source, needle) {
   const li = (n) => ({ type: 'li', indent: n });
   const other = () => ({ type: 'paragraph', indent: 0 });
 
-  // ── reorderSpanIndices ────────────────────────────────────────────────
-  assert.strictEqual(reorderSpanIndices(3, 0, 0), null,
-    'inserting before yourself is the home position, not a move');
-  assert.strictEqual(reorderSpanIndices(3, 0, 1), null,
-    'inserting before the block immediately BELOW you is the same place on screen — '
-    + 'the byte no-op the drag\'s release-where-you-started case depends on');
+  // ── reorderSpanRange ────────────────────────────────────
+  // MIGRATED by S4 Task 6 from `reorderSpanIndices(length, from, insertAt)`,
+  // which could only express a ONE-member move. §4.5's 「grip 在選取集合內
+  // → 整批搬」 needs N, and two implementations of the same off-by-one would be
+  // the 「不得另寫一條」 shape this plan has already refused twice. Every
+  // assertion below is the ORIGINAL one with `count` pinned to 1, so the
+  // single-item arithmetic is still covered by exactly the cases that covered
+  // it before; the count > 1 rows underneath are new.
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 0), null,
+    'MIGRATED (was reorderSpanIndices(3, 0, 0)): inserting before yourself is the home '
+    + 'position, not a move');
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 1), null,
+    'MIGRATED (was reorderSpanIndices(3, 0, 1)): inserting before the block immediately '
+    + 'BELOW you is the same place on screen — the byte no-op the drag\'s '
+    + 'release-where-you-started case depends on');
   // The partner: without it, "it returned null" is satisfied by a function
   // that always returns null.
-  assert.deepStrictEqual(reorderSpanIndices(3, 0, 2), [1, 0, 2],
-    'one slot further down IS a move, and the moved item lands AFTER the block whose '
-    + 'slot was named — the decrement that a downward move needs');
-  assert.deepStrictEqual(reorderSpanIndices(3, 0, 3), [1, 2, 0],
-    'insertAt === length is "at the very end of the run"');
-  assert.deepStrictEqual(reorderSpanIndices(3, 2, 0), [2, 0, 1],
-    'an UPWARD move is not decremented — the same insertAt means a different slot '
-    + 'depending on the direction, which is the whole reason this is a named function');
-  assert.deepStrictEqual(reorderSpanIndices(4, 3, 1), [0, 3, 1, 2],
-    'up past two blocks');
-  assert.deepStrictEqual(reorderSpanIndices(4, 1, 4), [0, 2, 3, 1],
-    'down to the end past two blocks');
+  assert.deepStrictEqual(reorderSpanRange(3, 0, 1, 2), [1, 0, 2],
+    'MIGRATED: one slot further down IS a move, and the moved item lands AFTER the block '
+    + 'whose slot was named — the decrement that a downward move needs');
+  assert.deepStrictEqual(reorderSpanRange(3, 0, 1, 3), [1, 2, 0],
+    'MIGRATED: insertAt === length is "at the very end of the run"');
+  assert.deepStrictEqual(reorderSpanRange(3, 2, 1, 0), [2, 0, 1],
+    'MIGRATED: an UPWARD move is not decremented — the same insertAt means a different '
+    + 'slot depending on the direction, which is the whole reason this is a named function');
+  assert.deepStrictEqual(reorderSpanRange(4, 3, 1, 1), [0, 3, 1, 2],
+    'MIGRATED: up past two blocks');
+  assert.deepStrictEqual(reorderSpanRange(4, 1, 1, 4), [0, 2, 3, 1],
+    'MIGRATED: down to the end past two blocks');
+  assert.strictEqual(reorderSpanRange(3, 3, 1, 0), null,
+    'MIGRATED: a `from` outside the span is refused');
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 4), null,
+    'MIGRATED: an `insertAt` past the end is refused');
+
+  // ── count > 1: the whole point of Task 6 ────────────────────
+  // THE MUTATION THIS BLOCK EXISTS TO KILL is "the operand set one short":
+  // `count - 1` here leaves the set's LAST member standing where it was while
+  // the rest travel, which on a gesture-level assertion looks like an ordinary
+  // wrong-order document and on a two-member set is invisible (moving one of
+  // two members past the other produces the same array as moving both, in the
+  // one direction). The rows below are all >= 2 members in a >= 4 slot span
+  // for exactly that reason.
+  assert.deepStrictEqual(reorderSpanRange(4, 0, 2, 4), [2, 3, 0, 1],
+    'a two-member set moved to the end keeps the members\' OWN order — the set travels '
+    + 'as a block, it is not reversed and it is not interleaved');
+  assert.deepStrictEqual(reorderSpanRange(4, 2, 2, 0), [2, 3, 0, 1],
+    'and the same set moved UP to the head, from the other side');
+  assert.deepStrictEqual(reorderSpanRange(5, 1, 3, 5), [0, 4, 1, 2, 3],
+    'THREE members down past the tail: `insertAt` names a slot in the array BEFORE the '
+    + 'removal, so a downward move is decremented by the WHOLE count and not by one — '
+    + 'decrementing by 1 here answers [0,4,1,2,3] for insertAt 5 and 4 alike, i.e. two '
+    + 'different gestures collapse onto one document');
+  assert.deepStrictEqual(reorderSpanRange(5, 1, 3, 0), [1, 2, 3, 0, 4],
+    'three members up to the head');
+  // The home positions, for a SET. `insertAt` anywhere from `from` to
+  // `from + count` inclusive is the set's own footprint: the same place on
+  // screen, and the byte no-op a release-where-you-started gesture depends on.
+  [0, 1, 2].forEach((a) => {
+    assert.strictEqual(reorderSpanRange(4, 0, 2, a), null,
+      'insertAt=' + a + ' is inside (or on either edge of) a 2-member set starting at 0 '
+      + '— every one of those is the set\'s own position and must be a byte no-op, not '
+      + 'a reorder that shuffles members WITHIN the set');
+  });
+  assert.deepStrictEqual(reorderSpanRange(4, 0, 2, 3), [2, 0, 1, 3],
+    'and the partner one slot further on IS a move — without it the three nulls above '
+    + 'are satisfied by a function that refuses every set');
+  assert.strictEqual(reorderSpanRange(4, 3, 2, 0), null,
+    'a set that runs off the end of the span is refused');
+  assert.strictEqual(reorderSpanRange(4, 0, 0, 2), null,
+    'an EMPTY set names no move');
   // Every answer is a PERMUTATION of the span — nothing may be dropped or
   // duplicated. Asserted, because a splice off by one silently can do both.
-  [[3, 0, 2], [3, 0, 3], [3, 2, 0], [4, 3, 1], [4, 1, 4]].forEach(([n, f, a]) => {
-    const got = reorderSpanIndices(n, f, a);
+  [[3, 0, 1, 2], [3, 0, 1, 3], [3, 2, 1, 0], [4, 3, 1, 1], [4, 1, 1, 4],
+    [4, 0, 2, 4], [4, 2, 2, 0], [5, 1, 3, 5], [5, 1, 3, 0], [4, 0, 2, 3]].forEach(([n, f, c, a]) => {
+    const got = reorderSpanRange(n, f, c, a);
     assert.deepStrictEqual(got.slice().sort((x, y) => x - y),
       Array.from({ length: n }, (_, i) => i),
       'a reorder is a PERMUTATION of the span: same members, same count. Got '
       + JSON.stringify(got));
+    // ...and the moved members stay CONSECUTIVE and in their own order. A
+    // `count`-off-by-one shows up here as a member left behind in place.
+    const moved = Array.from({ length: c }, (_, i) => f + i);
+    const at = got.indexOf(moved[0]);
+    assert.deepStrictEqual(got.slice(at, at + c), moved,
+      'the operand set travels WHOLE and in order — got ' + JSON.stringify(got)
+      + ' for (length ' + n + ', from ' + f + ', count ' + c + ', insertAt ' + a + ')');
   });
-  assert.strictEqual(reorderSpanIndices(3, 3, 0), null, 'a `from` outside the span is refused');
-  assert.strictEqual(reorderSpanIndices(3, 0, 4), null, 'an `insertAt` past the end is refused');
+
+  // ── spanMoveRange ───────────────────────────────────
+  // The non-li half of "the operand set one short", and the reason it is a
+  // named function rather than an object literal at the call site: the set is
+  // the ONLY thing that reaches planBlockMove(), so an endLine taken from any
+  // member but the LAST silently relocates a prefix of the set and leaves the
+  // rest behind — which writes the set's own text into the file twice over
+  // once the blank runs are re-emitted. `recs[0].endLine` is the mutation that
+  // looks most like a typo and it is caught here in milliseconds.
+  {
+    const r = (a, b) => ({ startLine: a, endLine: b });
+    assert.deepStrictEqual(spanMoveRange([r(3, 3)]), { startLine: 3, endLine: 3 },
+      'one block: the block\'s own range');
+    assert.deepStrictEqual(spanMoveRange([r(3, 3), r(5, 5), r(7, 7)]),
+      { startLine: 3, endLine: 7 },
+      'THREE blocks: first member\'s startLine to the LAST member\'s endLine. The '
+      + 'separators between them are inside that range and travel verbatim, which is '
+      + 'what makes a batch move the same single commitRangeEdit a one-block move is');
+    assert.deepStrictEqual(spanMoveRange([r(3, 3), r(5, 9)]), { startLine: 3, endLine: 9 },
+      'the last member\'s endLine, not its startLine — a fence or a table owns several '
+      + 'lines and a set that ends in one must carry all of them');
+    assert.strictEqual(spanMoveRange([]), null, 'an empty operand set names no range');
+    assert.strictEqual(spanMoveRange(null), null, 'and neither does a missing one');
+  }
 
   // ── spanIndentsAreAnchored ────────────────────────────────────────────
   assert.strictEqual(spanIndentsAreAnchored([li(0), li(0), li(0)]), true,
@@ -1068,6 +1148,82 @@ function countInCode(source, needle) {
   assert.strictEqual(blockMoveSeamRefusal(null, null), null, 'a missing seam pair is not a refusal');
   assert.strictEqual(blockMoveSeamRefusal(undefined, seam(li('r1'), li('r1'))), 'destination',
     'and a missing SOURCE seam still lets the destination be judged');
+}
+
+// -- S4 Task 6: NO SILENT RETURN IN THE DRAG PATH (spec §3.6) ---------------
+// 「靜默不動作是缺陷」. Task 8 Step 0 verifies by gesture that every drag ends
+// in a move or a banner; this is the guard that makes a REGRESSION of that
+// invariant fail immediately instead of waiting for someone to think of the
+// gesture. It is a source-presence check, and that is a weaker thing than a
+// reachability proof — but the failure mode it catches is precisely a future
+// task adding `if (…) return;` to one of these two functions, which is how all
+// three of the silent shapes this task closed got there in the first place.
+//
+// EVERY silent exit must be on this list, with the reason it is allowed to be
+// silent. Adding one and not listing it fails the test; changing a listed one
+// into a banner fails it too and the entry is simply deleted.
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const lines = src.split('\n');
+  const from = lines.findIndex((l) => l.indexOf('async function performBlockDrop(st)') !== -1);
+  const to = lines.findIndex((l) => l.indexOf('function movedLiRangeAfterReorder(') !== -1);
+  assert.ok(from > 0 && to > from,
+    'PRECONDITION: both drag-path functions must be locatable by content — line numbers '
+    + 'have drifted every stage, so nothing here may be pinned to one');
+  const raises = (i) => {
+    // A banner raised on the same line, or in the two lines above it (the
+    // `{ refuse…; return; }` and the three-line block forms both occur).
+    for (let k = Math.max(from, i - 2); k <= i; k++) {
+      if (/showBanner\(|refuseStructuralListEdit\(/.test(lines[k])) return true;
+    }
+    return false;
+  };
+  const silent = [];
+  for (let i = from; i < to; i++) {
+    const l = lines[i];
+    if (l.trim().indexOf('//') === 0) continue;
+    if (!/(^|[^\w.])return\s*;/.test(l)) continue;
+    if (/await performListItemDrop\(/.test(lines[i - 1] || '')) continue; // delegation, not an exit
+    if (/if \(!operands\) return;/.test(l)) continue;                     // the preamble bannered already
+    if (raises(i)) continue;
+    silent.push(l.trim().replace(/\s+/g, ' '));
+  }
+  assert.deepStrictEqual(silent, [
+    // Defensive only — nearestBlockDropTarget() has no null answer and
+    // updateBlockDropIndicator() assigns dropTarget unconditionally, so no
+    // gesture reaches this.
+    'if (!target) return; // engaged but never moved onto a target — nothing to do',
+    // §4.5 / Task 3's ruling: a drop where the block already is is a BYTE
+    // NO-OP, not a refusal. The first home position (the destination is a
+    // member of the set) …
+    'if (liveDestEl && opEls.indexOf(liveDestEl) !== -1) return;',
+    // … and the second (the seam immediately below the set).
+    'if (!planBlockMove(lines, blocks, srcRec, destRec)) return;',
+    // MEASURED reachable, and correct: two identical adjacent blocks make a
+    // real move produce byte-identical text. The document after the gesture
+    // IS the document before it, so a banner would report a failure the user
+    // can see did not happen.
+    'if (!result.op) return;',
+    // The li path's own second home position …
+    'if (destEl ? destEl === afterSrcEl : all[all.length - 1] === lastLiEl) return;',
+    // … and reorderSpanRange()'s order-is-unchanged answer, which the two
+    // home positions reach by another road.
+    'if (!order) return;',
+  ], 'SIX silent exits, every one of them a documented BYTE NO-OP or an '
+    + 'unreachable defensive guard. Anything else in this list is §3.6\'s '
+    + '「靜默不動作是缺陷」 — a drag that neither moved nor said why. Got:\n'
+    + silent.map((x) => '  ' + x).join('\n'));
+  // ANTI-VACUITY: the scan must actually be finding returns, or an empty
+  // `silent` would pass a list that had been emptied by a broken regex.
+  const allReturns = lines.slice(from, to)
+    .filter((l) => /(^|[^\w.])return\s*;/.test(l) && l.trim().indexOf('//') !== 0).length;
+  assert.ok(allReturns >= 20,
+    'the scan must be reading the real functions: expected 20+ `return;` sites across '
+    + 'performBlockDrop() and performListItemDrop(), found ' + allReturns);
+  assert.ok(allReturns - silent.length >= 14,
+    'and most of them must be BANNERED exits — ' + (allReturns - silent.length)
+    + ' found. If this drops, the classifier above has stopped recognising banners and '
+    + 'the whole guard has gone vacuous');
 }
 
 console.log('editor-client.test.js OK');
