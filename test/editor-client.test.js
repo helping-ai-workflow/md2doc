@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -793,9 +793,115 @@ function countInCode(source, needle) {
   // reuses commitListStructure()'s existing site the way every other list
   // structural edit does. The expected total is therefore DECLARED once +
   // EXPORTED once + 11 uses = 13.
-  assert.strictEqual(helperCalls, 13,
-    'the helper must be DECLARED once, EXPORTED once, and used at all eleven ' +
+  //
+  // MIGRATED by S4 Task 3 (13 -> 14), with the reason: performBlockDrop() —
+  // the ⠿ drag's drop — is a genuinely NEW commit-then-render site. It commits
+  // ONE relocated line range through commitBlockMove()/commitRangeEdit() and
+  // renders, which is neither commitListStructure()'s site nor
+  // commitBlockInsertion()'s nor changeHeadingDepthsInSpan()'s. S4 Tasks 1, 2
+  // and 2b added NONE and that was checked rather than assumed: Task 1 is
+  // geometry, and Tasks 2/2b are chrome that deliberately write no bytes at
+  // all. The expected total is therefore DECLARED once + EXPORTED once +
+  // 12 uses = 14.
+  assert.strictEqual(helperCalls, 14,
+    'the helper must be DECLARED once, EXPORTED once, and used at all twelve ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
+}
+
+// -- S4 Task 3: planBlockMove() / commitBlockMove() --------------------------
+// The pure half of the ⠿ drag's drop. The RUNTIME scenarios in
+// test/editor-client-runtime.test.js drive the gesture and pin the saved
+// bytes; what lives here is the one property a gesture scenario CANNOT
+// discriminate, plus the byte table those scenarios' expectations were
+// measured from.
+//
+// WHY THE HOME-POSITION GUARD NEEDS ITS OWN TEST — measured, and it is the
+// vacuity shape this plan's own constraints name ("an assertion that holds
+// under a refusal"): narrowing the guard from `ins >= ds && ins <= de + 1` to
+// `ins === ds` left EVERY runtime scenario green, the "released where it
+// started" ones included. The narrowed guard lets the `de + 1` seam through,
+// the branch arithmetic then produces an INVERTED range, and
+// refuseInvertedRange() catches it and writes nothing — so the file is
+// byte-identical for the wrong reason and no gesture-level assertion can see
+// the difference. This one can: it reads the plan, not the file.
+{
+  const mv = (md, srcIdx, destIdx) => {
+    const l = md.split('\n');
+    const bm = require('../lib/editor/blockmap.js').buildBlockMap(md).blocks;
+    const plan = planBlockMove(l, bm, bm[srcIdx], destIdx === null ? null : bm[destIdx]);
+    if (!plan) return null;
+    return l.slice(0, plan.startLine - 1).concat(plan.after, l.slice(plan.endLine)).join('\n');
+  };
+  const DOC = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\ndelta\n';
+
+  // ── the two home positions ────────────────────────────────────────────
+  assert.strictEqual(mv(DOC, 1, 1), null,
+    'a block released on its OWN top edge (before-block = itself) is a no-op');
+  assert.strictEqual(mv(DOC, 1, 2), null,
+    'a block released on the seam immediately BELOW itself is the SAME position on '
+    + 'screen and must also be a no-op. This is the assertion a gesture scenario cannot '
+    + 'make: with this case let through, the range comes out INVERTED, '
+    + 'refuseInvertedRange() swallows it, and the file is unchanged for the wrong reason');
+  assert.strictEqual(mv(DOC, 4, null), null,
+    'the LAST block released on the append target is already there');
+
+  // ── the partner: the very next seam in each direction IS a move ───────
+  // Without these, "it returned null" is satisfied by a function that always
+  // returns null.
+  assert.strictEqual(mv(DOC, 1, 3), '# Doc\n\nbravo\n\nalpha\n\ncharlie\n\ndelta\n',
+    'ONE seam further down is a real move — the partner proving the no-ops above are '
+    + 'about the POSITION and not about the function');
+  assert.strictEqual(mv(DOC, 1, 0), 'alpha\n\n# Doc\n\nbravo\n\ncharlie\n\ndelta\n',
+    'one seam further UP is a real move too');
+
+  // ── the byte table (every entry verified against marked.lexer and
+  //    blockmap.buildBlockMap before it was pinned) ────────────────────────
+  assert.strictEqual(mv(DOC, 1, 4), '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+    'down past two blocks');
+  assert.strictEqual(mv(DOC, 3, 0), 'charlie\n\n# Doc\n\nalpha\n\nbravo\n\ndelta\n',
+    'up to the very top: no leading blank is invented, there is no neighbour above');
+  assert.strictEqual(mv(DOC, 1, null), '# Doc\n\nbravo\n\ncharlie\n\ndelta\n\nalpha\n',
+    'appended: the separator lands ABOVE the block, and the file keeps its trailing '
+    + 'newline rather than absorbing it as a blank');
+  assert.strictEqual(
+    mv('# Doc\n\nalpha\n\n```js\nconst a = 1;\n\nconst b = 2;\n```\n\nbravo\n', 2, 0),
+    '```js\nconst a = 1;\n\nconst b = 2;\n```\n\n# Doc\n\nalpha\n\nbravo\n',
+    'a fenced block moves whole — the blank INSIDE the fence is part of the block\'s '
+    + 'line range and is never mistaken for a separator');
+  assert.strictEqual(mv('# A\n# B\n# C\n', 0, 2), '# B\n\n# A\n\n# C\n',
+    'the ONE documented case where the blank count moves: the landing seam had none to '
+    + 'carry, so rule 3 emits the ones it needs');
+
+  // ── every move above is a PERMUTATION of the file's lines ─────────────
+  // The rule's headline property, asserted rather than asserted-in-prose.
+  [[DOC, 1, 4], [DOC, 3, 0], [DOC, 1, null]].forEach(([md, a, b]) => {
+    const out = mv(md, a, b);
+    assert.deepStrictEqual(out.split('\n').slice().sort(), md.split('\n').slice().sort(),
+      'a move in a normally-separated document is a PERMUTATION of its lines — same '
+      + 'lines, same count, same separators. Got:\n' + JSON.stringify(out));
+  });
+
+  // ── ONE op on the stack, and undo restores the file ──────────────────
+  // §3.4: one gesture, one undo. commitBlockMove() is the only thing between
+  // the gesture and the stack, so this is where "exactly one op" is provable
+  // by COUNTING rather than by pressing Ctrl+Z once and hoping.
+  {
+    const l = DOC.split('\n');
+    const bm = require('../lib/editor/blockmap.js').buildBlockMap(DOC).blocks;
+    const st = new UndoStack();
+    const r = commitBlockMove({ lines: l, blocks: bm, stack: st }, bm[1], bm[4]);
+    assert.ok(r.op, 'PRECONDITION: this fixture must actually move — a stack with zero '
+      + 'ops also satisfies "not more than one"');
+    assert.strictEqual(r.lines.join('\n'), '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+      'PRECONDITION: ...and move to the right place');
+    const back = st.undo(r.lines);
+    assert.strictEqual(back.lines.join('\n'), DOC,
+      'ONE undo op restores the file: the move is a single contiguous range edit, never '
+      + 'a removal plus an insertion');
+    assert.strictEqual(st.undo(back.lines), null,
+      'and there is no SECOND op behind it — that is the whole reason the move is '
+      + 'written as one commitRangeEdit over min(source, destination)..max(...)');
+  }
 }
 
 console.log('editor-client.test.js OK');
