@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanIndices, spanIndentsAreAnchored, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanIndices, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -983,6 +983,91 @@ function countInCode(source, needle) {
     'and the partner — the same shape at a legal indent is anchored, so the assertion '
     + 'above is about the INDENT and not about the paragraph');
   assert.strictEqual(spanIndentsAreAnchored([]), true, 'an empty span is vacuously anchored');
+}
+
+// -- S4 Task 5: blockMoveSeamRefusal() ---------------------------------------
+// The cross-boundary enumeration's whole ruling, as one pure predicate. Every
+// row below is a MEASURED marked.lexer answer, not a reasoned one — the
+// measurement script's outputs are quoted in each assertion message, because
+// this is the function that decides whether a list gets corrupted and a
+// corrupted list is not undoable.
+//
+// TWO SEAMS, and they get DIFFERENT rules. That asymmetry is the finding:
+//
+//   * the DESTINATION seam is where the block LANDS. An insertion can only
+//     ever SPLIT — it cannot merge two lists — so two adjacent li that are
+//     already in DIFFERENT runs stay two lists whatever is put between them.
+//     MEASURED: '# Doc\n\n- a\n\n1. b\n\ntail\n' with a paragraph spliced at
+//     the seam is heading | ul(1,tight) | paragraph | ol(1,tight) |
+//     paragraph. So the destination narrows to SAME RUN.
+//
+//   * the SOURCE seam is where the block LEAVES, and a removal MERGES. It
+//     cannot be narrowed at all with what the block model carries:
+//       - '- a' / para / '- b'      -> '- a\n\n- b\n'     = ONE list, loose
+//       - '1. a' / para / '2. b'    -> '1. a\n\n2. b\n'   = ONE list, loose
+//       - '- [ ] a' / para / '- [x] b'                    = ONE list, loose
+//       - '- a' / para / '  1. a1'  -> '- a\n\n  1. a1\n' = ONE list, loose
+//         — and THAT one is the killer: blockmap reports BOTH items at
+//         indent 0 with listType 'ul' and 'ol', i.e. different runs AND
+//         different types, so every discriminator the model exposes says
+//         "safe" while the file says loose === true. The 2-space prefix that
+//         decides it is a RAW BYTE the block model does not carry, and the
+//         client has no lexer to ask.
+//     Narrowing the source seam therefore needs the run/non-run blank-line
+//     rule §4.5 defers to 3.1.0. It stays wide: two li neighbours = refused.
+{
+  const li = (runKey) => ({ runKey: runKey });
+  const none = null;
+  const seam = (prev, next) => ({ prev: prev, next: next });
+
+  // ── the source seam: WIDE, and every narrowing is refused with it ──────
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r1')), seam(none, none)), 'source',
+    'a block whose removal leaves two members of ONE run adjacent is refused');
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r2')), seam(none, none)), 'source',
+    'DIFFERENT runs at the SOURCE seam are refused TOO, and this is the assertion the '
+    + 'obvious narrowing fails: measured, "- a" / para / "- b" is two runs in the model '
+    + 'and ONE loose list in the file the moment the paragraph leaves');
+  // The partner, on the same predicate: a source seam with only ONE li
+  // neighbour is NOT refused. Without it "it returned 'source'" is satisfied
+  // by a predicate that refuses everything.
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), none), seam(none, none)), null,
+    'one li neighbour cannot merge with anything — a block at the end of the document, '
+    + 'or with a paragraph on its other side, moves freely');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, li('r1')), seam(none, none)), null,
+    'and the mirror image');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(none, none)), null,
+    'no li neighbour at either seam is the ordinary move Task 3 ships');
+
+  // ── the destination seam: NARROWED to same-run ────────────────────────
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li('r1'))), 'destination',
+    'splicing a foreign block between two members of ONE run turns it into two runs '
+    + 'with §4.3\'s looseness trap either side of the intruder');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li('r2'))), null,
+    'THE NARROWING: two adjacent li of DIFFERENT runs are already two lists, and an '
+    + 'insertion cannot merge them. Measured on "# Doc\\n\\n- a\\n\\n1. b\\n\\ntail\\n" '
+    + '— every list tight before and after. Task 3 refused this case on purpose and '
+    + 'said so; this is where it is paid back');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li(null), li('r2'))), 'destination',
+    'a runKey the DOM could not answer is treated as "same run" — an unknown seam '
+    + 'refuses rather than guesses, because the guess that goes wrong is not undoable');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li(null))), 'destination',
+    'and the mirror image');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), none)), null,
+    'a destination at the HEAD or the TAIL of a run has one li neighbour only — the '
+    + 'block lands beside the run, not inside it');
+
+  // ── both seams at once: the SOURCE answer wins ────────────────────────
+  // The block cannot leave AT ALL, so telling the user about the destination
+  // would send them to move it somewhere else — which fails the same way.
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r2')), seam(li('r3'), li('r3'))), 'source',
+    'when both seams object, the SOURCE one is reported: it is the objection that '
+    + 'holds wherever the user aims next');
+
+  // Shape tolerance — the call site builds these from possibly-absent DOM
+  // neighbours, and an undefined seam must not throw on a drag.
+  assert.strictEqual(blockMoveSeamRefusal(null, null), null, 'a missing seam pair is not a refusal');
+  assert.strictEqual(blockMoveSeamRefusal(undefined, seam(li('r1'), li('r1'))), 'destination',
+    'and a missing SOURCE seam still lets the destination be judged');
 }
 
 console.log('editor-client.test.js OK');

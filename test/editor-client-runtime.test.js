@@ -19499,72 +19499,206 @@ async function gutterGeometry(page, sel) {
         'ONE Ctrl+Z must restore the file byte-for-byte');
     }, 'T3');
 
-    // ── 6. the DESTINATION seam is inside a list run → refused ───────────
-    // Dropping a paragraph between two items of one run would splice a
-    // non-list block into the middle of it, and the blank lines this rule
-    // emits either side would make the surviving halves LOOSE — §4.3's
-    // looseness trap, which degrades the whole run read-only with no banner.
-    // §3.6 is explicit that a silent no-op is a defect, so this refuses out
-    // loud. Task 5 owns the full cross-boundary enumeration; this is the one
-    // case Task 3's own path would otherwise corrupt.
-    await s4Scenario('a paragraph dropped between two items of one list run is REFUSED '
-      + 'with a banner, and writes nothing', '# Doc\n\npara\n\n- a\n- b\n\ntail\n',
+    // ── 6. the DESTINATION seam is inside ONE list run → refused ────────
+    // MIGRATED BY TASK 5, twice over, and the reasons are recorded here
+    // rather than in a commit message nobody will find:
+    //   (a) the WORDING. Task 3 raised this with the provisional
+    //       BLOCK_MOVE_LIST_SEAM_MESSAGE, which covered the source seam and
+    //       the destination seam with one sentence. They are different
+    //       problems with different remedies — "you cannot put a block
+    //       INSIDE a list" vs "moving this block would JOIN the two lists
+    //       around it" — so Task 5 split the constant in two and this
+    //       scenario now pins the destination one.
+    //   (b) the GATE. Task 3's predicate refused any two adjacent li; Task 5
+    //       narrowed the destination half to two li OF THE SAME RUN. This
+    //       fixture is the same-run case, so the answer is unchanged — which
+    //       is exactly why it is the one that has to keep asserting it.
+    // The ACCEPTED PARTNER comes first, on the same fixture and through the
+    // same drop path: without it "the move was refused" is satisfied by an
+    // implementation that refuses every move on this page.
+    await s4Scenario('a paragraph dropped between two items of ONE list run is REFUSED '
+      + 'with a banner and writes nothing — while an ordinary move on the same page is '
+      + 'accepted', '# Doc\n\npara\n\n- a\n- b\n\ntail\n',
       async (page, mdPath) => {
       const original = '# Doc\n\npara\n\n- a\n- b\n\ntail\n';
       const g = await s4Geometry(page);
       assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'paragraph', 'li', 'li', 'paragraph'],
         'FIXTURE SANITY: heading, paragraph, TWO li of one run, paragraph. Got '
         + JSON.stringify(g.map((b) => b.type)));
+      // The fixture is PROVEN to be in the state the refusal is about: the
+      // two items are one RUN, not two lists that happen to be adjacent.
+      // Measured through the same attributes performBlockDrop() reads.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/-'],
+        'FIXTURE PROOF: ONE run — the second item does NOT open a list of its own. If '
+        + 'it ever does, this fixture has become the different-runs case Task 5 now '
+        + 'ACCEPTS and the assertion below would be testing nothing. Got '
+        + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false],
+        'FIXTURE PROOF: exactly ONE list, and it is tight');
+
+      // ── the accepted partner, first and on a page with no banner ───────
       const src = g[1];
-      await s4ArmedOn(page, src, 'para');
-      const ind = await s4DragHandleTo(page, src, g[3].mid - 2);
-      expectApprox(ind.top, g[3].top,
+      await s4ArmedOn(page, src, 'para (the partner move)');
+      const okInd = await s4DragHandleTo(page, src, g[4].bottom + 200);
+      expectApprox(okInd.top, g[4].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'}');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- a\n- b\n\ntail\n\npara\n',
+        'the SAME block, through the SAME drop path, moves when the seam is legal — '
+        + 'this is what stops the refusal below from being satisfied by a page nothing '
+        + 'can move on');
+      assert.strictEqual(await s4Banner(page), null,
+        'and an accepted move raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now the destination seam inside the run ───────────────────────
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[1], 'para');
+      const ind = await s4DragHandleTo(page, g2[1], g2[3].mid - 2);
+      expectApprox(ind.top, g2[3].top,
         'PRECONDITION: the drop target must be before-block 3 — the seam BETWEEN the two '
         + 'list items, which is the whole point of this scenario');
       const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('區塊搬移不能跨越清單邊界') !== -1,
+      assert.ok(banner && banner.indexOf('無法把區塊放進清單項目之間') !== -1,
         'a drop into the middle of a list run must REFUSE OUT LOUD — §3.6: a silent no-op '
         + 'is a defect. The EXACT wording is asserted, not merely the presence of a '
-        + 'banner mentioning 清單: three other refusals in this file (the default '
-        + 'structural-edit message, BATCH_MIXED_MESSAGE, BATCH_MULTIRUN_MESSAGE) contain '
-        + 'that word too, and any of them appearing here would mean the gesture was '
-        + 'refused for a reason this scenario is not about. Got ' + JSON.stringify(banner));
+        + 'banner mentioning 清單: five other refusals in this file (the default '
+        + 'structural-edit message, BATCH_MIXED_MESSAGE, BATCH_MULTIRUN_MESSAGE, and '
+        + 'Task 5\'s own source-seam and out-of-run messages) contain that word too, and '
+        + 'any of them appearing here would mean the gesture was refused for a reason '
+        + 'this scenario is not about. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('會讓上下兩串清單接在一起'), -1,
+        'and specifically NOT the SOURCE-seam message: this block\'s own seam (heading '
+        + 'above, list below) is perfectly legal — one message for both seams would tell '
+        + 'the user to go and fix the wrong end of the gesture');
       assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'para', 'a', 'b', 'tail'],
         'a refused move must leave the rendered document exactly as it was');
       assert.strictEqual(await saveAndRead(page, mdPath), original,
         'a refused move must not write a byte');
-    }, 'T3');
+    }, 'T3/T5');
 
-    // ── 7. the SOURCE seam is between two list runs → refused ────────────
+    // ── 7. the SOURCE seam is between two list items → refused ──────────
     // The mirror case, and the one the plan's own enumeration does not list:
     // lifting the paragraph out of '- a\n\npara\n\n- b\n' leaves
     // '- a\n\n- b\n', which marked.lexer answers as ONE list with
     // `loose === true` — the same read-only degradation, arriving from the
     // seam the block LEFT rather than the one it landed in.
-    await s4Scenario('a paragraph lifted from between two list runs is REFUSED with a '
-      + 'banner, and writes nothing', '# Doc\n\n- a\n\npara\n\n- b\n', async (page, mdPath) => {
+    //
+    // MIGRATED BY TASK 5 in three ways, all recorded here:
+    //   (a) the WORDING — Task 5 split the provisional one-size message into
+    //       a source-seam one and a destination-seam one, because the two
+    //       have different remedies.
+    //   (b) the GATE — Task 5 narrowed the DESTINATION half to same-run, and
+    //       deliberately did NOT narrow this one. The measurement that
+    //       decides it is in this scenario's own assertions below.
+    //   (c) the ORDERING HOLE Task 4 reported and no fixture exercised:
+    //       `planBlockMove()`'s null answer is asked BEFORE this gate, so a
+    //       put-it-back gesture on a block that sits between two list items
+    //       is SILENT rather than refused. That combination is now driven
+    //       here, in the middle of this scenario, on the one fixture where
+    //       the gate is provably armed.
+    await s4Scenario('a paragraph lifted from between two list items is REFUSED with a '
+      + 'banner and writes nothing — while a put-it-back gesture on the same block is '
+      + 'SILENT, and an ordinary move on the same page is accepted',
+      '# Doc\n\n- a\n\npara\n\n- b\n', async (page, mdPath) => {
       const original = '# Doc\n\n- a\n\npara\n\n- b\n';
       const g = await s4Geometry(page);
       assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'li', 'paragraph', 'li'],
         'FIXTURE SANITY: the paragraph must sit BETWEEN two list items. Got '
         + JSON.stringify(g.map((b) => b.type)));
-      const src = g[2];
-      await s4ArmedOn(page, src, 'para');
-      const ind = await s4DragHandleTo(page, src, 1);
-      expectApprox(ind.top, g[0].top,
+      // THE MEASUREMENT THIS WHOLE SCENARIO RESTS ON, asserted rather than
+      // narrated: the bytes the move would leave behind are ONE LOOSE LIST.
+      // If marked ever stops answering that, the refusal below is no longer
+      // protecting anything and this scenario must be re-decided, not
+      // re-pointed.
+      assert.deepStrictEqual(lexLooseDeep('- a\n\n- b\n'), [true],
+        'FIXTURE PROOF: the document this move WOULD produce at the source seam is one '
+        + 'list with loose === true — every item renders as a <p>, serializeBlocks() '
+        + 'reports \'P\' for each, and the whole run degrades read-only with no banner');
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: and right now it is TWO tight lists — so the corruption above '
+        + 'is caused by the move and not already present');
+      // The two items are in DIFFERENT runs, which is precisely the case
+      // Task 5 narrowed the DESTINATION seam on. Asserting it here is what
+      // makes this scenario the proof that the source seam could NOT be
+      // narrowed the same way: same model-visible facts, opposite answer.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/START'],
+        'FIXTURE PROOF: TWO separate runs — each item opens its own list token. The '
+        + 'destination gate would ACCEPT this pair; the source gate must not. Got '
+        + JSON.stringify(runShape));
+
+      // ── (1) the accepted partner, on the same page and the same path ───
+      await s4ArmedOn(page, g[0], '# Doc (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[0], g[3].bottom + 200);
+      expectApprox(okInd.top, g[3].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'}');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '- a\n\npara\n\n- b\n\n# Doc\n',
+        'a block whose own seam has a list on ONE side only moves freely — the partner '
+        + 'that stops everything below from being satisfied by a page nothing can move on');
+      assert.strictEqual(await s4Banner(page), null, 'and it raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the rest of this scenario: the fixture is back, byte for byte');
+
+      // ── (2) THE ORDERING HOLE: put it back where it already is ─────────
+      // `before-block 3` is the seam immediately BELOW the paragraph — the
+      // same place on screen as its own top edge, and the gesture the drag's
+      // release-where-you-started case produces. planBlockMove() answers null
+      // for it, and that answer is asked BEFORE the seam gate. If the two
+      // were the other way round this gesture would raise the source-seam
+      // banner for a move in which nothing whatsoever went wrong — and until
+      // Task 5 no fixture put a block between two list items AND released it
+      // at home, so nothing held the order in place.
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[2], 'para (the put-it-back gesture)');
+      const homeInd = await s4DragHandleTo(page, g2[2], g2[3].mid - 2);
+      expectApprox(homeInd.top, g2[3].top,
+        'PRECONDITION: the drop target IS before-block 3 — the seam just below the '
+        + 'paragraph. This is a real, engaged drag onto a real target, not a press that '
+        + 'never moved: the indicator was read back with the pointer still down');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE ORDERING ASSERTION: a put-it-back gesture must be SILENT. It is a byte '
+        + 'no-op, not a refusal — and the seam gate, which IS armed on this fixture '
+        + '(see the refusal below), must not get to speak first. Got '
+        + JSON.stringify(await s4Banner(page)));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b'],
+        'and nothing moved on screen');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and not a byte was written');
+
+      // ── (3) the refusal, out loud ──────────────────────────────────────
+      const g3 = await s4Geometry(page);
+      await s4ArmedOn(page, g3[2], 'para');
+      const ind = await s4DragHandleTo(page, g3[2], 1);
+      expectApprox(ind.top, g3[0].top,
         'PRECONDITION: the drop target is before-block 0 — a perfectly legal DESTINATION, '
         + 'so the refusal below can only be about the seam the block would LEAVE');
       const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('區塊搬移不能跨越清單邊界') !== -1,
+      assert.ok(banner && banner.indexOf('移走這個區塊會讓上下兩串清單接在一起') !== -1,
         'lifting the only thing separating two list runs merges them into one LOOSE list '
         + '— it must refuse out loud rather than corrupt. The EXACT wording again, for '
-        + 'the same reason: three other refusals in this file also say 清單. Got '
+        + 'the same reason: five other refusals in this file also say 清單. Got '
         + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
+        'and specifically NOT the DESTINATION-seam message: the destination here is the '
+        + 'top of the document, which is legal. Telling the user to aim somewhere else '
+        + 'would be a lie — there is nowhere this block can go');
       assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b'],
         'a refused move must leave the rendered document exactly as it was');
       assert.strictEqual(await saveAndRead(page, mdPath), original,
         'a refused move must not write a byte');
-    }, 'T3');
+    }, 'T3/T5');
 
     // ── 8. the one document shape where the separator count MOVES ────────
     // Rule 3 emits the blank the landing seam needs. In a document that
@@ -19878,29 +20012,60 @@ async function gutterGeometry(page, sel) {
     }, 'T4');
 
     // ── 6. OUT of its own run → refused with a banner ────────────────────
-    // §4.3's ruling, already made: a cross-boundary move is REFUSED in 3.0.0
+    // §4.5's ruling, already made: a cross-boundary move is REFUSED in 3.0.0
     // and the capability deferred. What this scenario adds is that a li drag
     // is no longer SILENT when it declines — the defect §3.6 names.
-    await s4Scenario('a list item dragged out of its own run is REFUSED with a banner, '
-      + 'and writes nothing', T4_BULLET, async (page, mdPath) => {
+    //
+    // MIGRATED BY TASK 5: the wording. Task 3's provisional
+    // BLOCK_MOVE_LIST_SEAM_MESSAGE covered three unrelated problems with one
+    // sentence — a block landing inside a run, a block whose removal joins
+    // two runs, and THIS, a list item leaving the run it belongs to. Only the
+    // third is about the item's own membership, and it is the only one whose
+    // remedy is "drop it somewhere inside its own list", so it got its own
+    // constant. Task 5 also added the ACCEPTED PARTNER below: the refusal
+    // stood alone on this page, which an implementation that refuses every li
+    // drag would have passed.
+    await s4Scenario('a list item dragged out of its own run is REFUSED with a banner '
+      + 'and writes nothing — while a move inside the run is accepted on the same page',
+      T4_BULLET, async (page, mdPath) => {
       const g = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
-      await s4ArmedOn(page, g[2], 'bravo');
-      const ind = await s4DragHandleTo(page, g[2], 1);
-      expectApprox(ind.top, g[0].top,
+      // ── the accepted partner, first, on a page with no banner ─────────
+      await s4ArmedOn(page, g[3], 'charlie (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(okInd.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- charlie\n- alpha\n- bravo\n\ntail\n',
+        'a li move INSIDE the run, through the same drop path, is accepted — without '
+        + 'this the refusal below is satisfied by a page on which no li can move at all, '
+        + 'which is exactly what shipped up to Task 3');
+      assert.strictEqual(await s4Banner(page), null, 'and it raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now out of the run entirely ───────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
+      await s4ArmedOn(page, g2[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g2[2], 1);
+      expectApprox(ind.top, g2[0].top,
         'PRECONDITION: above every block\'s midline the drop target is before-block 0 — '
         + 'ABOVE the heading, which is outside the item\'s run by any reading');
       const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('區塊搬移不能跨越清單邊界') !== -1,
-        'a li that leaves its run must refuse OUT LOUD — until this task the same '
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'a li that leaves its run must refuse OUT LOUD — until Task 4 the same '
         + 'gesture did nothing at all and said nothing at all, which §3.6 calls a '
         + 'defect. The EXACT wording is asserted, not merely a banner mentioning 清單: '
-        + 'four other refusals in this file contain that word. Got ' + JSON.stringify(banner));
+        + 'five other refusals in this file contain that word. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('移走這個區塊會讓上下兩串清單接在一起'), -1,
+        'and NOT the source-seam message, which belongs to the non-li path and would '
+        + 'mean the gesture was declined for a reason this scenario is not about');
       assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
         'a refused move must leave the rendered document exactly as it was');
       assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
         'a refused move must not write a byte');
-    }, 'T4');
+    }, 'T4/T5');
 
     // ── 7. a DEGRADED run → §4.3's run-wide gate refuses ─────────────────
     // §4.3: 「轉換／建立副本／刪除／拖曳一律在 mutation 前走
@@ -20029,6 +20194,278 @@ async function gutterGeometry(page, sel) {
         'ONE Ctrl+Z must restore the file byte-for-byte, continuation line included');
     }, 'T4');
     // <<<S4T4SECTION
+
+    // >>>S4T5SECTION  (and <<<S4T5SECTION at the end.)
+    //
+    // ── S4 Task 5: moves that cross a boundary ────────────────────────────
+    //
+    // THE RULING IS §4.5's, made by the user on 2026-09-01 and NOT re-opened
+    // here: a cross-boundary move is REFUSED with a banner in 3.0.0, and the
+    // capability is deferred to 3.1.0 whose first step is amending the spec
+    // with the blank-line rule for a run/non-run seam. What this task owns is
+    // making the refusals CORRECT, COHERENT and HONESTLY WORDED, and making
+    // sure the ones that were over-broad stop refusing what is safe.
+    //
+    // THE ENUMERATION, both seams, every case measured with marked.lexer +
+    // blockmap.buildBlockMap before a line of it was implemented:
+    //
+    //   DESTINATION (where the block lands). An insertion can only ever
+    //   SPLIT — it has no way to merge two lists — so the only thing it can
+    //   break is a run it lands INSIDE:
+    //     * a non-li into the middle of ONE run: '- a' | para | '- b' with
+    //       the blanks rule 3 emits either side. Two one-item runs where
+    //       there was one two-item run. REFUSED (scenario T3/T5 #6).
+    //     * a non-li between two li of DIFFERENT runs: already two lists;
+    //       nothing to merge. MEASURED '# Doc\n\n- a\n\n1. b\n\ntail\n'
+    //       + para at the seam = heading | ul(1,tight) | paragraph |
+    //       ol(1,tight) | paragraph. ACCEPTED — this is Task 3's deliberate
+    //       over-refusal, paid back here (scenario #1 below).
+    //     * a li out of its run: into a slot between two non-li, into a
+    //       DIFFERENT run, into the middle of a run of another list type, or
+    //       past the end of a document its run does not end. All four are the
+    //       same branch of performListItemDrop() (`insertAt < 0`) and all
+    //       four are REFUSED (scenarios T4/T5 #6, #2 and #3 below).
+    //     * a block moved ACROSS a table: not a boundary at all — a table is
+    //       not a list and neither seam involves a li. Already covered by
+    //       T3 #5, which drags the table itself past every block.
+    //
+    //   SOURCE (where the block leaves). A removal MERGES, and this is the
+    //   seam the plan's own enumeration did not have. It CANNOT be narrowed
+    //   with anything the block model carries:
+    //     * '- a' | para | '- b'        -> '- a\n\n- b\n'     ONE list, loose
+    //     * '1. a' | para | '2. b'      -> '1. a\n\n2. b\n'   ONE list, loose
+    //     * '- [ ] a' | para | '- [x] b'                        ONE list, loose
+    //     * '- a' | para | '  1. a1'    -> '- a\n\n  1. a1\n' ONE list, loose
+    //       — and this is the one that kills every clever narrowing.
+    //       blockmap reports those two items as indent 0 / listType 'ul' and
+    //       indent 0 / listType 'ol', i.e. DIFFERENT RUNS and DIFFERENT
+    //       TYPES: every fact the model exposes says "two lists, safe", and
+    //       the file says loose === true. What decides it is the 2-space
+    //       prefix on a raw line, which no block attribute carries and which
+    //       the client cannot lex (there is no lexer in the browser — render
+    //       is a server round trip).
+    //     * '- a' | para | '* b'        -> '- a\n\n* b\n'     two tight lists
+    //       — genuinely safe, and still refused. The discriminator is the
+    //       bullet CHARACTER, another raw byte the model does not carry.
+    //       Recorded as a deliberate over-refusal, not as a correctness
+    //       claim; 3.1.0 gets it back with the spec rule.
+    //   So the source seam keeps Task 3's wide predicate: two li neighbours,
+    //   refused. The scenario that proves it is T3/T5 #7, which asserts the
+    //   loose bytes the move would have produced AND that the two items are
+    //   in different runs — the same model-visible facts the destination gate
+    //   now ACCEPTS, with the opposite answer.
+    //
+    // THE VOCABULARY. Task 3's single provisional message covered three
+    // unrelated problems. Task 5 splits it, following the BATCH_*_MESSAGE
+    // convention already in the file:
+    //   BLOCK_MOVE_SOURCE_SEAM_MESSAGE — moving this block would join the two
+    //     lists it stands between. The remedy is "don't move it", and no
+    //     other destination helps.
+    //   BLOCK_MOVE_DEST_SEAM_MESSAGE — this block cannot go INSIDE a list.
+    //     The remedy is "aim somewhere else", which is the opposite advice.
+    //   BLOCK_MOVE_OUT_OF_RUN_MESSAGE — a list item can only move within its
+    //     own run. The remedy is "stay inside your list".
+    // Each scenario asserts its own message AND that the other two are
+    // absent: one sentence for all three would pass an assertion that only
+    // looked for 清單, and would send the user to fix the wrong end of the
+    // gesture.
+    //
+    // ANTI-VACUITY, and it is the whole reason the scenarios are shaped the
+    // way they are: a refusal test is worthless unless (a) the fixture is
+    // PROVEN to be in the state that triggers it — every scenario asserts the
+    // run shape through the same attributes the gate reads, and the source
+    // one asserts the loose bytes the move would produce; (b) the banner TEXT
+    // is asserted, not its existence; (c) the file is asserted byte-identical;
+    // and (d) there is an ACCEPTED partner on the SAME fixture through the
+    // SAME drop path — otherwise an implementation that refuses everything
+    // passes the entire task.
+
+    // ── 1. THE NARROWING: a block between two DIFFERENT runs is accepted ──
+    // Task 3 refused this on purpose and said so in its own comment: "two
+    // adjacent li of DIFFERENT runs are refused too, though that case is
+    // safe. Task 5 owns the cross-boundary enumeration and can narrow it;
+    // corrupting a list in the meantime cannot be narrowed afterwards."
+    // This is the repayment, and it is the only behaviour change Task 5 makes
+    // that lets a gesture write bytes it could not write before.
+    await s4Scenario('a paragraph dropped between two lists that are ALREADY separate '
+      + 'is accepted — an insertion cannot merge what is not one run',
+      '# Doc\n\npara\n\n- a\n\n1. b\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\npara\n\n- a\n\n1. b\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'paragraph', 'li', 'li', 'paragraph'],
+        'FIXTURE SANITY: heading, paragraph, TWO li, paragraph. Got '
+        + JSON.stringify(g.map((b) => b.type)));
+      // THE PRECONDITION THE WHOLE SCENARIO IS ABOUT, asserted through the
+      // very attributes performBlockDrop() reads: the two li are adjacent
+      // BLOCKS but two separate RUNS. Under Task 3's gate this fixture was
+      // refused; if it ever collapses into one run the acceptance below stops
+      // being the narrowing and becomes a corruption.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ol/START'],
+        'FIXTURE PROOF: TWO runs of DIFFERENT type, each opening its own list token — '
+        + 'the shape Task 3 over-refused. Got ' + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: two lists, both tight, before the move');
+
+      await s4ArmedOn(page, g[1], 'para');
+      const ind = await s4DragHandleTo(page, g[1], g[3].mid - 2);
+      expectApprox(ind.top, g[3].top,
+        'PRECONDITION: the drop target is before-block 3 — the seam BETWEEN the two '
+        + 'list items, i.e. the exact position Task 3 refused');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE NARROWING: this must NOT refuse. A banner here means the gate is still '
+        + 'Task 3\'s wide one. Got ' + JSON.stringify(await s4Banner(page)));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b', 'tail'],
+        'the paragraph must now stand BETWEEN the two lists');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- a\n\npara\n\n1. b\n\ntail\n',
+        'the paragraph relocates verbatim and each list keeps its own marker. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'AND NOTHING WENT LOOSE — the assertion that makes the acceptance safe rather '
+        + 'than merely permitted. Two lists before, two tight lists after');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T5');
+
+    // ── 2. a li dragged into the MIDDLE of a different run → refused ──────
+    // Two of the plan's destination cases at once: "li into a different run"
+    // and "li into the middle of a run of a different list type". Both are
+    // the same branch — `insertAt` never leaves −1 because the destination is
+    // neither one of the item's own §3.8 siblings nor the block just past its
+    // subtree — and both are refused with the same, accurate message.
+    await s4Scenario('a list item dragged into the middle of ANOTHER run is REFUSED '
+      + 'with a banner and writes nothing — while a move to the end of its own run is '
+      + 'accepted on the same page',
+      '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', '0', null], 'two-runs');
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/-', 'ol/START', 'ol/-'],
+        'FIXTURE PROOF: a TWO-item bullet run followed by a TWO-item ordered run. The '
+        + 'second run must have a member on BOTH sides of the destination seam, or the '
+        + '"middle of another run" this scenario names does not exist in the fixture. '
+        + 'Got ' + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: two lists, both tight');
+
+      // ── the accepted partner: the same item, the same path, to the end
+      //    of its OWN run. Its destination is the ordered run's FIRST item —
+      //    the only way a drop target can name "past the last sibling" when
+      //    something follows the run — so it lands one pixel from the
+      //    refusal below and is nonetheless legal.
+      await s4ArmedOn(page, g[1], 'a (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[1], g[3].mid - 2);
+      expectApprox(okInd.top, g[3].top,
+        'PRECONDITION: the drop target is before-block 3, the ordered run\'s FIRST item '
+        + '— which for the bullet run is the slot immediately past its last sibling');
+      assert.strictEqual(await s4Banner(page), null, 'the partner must NOT refuse');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- b\n- a\n\n1. c\n1. d\n\ntail\n',
+        'a move to the END of the item\'s own run is accepted, and the ordered run is '
+        + 'untouched');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now ONE slot further: inside the other run ────────────────────
+      const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', '0', null], 'two-runs (after undo)');
+      await s4ArmedOn(page, g2[1], 'a');
+      const ind = await s4DragHandleTo(page, g2[1], g2[4].mid - 2);
+      expectApprox(ind.top, g2[4].top,
+        'PRECONDITION: the drop target is before-block 4 — BETWEEN the two members of '
+        + 'the ordered run, which is the one slot the partner above is not');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'a li may not enter another run — the marker widths and ordinals of BOTH runs '
+        + 'would have to be restated and §3.4 allows one contiguous range per gesture. '
+        + 'The EXACT wording. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
+        'and NOT the non-li destination message: this source IS a list item, and the '
+        + 'advice it needs is different');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'b', 'c', 'd', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'a refused move must not write a byte');
+      assert.deepStrictEqual(lexLooseDeep(await saveAndRead(page, mdPath)), [false, false],
+        'and neither run degraded');
+    }, 'T5');
+
+    // ── 3. a li dragged PAST THE END of the document → refused ────────────
+    // The {mode:'append'} destination, which is a separate branch of
+    // performListItemDrop(): `destEl === null` names the end of the item's run
+    // only when the run ENDS the document. Here a paragraph follows it, so the
+    // append target is outside the run and the move is refused. Without this
+    // scenario the `destEl === null` arm of the out-of-run refusal has no
+    // coverage at all — the other three cases all arrive with a real element.
+    await s4Scenario('a list item dragged below every block is REFUSED when its run does '
+      + 'not end the document — and accepted when it does',
+      T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'append');
+      assert.strictEqual(g[4].type, 'paragraph',
+        'FIXTURE PROOF: a block FOLLOWS the run, which is what makes the append target '
+        + 'land outside it. Got ' + g[4].type);
+
+      // ── the accepted partner: the same gesture on a document whose run
+      //    DOES end it. Same path, same {mode:'append'} target, opposite
+      //    answer — so "the append target refuses" cannot be satisfied by an
+      //    append that never works.
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[4].bottom + 200);
+      expectApprox(ind.top, g[4].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'} — the '
+        + 'indicator sits on that block\'s BOTTOM, a position no before-block target '
+        + 'can produce');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'the end of the DOCUMENT is not the end of this item\'s run — a paragraph '
+        + 'stands between them — so the move leaves the run and must refuse out loud. '
+        + 'Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'a refused move must not write a byte');
+    }, 'T5');
+
+    // ── 4. the partner for #3, on a document whose run DOES end it ────────
+    // Same gesture, same branch, opposite answer. Split into its own scenario
+    // because #3 leaves a banner standing and a second refusal-or-acceptance
+    // on the same page could not be told from the first.
+    await s4Scenario('a list item dragged below every block IS accepted when its own run '
+      + 'ends the document', '# Doc\n\n- alpha\n- bravo\n- charlie\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\n- alpha\n- bravo\n- charlie\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li'],
+        [null, '0', '0', '0'], 'append-accepted');
+      assert.strictEqual(g[g.length - 1].type, 'li',
+        'FIXTURE PROOF: the run ENDS the document — the difference from #3, and the '
+        + 'only difference');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].bottom + 200);
+      expectApprox(ind.top, g[3].bottom,
+        'PRECONDITION: the same {mode:\'append\'} target as #3');
+      assert.strictEqual(await s4Banner(page), null,
+        'and here it must NOT refuse — the append target names the end of the item\'s '
+        + 'own run. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- charlie\n- alpha\n',
+        'alpha moves to the end of its run. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'and the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T5');
+    // <<<S4T5SECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
