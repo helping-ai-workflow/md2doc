@@ -1065,6 +1065,127 @@ function countInCode(source, needle) {
   assert.strictEqual(spanIndentsAreAnchored([]), true, 'an empty span is vacuously anchored');
 }
 
+// -- S4 Task 7: THE SWEEP the clamp decision rests on -------------------------
+// Not a feature test — a MEASUREMENT PIN, and it is labelled as one because it
+// was green before Task 7 wrote a line of production code. It re-runs, on every
+// `npm test`, the exhaustive sweep that decided between "extend the clamp" and
+// "keep Task 4's refusal and narrow it", so that a future change to
+// clampIndents() or reorderSpanRange() cannot quietly invalidate the decision
+// without a test saying so.
+//
+// The model is performListItemDrop()'s own gates, re-expressed on indent
+// arrays: `run` is a legal indent array (each entry at most one deeper than the
+// one above); the operand set is `count` CONSECUTIVE slots starting at `from`;
+// the legal destinations are the slots of the FIRST member's §3.8 sibling group
+// plus the slot past the last sibling's whole subtree (§4.5's 2026-09-01
+// ruling); `reorderSpanRange()` answers the span order and `null` for a home
+// position. The clamp under test is the one performListItemDrop() performs:
+// clampIndents(run in DOCUMENT order, the set's indices, the set's SMALLEST old
+// indent, { removed: true }) — the removal half of the move, at the OLD index.
+//
+// Three numbers come out, and all three are load-bearing:
+//   * 0 drops leave the MOVED set's own first member illegal at its
+//     destination, which is why §4.5's 「落點使其非法時夾到合法值」 has no
+//     reachable case while the destination gate stands;
+//   * every remaining unanchored span is a `count > 1` set whose break is the
+//     block immediately AFTER the landed set — the DESTINATION side, which no
+//     removal-clamp reaches. That family is what BLOCK_MOVE_ORPHAN_MESSAGE
+//     still refuses;
+//   * and the refusal it replaced fired on 1425 of the 4067, i.e. the gate was
+//     over-wide by 1411 drops. If that number ever collapses toward zero the
+//     clamp has stopped being called and the sweep has gone vacuous.
+{
+  const { clampIndents } = require('../lib/editor/indent-clamp.js');
+  const li = (n) => ({ type: 'li', indent: n });
+  const legalShapes = (n) => {
+    const out = [];
+    (function rec(a) {
+      if (a.length === n) { out.push(a.slice()); return; }
+      for (let d = 0; d <= Math.min(3, a[a.length - 1] + 1); d++) rec(a.concat(d));
+    })([0]);
+    return out;
+  };
+  // The §3.8 sibling group of slot `i`: the same-depth members reachable
+  // without stepping outside the subtree that contains it.
+  const sibsOf = (ds, i) => {
+    const d = ds[i]; const out = [];
+    for (let j = i; j >= 0; j--) { if (ds[j] < d) break; if (ds[j] === d) out.unshift(j); }
+    for (let j = i + 1; j < ds.length; j++) { if (ds[j] < d) break; if (ds[j] === d) out.push(j); }
+    return out;
+  };
+  const subtreeEnd = (ds, j) => {
+    let k = j; while (k + 1 < ds.length && ds[k + 1] > ds[j]) k++; return k;
+  };
+  const firstBreak = (arr) => {
+    let prev = null;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] > (prev === null ? 0 : prev + 1)) return i;
+      prev = arr[i];
+    }
+    return -1;
+  };
+  let total = 0, refusedByThePredicate = 0, movedIllegal = 0;
+  const residual = [];
+  for (let n = 2; n <= 6; n++) {
+    legalShapes(n).forEach((ds) => {
+      for (let from = 0; from < n; from++) {
+        for (let count = 1; from + count <= n; count++) {
+          const sibs = sibsOf(ds, from);
+          const dests = sibs.concat([subtreeEnd(ds, sibs[sibs.length - 1]) + 1]);
+          dests.forEach((insertAt) => {
+            const order = reorderSpanRange(n, from, count, insertAt);
+            if (!order) return; // a home position: no reorder, no bytes
+            total++;
+            if (!spanIndentsAreAnchored(order.map((k) => li(ds[k])))) refusedByThePredicate++;
+            const idxs = [];
+            for (let k = from; k < from + count; k++) idxs.push(k);
+            const opOld = Math.min.apply(null, idxs.map((k) => ds[k]));
+            const after = ds.slice();
+            clampIndents(ds.map((d, k) => ({ id: k, type: 'li', indent: d })),
+              idxs, opOld, { removed: true }).forEach((r) => { after[r.blockId] = r.indent; });
+            const span = order.map((k) => after[k]);
+            const setPos = order.indexOf(from);
+            const bound = setPos === 0 ? 0 : span[setPos - 1] + 1;
+            if (after[from] > bound) movedIllegal++;
+            const br = firstBreak(span);
+            if (br >= 0) residual.push({ ds: ds.join(''), from, count, insertAt, br,
+              afterSet: br === setPos + count });
+          });
+        }
+      }
+    });
+  }
+  assert.strictEqual(total, 4067,
+    'ANTI-VACUITY: the sweep must be enumerating the whole space it claims to. 4067 '
+    + 'legal drops over every legal indent array of length 2..6 and depth 0..3, every '
+    + 'operand-set size, every legal destination. Got ' + total);
+  assert.ok(refusedByThePredicate > 1000,
+    'ANTI-VACUITY: Task 4\'s predicate must still be firing on a large fraction of the '
+    + 'space — that is what makes "the clamp answers almost all of it" a claim worth '
+    + 'pinning. Got ' + refusedByThePredicate);
+  assert.strictEqual(movedIllegal, 0,
+    'THE MOVED BLOCK IS NEVER ILLEGAL AT ITS DESTINATION. §4.5 says it is clamped when '
+    + 'the destination makes it so, and the 2026-09-01 destination ruling means that '
+    + 'cannot happen: the only legal slots are among its own same-depth siblings, whose '
+    + 'predecessor can always parent it. If this ever fires, the destination gate has '
+    + 'been widened and performListItemDrop() now owes a clamp for the moved block '
+    + 'itself. Got ' + movedIllegal + ' counterexamples');
+  assert.ok(residual.every((r) => r.count > 1),
+    'every span the removal-clamp cannot anchor comes from a MULTI-BLOCK set — a single '
+    + 'item\'s move is fully answered by { removed: true } at its old index. Got '
+    + JSON.stringify(residual.filter((r) => r.count === 1).slice(0, 3)));
+  assert.ok(residual.every((r) => r.afterSet),
+    'and in every one of them the break is the block immediately AFTER the landed set, '
+    + 'i.e. the INSERTION half — which no removal-clamp reaches and for which §3.4 has '
+    + 'no rule. That is exactly the family BLOCK_MOVE_ORPHAN_MESSAGE still refuses. Got '
+    + JSON.stringify(residual.filter((r) => !r.afterSet).slice(0, 3)));
+  assert.strictEqual(residual.length, 14,
+    'and it is 14 of the 4067 — the number the narrowing was decided on. A DIFFERENT '
+    + 'number is not a failing test on its own, but it means clampIndents() or '
+    + 'reorderSpanRange() changed answer and Task 7\'s ruling has to be re-measured '
+    + 'before it is re-pinned. Got ' + residual.length);
+}
+
 // -- S4 Task 5: blockMoveSeamRefusal() ---------------------------------------
 // The cross-boundary enumeration's whole ruling, as one pure predicate. Every
 // row below is a MEASURED marked.lexer answer, not a reasoned one — the

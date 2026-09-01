@@ -20101,19 +20101,22 @@ async function gutterGeometry(page, sel) {
     }, 'T4');
 
     // ── 8. THE SEAM TASK 7 OWNS: a destination that needs an indent clamp ─
-    // §4.5 also says the moved block keeps its own indent and is CLAMPED when
-    // the destination makes it illegal. That clamp is Task 7's subject, and
-    // `applyIndentClamp()` cannot express a move yet — measured: its rule-2
-    // scope starts after the operated block's NEW index, while a move's
-    // orphans are left at its OLD one, so for this fixture it clamps nothing
-    // and the DOM and the file end up disagreeing about the nesting.
+    // MIGRATED BY S4 TASK 7, and the reason is in the assertions below rather
+    // than only here. Task 4 shipped this scenario as a REFUSAL, on the
+    // measured ground that `applyIndentClamp()` could not express a move:
+    // `clampIndents()`'s rule-2 scope starts after the operated block's NEW
+    // index while a move's orphans are left behind at its OLD one, so handed
+    // the REORDERED span it clamps nothing.
     //
-    // Until then the move is REFUSED rather than committed wrong. Task 7
-    // replaces the refusal with the clamp at one site (see
-    // spanIndentsAreAnchored()'s call in performListItemDrop()); this
-    // scenario is the one that has to be re-pointed when it does.
-    await s4Scenario('a move that would leave a child with no parent is refused rather '
-      + 'than committed at the wrong column', T4_ORPHAN, async (page, mdPath) => {
+    // Task 7 measured the other half of that sentence and it is the whole
+    // finding: a move IS a removal at the old index plus an insertion at the
+    // new one, and the removal half is `{ removed: true }` — the mode the ⠿
+    // delete has used since S1 — asked of the run in DOCUMENT order, BEFORE
+    // the reorder. No contract change, no new mode, no §3.4 amendment. So
+    // this scenario is now the ACCEPTANCE it was always going to become, and
+    // the exact bytes below are what the clamp answers.
+    await s4Scenario('a move that leaves a child behind RE-ANCHORS it, at the column '
+      + 'the clamp computes', T4_ORPHAN, async (page, mdPath) => {
       const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
         [null, '0', '1', '0', null], 'orphan');
       assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'a1', 'bravo', 'tail'],
@@ -20135,7 +20138,7 @@ async function gutterGeometry(page, sel) {
         'and neither list went loose');
       await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
-        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+        'PRECONDITION for the move below: the fixture is back, byte for byte');
 
       // ── now the one that needs the clamp ────────────────────────────────
       const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
@@ -20145,17 +20148,33 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[4].top,
         'PRECONDITION: the drop target is before-block 4 — the end of the run, an '
         + 'otherwise perfectly ordinary destination');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('搬移後子項目會失去上層項目') !== -1,
-        'the move must refuse OUT LOUD — committing it emits a1 at column 0, which is a '
-        + 'different document from the one on screen. The EXACT wording, because the '
-        + 'cross-boundary refusal would mean the destination was rejected instead of the '
-        + 'indent. Got ' + JSON.stringify(banner));
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'a1', 'bravo', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await s4Banner(page), null,
+        'MIGRATED FROM A REFUSAL (S4 T7): until this task the gesture raised '
+        + 'BLOCK_MOVE_ORPHAN_MESSAGE here, because nothing re-anchored a1 and committing '
+        + 'the span would have emitted it at column 0 — a different document from the one '
+        + 'on screen. The clamp now answers that, so there is nothing left to refuse. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const orphaned = await saveAndRead(page, mdPath);
+      assert.strictEqual(orphaned, '# Doc\n\n- a1\n- bravo\n- alpha\n\ntail\n',
+        'a1 lost its parent and is RE-ANCHORED at column 0 — §3.4 rule 3\'s segment '
+        + 'delta, computed against the block that now stands above it (none). This is '
+        + 'the byte assertion that bites when the clamp is dropped: without it the DOM '
+        + 'says indent 1 and serializeBlocks() emits column 0 anyway. Got:\n'
+        + JSON.stringify(orphaned));
+      assert.deepStrictEqual(lexLooseDeep(orphaned), [false],
+        'and the run stays TIGHT — one list, not a nested pair');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '0', '0', null],
+        'and the DOM AGREES with the file — a1 carries data-indent="0", not the 1 it had. '
+        + 'A clamp that writes only the file is the same "looks right on screen, cannot '
+        + 'be saved" bug in the other direction. Got ' + JSON.stringify(indents));
+      await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
-        'a refused move must not write a byte');
-    }, 'T4');
+        'ONE Ctrl+Z restores the file byte-for-byte — the clamp rides inside the same '
+        + 'single commitRangeEdit, it is not a second op');
+    }, 'T4/T7');
 
     // ── 9. a HARD-WRAPPED item is draggable, and nothing is re-escaped ───
     // The scenario that earns §4.3's gate its `columnOnly` argument. A reorder
@@ -20525,6 +20544,10 @@ async function gutterGeometry(page, sel) {
       srcSeam: '移走這個區塊會讓上下兩串清單接在一起，無法搬移',
       destSeam: '無法把區塊放進清單項目之間',
       outOfRun: '清單項目只能在所屬清單內搬移',
+      // S4 Task 7's, narrowed from Task 4's wide one and re-worded with it.
+      // Listed here so every OTHER refusal in the file now also asserts that
+      // this one did not fire — the distinctness constraint Task 5 set.
+      orphan: '落點的子項目會失去上層項目，無法搬移到這裡',
     };
     // The banner's own dismiss button (`✕`) is part of its textContent; it is
     // stripped rather than matched with indexOf() so the assertion still pins
@@ -20921,6 +20944,293 @@ async function gutterGeometry(page, sel) {
     }, 'T6');
 
     // <<<S4T6SECTION
+
+    // ── S4 Task 7: the indent clamp on a moved block (§4.5, §3.4) ─────────
+    //
+    // THE FINDING, and it is the opposite of what the plan assumed. The plan
+    // said `applyIndentClamp()` could not express a move and that fixing it
+    // meant extending `indent-clamp.js`'s contract. Task 4's measurement was
+    // right about the symptom — handed the REORDERED span, rule 2's scope
+    // starts after the operated block's NEW index and is empty — and wrong
+    // about the remedy. A move is a REMOVAL at the old index plus an
+    // INSERTION at the new one, and `{ removed: true }` on the run in
+    // DOCUMENT order is exactly the first half. That mode has existed since
+    // S1 and the ⠿ delete uses it. Nothing in `indent-clamp.js` changed.
+    //
+    // MEASURED over the whole shape space before a line was written: every
+    // legal indent array up to length 6 and depth 3, every operand set size,
+    // every legal destination the run gate admits — 4067 drops.
+    //   * 1425 were refused by Task 4's predicate.
+    //   * the removal-clamp answers 1411 of them, leaving 14.
+    //   * all 14 are BATCH sets, and in every one of them the span breaks at
+    //     the block immediately AFTER the landed set — the DESTINATION side,
+    //     which no removal-clamp can reach. Those keep the refusal.
+    //   * 0 drops leave the MOVED block's own indent illegal. §4.5's 「保留
+    //     自己的 indent，落點使其非法時夾到合法值」 has no reachable case,
+    //     because the destination gate (§4.5's 2026-09-01 run ruling) only
+    //     ever admits a slot among the item's own same-depth siblings. That
+    //     is asserted below rather than left as an argument.
+    // test/editor-client.test.js re-runs that sweep as a pure pin.
+    //
+    // ANTI-VACUITY, per shape:
+    //   * "the orphans re-anchored" is asserted as BYTES and as the surviving
+    //     block's own `data-indent` — a clamp that writes only one of the two
+    //     is the "looks right on screen, cannot be saved" bug in whichever
+    //     direction it missed.
+    //   * "nothing shifted" carries a PARTNER on the SAME fixture through the
+    //     SAME drop path that provably DOES shift. Without it the assertion is
+    //     satisfied by a clamp that was never called.
+    //   * the surviving refusal carries an ACCEPTED partner on the same
+    //     fixture and the same DESTINATION, differing only in the operand set.
+    //   * every fixture's indents are read back through `t4Fixture()` before
+    //     the gesture, so a fixture that stopped expressing its shape fails
+    //     as a precondition rather than passing as a green test.
+
+    // ── 1. TWO SEGMENTS, DIFFERENT DELTAS — the discriminating shape ──────
+    // S3's D1 review established that a single-segment clamp and a correct
+    // one give the same answer on a one-segment fixture, and that
+    // `serializeBlocks()` rebuilds its width stack per span so a span's FIRST
+    // block emits at column 0 whatever it claims. This is the shape that can
+    // tell them apart. Removing `alpha` puts rule 3's scope into two
+    // segments:
+    //   segment 1 = alpha's whole subtree [a1(1), a1a(2), a2(1)], delta 1
+    //               (its bound is 0 — nothing survives above it)
+    //   segment 2 = the sibling bravo plus ITS subtree [bravo(0), b1(1)],
+    //               delta 0 (its bound is a2's settled 0, plus one)
+    // ONE delta for the whole scope drags b1 to column 0 too; a PER-ITEM
+    // clamp leaves a2 at 1, i.e. adopted by a1a, which is a restructure of
+    // content the user never touched (rule 3's own worked failure).
+    const T7_TWOSEG = '# Doc\n\n- alpha\n  - a1\n    - a1a\n  - a2\n- bravo\n  - b1\n\ntail\n';
+    await s4Scenario('a move whose scope holds TWO segments shifts each by its own delta',
+      T7_TWOSEG, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '1', '0', '1', null], 'two-segment');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a2', 'bravo', 'b1', 'tail'],
+        'FIXTURE SANITY: alpha owns a1/a1a/a2; bravo owns b1. TWO top-level items, so '
+        + 'the scope after alpha leaves really does split into two segments — a fixture '
+        + 'with one top-level item cannot express this at all');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[7].top + 1);
+      expectApprox(ind.top, g[7].top,
+        'PRECONDITION: the drop lands on `tail`\'s top edge — the ONE way to name "past '
+        + 'the last sibling\'s whole subtree", which is where the run ends');
+      assert.strictEqual(await s4Banner(page), null,
+        'no refusal: the orphans are re-anchored, not declined. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- a1\n  - a1a\n- a2\n- bravo\n  - b1\n- alpha\n\ntail\n',
+        'segment 1 shifts by 1 (a1 1->0, a1a 2->1, a2 1->0) and segment 2 by 0 (bravo '
+        + 'and b1 keep 0/1). BOTH mutants were run: one global delta for the whole scope '
+        + 'writes `- b1` at column 0, and dropping rule 3 for rule 4 alone writes '
+        + '"- a1 /   - a1a /   - a2" — a2 ADOPTED by a1, standing beside the nephew it '
+        + 'never had a relationship with. The single-segment fixture (T4 #8) is green '
+        + 'under that second mutant, which is why this fixture exists. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false, false],
+        'and nothing went loose — THREE answers, because a1 and bravo each keep a nested '
+        + 'list and lexLooseDeep() walks into both');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '0', '0', '1', '0', null],
+        'and the DOM carries the same depths the file does, in the new order '
+        + '(a1, a1a, a2, bravo, b1, alpha). Got ' + JSON.stringify(indents));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_TWOSEG,
+        'ONE Ctrl+Z restores every one of those columns — the clamp is part of the same '
+        + 'commitRangeEdit, not a second op behind it');
+    }, 'T7');
+
+    // ── 2. an indent that is ALREADY legal is left alone — with a partner ──
+    // Both halves are on ONE fixture and go through ONE drop path; the only
+    // difference is which item is dragged. `alpha`'s child cannot stay where
+    // it is (nothing survives above it), `bravo`'s can (zulu does). A clamp
+    // that shifts unconditionally fails the second; a clamp that never runs
+    // fails the first.
+    const T7_LEGAL = '# Doc\n\n- alpha\n  - a1\n- zulu\n- bravo\n  - b1\n\ntail\n';
+    await s4Scenario('an orphan whose indent is still legal is NOT shifted, and the same '
+      + 'gesture on the same run DOES shift one that is not', T7_LEGAL,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', '0', '1', null], 'already-legal');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'zulu', 'bravo', 'b1', 'tail'],
+        'FIXTURE SANITY: a1 is alpha\'s child and alpha is FIRST; b1 is bravo\'s child '
+        + 'and `zulu` stands above bravo. That asymmetry is the whole scenario');
+
+      // ── the PARTNER: this one SHIFTS ─────────────────────────────────────
+      await s4ArmedOn(page, g[1], 'alpha (the partner — this one shifts)');
+      const ind1 = await s4DragHandleTo(page, g[1], g[6].top + 1);
+      expectApprox(ind1.top, g[6].top, 'PRECONDITION: aimed past the last sibling\'s subtree');
+      const shifted = await saveAndRead(page, mdPath);
+      assert.strictEqual(shifted, '# Doc\n\n- a1\n- zulu\n- bravo\n  - b1\n- alpha\n\ntail\n',
+        'THE PARTNER: a1 had nothing left above it, so the clamp pulls it to column 0. '
+        + 'Without this half, "nothing shifted" below is satisfied by a clamp that is '
+        + 'never called at all. Got:\n' + JSON.stringify(shifted));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_LEGAL,
+        'PRECONDITION for the half below: the fixture is back, byte for byte');
+
+      // ── the assertion: this one does NOT ─────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', '0', '1', null], 'already-legal (after undo)');
+      await s4ArmedOn(page, g2[4], 'bravo');
+      const ind2 = await s4DragHandleTo(page, g2[4], g2[6].top + 1);
+      expectApprox(ind2.top, g2[6].top, 'PRECONDITION: the SAME drop target as the partner');
+      assert.strictEqual(await s4Banner(page), null, 'nothing to refuse');
+      const same = await saveAndRead(page, mdPath);
+      assert.strictEqual(same, '# Doc\n\n- alpha\n  - a1\n- zulu\n  - b1\n- bravo\n\ntail\n',
+        'b1 keeps column 2: `zulu` is still standing above it and can parent it, so '
+        + 'rule 3\'s delta is 0. A clamp that shifts every orphan writes `- b1` at column '
+        + '0 and silently re-parents content nobody dragged. Got:\n' + JSON.stringify(same));
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '0', '1', '0', null],
+        'and NOT ONE data-indent changed value — alpha 0 / a1 1 / zulu 0 / b1 1 / bravo '
+        + '0, the same five numbers the fixture had, in the new order. Got '
+        + JSON.stringify(indents));
+      assert.deepStrictEqual(lexLooseDeep(same), [false, false, false],
+        'and nothing went loose');
+    }, 'T7');
+
+    // ── 3. a DEPTH-2 item aimed where only depth 0 is legal ───────────────
+    // The plan asked for this shape and the answer is a measurement that
+    // contradicts it: the gesture cannot be made. §4.5's destination ruling
+    // (2026-09-01) admits only a slot among the item's own §3.8 siblings, so
+    // a depth-2 item aimed at a depth-0 seam is refused by Task 5's OUT OF
+    // RUN gate before any clamp is asked — and over the whole 4067-drop sweep
+    // there is no drop at all (0 of 4067) that leaves the moved block's own
+    // indent illegal. §4.5's 「落點使其非法時夾到合法值」 is therefore unreachable in
+    // 3.0.0, not unimplemented; it is the destination gate that makes it so,
+    // and if that gate is ever widened (3.1.0) this is the assertion that
+    // says the clamp for the moved block itself is now owed.
+    const T7_DEEP = '# Doc\n\n- alpha\n  - a1\n    - a1a\n    - a1b\n- bravo\n\ntail\n';
+    await s4Scenario('a depth-2 item aimed at a depth-0 seam is REFUSED by the run gate, '
+      + 'never clamped — and among its own siblings it keeps its depth',
+      T7_DEEP, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'depth-2');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a1b', 'bravo', 'tail'],
+        'FIXTURE SANITY: a1a and a1b are a TWO-member depth-2 run under a1 — one member '
+        + 'would make every sibling destination its own home position and the scenario '
+        + 'would assert nothing');
+
+      // ── the ACCEPTED half first: among its own siblings, depth is kept ──
+      await s4ArmedOn(page, g[4], 'a1b (the partner move)');
+      const ok = await s4DragHandleTo(page, g[4], g[3].mid - 2);
+      expectApprox(ok.top, g[3].top, 'PRECONDITION: the drop target is before-block 3 (a1a)');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- alpha\n  - a1\n    - a1b\n    - a1a\n- bravo\n\ntail\n',
+        'a depth-2 item moved among its own siblings keeps column 4 — its new '
+        + 'predecessor is the same parent it always had. Got:\n' + JSON.stringify(moved));
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '2', '2', '0', null],
+        'and its data-indent is still 2 — the moved block KEEPS ITS OWN INDENT (§4.5), '
+        + 'which is the half of that sentence that IS reachable. Got '
+        + JSON.stringify(indents));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── the refusal: a depth-0 destination is out of the run ────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'depth-2 (after undo)');
+      await s4ArmedOn(page, g2[4], 'a1b');
+      const ind = await s4DragHandleTo(page, g2[4], g2[1].mid - 2);
+      expectApprox(ind.top, g2[1].top,
+        'PRECONDITION: the drop target is before-block 1 — the head of the OUTER list, '
+        + 'the one seam in this document where only depth 0 is legal');
+      await t6AssertOnly(page, 'outOfRun', 'a depth-2 item aimed at a depth-0 seam');
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'and not a byte was written: the item is neither moved to column 0 nor clamped — '
+        + 'the destination is refused outright, which is why the moved block\'s own '
+        + 'clamp has no reachable case in 3.0.0');
+    }, 'T7');
+
+    // ── 4. THE SURVIVING REFUSAL: a batch whose LANDING orphans a block ────
+    // 14 drops out of 4067 are still unanchored after the removal-clamp, and
+    // all 14 look like this one: a BATCH whose last member is SHALLOWER than
+    // the block it lands before, so the destination block loses the parent
+    // chain that stood above it. A removal-clamp cannot reach that — it is
+    // the insertion half, at the NEW index, and §3.4 has no rule for it. The
+    // refusal is kept, narrowed to exactly this family and re-worded from
+    // Task 4's 「搬移後子項目會失去上層項目，暫時無法搬移到這裡」: the remedy
+    // here is to aim somewhere else, which is what the new wording says.
+    await s4Scenario('a batch whose last member is shallower than its destination is '
+      + 'refused, and the same destination accepts the same grip alone', T7_DEEP,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'residual-orphan');
+
+      // ── THE ACCEPTED PARTNER FIRST: same grip, same destination ─────────
+      // The ONLY difference between this gesture and the refused one is
+      // whether `bravo` is in the operand set. Without it "the batch was
+      // refused" is satisfied by an implementation that refuses this
+      // destination outright.
+      assert.strictEqual(await t6Sel(page), null,
+        'PARTNER PRECONDITION: no selection is standing, so the grip acts on a1b alone');
+      await s4ArmedOn(page, g[4], 'a1b alone (the partner)');
+      const ok = await s4DragHandleTo(page, g[4], g[3].mid - 2);
+      expectApprox(ok.top, g[3].top, 'PARTNER PRECONDITION: the drop target is a1a');
+      assert.strictEqual(await s4Banner(page), null, 'the single-item move is accepted');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- alpha\n  - a1\n    - a1b\n    - a1a\n- bravo\n\ntail\n',
+        'and it really moved');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'PRECONDITION for the refusal: the fixture is back, byte for byte');
+
+      // ── the refusal ─────────────────────────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'residual-orphan (after undo)');
+      await page.evaluate(() => window.__edTestSetSelection(6, 7));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [4, 5],
+        'THE PRECONDITION THIS SCENARIO IS ABOUT: the set is a1b (depth 2) AND bravo '
+        + '(depth 0) — contiguous, all list items, so every OTHER batch gate passes and '
+        + 'the only thing left to object is the landing. Asserted through the paint');
+      assert.deepStrictEqual(await t6SelectedTypes(page), ['li', 'li'],
+        'and both members really are list items, so BATCH_MIXED cannot be what fires');
+      await s4ArmedOn(page, g2[4], 'a1b (with bravo in the set)');
+      const ind = await s4DragHandleTo(page, g2[4], g2[3].mid - 2);
+      expectApprox(ind.top, g2[3].top,
+        'PRECONDITION: the SAME drop target the partner above was accepted at — a1a. '
+        + 'The destination is identical; only the operand set differs');
+      await t6AssertOnly(page, 'orphan', 'a batch landing above a deeper block');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a1b', 'bravo', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'a refused move must not write a byte — and committing this one would put a1a '
+        + '(column 4) directly under bravo (column 0), which serializeBlocks() emits at '
+        + 'column 0 and the DOM never showed');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '2', '2', '0', null],
+        'and the REFUSAL WROTE NO data-indent EITHER — a refused gesture must leave the '
+        + 'model exactly as it found it. NOTE, honestly: on THIS fixture the clamp is '
+        + 'empty anyway (the removal side is clean, which is true of all 14 residual '
+        + 'shapes), so this assertion does not by itself prove the compute-then-write '
+        + 'ordering in performListItemDrop(). That ordering is defensive: it is what '
+        + 'keeps the guarantee true if the residual family ever grows past the depth-3, '
+        + 'length-6 space the sweep covers. Got ' + JSON.stringify(indents));
+    }, 'T7');
+
+    // <<<S4T7SECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
