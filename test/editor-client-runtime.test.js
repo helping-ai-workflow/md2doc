@@ -18996,6 +18996,169 @@ async function gutterGeometry(page, sel) {
     });
     // <<<S4T2SECTION
 
+    // >>>S4T2BSECTION  (and <<<S4T2BSECTION at the end.)
+    //
+    // ── S4 Task 2b: visual feedback while a block is being dragged ────────
+    //
+    // T2 shipped the gesture with NO feedback on the source block, and the
+    // user asked for some: `.ed-handle` is `opacity: 0` off-hover, so the
+    // moment the pointer leaves the block there is nothing under the cursor
+    // but the indicator line.
+    //
+    // The RULING (2026-09-01) is `cursor: grabbing`, applied as a class on
+    // `document.documentElement` — OUTSIDE `contentEl`, so "nothing in the
+    // content DOM is mutated during a drag" still holds. That invariant is
+    // the only reason Escape / pointercancel / window blur can all clean up
+    // unconditionally, so this scenario pins it rather than assuming it: the
+    // content column's innerHTML is read back MID-DRAG, not merely after.
+    // The table drag's `ed-te-row-dragging` dim is deliberately NOT copied —
+    // it dims a node INSIDE the content and paid for it with a `class=""`
+    // residue the burst's zero-edit guard then had to strip by hand.
+    //
+    // ANTI-VACUITY — "the class is gone" is trivially true of a gesture that
+    // never started, and a class with no CSS behind it is not feedback:
+    //   * every path asserts the class is ABSENT before it presses, and that
+    //     the drag actually ENGAGED (the drop indicator is up) before it
+    //     asserts the class is present;
+    //   * the sub-threshold press is the partner that proves the class is
+    //     tied to ENGAGEMENT rather than to the press;
+    //   * the computed `cursor` is read back on `body` AND on `.ed-handle`
+    //     (which carries its own `cursor: pointer`, so it is the one that
+    //     proves the override actually wins the cascade).
+    const s4DragChrome = (page) => page.evaluate(() => {
+      const handle = document.querySelector('.ed-handle');
+      const ind = document.querySelector('.ed-block-drop-indicator');
+      return {
+        indicatorPresent: !!ind,
+        indicatorHidden: !ind || !!ind.hidden,
+        htmlHasClass: document.documentElement.classList.contains('ed-block-dragging'),
+        bodyCursor: getComputedStyle(document.body).cursor,
+        handleCursor: handle ? getComputedStyle(handle).cursor : null,
+      };
+    });
+
+    await s4Scenario('a live ⠿ drag puts the grabbing cursor on <html>, and each of '
+      + 'pointerup / Escape / pointercancel / window blur takes it off again',
+      S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 5,
+        'FIXTURE SANITY: five top-level blocks. Got ' + JSON.stringify(g.map((b) => b.text)));
+      const src = g[1];
+      assert.strictEqual(src.text, 'alpha',
+        'FIXTURE SANITY: block index 1 must be the "alpha" paragraph, got ' + JSON.stringify(src.text));
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s OWN ⠿ — every "the class is '
+        + 'absent" claim below is satisfied by a press that missed the button. Got '
+        + JSON.stringify(at));
+
+      const idle = await s4DragChrome(page);
+      assert.strictEqual(idle.indicatorPresent, true,
+        'ANTI-VACUITY: the drop indicator singleton must exist, or "the drag engaged" '
+        + 'cannot be checked at all. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.htmlHasClass, false,
+        'ANTI-VACUITY: `ed-block-dragging` must be ABSENT before any gesture — "it was '
+        + 'removed" is trivially true of a class that is never added. Got ' + JSON.stringify(idle));
+      assert.notStrictEqual(idle.bodyCursor, 'grabbing',
+        'ANTI-VACUITY: the resting cursor must NOT already be grabbing. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.handleCursor, 'pointer',
+        'FIXTURE SANITY: `.ed-handle` carries `cursor: pointer` at rest — that is what '
+        + 'makes it the element that proves the drag override wins the cascade. Got '
+        + JSON.stringify(idle));
+      const before = await s4Content(page);
+
+      // ── the partner: a press that never crosses the threshold is a CLICK,
+      //    and must not put the drag cursor up at all ──────────────────────
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x + 2, src.handle.y + 2);
+      const wiggle = await s4DragChrome(page);
+      assert.strictEqual(wiggle.indicatorHidden, true,
+        'PRECONDITION: 2.83px is under TE_DRAG_THRESHOLD_PX, so no drag has engaged. Got '
+        + JSON.stringify(wiggle));
+      assert.strictEqual(wiggle.htmlHasClass, false,
+        'a press that has not crossed the drag threshold is still a CLICK — the grabbing '
+        + 'cursor must not appear. This is the partner that proves the class is tied to '
+        + 'ENGAGEMENT and not merely to the press. Got ' + JSON.stringify(wiggle));
+      await page.mouse.up();
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + src.id + '"]');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+
+      // ── every end path, each from a drag that genuinely engaged ─────────
+      // `homeFirst` is what keeps the pointerup case a BYTE NO-OP once Task 3
+      // makes the drop real: the pointer is brought back over the source's own
+      // position before it is released, which is the "released where it
+      // started" case. Task 2b is chrome, and its scenario must not become a
+      // move test the day the drop lands.
+      const endVia = async (label, homeFirst, fire) => {
+        const pre = await s4DragChrome(page);
+        assert.strictEqual(pre.htmlHasClass, false,
+          label + ' ANTI-VACUITY: the class must be ABSENT before this path presses. Got '
+          + JSON.stringify(pre));
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const during = await s4DragChrome(page);
+        assert.strictEqual(during.indicatorHidden, false,
+          label + ' PRECONDITION: the drag must actually have ENGAGED before anything '
+          + 'below means anything. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.htmlHasClass, true,
+          label + ': a live ⠿ drag must carry `ed-block-dragging` on <html> — the source '
+          + 'block itself cannot show the drag (nothing in the content DOM may be mutated '
+          + 'during one) and `.ed-handle` is opacity:0 the moment the pointer leaves the '
+          + 'block, so this class IS the feedback. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.bodyCursor, 'grabbing',
+          label + ': the class must actually PAINT — a class with no CSS behind it is not '
+          + 'feedback. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.handleCursor, 'grabbing',
+          label + ': the grabbing cursor must win over `.ed-handle`\'s own '
+          + '`cursor: pointer`, or the one element the pointer started on keeps showing a '
+          + 'click affordance for the whole drag. Got ' + JSON.stringify(during));
+        assert.strictEqual(await s4Content(page), before,
+          label + ' MID-DRAG: the content column must be byte-identical WHILE the drag is '
+          + 'live. The class lives on <html>, outside contentEl, precisely so the '
+          + '"mutate nothing during a drag" invariant — the only reason Escape / '
+          + 'pointercancel / blur can clean up unconditionally — still holds');
+        if (homeFirst) {
+          await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+          const home = await s4DragChrome(page);
+          assert.strictEqual(home.htmlHasClass, true,
+            label + ' PRECONDITION: the drag must still be live at the moment of release');
+        }
+        await fire();
+        await new Promise((r) => setTimeout(r, 100));
+        const post = await s4DragChrome(page);
+        assert.strictEqual(post.indicatorHidden, true,
+          label + ' must hide the drop indicator. Got ' + JSON.stringify(post));
+        assert.strictEqual(post.htmlHasClass, false,
+          label + ' must take `ed-block-dragging` back off <html> — teardownBlockDrag() is '
+          + 'the single funnel both endBlockDrag() and cancelBlockDrag() go through, so '
+          + 'every abort path inherits the removal. Got ' + JSON.stringify(post));
+        assert.notStrictEqual(post.bodyCursor, 'grabbing',
+          label + ' must leave the cursor back to normal. Got ' + JSON.stringify(post));
+        if (!homeFirst) await page.mouse.up(); // already torn down — an inert no-op
+        await settleEditor(page);
+        assert.strictEqual(await s4Content(page), before,
+          label + ' must leave the content column byte-identical across the whole gesture');
+      };
+
+      await endVia('pointerup (released where it started)', true, () => page.mouse.up());
+      await endVia('Escape mid-drag', false, () => page.keyboard.press('Escape'));
+      await endVia('pointercancel mid-drag', false, () => page.evaluate(
+        () => document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }))));
+      await endVia('window blur mid-drag', false, () => page.evaluate(
+        () => window.dispatchEvent(new Event('blur'))));
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'Task 2b is chrome only — no path above may write a byte. Got:\n' + fileText);
+    }, 'T2b');
+    // <<<S4T2BSECTION
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
