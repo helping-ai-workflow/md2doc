@@ -19597,6 +19597,439 @@ async function gutterGeometry(page, sel) {
     }, 'T3');
     // <<<S4T3SECTION
 
+    // ── S4 Task 4: moving a LIST ITEM within its own run ──────────────────
+    //
+    // Task 3's drop refused to touch a li at all — silently, which §3.6 calls
+    // a defect in so many words (「靜默不動作是缺陷」). After this task a li
+    // drag either MOVES or refuses WITH A BANNER; the only silent outcome
+    // left is the home position, which is Task 3's own ruling (a drop where
+    // the block already is is a byte no-op, not a refusal) and is asserted as
+    // such below rather than left to inference.
+    //
+    // THE SHAPE, and it is `duplicateListItems()`'s, not planBlockMove()'s: a
+    // li's lines CANNOT be relocated verbatim, because markers and ordinals
+    // are run-global — '3. charlie' moved to the head of its run has to come
+    // back as '1. charlie' and renumber everything behind it. So the run is
+    // re-serialized as ONE commitRangeEdit over its own line range: capture
+    // `presetRange` BEFORE mutating, build the REORDERED span array, move the
+    // node with mutateListRun(), then commitListStructure() with
+    // `carryOver: bystanderCarryOver(span)`. serializeBlocks() emits in span
+    // ARRAY order and carryOver replays each block's original bytes by id, so
+    // nothing is re-escaped and only the markers and the leading columns move.
+    // One commitRangeEdit is one undo op, which is §3.4's requirement.
+    //
+    // `data-list-start` is a POSITION property, not an item property — it is
+    // the only carrier of "marked's lexer opened a list token here" (§3.8 rule
+    // (d)) and serializeBlocks() resets its ordinal counter on it. A reorder
+    // that changes which item stands FIRST therefore has to carry the
+    // attribute across, exactly as duplicateListItems() strips it from a copy
+    // for the mirror-image reason. Without that, the run RESTARTS its
+    // numbering mid-way — measured, not reasoned: see the ordered-list
+    // scenario's own comment for the exact bytes.
+    //
+    // ANTI-VACUITY, per shape:
+    //   * every scenario asserts the move LANDED — the rendered block order
+    //     AND the saved bytes — before it asserts anything about undo. "One
+    //     Ctrl+Z restored the file" is trivially true of a gesture that did
+    //     nothing, and a li drag did exactly nothing until this task.
+    //   * "the children stayed put" is worthless unless the children were
+    //     provably there first. That scenario asserts the child's index, its
+    //     data-indent AND its source line BEFORE the drag, and the same three
+    //     after.
+    //   * a byte assertion proves nothing when the bytes would be identical
+    //     either way, which is why the ORDERED fixture carries the
+    //     renumbering claim: '- a' reordered is a permutation of its own
+    //     lines and cannot see a serializer that lost the run's numbering.
+    //   * every refusal asserts the drag ENGAGED (the indicator up on the
+    //     intended seam, read back with the pointer still down) and the EXACT
+    //     banner text — four other refusals in this file also contain 清單.
+    //   * `lexLooseDeep()` everywhere, never `lexLoose()`: the shallow one
+    //     inspects top-level tokens only, misses a NESTED list going loose,
+    //     and has already produced a false green in this project.
+    const T4_BULLET = '# Doc\n\n- alpha\n- bravo\n- charlie\n\ntail\n';
+    const T4_OL = '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n\ntail\n';
+    const T4_KIDS = '# Doc\n\n- alpha\n- bravo\n  - b1\n- charlie\n\ntail\n';
+    const T4_TASK = '# Doc\n\n- [ ] alpha\n- [x] bravo\n- [ ] charlie\n\ntail\n';
+    const T4_LOOSE = '# Doc\n\n- alpha\n\n- bravo\n\n- charlie\n\ntail\n';
+    const T4_ORPHAN = '# Doc\n\n- alpha\n  - a1\n- bravo\n\ntail\n';
+
+    // The li fixtures' own sanity check, folded into one call so no scenario
+    // can forget it: the blocks really are `li`, at the indents named, and the
+    // run's head really does carry `data-list-start` (without which the
+    // renumbering scenario would be asserting nothing).
+    const t4Fixture = async (page, types, indents, label) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), types,
+        label + ' FIXTURE SANITY: block types. Got ' + JSON.stringify(g.map((b) => b.type)));
+      const got = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(got, indents,
+        label + ' FIXTURE SANITY: data-indent per block. Got ' + JSON.stringify(got));
+      return g;
+    };
+
+    // ── 1. two items of a BULLET run swapped — plus both home positions ───
+    await s4Scenario('a list item dragged above its neighbour swaps them, in exactly one '
+      + 'undo op — and a drop where it already is writes nothing', T4_BULLET,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'bullet');
+      const src = g[3];
+      assert.strictEqual(src.text, 'charlie', 'FIXTURE SANITY: block 3 is the charlie item');
+      await s4ArmedOn(page, src, 'charlie');
+
+      // ── the home half, and it is SILENT — Task 3's ruling, applied to a li
+      //    for the first time. Its partner is the real move on the same page
+      //    below: without one, "no bytes were written" is satisfied by the
+      //    do-nothing path a li drag had until this task.
+      // (a) released on the item's OWN top edge.
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[1].mid - 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const away = await s4Indicator(page);
+      await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+      const home = await s4Indicator(page);
+      expectApprox(home.top, src.top,
+        'PRECONDITION: the drop target at release must be the ITEM\'s own top edge');
+      assert.ok(Math.abs(away.top - home.top) > 1,
+        'ANTI-VACUITY: the drag must genuinely have travelled away and come back. away='
+        + away.top + ' home=' + home.top);
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4Banner(page), null,
+        'a li dropped where it already is is a BYTE NO-OP, not a refusal — the same '
+        + 'ruling Task 3 made for every other block type');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'and it writes nothing');
+
+      // (b) released on the seam immediately BELOW it — for the run's LAST
+      //     item that seam is the paragraph after the run, i.e. a block
+      //     OUTSIDE the run, and it must still be read as "already there"
+      //     rather than as a cross-boundary refusal.
+      const noop = await s4DragHandleTo(page, g[3], g[4].mid - 2);
+      expectApprox(noop.top, g[4].top,
+        'PRECONDITION: the drop target must be before-block 4 (the tail paragraph) — the '
+        + 'seam immediately below charlie, which is charlie\'s own position');
+      assert.strictEqual(await s4Banner(page), null,
+        'the seam immediately below the last item is the home position, not a boundary '
+        + 'crossing — it must be silent, and this is the only assertion that can see the '
+        + 'difference (the file is untouched either way)');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'and it writes nothing');
+
+      // ── the real move ──────────────────────────────────────────────────
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[3], 'charlie (real move)');
+      const ind = await s4DragHandleTo(page, g2[3], g2[2].mid - 2);
+      expectApprox(ind.top, g2[2].top,
+        'PRECONDITION: above bravo\'s midline the drop target is before-block 2 — the '
+        + 'indicator must sit on bravo\'s own top edge');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'charlie', 'bravo', 'tail'],
+        'the item must have moved ABOVE bravo in the RENDERED document');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- alpha\n- charlie\n- bravo\n\ntail\n',
+        'the run is re-serialized in the NEW span order and nothing else moves. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false],
+        'the run must stay TIGHT — a stray blank line either side of the moved item '
+        + 'makes marked call the whole list loose, every item renders as <p>, and the '
+        + 'run degrades read-only with no banner');
+
+      await s4UndoOnce(page);
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'ONE Ctrl+Z must put the run back — a reorder written as a removal plus an '
+        + 'insertion is TWO ops and would leave the item still moved here');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 2. an ORDERED run: the item moved to FIRST, and the renumbering ───
+    // The scenario that carries the `data-list-start` claim. MEASURED with
+    // the handling removed: the attribute stays on `alpha`, which is now the
+    // span's SECOND block, and serializeBlocks() resets its ordinal counter
+    // there — '1. charlie\n1. alpha\n2. bravo'. A bullet fixture cannot see
+    // that at all (every marker is '- '), which is why the renumbering claim
+    // lives on an ordered one.
+    await s4Scenario('an item dragged to the head of an ORDERED run renumbers the whole '
+      + 'run, in exactly one undo op', T4_OL, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'ordered');
+      const headStart = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-list-start')));
+      assert.deepStrictEqual(headStart, [null, '1', null, null, null],
+        'FIXTURE SANITY: the run\'s HEAD carries data-list-start and no other item does '
+        + '— the whole renumbering claim below is about that attribute moving with the '
+        + 'head. Got ' + JSON.stringify(headStart));
+      await s4ArmedOn(page, g[3], 'charlie');
+      const ind = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top,
+        'PRECONDITION: above alpha\'s midline the drop target is before-block 1 — the '
+        + 'head of the run');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'charlie', 'alpha', 'bravo', 'tail'],
+        'the item must now be the run\'s FIRST');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n1. charlie\n2. alpha\n3. bravo\n\ntail\n',
+        'the ordinals are re-stated 1,2,3 in the NEW order — a run that kept a stale '
+        + 'data-list-start on the item that used to be first comes back as '
+        + '"1. charlie / 1. alpha / 2. bravo". Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_OL,
+        'ONE Ctrl+Z must restore the file byte-for-byte, ordinals included');
+    }, 'T4');
+
+    // ── 3. an item WITH CHILDREN — the children stay where they are ───────
+    // §4.5: 「只搬 grip 那一個 block，子項留在原地」. The child is asserted to
+    // BE there first — its index, its data-indent and its own source line —
+    // because "it did not move" is satisfied by a child that was never in the
+    // fixture, and by a gesture that did nothing at all.
+    await s4Scenario('an item dragged out from above its own child leaves the child where '
+      + 'it stands', T4_KIDS, async (page, mdPath) => {
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '1', '0', null], 'kids');
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'b1', 'charlie', 'tail'],
+        'FIXTURE SANITY: b1 sits at index 3, between bravo and charlie');
+      assert.ok(T4_KIDS.indexOf('- bravo\n  - b1\n') !== -1,
+        'FIXTURE SANITY: and in the FILE the child line follows bravo\'s own line, so '
+        + '"the child stayed" below is a claim about a child that was provably there');
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top,
+        'PRECONDITION: the drop target is before-block 1 — the head of the run');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'b1', 'charlie', 'tail'],
+        'bravo moved to the head; b1 did NOT follow it — it is still at index 3, which '
+        + 'is where it stood');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block')).map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '0', '1', '0', null],
+        'and it kept its own indent — the child is re-anchored under whatever now stands '
+        + 'above it, not promoted. Got ' + JSON.stringify(indents));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- alpha\n  - b1\n- charlie\n\ntail\n',
+        'ONLY the grip\'s own block moved. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'neither the outer run NOR the nested one may go loose — lexLooseDeep(), never '
+        + 'lexLoose(): the shallow scan reports only [false] for this file and cannot see '
+        + 'the nested list at all');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_KIDS,
+        'ONE Ctrl+Z must restore the file byte-for-byte, nesting included');
+    }, 'T4');
+
+    // ── 4. to the run's LAST position ────────────────────────────────────
+    // The destination is the paragraph AFTER the run — a block the run does
+    // not contain. It is the only way to name "the end of the run" when
+    // something follows it, and it must NOT be read as a boundary crossing.
+    await s4Scenario('an item dragged past the last item of its run becomes the last item',
+      T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'last');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].mid + 2);
+      expectApprox(ind.top, g[4].top,
+        'PRECONDITION: below charlie\'s midline the drop target is before-block 4 — the '
+        + 'tail PARAGRAPH, which is outside the run and is the only name the run\'s own '
+        + 'end has here');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'charlie', 'alpha', 'tail'],
+        'the item must now be the run\'s LAST — and still inside the run, not after it');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- charlie\n- alpha\n\ntail\n',
+        'the paragraph after the run is untouched and no blank line is invented between '
+        + 'the run and it. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 5. a TASK item keeps its checked state ───────────────────────────
+    // The marker is RE-STATED by the serializer on every reorder (that is
+    // what renumbers an ordered run), and the checkbox is part of the marker
+    // — so a reorder is exactly the path on which a checked item can silently
+    // come back unchecked. The fixture checks the item that MOVES, and the
+    // two that do not are unchecked, so "[x] survived" cannot be satisfied by
+    // a serializer that checks everything.
+    await s4Scenario('a checked task item keeps its checkbox across a reorder', T4_TASK,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'task');
+      const checks = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"] .ed-li-check'))
+        .map((el) => el.getAttribute('data-checked')));
+      assert.deepStrictEqual(checks, ['0', '1', '0'],
+        'FIXTURE SANITY: exactly the MIDDLE item is checked — the one that moves. Got '
+        + JSON.stringify(checks));
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'charlie', 'tail'],
+        'the checked item must have moved to the head');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- [x] bravo\n- [ ] alpha\n- [ ] charlie\n\ntail\n',
+        'the checkbox travels with the item and the other two stay unchecked. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_TASK,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 6. OUT of its own run → refused with a banner ────────────────────
+    // §4.3's ruling, already made: a cross-boundary move is REFUSED in 3.0.0
+    // and the capability deferred. What this scenario adds is that a li drag
+    // is no longer SILENT when it declines — the defect §3.6 names.
+    await s4Scenario('a list item dragged out of its own run is REFUSED with a banner, '
+      + 'and writes nothing', T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], 1);
+      expectApprox(ind.top, g[0].top,
+        'PRECONDITION: above every block\'s midline the drop target is before-block 0 — '
+        + 'ABOVE the heading, which is outside the item\'s run by any reading');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('區塊搬移不能跨越清單邊界') !== -1,
+        'a li that leaves its run must refuse OUT LOUD — until this task the same '
+        + 'gesture did nothing at all and said nothing at all, which §3.6 calls a '
+        + 'defect. The EXACT wording is asserted, not merely a banner mentioning 清單: '
+        + 'four other refusals in this file contain that word. Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'a refused move must not write a byte');
+    }, 'T4');
+
+    // ── 7. a DEGRADED run → §4.3's run-wide gate refuses ─────────────────
+    // §4.3: 「轉換／建立副本／刪除／拖曳一律在 mutation 前走
+    // listRunSupportsStructuralEdit()」. A loose run's items each render as a
+    // <p>, serializeBlocks() reports 'P' for every one of them and STRIPS
+    // what it cannot represent — committing such a run deletes the user's
+    // text. There is no shared helper for the gate; the four existing call
+    // sites each make the call themselves and so does this one.
+    await s4Scenario('a drag inside a DEGRADED list run is refused by §4.3\'s run-wide '
+      + 'gate, and writes nothing', T4_LOOSE, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'loose');
+      assert.deepStrictEqual(lexLooseDeep(T4_LOOSE), [true],
+        'FIXTURE SANITY: this run really is LOOSE — the whole point of the gate. If this '
+        + 'ever reports [false] the fixture stopped expressing the shape under test');
+      await s4ArmedOn(page, g[3], 'charlie');
+      const ind = await s4DragHandleTo(page, g[3], g[2].mid - 2);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: the drop target is before-block 2 — a perfectly ORDINARY '
+        + 'destination inside the item\'s own run, so the refusal below can only be '
+        + 'about the run\'s condition');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('此清單含不支援的格式，無法調整結構') !== -1,
+        '§4.3\'s gate must refuse the drag, with ITS OWN wording — not the cross-boundary '
+        + 'one, which would mean the move was declined for a reason this scenario is not '
+        + 'about. Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_LOOSE,
+        'a refused move must not write a byte — and this is the assertion that bites '
+        + 'when the gate is removed: without it the run is committed through '
+        + 'serializeBlocks(), which strips every <p> item it cannot represent');
+    }, 'T4');
+
+    // ── 8. THE SEAM TASK 7 OWNS: a destination that needs an indent clamp ─
+    // §4.5 also says the moved block keeps its own indent and is CLAMPED when
+    // the destination makes it illegal. That clamp is Task 7's subject, and
+    // `applyIndentClamp()` cannot express a move yet — measured: its rule-2
+    // scope starts after the operated block's NEW index, while a move's
+    // orphans are left at its OLD one, so for this fixture it clamps nothing
+    // and the DOM and the file end up disagreeing about the nesting.
+    //
+    // Until then the move is REFUSED rather than committed wrong. Task 7
+    // replaces the refusal with the clamp at one site (see
+    // spanIndentsAreAnchored()'s call in performListItemDrop()); this
+    // scenario is the one that has to be re-pointed when it does.
+    await s4Scenario('a move that would leave a child with no parent is refused rather '
+      + 'than committed at the wrong column', T4_ORPHAN, async (page, mdPath) => {
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', null], 'orphan');
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'a1', 'bravo', 'tail'],
+        'FIXTURE SANITY: a1 is alpha\'s ONLY child and stands directly below it — moving '
+        + 'alpha away is what leaves a1 as the span\'s first block, at indent 1');
+      // THE PARTNER FIRST, on a page with no banner standing: the SAME run,
+      // an item that orphans nobody, and it is ACCEPTED. Without it "the move
+      // was refused" is satisfied by a run nothing can move in at all — and a
+      // li drag moved nothing anywhere until this task, so that is not a
+      // hypothetical.
+      await s4ArmedOn(page, g[3], 'bravo (the partner move)');
+      const ok = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(ok.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- alpha\n  - a1\n\ntail\n',
+        'a move in this very run, of an item that orphans nobody, must be ACCEPTED. '
+        + 'Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'and neither list went loose');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now the one that needs the clamp ────────────────────────────────
+      const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', null], 'orphan (after undo)');
+      await s4ArmedOn(page, g2[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g2[1], g2[3].mid + 2);
+      expectApprox(ind.top, g2[4].top,
+        'PRECONDITION: the drop target is before-block 4 — the end of the run, an '
+        + 'otherwise perfectly ordinary destination');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('搬移後子項目會失去上層項目') !== -1,
+        'the move must refuse OUT LOUD — committing it emits a1 at column 0, which is a '
+        + 'different document from the one on screen. The EXACT wording, because the '
+        + 'cross-boundary refusal would mean the destination was rejected instead of the '
+        + 'indent. Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'a1', 'bravo', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
+        'a refused move must not write a byte');
+    }, 'T4');
+
+    // ── 9. a HARD-WRAPPED item is draggable, and nothing is re-escaped ───
+    // The scenario that earns §4.3's gate its `columnOnly` argument. A reorder
+    // rewrites no item's content and no item's line COUNT — only markers and
+    // leading columns — so a multi-line li must not veto the drag; without
+    // `columnOnly` a single hard-wrapped item anywhere in the run refuses
+    // every move in it, and 80.6% of this repo's own CHANGELOG.md list items
+    // are hard-wrapped. The `~5px` belongs to a BYSTANDER the gesture never
+    // touched: carryOver replays its bytes, and the round trip through
+    // escapeText() that would otherwise return '\\~5px' is what this pins.
+    await s4Scenario('a hard-wrapped item moves whole, and an untouched item\'s bytes '
+      + 'are replayed rather than re-serialized',
+      '# Doc\n\n- alpha ~5px\n- bravo has a\n  lazy continuation\n- charlie\n\ntail\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\n- alpha ~5px\n- bravo has a\n  lazy continuation\n- charlie\n\ntail\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', null], 'hard-wrapped');
+      assert.strictEqual(g[2].text.replace(/\s+/g, ' '), 'bravo has a lazy continuation',
+        'FIXTURE SANITY: block 2 really is ONE list item owning TWO source lines — if '
+        + 'this ever splits into two blocks the scenario stops expressing the shape');
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- bravo has a\n  lazy continuation\n- alpha ~5px\n- charlie\n\ntail\n',
+        'both of the moved item\'s lines travel, the continuation keeps its column, and '
+        + 'the bystander\'s tilde is NOT escaped. Got:\n' + JSON.stringify(moved));
+      assert.strictEqual(moved.indexOf('\\~'), -1,
+        'no byte of an item the gesture never touched may be re-escaped — that is the '
+        + 'whole job of carryOver, and a single backslash here is the measured '
+        + 'regression list-md.js\'s own header records');
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte, continuation line included');
+    }, 'T4');
+    // <<<S4T4SECTION
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();

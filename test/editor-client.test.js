@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanIndices, spanIndentsAreAnchored, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -902,6 +902,87 @@ function countInCode(source, needle) {
       'and there is no SECOND op behind it — that is the whole reason the move is '
       + 'written as one commitRangeEdit over min(source, destination)..max(...)');
   }
+}
+
+// -- S4 Task 4: reorderSpanIndices() / spanIndentsAreAnchored() --------------
+// The pure half of a LIST ITEM's ⠿ drop. The runtime scenarios drive the
+// gesture and pin the saved bytes; these two answer the questions a gesture
+// scenario cannot discriminate.
+//
+// reorderSpanIndices() is the arithmetic that turns "the item at `from` goes
+// before the item at `insertAt`" into the span array serializeBlocks() emits
+// in. It is not the obvious `splice(from,1); splice(insertAt,0,…)`: `insertAt`
+// names a slot in the array BEFORE the removal, so a downward move has to be
+// decremented — off by one there moves the item to the wrong side of its
+// destination, which on a two-item run is invisible (there is only one other
+// slot) and on a three-item run is a wrong document.
+//
+// spanIndentsAreAnchored() is §4.5's INDENT SEAM, and the reason Task 4 has
+// one at all: `serializeBlocks()` rebuilds its width stack per span, so a span
+// whose first block claims `data-indent="1"` emits it at column 0 — the DOM
+// and the file then disagree about the nesting, which is the "looks right on
+// screen, cannot be saved" class indent-clamp.js exists for. Task 7 replaces
+// the refusal this predicate drives with `applyIndentClamp()`; until then the
+// predicate is what stops the move from writing a document the user did not
+// ask for. Its bound is deliberately the SAME one indent-clamp.js's own
+// `boundAt()` computes (previous li's indent + 1, and 0 when there is no
+// previous li or the previous block is not a li), so the two cannot drift.
+{
+  const li = (n) => ({ type: 'li', indent: n });
+  const other = () => ({ type: 'paragraph', indent: 0 });
+
+  // ── reorderSpanIndices ────────────────────────────────────────────────
+  assert.strictEqual(reorderSpanIndices(3, 0, 0), null,
+    'inserting before yourself is the home position, not a move');
+  assert.strictEqual(reorderSpanIndices(3, 0, 1), null,
+    'inserting before the block immediately BELOW you is the same place on screen — '
+    + 'the byte no-op the drag\'s release-where-you-started case depends on');
+  // The partner: without it, "it returned null" is satisfied by a function
+  // that always returns null.
+  assert.deepStrictEqual(reorderSpanIndices(3, 0, 2), [1, 0, 2],
+    'one slot further down IS a move, and the moved item lands AFTER the block whose '
+    + 'slot was named — the decrement that a downward move needs');
+  assert.deepStrictEqual(reorderSpanIndices(3, 0, 3), [1, 2, 0],
+    'insertAt === length is "at the very end of the run"');
+  assert.deepStrictEqual(reorderSpanIndices(3, 2, 0), [2, 0, 1],
+    'an UPWARD move is not decremented — the same insertAt means a different slot '
+    + 'depending on the direction, which is the whole reason this is a named function');
+  assert.deepStrictEqual(reorderSpanIndices(4, 3, 1), [0, 3, 1, 2],
+    'up past two blocks');
+  assert.deepStrictEqual(reorderSpanIndices(4, 1, 4), [0, 2, 3, 1],
+    'down to the end past two blocks');
+  // Every answer is a PERMUTATION of the span — nothing may be dropped or
+  // duplicated. Asserted, because a splice off by one silently can do both.
+  [[3, 0, 2], [3, 0, 3], [3, 2, 0], [4, 3, 1], [4, 1, 4]].forEach(([n, f, a]) => {
+    const got = reorderSpanIndices(n, f, a);
+    assert.deepStrictEqual(got.slice().sort((x, y) => x - y),
+      Array.from({ length: n }, (_, i) => i),
+      'a reorder is a PERMUTATION of the span: same members, same count. Got '
+      + JSON.stringify(got));
+  });
+  assert.strictEqual(reorderSpanIndices(3, 3, 0), null, 'a `from` outside the span is refused');
+  assert.strictEqual(reorderSpanIndices(3, 0, 4), null, 'an `insertAt` past the end is refused');
+
+  // ── spanIndentsAreAnchored ────────────────────────────────────────────
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(0), li(0)]), true,
+    'a flat run is anchored');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(1), li(0)]), true,
+    'a child directly under its parent is anchored');
+  assert.strictEqual(spanIndentsAreAnchored([li(1), li(0)]), false,
+    'a span that OPENS at indent 1 has nothing to hang that column off — this is the '
+    + 'case a move creates by lifting a parent out from above its own child, and it is '
+    + 'exactly what serializeBlocks() would silently emit at column 0');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(2)]), false,
+    'a jump of two columns has no anchor for the second one either');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(1), li(2), li(1), li(0)]), true,
+    'coming back UP is always anchored — only going deeper needs a parent');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), other(), li(1)]), false,
+    'a NON-li block breaks the chain: indent-clamp.js\'s anchorBefore() stops at the '
+    + 'first non-li and answers null, so the block after it may sit at 0 and no deeper');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), other(), li(0)]), true,
+    'and the partner — the same shape at a legal indent is anchored, so the assertion '
+    + 'above is about the INDENT and not about the paragraph');
+  assert.strictEqual(spanIndentsAreAnchored([]), true, 'an empty span is vacuously anchored');
 }
 
 console.log('editor-client.test.js OK');
