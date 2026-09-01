@@ -17608,16 +17608,17 @@ async function gutterGeometry(page, sel) {
     // >>>T8SWEEP  (and <<<T8SWEEP at the end: the scratch subset runner every
     // S3 task has used slices a section out by markers, never by line number.)
     //
-    // THIRTEEN selection SHAPES against seven batch OPERATIONS — 91 cells.
+    // THIRTEEN selection SHAPES against EIGHT batch OPERATIONS — 104 cells.
     // (Corrected 2026-08-31: this header read "Eleven" and "all 77 cells"
     // because the stage-closure follow-up added the `hr in span` and
     // `html in span` rows without re-counting the prose. Every total the
     // sweep PRINTS is derived from T8_SHAPES.length x T8_OPS.length, so the
-    // comments were the only thing that was ever wrong.)
+    // comments were the only thing that was ever wrong. S4 Task 8 added the
+    // EIGHTH column — `move`, the ⠿ drag — and re-counted this line with it.)
     // Tasks 6 and 7
     // each pinned exact bytes for the shapes their own arithmetic lives in;
     // this is the cross product, and its job is different — it asks every
-    // shape the same seven questions and refuses to let a cell be green for
+    // shape the same eight questions and refuses to let a cell be green for
     // being silent.
     //
     // Three rules the sweep is built around, all of them lessons this plan
@@ -17688,6 +17689,18 @@ async function gutterGeometry(page, sel) {
       const refused = (m) => ({ kind: 'refused', message: m });
       const noop = (why) => ({ kind: 'noop', why: why });
       const applied = { kind: 'applied' };
+      // S4 Task 8. The move column's applied cells carry their own EXPECTED
+      // SAVED BYTES, which the other seven do not need: a move creates and
+      // destroys no block, rewrites no member's content and changes no
+      // member's line count, so EVERY generic invariant the sweep already
+      // owns is satisfied by a document in which nothing moved at all. The
+      // literal is what says WHERE it went. It is not the only thing holding
+      // the column up — three DERIVED invariants below are computed from the
+      // fixture rather than authored, so a literal transcribed from a broken
+      // build fails them — but it is the one that pins the destination.
+      // MEASURED per row (a real ⠿ drag, driven and read back off disk)
+      // before being written down; never authored from reasoning.
+      const moved = (bytes) => ({ kind: 'applied', bytes: bytes });
       // §3.5: 「段落 no-op」— a span with no heading and no list item in it has
       // nothing for Tab to change, and that is the spec's answer, not a
       // dropped gesture.
@@ -17696,6 +17709,11 @@ async function gutterGeometry(page, sel) {
         'convert-quote': refused(m), 'convert-ul': refused(m), duplicate: refused(m),
         'delete-menu': refused(m), 'delete-key': refused(m),
         tab: refused(m), 'shift-tab': refused(m),
+        // S4 Task 8: the drag refuses through the SAME gate and with the
+        // SAME sentence as the menu. That is a claim, not bookkeeping —
+        // §3.6's 「不得另寫一條」 — and a drag path that grew its own wording
+        // for MIXED / the §4.3 run gate / a GAP fails here.
+        move: refused(m),
       });
       const paraOps = {
         'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
@@ -17703,20 +17721,50 @@ async function gutterGeometry(page, sel) {
         tab: PARA_TAB, 'shift-tab': PARA_TAB,
       };
 
+      // S4 Task 8: `paraOps` is shared by five rows whose move cells all
+      // APPLY and all write DIFFERENT bytes, so the eighth cell cannot live
+      // in the shared object the way the other seven do.
+      const withMove = (base, cell) => Object.assign({}, base, { move: cell });
+
       const T8_SHAPES = [
         { id: '1 block', md: T8_P, anchor: 3, focus: 3, members: [[3, 3]],
-          expect: paraOps },
+          moveTo: { at: 'append', why: 'past every block in the document, which is the '
+            + 'longest travel this fixture offers a single block' },
+          expect: withMove(paraOps, moved('# Doc\n\nbravo\n\ncharlie\n\nalpha\n')) },
         { id: '2 blocks', md: T8_P, anchor: 3, focus: 5, members: [[3, 3], [5, 5]],
-          expect: paraOps },
+          moveTo: { at: 'append', why: 'past the one block the pair does not cover — the '
+            + 'set must arrive whole AND in its own order' },
+          expect: withMove(paraOps, moved('# Doc\n\ncharlie\n\nalpha\n\nbravo\n')) },
+        // `append` here would be the SECOND HOME POSITION (this set already
+        // ends the document) and the cell would answer nothing, so the whole
+        // set travels to the TOP instead — the heading, the one block it does
+        // not hold, ends up last.
         { id: 'N blocks', md: T8_P, anchor: 3, focus: 7,
-          members: [[3, 3], [5, 5], [7, 7]], expect: paraOps },
+          members: [[3, 3], [5, 5], [7, 7]],
+          moveTo: { at: 0, why: 'above the heading — the only destination this '
+            + 'whole-but-one set has that is not a home position' },
+          expect: withMove(paraOps, moved('alpha\n\nbravo\n\ncharlie\n\n# Doc\n')) },
         // A span of list items, deliberately NOT starting at the run's first
         // item: an anchor that is the list's own start has delta 0 by
         // indentListItem()'s list-start clause, and the Tab cell would then be
         // a no-op for a reason that has nothing to do with the batch.
         { id: 'list-item span', md: T8_L, anchor: 4, focus: 6,
           members: [[4, 4], [5, 5], [6, 6]],
+          // The one row whose move goes down performListItemDrop() rather
+          // than planBlockMove(): three of the run's four items travel to its
+          // HEAD, which is the only destination that makes the run RENUMBER
+          // (§3.8) and the only one that moves `data-list-start` off the item
+          // that used to be first. A destination further down would leave
+          // '1. alpha' first and the renumbering claim untested.
+          moveTo: { at: 1, why: 'before the run\'s own first item — the head of the run' },
+          // A move re-serializes the run, so the members' bytes come back
+          // through carryOver and only the ordinals are re-stated. This is
+          // the ONLY applied move cell whose saved lines are not a
+          // permutation of the fixture's, which is why the permutation
+          // invariant below normalises ordinals away before comparing.
+          renumbers: true,
           expect: {
+            move: moved('# Doc\n\n1. bravo\n2. charlie\n3. delta\n4. alpha\n'),
             'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
             'delete-menu': applied, 'delete-key': applied, tab: applied,
             // T7 carry 5: the delta is measured from the set's MINIMUM old
@@ -17727,24 +17775,50 @@ async function gutterGeometry(page, sel) {
             'shift-tab': noop('T7 carry 5: minimum old indent is already 0, so the '
               + 'one delta is 0 and §3.5 forbids a per-item floor'),
           } },
-        // §3.6's 2026-08-31 ruling. Every one of the seven refuses.
+        // §3.6's 2026-08-31 ruling. Every one of the EIGHT refuses — the
+        // drag included, since S4 Task 8.
         { id: 'crossing kinds', md: T8_MIX, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], mixed: true, expect: allRefuse(MIXED) },
+          members: [[3, 3], [5, 5]], mixed: true,
+          // Deliberately a destination the set could otherwise reach: MIXED is
+          // a property of the SET, so it gives the same answer at every drop
+          // target and there is no aim that would have worked (§4.5's own T6
+          // note). A destination inside the set would be a HOME POSITION and
+          // the cell would be measuring the silence, not the refusal.
+          moveTo: { at: 'append', why: 'past the last block — outside the set, so the '
+            + 'refusal is the gate\'s and not a home position\'s silence' },
+          expect: allRefuse(MIXED) },
         // §4.3's run-wide gate. The fixture is one LOOSE list, so
         // serializeBlocks() reports 'P' for every item and the gate refuses
         // ahead of the columnOnly bail — which is why Tab refuses here too.
         { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], degraded: true, expect: allRefuse(RUN_GATE) },
+          members: [[3, 3], [5, 5]], degraded: true,
+          // NOT `append`: this set ends the document, so append is the li
+          // path's SECOND HOME POSITION — answered ABOVE the §4.3 gate, on
+          // purpose (a put-it-back gesture must not raise a banner), and the
+          // cell would come back silent for a reason that has nothing to do
+          // with the degraded run. The top is outside the set and reaches the
+          // gate.
+          moveTo: { at: 0, why: 'above the heading — outside the set, so the §4.3 '
+            + 'run-wide gate is actually reached' },
+          expect: allRefuse(RUN_GATE) },
         // Task 1 carry 2 / Task 6 carry 15: a no-line PHANTOM sits BETWEEN two
         // real members, so the set cannot be expressed as one contiguous index
         // range in `blocks`.
         { id: 'phantom in span', md: T8_GAP, anchor: 3, focus: 5,
-          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2, expect: allRefuse(GAP) },
+          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2,
+          // Any destination at all: resolveGutterOperands()'s contiguity gate
+          // runs in the shared preamble, ahead of both home positions, so the
+          // gap is refused before the drop target is ever consulted. MEASURED
+          // at all six of this fixture's targets — the same banner at every
+          // one.
+          moveTo: { at: 'append', why: 'past the last block; the gap is refused in the '
+            + 'preamble, so every target gives this same answer' },
+          expect: allRefuse(GAP) },
         // A table is ONE block owning four source lines. The anchor is put on
         // the table's startLine and the FOCUS on the paragraph, so the roving
         // holder — and therefore the ⠿ the menu opens on — is the paragraph:
         // §3.7 gives a table block no 轉換成 at all, and a grip that could not
-        // offer the item would make two of the seven cells unreachable rather
+        // offer the item would make two of the eight cells unreachable rather
         // than answered.
         // ⚠ RULED 2026-08-31 (stage-closure gap 2), and this row is where the
         // ruling is enforced. The two conversion cells used to APPLY and to
@@ -17765,7 +17839,16 @@ async function gutterGeometry(page, sel) {
         // are — which is what makes this row the guard against the refusal
         // being widened by accident as well as against it being dropped.
         { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
-          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] }, expect: {
+          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] },
+          // The set covers every block but the heading, so the top is its
+          // only non-home destination. It is also the interesting one: the
+          // table's THREE source lines travel as part of a batch, relocated
+          // verbatim, and the block count must still move by 0 — a move is
+          // the one operation §3.7's 轉換成 withholding has nothing to say
+          // about, because it rewrites no cell.
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            move: moved('alpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n# Doc\n'),
             'convert-quote': refused(TABLE_CONVERT),
             'convert-ul': refused(TABLE_CONVERT),
             duplicate: applied,
@@ -17795,7 +17878,15 @@ async function gutterGeometry(page, sel) {
         // resolveGutterOperands() shows up here as a failure too.
         { id: 'hr in span', md: T8_HR, anchor: 3, focus: 7,
           members: [[3, 3], [5, 5], [7, 7]],
-          withheld: { type: 'hr', lines: [5, 5] }, expect: {
+          withheld: { type: 'hr', lines: [5, 5] },
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            // The hr travels with the set and comes back an hr. The row's
+            // 轉換成 cells refuse because a rule has no content to re-host;
+            // a MOVE re-hosts nothing, so it applies — and the derived
+            // token-kind invariant below is what proves '---' did not land
+            // somewhere that re-lexes it as a setext underline.
+            move: moved('alpha\n\n---\n\nbravo\n\n# Doc\n'),
             'convert-quote': refused(HR_CONVERT),
             'convert-ul': refused(HR_CONVERT),
             duplicate: applied,
@@ -17804,26 +17895,143 @@ async function gutterGeometry(page, sel) {
           } },
         { id: 'html in span', md: T8_HTML, anchor: 3, focus: 7,
           members: [[3, 3], [5, 5], [7, 7]],
-          withheld: { type: 'html', lines: [5, 5] }, expect: {
+          withheld: { type: 'html', lines: [5, 5] },
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            move: moved('alpha\n\n<div>x</div>\n\nbravo\n\n# Doc\n'),
             'convert-quote': refused(HTML_CONVERT),
             'convert-ul': refused(HTML_CONVERT),
             duplicate: applied,
             'delete-menu': applied, 'delete-key': applied,
             tab: PARA_TAB, 'shift-tab': PARA_TAB,
           } },
+        // The two edge rows are each other's mirror, deliberately: the set at
+        // the document's START can only move DOWN and the set at its END can
+        // only move UP, and planBlockMove()'s two branches (`ins > de + 1`
+        // and its else) are exactly those two directions. One row would
+        // exercise one branch.
         { id: 'document start', md: T8_EDGE, anchor: 1, focus: 3,
-          members: [[1, 1], [3, 3]], expect: paraOps },
+          members: [[1, 1], [3, 3]],
+          moveTo: { at: 'append', why: 'the set opens the file, so DOWN is the only '
+            + 'direction it has' },
+          expect: withMove(paraOps, moved('charlie\n\nalpha\n\nbravo\n')) },
         { id: 'document end', md: T8_EDGE, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], expect: paraOps },
+          members: [[3, 3], [5, 5]],
+          moveTo: { at: 0, why: 'the set closes the file, so UP is the only direction '
+            + 'it has' },
+          expect: withMove(paraOps, moved('bravo\n\ncharlie\n\nalpha\n')) },
         // T7 carry 7: a whole-document set is allowed and its delete empties
         // the file. One Ctrl+Z brings it back, which is what makes it safe.
+        // MEASURED at every one of this fixture's three drop targets: all
+        // three are home positions, so the row's move cell is a documented
+        // no-op rather than a chosen one. That is the honest answer and it
+        // is worth a cell — a set that covers every block has nowhere to go,
+        // and §3.6's 「靜默不動作是缺陷」 is about a gesture that COULD have
+        // done something, not about one whose document has no other order.
         { id: 'whole document', md: T8_WHOLE, anchor: 1, focus: 3,
-          members: [[1, 1], [3, 3]], empties: true, expect: paraOps },
+          members: [[1, 1], [3, 3]], empties: true,
+          moveTo: { at: 'append', why: 'past the last block — and the set IS every block, '
+            + 'so this is the second home position and there is no destination that is not' },
+          expect: withMove(paraOps, noop('the set covers every block in the document, so '
+            + 'every drop target is a home position and a move has nowhere to put it')) },
       ];
 
-      // The seven operations. Two conversions — one list target and one
+      // ── S4 Task 8: the EIGHTH column — the ⠿ DRAG-MOVE ─────────────────
+      //
+      // Every other column is a menu item or a keystroke, and the sweep can
+      // fire it from a selector alone. A move is a GESTURE: it needs the
+      // grip's own pixel, a destination measured in the live layout, and the
+      // drop indicator read back BEFORE the release to prove the drag was
+      // aimed where the row claims. Those three facts are why the driver
+      // lives here with its own geometry reader instead of in `run:`.
+      //
+      // THE DESTINATION IS PER ROW, and that is not a weakening of "every
+      // shape gets the same question". The question a move asks is «where
+      // does this set go», and a document has no destination that means the
+      // same thing to all thirteen fixtures: `append` is a real move for a
+      // set that does not end the document and the SECOND HOME POSITION for
+      // one that does — a byte no-op, so a uniform destination would have
+      // turned five rows into no-ops answering nothing. Each row therefore
+      // names its own `moveTo` and the REASON it is the interesting one, and
+      // the driver asserts the drop indicator really landed on it.
+      //
+      // MEASURED, and this is the sweep's own Step-0 evidence: every drop
+      // target these thirteen fixtures offer — 61 gestures, not the 13 the
+      // column runs — was driven before this column was written. 12 moved,
+      // 11 refused with a banner, and all 38 of the rest are one of the two
+      // documented HOME POSITIONS (the destination is a member of the set,
+      // or it is the seam immediately below the set). Not one silent
+      // non-home outcome, which is §3.6's 「靜默不動作是缺陷」 asked of the
+      // whole matrix rather than of one gesture.
+      const t8Geometry = (page) => page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block')).map((el) => {
+          const r = el.getBoundingClientRect();
+          const h = el.querySelector(':scope > .ed-handle');
+          const hr = h ? h.getBoundingClientRect() : null;
+          return {
+            id: el.getAttribute('data-block-id'),
+            type: el.getAttribute('data-block-type'),
+            top: r.top, bottom: r.bottom,
+            handle: hr ? { x: (hr.left + hr.right) / 2, y: (hr.top + hr.bottom) / 2 } : null,
+          };
+        }));
+      const t8IndicatorBox = (page) => page.evaluate(() => {
+        const el = document.querySelector('.ed-block-drop-indicator');
+        if (!el) return { present: false, hidden: true, top: null };
+        const r = el.getBoundingClientRect();
+        return { present: true, hidden: !!el.hidden, top: r.top };
+      });
+
+      const t8Move = async (page, gripSel, shape) => {
+        const cell = shape.id + ' × move';
+        const to = shape.moveTo;
+        assert.ok(to, 'FIXTURE SANITY ' + cell + ': every row must name its own move '
+          + 'destination and the reason it is the interesting one — a row with no '
+          + '`moveTo` sweeps whatever the layout happened to put under the pointer');
+        const g = await t8Geometry(page);
+        const holderId = /data-block-id="([^"]+)"/.exec(gripSel)[1];
+        const src = g.filter((b) => b.id === holderId)[0];
+        assert.ok(src && src.handle,
+          'PRECONDITION ' + cell + ': the roving focus holder must carry a ⠿ of its own — '
+          + 'a press that misses the button satisfies every "nothing happened" assertion '
+          + 'below trivially. Got ' + JSON.stringify(src));
+        const last = g[g.length - 1];
+        assert.ok(to.at === 'append' || g[to.at],
+          'FIXTURE SANITY ' + cell + ': block ordinal ' + to.at + ' must exist — this '
+          + 'fixture has ' + g.length + ' blocks');
+        const destY = to.at === 'append' ? last.bottom + 20 : g[to.at].top + 1;
+        const wantTop = to.at === 'append' ? last.bottom : g[to.at].top;
+        const idle = await t8IndicatorBox(page);
+        assert.deepStrictEqual([idle.present, idle.hidden], [true, true],
+          'ANTI-VACUITY ' + cell + ': the drop-indicator singleton must EXIST and be DOWN '
+          + 'before the gesture — "the indicator came up on the right seam" proves nothing '
+          + 'if it was already up. Got ' + JSON.stringify(idle));
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        // Two legs: the first crosses TE_DRAG_THRESHOLD_PX so the gesture
+        // ENGAGES (a single jump to the destination would too, but a press
+        // that never engaged is exactly the vacuous pass this column has to
+        // rule out), the second travels to the destination.
+        await page.mouse.move(src.handle.x, src.handle.y + 30, { steps: 4 });
+        await page.mouse.move(src.handle.x, destY, { steps: 6 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const ind = await t8IndicatorBox(page);
+        // Read WHILE THE POINTER IS STILL DOWN: this is the assertion that
+        // the drop went where the row aimed, and the pointer's coordinates
+        // are not that proof (a layout this scenario did not predict would
+        // put a different seam under the same y).
+        expectApprox(ind.top, wantTop,
+          'PRECONDITION ' + cell + ': the drop target must be ' + JSON.stringify(to.at)
+          + ' (' + to.why + ') — the indicator must sit on '
+          + (to.at === 'append' ? 'the LAST block\'s BOTTOM edge, a position no '
+            + 'before-block target can produce' : 'that block\'s own TOP edge'));
+        await page.mouse.up();
+      };
+
+      // The eight operations. Two conversions — one list target and one
       // non-list target, the two sides of §4.3's rules 1 and 2 — plus the ⠿'s
-      // other two set operations and the three keyboard ones.
+      // other two set operations, the three keyboard ones, and (S4 Task 8)
+      // the ⠿ drag itself, driven by t8Move() above.
       const T8_OPS = [
         { id: 'convert-quote', run: (page, sel) => convertVia(page, sel, '引用') },
         { id: 'convert-ul', run: (page, sel) => convertVia(page, sel, '項目符號列表') },
@@ -17836,6 +18044,9 @@ async function gutterGeometry(page, sel) {
           await page.keyboard.press('Tab');
           await page.keyboard.up('Shift');
         } },
+        // S4 Task 8. Third argument: the whole row, because a gesture needs
+        // its own destination. The seven above ignore it.
+        { id: 'move', run: (page, sel, shape) => t8Move(page, sel, shape) },
       ];
 
       const t8Banner = (page) => page.evaluate(() => {
@@ -17860,7 +18071,7 @@ async function gutterGeometry(page, sel) {
         const mdPath = path.join(dir, 'doc.md');
         fs.writeFileSync(mdPath, shape.md, 'utf8');
         // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
-        // has one: seven cells on one server outlive createEditorServer()'s
+        // has one: eight cells on one server outlive createEditorServer()'s
         // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
         // that reads as a broken test.
         const srv8 = await createEditorServer({
@@ -17868,6 +18079,13 @@ async function gutterGeometry(page, sel) {
         });
         try {
           const page = await newPage(browser);
+          // S4 Task 8: PINNED, for the same reason s4Scenario() pins it —
+          // the move column presses a ⠿ at a measured pixel and reads the
+          // drop indicator's own top edge back. Every other column is
+          // selector-driven and indifferent to it; this one is not, and a
+          // viewport that varies with the harness is a cell that varies with
+          // the harness.
+          await page.setViewport({ width: 1400, height: 900 });
           // The batch paths are async handlers with no catch of their own, so
           // a throw inside one is silent and looks exactly like "the gesture
           // did nothing" (Task 6 carry 17).
@@ -17917,7 +18135,7 @@ async function gutterGeometry(page, sel) {
               assert.deepStrictEqual(unsupported, [],
                 'PRECONDITION ' + cell + ': every list run in the fixture must be '
                 + 'structurally EDITABLE at the start of this cell — a degraded run refuses '
-                + 'all seven operations and this whole row would be green without a single '
+                + 'all eight operations and this whole row would be green without a single '
                 + 'one of them happening. Got ' + JSON.stringify(unsupported));
             }
             const blocksNow = await t8Blocks(page);
@@ -17976,7 +18194,7 @@ async function gutterGeometry(page, sel) {
 
             // ── THE OPERATION ────────────────────────────────────────────
             const gripSel = '.ed-block[data-block-id="' + before.focusHolderId + '"]';
-            await op.run(page, gripSel);
+            await op.run(page, gripSel, shape);
             await settleEditor(page);
 
             const nAfter = (await t8Blocks(page)).length;
@@ -18007,6 +18225,12 @@ async function gutterGeometry(page, sel) {
             // was written down; a cell that ever needs a different number is a
             // finding, not a constant to edit.
             const n = shape.members.length;
+            // S4 Task 8: a move falls in the `: 0` tail with the conversions
+            // and the indent changes, and it belongs there for a reason of
+            // its own — it RELOCATES lines and creates none, so a move that
+            // "worked" by duplicating the set at the destination and leaving
+            // the original behind, or by dropping a member on the way, is
+            // caught here and by nothing else in this block.
             const wantDelta = want.kind !== 'applied' ? 0
               : op.id === 'duplicate' ? n
                 : (op.id === 'delete-menu' || op.id === 'delete-key') ? -n : 0;
@@ -18026,8 +18250,14 @@ async function gutterGeometry(page, sel) {
             // cannot see it there (a conversion creates and destroys no
             // blocks), and "the file changed" is satisfied by converting only
             // the first member.
+            // S4 Task 8: `move` is excluded, and the exclusion is the whole
+            // difference between the two families. A conversion or a delete
+            // makes a member's line DISAPPEAR; a move RELOCATES it, so every
+            // one of those lines must still be in the file. The move column's
+            // own equivalent — the members' lines are still there, still
+            // contiguous, and now in the place the row names — is below.
             if (want.kind === 'applied' && op.id !== 'duplicate' && op.id !== 'tab'
-                && op.id !== 'shift-tab') {
+                && op.id !== 'shift-tab' && op.id !== 'move') {
               const src = shape.md.split('\n');
               const gone = [];
               shape.members.forEach((m) => {
@@ -18073,6 +18303,103 @@ async function gutterGeometry(page, sel) {
                 cell + ': the operation is expected to APPLY, and the file came back '
                 + 'byte-identical with no banner — a silently dropped gesture, which '
                 + '§3.6\'s ruling calls a defect outright');
+            }
+
+            // ── THE MOVE COLUMN'S OWN INVARIANTS (S4 Task 8) ─────────────
+            // Four, and only the first is authored. The block-count delta
+            // above and the four byte-level checks below are all satisfied by
+            // a document in which NOTHING happened, so a move needs
+            // assertions that say WHERE the set went — and the S3 author's
+            // own lesson (the block-count and member-line invariants had to
+            // be added because a "batch acts on only the first member" build
+            // passed everything else) applies to this column twice over: a
+            // move destroys no block, so the delta cannot see a short operand
+            // set at all.
+            if (op.id === 'move') {
+              // (1) AUTHORED — the exact saved bytes, measured by driving the
+              //     real gesture before they were written down. This is what
+              //     pins the DESTINATION; nothing derived from the fixture
+              //     can, because every legal destination produces a legal
+              //     document.
+              if (want.kind === 'applied') {
+                assert.strictEqual(after, want.bytes,
+                  cell + ': the drag must write exactly these bytes — the set at '
+                  + JSON.stringify(shape.moveTo.at) + ' (' + shape.moveTo.why + '). Got:\n'
+                  + JSON.stringify(after));
+              }
+              // (2) DERIVED — a move is a PERMUTATION OF THE FILE'S LINES.
+              //     Computed from the fixture, so it holds even if the
+              //     literal above was transcribed from a broken build: a move
+              //     that re-escaped a character, dropped a member, absorbed a
+              //     separator or emitted one changes the multiset and fails
+              //     here without anybody having to predict the wrong bytes.
+              //     Ordinals are normalised away because the li path
+              //     RE-SERIALIZES its run (§3.8 renumbering), and the row that
+              //     needs that is required to SAY so — `renumbers` is asserted
+              //     in both directions below, so the flag cannot rot into a
+              //     comment.
+              const norm = (t) => t.split('\n')
+                .map((l) => l.replace(/^(\s*)\d+([.)])(\s)/, '$1<n>$3'));
+              const sortedRaw = (t) => t.split('\n').slice().sort();
+              const sortedNorm = (t) => norm(t).slice().sort();
+              if (want.kind === 'applied') {
+                assert.deepStrictEqual(sortedNorm(after), sortedNorm(shape.md),
+                  cell + ': a move RELOCATES lines and creates none, so the saved file must '
+                  + 'be a permutation of the fixture\'s own lines (ordinals normalised). '
+                  + 'Derived from the fixture, not authored — this is what catches a move '
+                  + 'that re-escaped a character, lost a member or changed the separator '
+                  + 'count. Got\n' + JSON.stringify(after));
+                const renumbered =
+                  JSON.stringify(sortedRaw(after)) !== JSON.stringify(sortedRaw(shape.md));
+                assert.strictEqual(renumbered, !!shape.renumbers,
+                  cell + ': `renumbers` must say whether this row\'s move re-states any '
+                  + 'ordinal. Only the li path re-serializes (§3.8); every other move '
+                  + 'relocates its lines byte-for-byte. Declared '
+                  + JSON.stringify(!!shape.renumbers) + ', measured '
+                  + JSON.stringify(renumbered));
+              }
+              // (3) DERIVED — the SET TRAVELLED TOGETHER. The members plus the
+              //     separators between them are one contiguous source span
+              //     (that is what makes a batch move one commitRangeEdit), so
+              //     after the move that span must still be in the file, whole
+              //     and unbroken. THIS is the column's answer to "a batch that
+              //     acts on only the first member": move member 1 alone and a
+              //     non-member lands between it and member 2, so the span is
+              //     no longer a substring. Nothing else here can see that —
+              //     the block count does not move, the permutation still
+              //     holds, and the file did change.
+              if (want.kind === 'applied') {
+                const src = shape.md.split('\n');
+                const span = src
+                  .slice(shape.members[0][0] - 1, shape.members[shape.members.length - 1][1])
+                  .join('\n');
+                assert.ok(norm(after).join('\n').indexOf(norm(span).join('\n')) !== -1,
+                  cell + ': all ' + shape.members.length + ' member(s) must arrive TOGETHER '
+                  + 'and in their own order — their source span '
+                  + JSON.stringify(span) + ' must still be one unbroken run of the saved '
+                  + 'file. An operand set one member short still writes a different file '
+                  + 'and still passes every other invariant here. Got\n'
+                  + JSON.stringify(after));
+              }
+              // (4) DERIVED — NO TOKEN CHANGED KIND. A move relocates lines
+              //     verbatim, so every block must lex back as what it was:
+              //     the multiset of the file's own token types is preserved.
+              //     Strictly stronger than the code-token scan below for this
+              //     column, and it is the assertion that makes the `hr` and
+              //     `html` rows worth their cells — '---' landing under a
+              //     paragraph re-lexes as a SETEXT UNDERLINE, which changes no
+              //     line, creates no code token and leaves every list tight.
+              //     'space' tokens are dropped: they are separators, and a
+              //     permutation legitimately moves one from the head of the
+              //     file to its tail.
+              if (want.kind === 'applied') {
+                const kinds = (t) => lexTypes(t).filter((k) => k !== 'space').slice().sort();
+                assert.deepStrictEqual(kinds(after), kinds(shape.md),
+                  cell + ': every block must lex back as the type it was — a move rewrites '
+                  + 'no marker and no content. Got ' + JSON.stringify(kinds(after))
+                  + ' against a baseline of ' + JSON.stringify(kinds(shape.md)) + ', from\n'
+                  + JSON.stringify(after));
+              }
             }
 
             // ── CORRUPTION, on the SAVED BYTES ───────────────────────────
@@ -19731,6 +20058,8 @@ async function gutterGeometry(page, sel) {
     }, 'T3');
     // <<<S4T3SECTION
 
+    // >>>S4T4SECTION  (and <<<S4T4SECTION at the end.)
+    //
     // ── S4 Task 4: moving a LIST ITEM within its own run ──────────────────
     //
     // Task 3's drop refused to touch a li at all — silently, which §3.6 calls
@@ -20945,6 +21274,8 @@ async function gutterGeometry(page, sel) {
 
     // <<<S4T6SECTION
 
+    // >>>S4T7SECTION  (and <<<S4T7SECTION at the end.)
+    //
     // ── S4 Task 7: the indent clamp on a moved block (§4.5, §3.4) ─────────
     //
     // THE FINDING, and it is the opposite of what the plan assumed. The plan

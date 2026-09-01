@@ -353,3 +353,53 @@ console.log('Task 9 — inference guardrails OK');
     assert.match(r.stdout, /--bake-svg/, '--bake-svg documented in help');
     console.log('Task 10 — cli --bake-svg flag test passed');
 }
+
+// --- spec §5.3 item 15: the suite runs EVERY test file ---------------------
+//
+// 「`test/` 目錄的檔案數與 `package.json` 的 `test` script 條目數互相一致」.
+// Listed as a guardrail since the spec was written and never built; S4 Task 8
+// (stage closure) is the last honest place to add it.
+//
+// It is deliberately NOT a count comparison. §5.3 explains why a hard-coded
+// number is wrong ("不硬編 28"), and a bare `a.length === b.length` has the
+// same defect one step removed: adding a file and forgetting one already in
+// the script keeps the two totals equal and the suite silently stops running
+// a test. The SET difference is what actually says which file is unwatched,
+// and it is reported in both directions — a script entry naming a file that
+// no longer exists makes `npm test` die with MODULE_NOT_FOUND halfway
+// through, which reads as a broken test rather than as a stale script.
+{
+    const pkg = require(path.join(REPO, 'package.json'));
+    const entries = String(pkg.scripts.test).split('&&')
+        .map((s) => s.trim()).filter(Boolean);
+    // Every entry is `node <path>`; anything else in the chain would break the
+    // mapping silently, so it is asserted rather than filtered away.
+    const nonNode = entries.filter((e) => !/^node test\/[\w.-]+\.test\.js$/.test(e));
+    assert.deepStrictEqual(nonNode, [],
+        'every entry of the `test` script must be `node test/<file>.test.js` — this guard '
+        + 'maps entries to files by name, and an entry it cannot parse would drop out of '
+        + 'both directions of the comparison below and take its file with it');
+    const inScript = entries.map((e) => e.replace(/^node /, '')).sort();
+    const onDisk = fs.readdirSync(path.join(REPO, 'test'))
+        .filter((f) => f.endsWith('.test.js')).map((f) => 'test/' + f).sort();
+    // ANTI-VACUITY: two empty sets are trivially equal. Both sides must be
+    // real, and `>= 20` is a floor the suite passed long before this guard
+    // existed — not a count to maintain.
+    assert.ok(onDisk.length >= 20 && inScript.length >= 20,
+        'both sides must be non-trivial: ' + onDisk.length + ' file(s) on disk, '
+        + inScript.length + ' entry/entries in the script');
+    assert.deepStrictEqual(
+        onDisk.filter((f) => inScript.indexOf(f) === -1), [],
+        'a test file exists that `npm test` never runs — add it to package.json\'s `test` '
+        + 'script. A new file that nothing invokes is a test suite that shrinks silently');
+    assert.deepStrictEqual(
+        inScript.filter((f) => onDisk.indexOf(f) === -1), [],
+        'the `test` script names a file that is not in test/ — `npm test` will die with '
+        + 'MODULE_NOT_FOUND partway through and look like a broken test');
+    // The duplicate case neither difference can see: the same file listed
+    // twice keeps both set differences empty and doubles a file's runtime.
+    assert.strictEqual(new Set(inScript).size, inScript.length,
+        'no file may be listed twice in the `test` script');
+    console.log('spec §5.3 item 15 — all ' + onDisk.length
+        + ' test files are in the test script OK');
+}
