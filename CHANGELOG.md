@@ -3,6 +3,95 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.0.0 — 2026-09-01
+
+3.0.0 is a milestone, not a break. The `md2doc` command takes the same arguments and
+writes the same files, and everything a reader or a PDF ever sees is unchanged (two
+measured caveats are spelled out at the bottom of this entry). What the number marks is
+that the editor's block model is finished: a block can now be created, converted,
+duplicated, deleted, selected as part of a set — and, from this release, **moved**.
+
+### Added
+
+- **Drag a block's ⠿ to reorder it.** Press the handle and pull: a blue line follows the
+  pointer and marks the seam the block will land in, and letting go drops it there. The
+  whole move is a single Ctrl+Z however far it travelled, and the document it produces
+  has the same blank lines it had — a move is a re-ordering of the file's own lines, not
+  a delete and a re-type. A press that never travels far enough to count as a drag still
+  opens the ⠿ menu, so nothing that worked before works differently. Pressing Escape
+  mid-drag, releasing outside the window, or switching away from the window all abandon
+  the gesture and leave the document exactly as it was. Dropping a block onto one you
+  were in the middle of typing in keeps both halves: the edit is saved and the block
+  still moves where you aimed it.
+- **Dragging one block of a selection moves the whole selection.** With a set standing,
+  pressing the ⠿ of any block in it moves every block in the set — together, in their own
+  order, in one Ctrl+Z — and the blue wash follows them to their new position, so the
+  next keystroke still acts on the same blocks rather than on whatever now sits where
+  they used to be. Pressing the ⠿ of a block *outside* the set collapses the selection
+  onto that block first and moves it alone, which is what the set already does for every
+  other ⠿ operation.
+- **List items reorder inside their own list.** Dragging an item past its siblings
+  renumbers an ordered list as it goes, keeps a task item's checkbox state, and leaves
+  the item's own children where they are instead of dragging a whole subtree nobody
+  grabbed. A list held read-only because it contains something the editor cannot rewrite
+  refuses a drag exactly as it already refuses a conversion.
+- **The pointer shows the drag.** The cursor becomes a grabbing hand for as long as the
+  gesture is live, and goes back on every way out of it.
+- **Holding Shift, Ctrl or Alt changes nothing about the ⠿.** A modified press drags
+  exactly like an unmodified one, which is what a table's row and column grips have
+  always done; a modified press that never travels far enough still opens the ⠿ menu.
+  Before this release a modified press on the handle did nothing at all until it was
+  released, so nothing has been taken away — it is written down here because it had
+  never been written down anywhere.
+- **A move that cannot be made says so, and says which problem it hit.** Four separate
+  messages, because they have four opposite remedies and one sentence would send most
+  people to fix the wrong end of the gesture:
+  - dropping a block between two items of one list — `無法把區塊放進清單項目之間` (aim
+    somewhere else);
+  - moving a block out from between two list items, which would silently fuse them into
+    one list and freeze the whole thing read-only —
+    `移走這個區塊會讓上下兩串清單接在一起，無法搬移` (leave that one where it is);
+  - dragging a list item out of the list it belongs to — `清單項目只能在所屬清單內搬移`;
+  - dropping a set where the item just below the landing point would be left without its
+    parent — `落點的子項目會失去上層項目，無法搬移到這裡`.
+- **The refusals a selection already had now cover dragging it too.** A selection that
+  mixes list items with other blocks, that skips a block in the middle, that spans two
+  separate lists, or that covers a read-only list refuses a drag with exactly the message
+  it already refuses the ⠿ menu with, rather than a fifth wording for the same problem.
+  Every refusal leaves the file byte-identical, and no drag ends without either moving
+  something or putting a message on screen — dropping a block back where it already was
+  is the one silent outcome, and it is silent because nothing happened and nothing needed
+  to.
+
+### Known limits
+
+- **Moves that cross a list boundary are refused in this release rather than attempted.**
+  Dragging a list item out of its list, dropping a paragraph into the middle of one, or
+  moving a block whose departure would join two lists together all stop with one of the
+  messages above and write nothing at all. Doing them correctly needs a rule for the
+  blank line at a list/non-list seam that the design does not yet have, and inventing one
+  at the end of the rework is how the two worst defects of this series got in. That rule,
+  and the moves that depend on it, are 3.1.0's first job.
+
+### Notes for anyone diffing the output
+
+Both of these were measured, and neither changes what a reader sees.
+
+- **The generated HTML's `<style>` block is not byte-identical to v2.12.0's.** It gains
+  the drop indicator's and the grabbing cursor's rules, plus one inert custom property
+  (`--ed-te-grip-row-w: 20px`) that one hard-coded `20px` now refers to. Every selector
+  involved names a class only edit mode ever puts in a document, and the custom property
+  resolves to the number it replaced, so nothing renders differently — but "the CSS is
+  unchanged" would be false. Everything outside `<style>` is byte-for-byte what v2.12.0
+  produced, on both a list-heavy fixture and this repo's own README.
+- **In edit mode a table's first column sits about 10px further right, and clicking its
+  left padding now presses the row grip instead of placing a caret.** The row-drag grip
+  used to straddle the table's left border, which put its outer half on top of the
+  block's own ⠿ — the right 6px of every ⠿ started a table row drag instead of a block
+  gesture, which is a defect S4 could not ship around. The grip now sits entirely inside
+  the table, and the first column is padded past it so it still never covers cell text.
+  Reader and PDF output are untouched: none of this exists outside edit mode.
+
 ## v2.12.0 — 2026-08-31
 
 ### Added

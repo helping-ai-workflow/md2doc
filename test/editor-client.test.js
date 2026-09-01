@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -793,9 +793,689 @@ function countInCode(source, needle) {
   // reuses commitListStructure()'s existing site the way every other list
   // structural edit does. The expected total is therefore DECLARED once +
   // EXPORTED once + 11 uses = 13.
-  assert.strictEqual(helperCalls, 13,
-    'the helper must be DECLARED once, EXPORTED once, and used at all eleven ' +
+  //
+  // MIGRATED by S4 Task 3 (13 -> 14), with the reason: performBlockDrop() —
+  // the ⠿ drag's drop — is a genuinely NEW commit-then-render site. It commits
+  // ONE relocated line range through commitBlockMove()/commitRangeEdit() and
+  // renders, which is neither commitListStructure()'s site nor
+  // commitBlockInsertion()'s nor changeHeadingDepthsInSpan()'s. S4 Tasks 1, 2
+  // and 2b added NONE and that was checked rather than assumed: Task 1 is
+  // geometry, and Tasks 2/2b are chrome that deliberately write no bytes at
+  // all. The expected total is therefore DECLARED once + EXPORTED once +
+  // 12 uses = 14.
+  assert.strictEqual(helperCalls, 14,
+    'the helper must be DECLARED once, EXPORTED once, and used at all twelve ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
+}
+
+// -- S4 Task 3: planBlockMove() / commitBlockMove() --------------------------
+// The pure half of the ⠿ drag's drop. The RUNTIME scenarios in
+// test/editor-client-runtime.test.js drive the gesture and pin the saved
+// bytes; what lives here is the one property a gesture scenario CANNOT
+// discriminate, plus the byte table those scenarios' expectations were
+// measured from.
+//
+// WHY THE HOME-POSITION GUARD NEEDS ITS OWN TEST — measured, and it is the
+// vacuity shape this plan's own constraints name ("an assertion that holds
+// under a refusal"): narrowing the guard from `ins >= ds && ins <= de + 1` to
+// `ins === ds` left EVERY runtime scenario green, the "released where it
+// started" ones included. The narrowed guard lets the `de + 1` seam through,
+// the branch arithmetic then produces an INVERTED range, and
+// refuseInvertedRange() catches it and writes nothing — so the file is
+// byte-identical for the wrong reason and no gesture-level assertion can see
+// the difference. This one can: it reads the plan, not the file.
+{
+  const mv = (md, srcIdx, destIdx) => {
+    const l = md.split('\n');
+    const bm = require('../lib/editor/blockmap.js').buildBlockMap(md).blocks;
+    const plan = planBlockMove(l, bm, bm[srcIdx], destIdx === null ? null : bm[destIdx]);
+    if (!plan) return null;
+    return l.slice(0, plan.startLine - 1).concat(plan.after, l.slice(plan.endLine)).join('\n');
+  };
+  const DOC = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\ndelta\n';
+
+  // ── the two home positions ────────────────────────────────────────────
+  assert.strictEqual(mv(DOC, 1, 1), null,
+    'a block released on its OWN top edge (before-block = itself) is a no-op');
+  assert.strictEqual(mv(DOC, 1, 2), null,
+    'a block released on the seam immediately BELOW itself is the SAME position on '
+    + 'screen and must also be a no-op. This is the assertion a gesture scenario cannot '
+    + 'make: with this case let through, the range comes out INVERTED, '
+    + 'refuseInvertedRange() swallows it, and the file is unchanged for the wrong reason');
+  assert.strictEqual(mv(DOC, 4, null), null,
+    'the LAST block released on the append target is already there');
+
+  // ── the partner: the very next seam in each direction IS a move ───────
+  // Without these, "it returned null" is satisfied by a function that always
+  // returns null.
+  assert.strictEqual(mv(DOC, 1, 3), '# Doc\n\nbravo\n\nalpha\n\ncharlie\n\ndelta\n',
+    'ONE seam further down is a real move — the partner proving the no-ops above are '
+    + 'about the POSITION and not about the function');
+  assert.strictEqual(mv(DOC, 1, 0), 'alpha\n\n# Doc\n\nbravo\n\ncharlie\n\ndelta\n',
+    'one seam further UP is a real move too');
+
+  // ── the byte table (every entry verified against marked.lexer and
+  //    blockmap.buildBlockMap before it was pinned) ────────────────────────
+  assert.strictEqual(mv(DOC, 1, 4), '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+    'down past two blocks');
+  assert.strictEqual(mv(DOC, 3, 0), 'charlie\n\n# Doc\n\nalpha\n\nbravo\n\ndelta\n',
+    'up to the very top: no leading blank is invented, there is no neighbour above');
+  assert.strictEqual(mv(DOC, 1, null), '# Doc\n\nbravo\n\ncharlie\n\ndelta\n\nalpha\n',
+    'appended: the separator lands ABOVE the block, and the file keeps its trailing '
+    + 'newline rather than absorbing it as a blank');
+  assert.strictEqual(
+    mv('# Doc\n\nalpha\n\n```js\nconst a = 1;\n\nconst b = 2;\n```\n\nbravo\n', 2, 0),
+    '```js\nconst a = 1;\n\nconst b = 2;\n```\n\n# Doc\n\nalpha\n\nbravo\n',
+    'a fenced block moves whole — the blank INSIDE the fence is part of the block\'s '
+    + 'line range and is never mistaken for a separator');
+  assert.strictEqual(mv('# A\n# B\n# C\n', 0, 2), '# B\n\n# A\n\n# C\n',
+    'the ONE documented case where the blank count moves: the landing seam had none to '
+    + 'carry, so rule 3 emits the ones it needs');
+
+  // ── every move above is a PERMUTATION of the file's lines ─────────────
+  // The rule's headline property, asserted rather than asserted-in-prose.
+  [[DOC, 1, 4], [DOC, 3, 0], [DOC, 1, null]].forEach(([md, a, b]) => {
+    const out = mv(md, a, b);
+    assert.deepStrictEqual(out.split('\n').slice().sort(), md.split('\n').slice().sort(),
+      'a move in a normally-separated document is a PERMUTATION of its lines — same '
+      + 'lines, same count, same separators. Got:\n' + JSON.stringify(out));
+  });
+
+  // ── ONE op on the stack, and undo restores the file ──────────────────
+  // §3.4: one gesture, one undo. commitBlockMove() is the only thing between
+  // the gesture and the stack, so this is where "exactly one op" is provable
+  // by COUNTING rather than by pressing Ctrl+Z once and hoping.
+  {
+    const l = DOC.split('\n');
+    const bm = require('../lib/editor/blockmap.js').buildBlockMap(DOC).blocks;
+    const st = new UndoStack();
+    const r = commitBlockMove({ lines: l, blocks: bm, stack: st }, bm[1], bm[4]);
+    assert.ok(r.op, 'PRECONDITION: this fixture must actually move — a stack with zero '
+      + 'ops also satisfies "not more than one"');
+    assert.strictEqual(r.lines.join('\n'), '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+      'PRECONDITION: ...and move to the right place');
+    const back = st.undo(r.lines);
+    assert.strictEqual(back.lines.join('\n'), DOC,
+      'ONE undo op restores the file: the move is a single contiguous range edit, never '
+      + 'a removal plus an insertion');
+    assert.strictEqual(st.undo(back.lines), null,
+      'and there is no SECOND op behind it — that is the whole reason the move is '
+      + 'written as one commitRangeEdit over min(source, destination)..max(...)');
+  }
+}
+
+// -- S4 Task 4/6: reorderSpanRange() / spanMoveRange() / spanIndentsAreAnchored()
+// The pure half of a LIST ITEM's ⠿ drop. The runtime scenarios drive the
+// gesture and pin the saved bytes; these two answer the questions a gesture
+// scenario cannot discriminate.
+//
+// reorderSpanRange() is the arithmetic that turns "the `count` members at `from` go
+// before the item at `insertAt`" into the span array serializeBlocks() emits
+// in. It is not the obvious `splice(from,1); splice(insertAt,0,…)`: `insertAt`
+// names a slot in the array BEFORE the removal, so a downward move has to be
+// decremented — off by one there moves the item to the wrong side of its
+// destination, which on a two-item run is invisible (there is only one other
+// slot) and on a three-item run is a wrong document.
+//
+// spanIndentsAreAnchored() is §4.5's INDENT SEAM, and the reason Task 4 has
+// one at all: `serializeBlocks()` rebuilds its width stack per span, so a span
+// whose first block claims `data-indent="1"` emits it at column 0 — the DOM
+// and the file then disagree about the nesting, which is the "looks right on
+// screen, cannot be saved" class indent-clamp.js exists for. Task 7 replaces
+// the refusal this predicate drives with `applyIndentClamp()`; until then the
+// predicate is what stops the move from writing a document the user did not
+// ask for. Its bound is deliberately the SAME one indent-clamp.js's own
+// `boundAt()` computes (previous li's indent + 1, and 0 when there is no
+// previous li or the previous block is not a li), so the two cannot drift.
+{
+  const li = (n) => ({ type: 'li', indent: n });
+  const other = () => ({ type: 'paragraph', indent: 0 });
+
+  // ── reorderSpanRange ────────────────────────────────────
+  // MIGRATED by S4 Task 6 from `reorderSpanIndices(length, from, insertAt)`,
+  // which could only express a ONE-member move. §4.5's 「grip 在選取集合內
+  // → 整批搬」 needs N, and two implementations of the same off-by-one would be
+  // the 「不得另寫一條」 shape this plan has already refused twice. Every
+  // assertion below is the ORIGINAL one with `count` pinned to 1, so the
+  // single-item arithmetic is still covered by exactly the cases that covered
+  // it before; the count > 1 rows underneath are new.
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 0), null,
+    'MIGRATED (was reorderSpanIndices(3, 0, 0)): inserting before yourself is the home '
+    + 'position, not a move');
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 1), null,
+    'MIGRATED (was reorderSpanIndices(3, 0, 1)): inserting before the block immediately '
+    + 'BELOW you is the same place on screen — the byte no-op the drag\'s '
+    + 'release-where-you-started case depends on');
+  // The partner: without it, "it returned null" is satisfied by a function
+  // that always returns null.
+  assert.deepStrictEqual(reorderSpanRange(3, 0, 1, 2), [1, 0, 2],
+    'MIGRATED: one slot further down IS a move, and the moved item lands AFTER the block '
+    + 'whose slot was named — the decrement that a downward move needs');
+  assert.deepStrictEqual(reorderSpanRange(3, 0, 1, 3), [1, 2, 0],
+    'MIGRATED: insertAt === length is "at the very end of the run"');
+  assert.deepStrictEqual(reorderSpanRange(3, 2, 1, 0), [2, 0, 1],
+    'MIGRATED: an UPWARD move is not decremented — the same insertAt means a different '
+    + 'slot depending on the direction, which is the whole reason this is a named function');
+  assert.deepStrictEqual(reorderSpanRange(4, 3, 1, 1), [0, 3, 1, 2],
+    'MIGRATED: up past two blocks');
+  assert.deepStrictEqual(reorderSpanRange(4, 1, 1, 4), [0, 2, 3, 1],
+    'MIGRATED: down to the end past two blocks');
+  assert.strictEqual(reorderSpanRange(3, 3, 1, 0), null,
+    'MIGRATED: a `from` outside the span is refused');
+  assert.strictEqual(reorderSpanRange(3, 0, 1, 4), null,
+    'MIGRATED: an `insertAt` past the end is refused');
+
+  // ── count > 1: the whole point of Task 6 ────────────────────
+  // THE MUTATION THIS BLOCK EXISTS TO KILL is "the operand set one short":
+  // `count - 1` here leaves the set's LAST member standing where it was while
+  // the rest travel, which on a gesture-level assertion looks like an ordinary
+  // wrong-order document and on a two-member set is invisible (moving one of
+  // two members past the other produces the same array as moving both, in the
+  // one direction). The rows below are all >= 2 members in a >= 4 slot span
+  // for exactly that reason.
+  assert.deepStrictEqual(reorderSpanRange(4, 0, 2, 4), [2, 3, 0, 1],
+    'a two-member set moved to the end keeps the members\' OWN order — the set travels '
+    + 'as a block, it is not reversed and it is not interleaved');
+  assert.deepStrictEqual(reorderSpanRange(4, 2, 2, 0), [2, 3, 0, 1],
+    'and the same set moved UP to the head, from the other side');
+  assert.deepStrictEqual(reorderSpanRange(5, 1, 3, 5), [0, 4, 1, 2, 3],
+    'THREE members down past the tail: `insertAt` names a slot in the array BEFORE the '
+    + 'removal, so a downward move is decremented by the WHOLE count and not by one — '
+    + 'decrementing by 1 here answers [0,4,1,2,3] for insertAt 5 and 4 alike, i.e. two '
+    + 'different gestures collapse onto one document');
+  assert.deepStrictEqual(reorderSpanRange(5, 1, 3, 0), [1, 2, 3, 0, 4],
+    'three members up to the head');
+  // The home positions, for a SET. `insertAt` anywhere from `from` to
+  // `from + count` inclusive is the set's own footprint: the same place on
+  // screen, and the byte no-op a release-where-you-started gesture depends on.
+  [0, 1, 2].forEach((a) => {
+    assert.strictEqual(reorderSpanRange(4, 0, 2, a), null,
+      'insertAt=' + a + ' is inside (or on either edge of) a 2-member set starting at 0 '
+      + '— every one of those is the set\'s own position and must be a byte no-op, not '
+      + 'a reorder that shuffles members WITHIN the set');
+  });
+  assert.deepStrictEqual(reorderSpanRange(4, 0, 2, 3), [2, 0, 1, 3],
+    'and the partner one slot further on IS a move — without it the three nulls above '
+    + 'are satisfied by a function that refuses every set');
+  assert.strictEqual(reorderSpanRange(4, 3, 2, 0), null,
+    'a set that runs off the end of the span is refused');
+  assert.strictEqual(reorderSpanRange(4, 0, 0, 2), null,
+    'an EMPTY set names no move');
+  // Every answer is a PERMUTATION of the span — nothing may be dropped or
+  // duplicated. Asserted, because a splice off by one silently can do both.
+  [[3, 0, 1, 2], [3, 0, 1, 3], [3, 2, 1, 0], [4, 3, 1, 1], [4, 1, 1, 4],
+    [4, 0, 2, 4], [4, 2, 2, 0], [5, 1, 3, 5], [5, 1, 3, 0], [4, 0, 2, 3]].forEach(([n, f, c, a]) => {
+    const got = reorderSpanRange(n, f, c, a);
+    assert.deepStrictEqual(got.slice().sort((x, y) => x - y),
+      Array.from({ length: n }, (_, i) => i),
+      'a reorder is a PERMUTATION of the span: same members, same count. Got '
+      + JSON.stringify(got));
+    // ...and the moved members stay CONSECUTIVE and in their own order. A
+    // `count`-off-by-one shows up here as a member left behind in place.
+    const moved = Array.from({ length: c }, (_, i) => f + i);
+    const at = got.indexOf(moved[0]);
+    assert.deepStrictEqual(got.slice(at, at + c), moved,
+      'the operand set travels WHOLE and in order — got ' + JSON.stringify(got)
+      + ' for (length ' + n + ', from ' + f + ', count ' + c + ', insertAt ' + a + ')');
+  });
+
+  // ── spanMoveRange ───────────────────────────────────
+  // The non-li half of "the operand set one short", and the reason it is a
+  // named function rather than an object literal at the call site: the set is
+  // the ONLY thing that reaches planBlockMove(), so an endLine taken from any
+  // member but the LAST silently relocates a prefix of the set and leaves the
+  // rest behind — which writes the set's own text into the file twice over
+  // once the blank runs are re-emitted. `recs[0].endLine` is the mutation that
+  // looks most like a typo and it is caught here in milliseconds.
+  {
+    const r = (a, b) => ({ startLine: a, endLine: b });
+    assert.deepStrictEqual(spanMoveRange([r(3, 3)]), { startLine: 3, endLine: 3 },
+      'one block: the block\'s own range');
+    assert.deepStrictEqual(spanMoveRange([r(3, 3), r(5, 5), r(7, 7)]),
+      { startLine: 3, endLine: 7 },
+      'THREE blocks: first member\'s startLine to the LAST member\'s endLine. The '
+      + 'separators between them are inside that range and travel verbatim, which is '
+      + 'what makes a batch move the same single commitRangeEdit a one-block move is');
+    assert.deepStrictEqual(spanMoveRange([r(3, 3), r(5, 9)]), { startLine: 3, endLine: 9 },
+      'the last member\'s endLine, not its startLine — a fence or a table owns several '
+      + 'lines and a set that ends in one must carry all of them');
+    assert.strictEqual(spanMoveRange([]), null, 'an empty operand set names no range');
+    assert.strictEqual(spanMoveRange(null), null, 'and neither does a missing one');
+  }
+
+  // ── spanIndentsAreAnchored ────────────────────────────────────────────
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(0), li(0)]), true,
+    'a flat run is anchored');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(1), li(0)]), true,
+    'a child directly under its parent is anchored');
+  assert.strictEqual(spanIndentsAreAnchored([li(1), li(0)]), false,
+    'a span that OPENS at indent 1 has nothing to hang that column off — this is the '
+    + 'case a move creates by lifting a parent out from above its own child, and it is '
+    + 'exactly what serializeBlocks() would silently emit at column 0');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(2)]), false,
+    'a jump of two columns has no anchor for the second one either');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(1), li(2), li(1), li(0)]), true,
+    'coming back UP is always anchored — only going deeper needs a parent');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), other(), li(1)]), false,
+    'a NON-li block breaks the chain: indent-clamp.js\'s anchorBefore() stops at the '
+    + 'first non-li and answers null, so the block after it may sit at 0 and no deeper');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), other(), li(0)]), true,
+    'and the partner — the same shape at a legal indent is anchored, so the assertion '
+    + 'above is about the INDENT and not about the paragraph');
+  assert.strictEqual(spanIndentsAreAnchored([]), true, 'an empty span is vacuously anchored');
+}
+
+// -- S4 Task 7: THE SWEEP the clamp decision rests on -------------------------
+// Not a feature test — a MEASUREMENT PIN, and it is labelled as one because it
+// was green before Task 7 wrote a line of production code. It re-runs, on every
+// `npm test`, the exhaustive sweep that decided between "extend the clamp" and
+// "keep Task 4's refusal and narrow it", so that a future change to
+// clampIndents() or reorderSpanRange() cannot quietly invalidate the decision
+// without a test saying so.
+//
+// The model is performListItemDrop()'s own gates, re-expressed on indent
+// arrays: `run` is a legal indent array (each entry at most one deeper than the
+// one above); the operand set is `count` CONSECUTIVE slots starting at `from`;
+// the legal destinations are the slots of the FIRST member's §3.8 sibling group
+// plus the slot past the last sibling's whole subtree (§4.5's 2026-09-01
+// ruling); `reorderSpanRange()` answers the span order and `null` for a home
+// position. The clamp under test is the one performListItemDrop() performs:
+// clampIndents(run in DOCUMENT order, the set's indices, the set's SMALLEST old
+// indent, { removed: true }) — the removal half of the move, at the OLD index.
+//
+// Three numbers come out, and all three are load-bearing:
+//   * 0 drops leave the MOVED set's own first member illegal at its
+//     destination, which is why §4.5's 「落點使其非法時夾到合法值」 has no
+//     reachable case while the destination gate stands;
+//   * every remaining unanchored span is a `count > 1` set whose break is the
+//     block immediately AFTER the landed set — the DESTINATION side, which no
+//     removal-clamp reaches. That family is what BLOCK_MOVE_ORPHAN_MESSAGE
+//     still refuses;
+//   * and the refusal it replaced fired on 1425 of the 4067, i.e. the gate was
+//     over-wide by 1411 drops. If that number ever collapses toward zero the
+//     clamp has stopped being called and the sweep has gone vacuous.
+{
+  const { clampIndents } = require('../lib/editor/indent-clamp.js');
+  const li = (n) => ({ type: 'li', indent: n });
+  const legalShapes = (n) => {
+    const out = [];
+    (function rec(a) {
+      if (a.length === n) { out.push(a.slice()); return; }
+      for (let d = 0; d <= Math.min(3, a[a.length - 1] + 1); d++) rec(a.concat(d));
+    })([0]);
+    return out;
+  };
+  // The §3.8 sibling group of slot `i`: the same-depth members reachable
+  // without stepping outside the subtree that contains it.
+  const sibsOf = (ds, i) => {
+    const d = ds[i]; const out = [];
+    for (let j = i; j >= 0; j--) { if (ds[j] < d) break; if (ds[j] === d) out.unshift(j); }
+    for (let j = i + 1; j < ds.length; j++) { if (ds[j] < d) break; if (ds[j] === d) out.push(j); }
+    return out;
+  };
+  const subtreeEnd = (ds, j) => {
+    let k = j; while (k + 1 < ds.length && ds[k + 1] > ds[j]) k++; return k;
+  };
+  const firstBreak = (arr) => {
+    let prev = null;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] > (prev === null ? 0 : prev + 1)) return i;
+      prev = arr[i];
+    }
+    return -1;
+  };
+  let total = 0, refusedByThePredicate = 0, movedIllegal = 0;
+  const residual = [];
+  for (let n = 2; n <= 6; n++) {
+    legalShapes(n).forEach((ds) => {
+      for (let from = 0; from < n; from++) {
+        for (let count = 1; from + count <= n; count++) {
+          const sibs = sibsOf(ds, from);
+          const dests = sibs.concat([subtreeEnd(ds, sibs[sibs.length - 1]) + 1]);
+          dests.forEach((insertAt) => {
+            const order = reorderSpanRange(n, from, count, insertAt);
+            if (!order) return; // a home position: no reorder, no bytes
+            total++;
+            if (!spanIndentsAreAnchored(order.map((k) => li(ds[k])))) refusedByThePredicate++;
+            const idxs = [];
+            for (let k = from; k < from + count; k++) idxs.push(k);
+            const opOld = Math.min.apply(null, idxs.map((k) => ds[k]));
+            const after = ds.slice();
+            clampIndents(ds.map((d, k) => ({ id: k, type: 'li', indent: d })),
+              idxs, opOld, { removed: true }).forEach((r) => { after[r.blockId] = r.indent; });
+            const span = order.map((k) => after[k]);
+            const setPos = order.indexOf(from);
+            const bound = setPos === 0 ? 0 : span[setPos - 1] + 1;
+            if (after[from] > bound) movedIllegal++;
+            const br = firstBreak(span);
+            if (br >= 0) residual.push({ ds: ds.join(''), from, count, insertAt, br,
+              afterSet: br === setPos + count });
+          });
+        }
+      }
+    });
+  }
+  assert.strictEqual(total, 4067,
+    'ANTI-VACUITY: the sweep must be enumerating the whole space it claims to. 4067 '
+    + 'legal drops over every legal indent array of length 2..6 and depth 0..3, every '
+    + 'operand-set size, every legal destination. Got ' + total);
+  assert.ok(refusedByThePredicate > 1000,
+    'ANTI-VACUITY: Task 4\'s predicate must still be firing on a large fraction of the '
+    + 'space — that is what makes "the clamp answers almost all of it" a claim worth '
+    + 'pinning. Got ' + refusedByThePredicate);
+  assert.strictEqual(movedIllegal, 0,
+    'THE MOVED BLOCK IS NEVER ILLEGAL AT ITS DESTINATION. §4.5 says it is clamped when '
+    + 'the destination makes it so, and the 2026-09-01 destination ruling means that '
+    + 'cannot happen: the only legal slots are among its own same-depth siblings, whose '
+    + 'predecessor can always parent it. If this ever fires, the destination gate has '
+    + 'been widened and performListItemDrop() now owes a clamp for the moved block '
+    + 'itself. Got ' + movedIllegal + ' counterexamples');
+  assert.ok(residual.every((r) => r.count > 1),
+    'every span the removal-clamp cannot anchor comes from a MULTI-BLOCK set — a single '
+    + 'item\'s move is fully answered by { removed: true } at its old index. Got '
+    + JSON.stringify(residual.filter((r) => r.count === 1).slice(0, 3)));
+  assert.ok(residual.every((r) => r.afterSet),
+    'and in every one of them the break is the block immediately AFTER the landed set, '
+    + 'i.e. the INSERTION half — which no removal-clamp reaches and for which §3.4 has '
+    + 'no rule. That is exactly the family BLOCK_MOVE_ORPHAN_MESSAGE still refuses. Got '
+    + JSON.stringify(residual.filter((r) => !r.afterSet).slice(0, 3)));
+  assert.strictEqual(residual.length, 14,
+    'and it is 14 of the 4067 — the number the narrowing was decided on. A DIFFERENT '
+    + 'number is not a failing test on its own, but it means clampIndents() or '
+    + 'reorderSpanRange() changed answer and Task 7\'s ruling has to be re-measured '
+    + 'before it is re-pinned. Got ' + residual.length);
+}
+
+// -- S4 review round: WHY writeIndentClamp()'s WRITE needs a BATCH fixture ---
+// The review measured that `writeIndentClamp(clamp);` could be deleted from
+// performListItemDrop() with all 39 S4 scenarios still green — the four T7 ones
+// named after the clamp included — and concluded the write might be inert.
+//
+// It is not. This re-runs the sweep above with the REAL serializeBlocks() on
+// both sides, once with the clamp's answer written back into `data-indent` and
+// once without, and counts the drops whose emitted BYTES differ. Two numbers
+// come out and both are load-bearing:
+//
+//   * `count === 1` never differs, on either list type. serializeBlocks()
+//     rebuilds its width stack as it walks (`widths.length = indent + 1` after
+//     every block), so an over-deep `data-indent` is emitted at its anchor's
+//     own column anyway — which is the column the clamp would have written.
+//     THAT is why every single-item T7 fixture stayed green, and why any test
+//     for the write has to be a BATCH one.
+//   * `count > 1` differs on 53 `ul` drops and 123 `ol` ones. If either falls
+//     to zero the write really has become inert and RV2 has gone vacuous —
+//     re-measure before deleting anything.
+{
+  const { serializeBlocks } = require('../lib/editor/list-md.js');
+  const { clampIndents } = require('../lib/editor/indent-clamp.js');
+  const stub = (name, attrs, kids) => ({
+    nodeType: 1, nodeName: name.toUpperCase(), childNodes: kids || [],
+    getAttribute: (k) => (attrs[k] !== undefined ? attrs[k] : null),
+    classList: { contains: (c) => (attrs.class || '').split(/\s+/).indexOf(c) !== -1 },
+    get textContent() { return this.childNodes.map((c) => c.textContent).join(''); },
+  });
+  const liStub = (id, listType, indent, listStart) => stub('div', {
+    class: 'ed-block', 'data-block-id': String(id), 'data-block-type': 'li',
+    'data-list-type': listType, 'data-task': '0', 'data-indent': String(indent),
+    'data-list-start': listStart ? '1' : null,
+  }, [
+    stub('span', { class: 'ed-li-marker' }, [{ nodeType: 3, textContent: '\u2022' }]),
+    stub('div', { class: 'ed-li-text' }, [{ nodeType: 3, textContent: 'x' + id }]),
+  ]);
+  const legalShapes = (n) => {
+    const out = [];
+    (function rec(a) {
+      if (a.length === n) { out.push(a.slice()); return; }
+      for (let d = 0; d <= Math.min(3, a[a.length - 1] + 1); d++) rec(a.concat(d));
+    })([0]);
+    return out;
+  };
+  const sibsOf = (ds, i) => {
+    const d = ds[i]; const out = [];
+    for (let j = i; j >= 0; j--) { if (ds[j] < d) break; if (ds[j] === d) out.unshift(j); }
+    for (let j = i + 1; j < ds.length; j++) { if (ds[j] < d) break; if (ds[j] === d) out.push(j); }
+    return out;
+  };
+  const subtreeEnd = (ds, j) => { let k = j; while (k + 1 < ds.length && ds[k + 1] > ds[j]) k++; return k; };
+  const counts = {};
+  ['ul', 'ol'].forEach((listType) => {
+    let single = 0, batch = 0, admitted = 0;
+    for (let n = 2; n <= 6; n++) {
+      legalShapes(n).forEach((ds) => {
+        for (let from = 0; from < n; from++) {
+          for (let count = 1; from + count <= n; count++) {
+            const sibs = sibsOf(ds, from);
+            const dests = sibs.concat([subtreeEnd(ds, sibs[sibs.length - 1]) + 1]);
+            dests.forEach((insertAt) => {
+              const order = reorderSpanRange(n, from, count, insertAt);
+              if (!order) return;
+              const idxs = [];
+              for (let k = from; k < from + count; k++) idxs.push(k);
+              const opOld = Math.min.apply(null, idxs.map((k) => ds[k]));
+              const after = ds.slice();
+              clampIndents(ds.map((d, k) => ({ id: k, type: 'li', indent: d })),
+                idxs, opOld, { removed: true }).forEach((r) => { after[r.blockId] = r.indent; });
+              // performListItemDrop() asks its predicate on the CLAMPED span,
+              // so a drop it refuses never reaches the write at all.
+              if (!spanIndentsAreAnchored(order.map((k) => ({ type: 'li', indent: after[k] })))) return;
+              admitted++;
+              // `data-list-start` follows the run's first SIBLING across the
+              // reorder — the transfer performListItemDrop() performs.
+              const head = order.filter((k) => sibs.indexOf(k) !== -1)[0];
+              const emit = (ind) => serializeBlocks(
+                order.map((k) => liStub(k, listType, ind[k], k === head)), {}).md;
+              if (emit(after) === emit(ds)) return;
+              if (count === 1) single++; else batch++;
+            });
+          }
+        }
+      });
+    }
+    counts[listType] = { admitted, single, batch };
+  });
+  assert.strictEqual(counts.ul.admitted, 4053,
+    'ANTI-VACUITY: the same space the sweep above enumerates, minus the 14 the orphan '
+    + 'predicate refuses. Got ' + counts.ul.admitted);
+  assert.strictEqual(counts.ul.single, 0,
+    'a SINGLE-item move never needs the write — serializeBlocks() bounds the emitted '
+    + 'column at the anchor\'s own depth whatever data-indent says. This is why the T7 '
+    + 'fixtures could not see the write, and why RV2 is a batch. Got ' + counts.ul.single);
+  assert.strictEqual(counts.ol.single, 0, 'and the same on an ordered list. Got ' + counts.ol.single);
+  assert.strictEqual(counts.ul.batch, 53,
+    'THE WRITE IS LOAD-BEARING: 53 batch drops on a `ul` emit different bytes without it '
+    + '(the smallest is indents 0,0,1,2,1 moving {1,2} — the orphan that kept its depth '
+    + 'gets ADOPTED by a block the user never touched). If this reaches 0 the write has '
+    + 'become inert and RV2 has gone vacuous. Got ' + counts.ul.batch);
+  assert.strictEqual(counts.ol.batch, 123,
+    'and 123 on an `ol`, where the ordinal moves too. Got ' + counts.ol.batch);
+}
+
+// -- S4 Task 5: blockMoveSeamRefusal() ---------------------------------------
+// The cross-boundary enumeration's whole ruling, as one pure predicate. Every
+// row below is a MEASURED marked.lexer answer, not a reasoned one — the
+// measurement script's outputs are quoted in each assertion message, because
+// this is the function that decides whether a list gets corrupted and a
+// corrupted list is not undoable.
+//
+// TWO SEAMS, and they get DIFFERENT rules. That asymmetry is the finding:
+//
+//   * the DESTINATION seam is where the block LANDS. An insertion can only
+//     ever SPLIT — it cannot merge two lists — so two adjacent li that are
+//     already in DIFFERENT runs stay two lists whatever is put between them.
+//     MEASURED: '# Doc\n\n- a\n\n1. b\n\ntail\n' with a paragraph spliced at
+//     the seam is heading | ul(1,tight) | paragraph | ol(1,tight) |
+//     paragraph. So the destination narrows to SAME RUN.
+//
+//   * the SOURCE seam is where the block LEAVES, and a removal MERGES. It
+//     cannot be narrowed at all with what the block model carries:
+//       - '- a' / para / '- b'      -> '- a\n\n- b\n'     = ONE list, loose
+//       - '1. a' / para / '2. b'    -> '1. a\n\n2. b\n'   = ONE list, loose
+//       - '- [ ] a' / para / '- [x] b'                    = ONE list, loose
+//       - '- a' / para / '  1. a1'  -> '- a\n\n  1. a1\n' = ONE list, loose
+//         — and THAT one is the killer: blockmap reports BOTH items at
+//         indent 0 with listType 'ul' and 'ol', i.e. different runs AND
+//         different types, so every discriminator the model exposes says
+//         "safe" while the file says loose === true. The 2-space prefix that
+//         decides it is a RAW BYTE the block model does not carry, and the
+//         client has no lexer to ask.
+//     Narrowing the source seam therefore needs the run/non-run blank-line
+//     rule §4.5 defers to 3.1.0. It stays wide: two li neighbours = refused.
+{
+  const li = (runKey) => ({ runKey: runKey });
+  const none = null;
+  const seam = (prev, next) => ({ prev: prev, next: next });
+
+  // ── the source seam: WIDE, and every narrowing is refused with it ──────
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r1')), seam(none, none)), 'source',
+    'a block whose removal leaves two members of ONE run adjacent is refused');
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r2')), seam(none, none)), 'source',
+    'DIFFERENT runs at the SOURCE seam are refused TOO, and this is the assertion the '
+    + 'obvious narrowing fails: measured, "- a" / para / "- b" is two runs in the model '
+    + 'and ONE loose list in the file the moment the paragraph leaves');
+  // The partner, on the same predicate: a source seam with only ONE li
+  // neighbour is NOT refused. Without it "it returned 'source'" is satisfied
+  // by a predicate that refuses everything.
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), none), seam(none, none)), null,
+    'one li neighbour cannot merge with anything — a block at the end of the document, '
+    + 'or with a paragraph on its other side, moves freely');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, li('r1')), seam(none, none)), null,
+    'and the mirror image');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(none, none)), null,
+    'no li neighbour at either seam is the ordinary move Task 3 ships');
+
+  // ── the destination seam: NARROWED to same-run ────────────────────────
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li('r1'))), 'destination',
+    'splicing a foreign block between two members of ONE run turns it into two runs '
+    + 'with §4.3\'s looseness trap either side of the intruder');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li('r2'))), null,
+    'THE NARROWING: two adjacent li of DIFFERENT runs are already two lists, and an '
+    + 'insertion cannot merge them. Measured on "# Doc\\n\\n- a\\n\\n1. b\\n\\ntail\\n" '
+    + '— every list tight before and after. Task 3 refused this case on purpose and '
+    + 'said so; this is where it is paid back');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li(null), li('r2'))), 'destination',
+    'a runKey the DOM could not answer is treated as "same run" — an unknown seam '
+    + 'refuses rather than guesses, because the guess that goes wrong is not undoable');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), li(null))), 'destination',
+    'and the mirror image');
+  assert.strictEqual(blockMoveSeamRefusal(seam(none, none), seam(li('r1'), none)), null,
+    'a destination at the HEAD or the TAIL of a run has one li neighbour only — the '
+    + 'block lands beside the run, not inside it');
+
+  // ── both seams at once: the SOURCE answer wins ────────────────────────
+  // The block cannot leave AT ALL, so telling the user about the destination
+  // would send them to move it somewhere else — which fails the same way.
+  assert.strictEqual(blockMoveSeamRefusal(seam(li('r1'), li('r2')), seam(li('r3'), li('r3'))), 'source',
+    'when both seams object, the SOURCE one is reported: it is the objection that '
+    + 'holds wherever the user aims next');
+
+  // Shape tolerance — the call site builds these from possibly-absent DOM
+  // neighbours, and an undefined seam must not throw on a drag.
+  assert.strictEqual(blockMoveSeamRefusal(null, null), null, 'a missing seam pair is not a refusal');
+  assert.strictEqual(blockMoveSeamRefusal(undefined, seam(li('r1'), li('r1'))), 'destination',
+    'and a missing SOURCE seam still lets the destination be judged');
+}
+
+// -- S4 Task 6: NO SILENT RETURN IN THE DRAG PATH (spec §3.6) ---------------
+// 「靜默不動作是缺陷」. Task 8 Step 0 verifies by gesture that every drag ends
+// in a move or a banner; this is the guard that makes a REGRESSION of that
+// invariant fail immediately instead of waiting for someone to think of the
+// gesture. It is a source-presence check, and that is a weaker thing than a
+// reachability proof — but the failure mode it catches is precisely a future
+// task adding `if (…) return;` to one of these two functions, which is how all
+// three of the silent shapes this task closed got there in the first place.
+//
+// EVERY silent exit must be on this list, with the reason it is allowed to be
+// silent. Adding one and not listing it fails the test; changing a listed one
+// into a banner fails it too and the entry is simply deleted.
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const lines = src.split('\n');
+  const from = lines.findIndex((l) => l.indexOf('async function performBlockDrop(st)') !== -1);
+  const to = lines.findIndex((l) => l.indexOf('function movedLiRangeAfterReorder(') !== -1);
+  assert.ok(from > 0 && to > from,
+    'PRECONDITION: both drag-path functions must be locatable by content — line numbers '
+    + 'have drifted every stage, so nothing here may be pinned to one');
+  const BANNER_RE = /showBanner\(|refuseStructuralListEdit\(/;
+  const RETURN_RE = /(^|[^\w.])return\s*;/;
+  const isCommentLine = (l) => l.trim().indexOf('//') === 0;
+  // Does the banner belong to THIS exit? On the return's own line
+  // (`{ refuse…; return; }`), or anywhere between it and the `{` that opens
+  // the statement it stands in (the three-line block form) — with no OTHER
+  // `return;` in between, because a banner above a different exit belongs to
+  // that one.
+  //
+  // MEASURED BLIND SPOT (S4 review round, 2026-09-01). This used to scan a
+  // FIXED WINDOW — the return's own line plus the two above it — so a silent
+  // `return;` two lines BELOW a bannered exit read as bannered. Proved by
+  // planting `const rvProbe = 1;` / `if (rvProbe > 99) return;` immediately
+  // under the `if (si < 0 || sj < 0 || di < 0) { showBanner(…); return; }`
+  // line: this whole file stayed green. Widening the fixed window does not
+  // fix it — the same trick one line lower defeats any width — so the window
+  // is the ENCLOSING STATEMENT instead, which has no width to outrun.
+  //
+  // Comment lines are skipped rather than scanned: they carry both braces and
+  // the names of banner helpers, and either would be read as code.
+  const raises = (i) => {
+    if (BANNER_RE.test(lines[i])) return true;
+    let depth = 0;
+    for (let k = i - 1; k >= from; k--) {
+      const l = lines[k];
+      if (isCommentLine(l)) continue;
+      depth += (l.match(/\}/g) || []).length - (l.match(/\{/g) || []).length;
+      // depth < 0 means THIS line opened the block the return stands in.
+      // Reading past it would start attributing somebody else's banner.
+      if (depth < 0) return BANNER_RE.test(l);
+      if (RETURN_RE.test(l)) return false;
+      if (BANNER_RE.test(l)) return true;
+    }
+    return false;
+  };
+  const silent = [];
+  for (let i = from; i < to; i++) {
+    const l = lines[i];
+    if (l.trim().indexOf('//') === 0) continue;
+    if (!/(^|[^\w.])return\s*;/.test(l)) continue;
+    if (/await performListItemDrop\(/.test(lines[i - 1] || '')) continue; // delegation, not an exit
+    if (/if \(!operands\) return;/.test(l)) continue;                     // the preamble bannered already
+    if (raises(i)) continue;
+    silent.push(l.trim().replace(/\s+/g, ' '));
+  }
+  assert.deepStrictEqual(silent, [
+    // Defensive only — nearestBlockDropTarget() has no null answer and
+    // updateBlockDropIndicator() assigns dropTarget unconditionally, so no
+    // gesture reaches this.
+    'if (!target) return; // engaged but never moved onto a target — nothing to do',
+    // §4.5 / Task 3's ruling: a drop where the block already is is a BYTE
+    // NO-OP, not a refusal. The first home position (the destination is a
+    // member of the set) …
+    'if (liveDestEl && opEls.indexOf(liveDestEl) !== -1) return;',
+    // … and the second (the seam immediately below the set).
+    'if (!planBlockMove(lines, blocks, srcRec, destRec)) return;',
+    // MEASURED reachable, and correct: two identical adjacent blocks make a
+    // real move produce byte-identical text. The document after the gesture
+    // IS the document before it, so a banner would report a failure the user
+    // can see did not happen.
+    'if (!result.op) return;',
+    // The li path's own second home position …
+    'if (destEl ? destEl === afterSrcEl : all[all.length - 1] === lastLiEl) return;',
+    // … and reorderSpanRange()'s order-is-unchanged answer, which the two
+    // home positions reach by another road.
+    'if (!order) return;',
+  ], 'SIX silent exits, every one of them a documented BYTE NO-OP or an '
+    + 'unreachable defensive guard. Anything else in this list is §3.6\'s '
+    + '「靜默不動作是缺陷」 — a drag that neither moved nor said why. Got:\n'
+    + silent.map((x) => '  ' + x).join('\n'));
+  // ANTI-VACUITY: the scan must actually be finding returns, or an empty
+  // `silent` would pass a list that had been emptied by a broken regex.
+  const allReturns = lines.slice(from, to)
+    .filter((l) => /(^|[^\w.])return\s*;/.test(l) && l.trim().indexOf('//') !== 0).length;
+  assert.ok(allReturns >= 20,
+    'the scan must be reading the real functions: expected 20+ `return;` sites across '
+    + 'performBlockDrop() and performListItemDrop(), found ' + allReturns);
+  assert.ok(allReturns - silent.length >= 14,
+    'and most of them must be BANNERED exits — ' + (allReturns - silent.length)
+    + ' found. If this drops, the classifier above has stopped recognising banners and '
+    + 'the whole guard has gone vacuous');
 }
 
 console.log('editor-client.test.js OK');

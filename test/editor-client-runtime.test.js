@@ -6346,8 +6346,15 @@ async function gutterGeometry(page, sel) {
           return { gTop: g.top, gLeft: g.left, gH: g.height, gW: g.width,
                    hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
         }, table0);
-        expectApprox(hg.gLeft + hg.gW / 2, hg.tLeft,
-          'header row grip straddles the table border like any other row (centreline ON it)');
+        // MIGRATED (S4 T1, spec §5.2a item 2): this asserted the grip's
+        // CENTRELINE was on the table's left border. §4.2 hit-test conflict 2
+        // reversed that — the grip's LEFT EDGE is on the border now, so the
+        // whole grip is inside the table and shares no pixel with the block
+        // gutter's ⠿. Same rule for every row, header included; only the
+        // expected number moved.
+        expectApprox(hg.gLeft, hg.tLeft,
+          'header row grip sits ENTIRELY INSIDE the table like any other row '
+          + '(its LEFT EDGE on the border, §4.2 conflict 2)');
         expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2,
           'header row grip is centred on its OWN row, exactly like a body row (no header-only offset)');
         // The column grip must still work over the header row's own cells
@@ -6357,10 +6364,14 @@ async function gutterGeometry(page, sel) {
           'hovering the header row must still reveal the COLUMN grip for that column');
 
         // Position (uniform geometry): the row grip STRADDLES the table's
-        // left border — its horizontal centreline ON that border — mirroring
-        // what the column grip does on the top border. The block's own
-        // gutter ⠿ is kept clear of it by the edit-mode-only content padding
-        // in lib/md2doc.js, not by insetting the grip.
+        // left border — its LEFT EDGE on that border, so the whole grip is
+        // inside the table (§4.2 hit-test conflict 2, landed S4 T1). This is
+        // NOT what the column grip does on the top border: nothing of the
+        // page's own chrome lives above a table, but the block's ⠿ lives
+        // immediately left of one, and a straddling row grip ate its right
+        // 6px. The grip is kept off the first cell's TEXT by the edit-mode
+        // first-column padding (--ed-te-cell-pad-left) in lib/md2doc.js —
+        // the 14px default is narrower than the grip.
         // expectApprox(actual, expected) allows ±1px for subpixel rounding.
         // Re-hover body row 0 first — the header hover above moved the
         // (shared, singleton) row grip onto the header row, so reading it
@@ -6381,11 +6392,11 @@ async function gutterGeometry(page, sel) {
         }, table0);
         {
           const { gr, tableRect, rowRect } = rowGripRects;
-          // row grip 的水平中心線落在表格左邊界上——與 colGrip 落在上邊界
-          // 的規則完全一樣；block 自己的 ⠿ 由 edit-mode 專用的 content
-          // padding 讓出空間，不靠把 grip 塞進表格內側。
-          expectApprox(gr.left + gr.width / 2, tableRect.left,
-            'row grip centreline sits ON the table\'s left border (straddling it)');
+          // row grip 的左緣落在表格左邊界上，整個 grip 在表格內側
+          // （§4.2 衝突 2，S4 T1 落地）；colGrip 仍跨在上邊界，兩軸不再對稱。
+          expectApprox(gr.left, tableRect.left,
+            'row grip\'s LEFT EDGE sits ON the table\'s left border (the whole '
+            + 'grip inside the table, §4.2 conflict 2)');
           expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
             'a body row grip stays vertically centred on its own row');
         }
@@ -6440,20 +6451,197 @@ async function gutterGeometry(page, sel) {
         }
 
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); one border-straddling position for every row — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); one position for every row, inside the table\'s left border — OK');
       } finally {
         tsrv.close();
       }
     }
 
+    // >>>T1CONFLICT2
+    // spec §4.2 hit-test conflict 2 — the OTHER direction, which had no
+    // coverage at all until S4 Task 1.
+    //
+    // The scenario above asserts elementFromPoint(row grip centre) is the row
+    // grip and not the block ⠿. That guards the grip. Nothing guarded the ⠿:
+    // MEASURED on main at v2.12.0 (1400x900, table block at blockLeft=412),
+    // .ed-handle occupied [390, 408] = [blockLeft-22, blockLeft-4] while the
+    // row grip parked on the HEADER row occupied [402, 422] x [236.22,
+    // 264.22], overlapping the ⠿'s own box [390, 408] x [231.09, 251.09].
+    // elementFromPoint() walked across the ⠿ at its own vertical centre
+    // answered ed-handle for x 390..401 and the ROW GRIP for x 402..407 —
+    // the right 6px of the ⠿ belonged to the table. S4 turns the ⠿ into a
+    // drag handle, so those 6px would start a TABLE ROW drag instead of a
+    // block move. This fixture has no heading, so it renders with no sidebar
+    // and its own numbers are shifted: blockLeft=80, ⠿ [58, 76], header row
+    // grip [70, 90], strays at x 70..75.5. Same 6px, same cause — the offset
+    // is [blockLeft-10, blockLeft-4] either way.
+    //
+    // The grip is position:fixed z-index:7 on document.body, so it wins that
+    // hit test whenever it is showing — i.e. whenever the pointer has
+    // recently been over a table cell, which is exactly when a user is about
+    // to reach for the table block's own ⠿.
+    //
+    // Asserted for EVERY pixel of the ⠿'s box (not just its centre: the
+    // centre, x=399, was never the broken half) at three heights, in three
+    // states: grip hidden, grip parked on the header row, grip parked on
+    // body row 0. Both the table's OWN block and the paragraph above it are
+    // probed — the paragraph is the control, since its ⠿ never shared a Y
+    // band with any grip and answered ed-handle throughout even on main.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        'Alpha paragraph.', '',
+        '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        const para0 = await page.evaluate(() => {
+          const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
+            .find((el) => (el.textContent || '').indexOf('Alpha') >= 0);
+          return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+        });
+        assert.ok(para0, 'fixture: the paragraph above the table must exist');
+
+        // Walks the ⠿'s box and reports what answered at every probe point.
+        //
+        // Two probe sets, because .ed-handle carries border-radius: 4px and
+        // the browser hit-tests the ROUNDED shape: at y = top+1 the box's own
+        // right edge is genuinely outside the button, and answers the block's
+        // .ed-block::before gutter hover zone instead. That is not the defect
+        // and never was — a press there was never on the ⠿ under ANY geometry
+        // — so the "every pixel is the ⠿" assertion probes the rounded box's
+        // interior (rows inset by the radius), while a SECOND assertion
+        // covers the full box corners included and only forbids the elements
+        // that would steal the S4 gesture. Neither set is a subset of the
+        // other's claim: the first would pass a geometry that let a grip take
+        // a corner, the second would pass one where the ⠿'s middle answered
+        // main.content.
+        const HANDLE_RADIUS_PX = 4;
+        const probeHandle = (page, sel) => page.evaluate((s, rad) => {
+          const b = document.querySelector(s);
+          const h = b.querySelector(':scope > .ed-handle');
+          const r = h.getBoundingClientRect();
+          const xs = [];
+          for (let x = Math.ceil(r.left); x <= Math.floor(r.right) - 1; x++) xs.push(x);
+          xs.push(r.left + 0.5, (r.left + r.right) / 2, r.right - 0.5);
+          const cy = (r.top + r.bottom) / 2;
+          // `inset` rows avoid the four rounded corners; `edge` rows are the
+          // box's own top/bottom pixel rows and are corner-bearing.
+          const rows = [
+            { y: r.top + rad, inset: true }, { y: cy, inset: true },
+            { y: r.bottom - rad, inset: true },
+            { y: r.top + 1, inset: false }, { y: r.bottom - 1, inset: false },
+          ];
+          const out = [];
+          for (const row of rows) {
+            for (const x of xs) {
+              const el = document.elementFromPoint(x, row.y);
+              const owner = el && el.closest ? el.closest('.ed-handle') : null;
+              out.push({
+                x: Math.round(x * 100) / 100, y: Math.round(row.y * 100) / 100,
+                inset: row.inset,
+                own: owner === h,
+                got: !el ? 'null'
+                  : el.closest('.ed-te-grip-row') ? 'ROW-GRIP'
+                  : el.closest('.ed-te-grip-col') ? 'COL-GRIP'
+                  : el.closest('.ed-insert') ? 'ed-insert'
+                  : owner === h ? 'ed-handle'
+                  : owner ? 'a DIFFERENT block\'s ed-handle'
+                  : (el.className && typeof el.className === 'string'
+                      ? el.tagName + '.' + el.className.split(' ')[0] : el.tagName),
+              });
+            }
+          }
+          return { box: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+                   samples: out };
+        }, sel, HANDLE_RADIUS_PX);
+
+        const boxStr = (res) => '[' + res.box.left.toFixed(2) + ', ' +
+          res.box.right.toFixed(2) + '] x [' + res.box.top.toFixed(2) + ', ' +
+          res.box.bottom.toFixed(2) + ']';
+        const assertAllHandle = (label, res) => {
+          const inset = res.samples.filter((p) => p.inset);
+          assert.ok(inset.length >= 3 * 18,
+            'ANTI-VACUITY (' + label + '): the probe must actually cover the ⠿ — ' +
+            'only ' + inset.length + ' interior points were sampled over ' + boxStr(res));
+          const stray = inset.filter((p) => !p.own);
+          assert.strictEqual(stray.length, 0,
+            'spec §4.2 conflict 2 — ' + label + ': EVERY pixel inside the ⠿ box ' +
+            boxStr(res) + ' must answer that block\'s own .ed-handle, or S4\'s ' +
+            'drag gesture starts on whatever else answers. ' + stray.length +
+            ' of ' + inset.length + ' interior points did not: ' +
+            JSON.stringify(stray.slice(0, 12)));
+          const grabbed = res.samples.filter((p) => p.got === 'ROW-GRIP' || p.got === 'COL-GRIP');
+          assert.strictEqual(grabbed.length, 0,
+            'spec §4.2 conflict 2 — ' + label + ': no point of the ⠿ box ' + boxStr(res) +
+            ', corners included, may answer a TABLE GRIP — a press there would start a ' +
+            'table row/column drag instead of a block move. ' + grabbed.length + ' did: ' +
+            JSON.stringify(grabbed.slice(0, 12)));
+        };
+
+        // ── State 1: no grip showing (pointer parked well away) ──────────
+        await page.mouse.move(1200, 850);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'precondition: with the pointer away from the table no row grip is showing');
+        assertAllHandle('row grip hidden, table block', await probeHandle(page, table0));
+        assertAllHandle('row grip hidden, paragraph block', await probeHandle(page, para0));
+
+        // ── State 2: the HEADER row's grip is showing ────────────────────
+        // This is the state the defect lives in: the header row's grip is
+        // the only one whose Y band reaches the table block's own ⠿ (the ⠿
+        // occupies the block's top 20px).
+        await headerGripCoords(page, table0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: the header row grip must actually be SHOWING — an ' +
+          'assertion about which element wins a hit test is vacuous if the ' +
+          'competing element is display:none');
+        const yOverlap = await page.evaluate((s) => {
+          const h = document.querySelector(s + ' > .ed-handle').getBoundingClientRect();
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return Math.min(h.bottom, g.bottom) - Math.max(h.top, g.top);
+        }, table0);
+        assert.ok(yOverlap > 0,
+          'precondition (ANTI-VACUITY): the header row grip\'s Y band must actually ' +
+          'overlap the table block\'s ⠿ — otherwise the x-walk below can never ' +
+          'reach the grip and would pass on any geometry whatsoever. Overlap was ' +
+          yOverlap.toFixed(2) + 'px');
+        assertAllHandle('header row grip showing, table block', await probeHandle(page, table0));
+        assertAllHandle('header row grip showing, paragraph block', await probeHandle(page, para0));
+
+        // ── State 3: body row 0's grip is showing ────────────────────────
+        await hoverBodyRowCell(page, table0, 0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: body row 0\'s grip must be showing');
+        assertAllHandle('body row 0 grip showing, table block', await probeHandle(page, table0));
+        assertAllHandle('body row 0 grip showing, paragraph block', await probeHandle(page, para0));
+
+        await page.close();
+        console.log('spec §4.2 conflict 2: every pixel of a block ⠿ answers the ⠿, row grip showing or not — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+    // <<<T1CONFLICT2
+
     // User acceptance (v2.10.2): the row grip must never sit ON the first
-    // cell's TEXT. With the uniform border-straddling geometry the grip's
-    // centreline is the table's left border, so its right edge lands inside
-    // the cell's own left padding — strictly left of where text starts. The
-    // v2.10.1 inside-the-table geometry (grip's LEFT edge flush with the
-    // table's left border, extending 20px inward) covered the whole 14px
-    // padding plus ~6px of the text itself, which is the defect this asserts
-    // against.
+    // cell's TEXT. This is the guard that got the FIRST attempt at §4.2
+    // conflict 2 reverted in v2.10.2 — a 20px grip whose left edge is flush
+    // with the table's left border covers the whole of a 14px cell padding
+    // plus ~6px of the text itself.
+    //
+    // S4 T1 lands that ruling anyway, and this assertion is exactly why it
+    // could not be landed by moving the grip alone: the first column's LEFT
+    // PADDING is widened in edit mode to --ed-te-cell-pad-left (the grip's
+    // own width plus --ed-gutter-gap) so the inset grip ends inside the
+    // padding again. The assertion below is unchanged and is now the guard
+    // on that padding — if the padding token is dropped or drifts below the
+    // grip's width, this goes red rather than the defect shipping.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -6855,6 +7043,7 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // >>>T1CORRIDOR
     // Grip reachability by a REAL (non-teleporting) pointer.
     //
     // COLUMN grip (unchanged): it still sits ON the table's top border (P0-a
@@ -6996,13 +7185,65 @@ async function gutterGeometry(page, sel) {
           'moving to the left margin at a DIFFERENT row\'s height must hide row 1\'s grip, ' +
           'not keep it visible at its stale position');
 
+        // ANTI-VACUITY PARTNER (S4 T1). spec §4.6 predicted precisely this:
+        // once §4.2 conflict 2 moves the row grip inside the table,
+        // pointInRowGripZone()'s corridor (`x >= gr.left && x <= tableRect.left`)
+        // collapses to an empty set, and the assertion above stops
+        // DISCRIMINATING — with no corridor at any height, "hidden at a
+        // different row's height" is true of every geometry, including one
+        // that ignored the anchor row entirely. It goes vacuous, not red.
+        //
+        // The probe that actually changed answer with the ruling is the SAME
+        // x at the ANCHOR row's own height. MEASURED on v2.12.0 (grip
+        // straddling, corridor live) it was inside row 1's corridor and the
+        // grip stayed up: hidden === false. With the grip inside the table
+        // there is no corridor to be in, and leaving the table on the left is
+        // a genuine exit at every height — including the one the grip is
+        // anchored to. Asserting both halves is what keeps the pair honest;
+        // if a future change restores a corridor, THIS is the assertion that
+        // notices.
+        await hoverBodyRowCell(page, table0, 0);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'precondition: re-hovering row 1 must arm its grip again');
+        const sameRow = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const r = table.tBodies[0].rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left - 5, y: r.top + r.height / 2 };
+        }, table0);
+        await page.mouse.move(sameRow.x, sameRow.y);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
+          'spec §4.2 conflict 2 / §4.6: with the row grip inside the table there is no '
+          + 'corridor outside it, so the left margin at the ANCHOR row\'s own height must '
+          + 'hide the grip too. This is the half that changed answer with the ruling — the '
+          + 'assertion above it passes either way and is vacuous on its own');
+
+        // And the reason the row axis needs no corridor at all: the grip is
+        // inside the table, so a pointer travelling from a cell to it never
+        // leaves. Asserted directly rather than left as prose.
+        await hoverBodyRowCell(page, table0, 0);
+        const inside = await page.evaluate((ts) => {
+          const t = document.querySelector(ts + ' table').getBoundingClientRect();
+          const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+          return { gLeft: g.left, gRight: g.right, tLeft: t.left, tRight: t.right };
+        }, table0);
+        assert.ok(inside.gLeft >= inside.tLeft - 1 && inside.gRight <= inside.tRight + 1,
+          'the row grip must lie inside the table\'s own horizontal extent — that is what '
+          + 'makes the corridor unnecessary rather than merely deleted. grip ['
+          + inside.gLeft.toFixed(2) + ', ' + inside.gRight.toFixed(2) + '] vs table ['
+          + inside.tLeft.toFixed(2) + ', ' + inside.tRight.toFixed(2) + ']');
+
         await page.close();
-        console.log('table grips: hover corridor is anchored to its own row, not the whole table — OK');
+        console.log('table grips: no corridor outside the table on the row axis; the keep-zone is the grip itself — OK');
       } finally {
         tsrv.close();
       }
     }
+    // <<<T1CORRIDOR
 
+    // >>>T1ROWDRAG
     // Row drag-reorder: press-and-drag from the LAST body row's left edge to
     // ABOVE the first body row -> a drop indicator tracks the pointer, and
     // dropping reorders the actual <tr> (never a clone) once committed.
@@ -7053,6 +7294,7 @@ async function gutterGeometry(page, sel) {
         tsrv.close();
       }
     }
+    // <<<T1ROWDRAG
 
     // Row drag lands on disk once actually committed (no undo this time),
     // and Esc DURING a drag cancels it with NO mutation at all — distinct
@@ -17366,16 +17608,17 @@ async function gutterGeometry(page, sel) {
     // >>>T8SWEEP  (and <<<T8SWEEP at the end: the scratch subset runner every
     // S3 task has used slices a section out by markers, never by line number.)
     //
-    // THIRTEEN selection SHAPES against seven batch OPERATIONS — 91 cells.
+    // THIRTEEN selection SHAPES against EIGHT batch OPERATIONS — 104 cells.
     // (Corrected 2026-08-31: this header read "Eleven" and "all 77 cells"
     // because the stage-closure follow-up added the `hr in span` and
     // `html in span` rows without re-counting the prose. Every total the
     // sweep PRINTS is derived from T8_SHAPES.length x T8_OPS.length, so the
-    // comments were the only thing that was ever wrong.)
+    // comments were the only thing that was ever wrong. S4 Task 8 added the
+    // EIGHTH column — `move`, the ⠿ drag — and re-counted this line with it.)
     // Tasks 6 and 7
     // each pinned exact bytes for the shapes their own arithmetic lives in;
     // this is the cross product, and its job is different — it asks every
-    // shape the same seven questions and refuses to let a cell be green for
+    // shape the same eight questions and refuses to let a cell be green for
     // being silent.
     //
     // Three rules the sweep is built around, all of them lessons this plan
@@ -17446,6 +17689,18 @@ async function gutterGeometry(page, sel) {
       const refused = (m) => ({ kind: 'refused', message: m });
       const noop = (why) => ({ kind: 'noop', why: why });
       const applied = { kind: 'applied' };
+      // S4 Task 8. The move column's applied cells carry their own EXPECTED
+      // SAVED BYTES, which the other seven do not need: a move creates and
+      // destroys no block, rewrites no member's content and changes no
+      // member's line count, so EVERY generic invariant the sweep already
+      // owns is satisfied by a document in which nothing moved at all. The
+      // literal is what says WHERE it went. It is not the only thing holding
+      // the column up — three DERIVED invariants below are computed from the
+      // fixture rather than authored, so a literal transcribed from a broken
+      // build fails them — but it is the one that pins the destination.
+      // MEASURED per row (a real ⠿ drag, driven and read back off disk)
+      // before being written down; never authored from reasoning.
+      const moved = (bytes) => ({ kind: 'applied', bytes: bytes });
       // §3.5: 「段落 no-op」— a span with no heading and no list item in it has
       // nothing for Tab to change, and that is the spec's answer, not a
       // dropped gesture.
@@ -17454,6 +17709,11 @@ async function gutterGeometry(page, sel) {
         'convert-quote': refused(m), 'convert-ul': refused(m), duplicate: refused(m),
         'delete-menu': refused(m), 'delete-key': refused(m),
         tab: refused(m), 'shift-tab': refused(m),
+        // S4 Task 8: the drag refuses through the SAME gate and with the
+        // SAME sentence as the menu. That is a claim, not bookkeeping —
+        // §3.6's 「不得另寫一條」 — and a drag path that grew its own wording
+        // for MIXED / the §4.3 run gate / a GAP fails here.
+        move: refused(m),
       });
       const paraOps = {
         'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
@@ -17461,20 +17721,50 @@ async function gutterGeometry(page, sel) {
         tab: PARA_TAB, 'shift-tab': PARA_TAB,
       };
 
+      // S4 Task 8: `paraOps` is shared by five rows whose move cells all
+      // APPLY and all write DIFFERENT bytes, so the eighth cell cannot live
+      // in the shared object the way the other seven do.
+      const withMove = (base, cell) => Object.assign({}, base, { move: cell });
+
       const T8_SHAPES = [
         { id: '1 block', md: T8_P, anchor: 3, focus: 3, members: [[3, 3]],
-          expect: paraOps },
+          moveTo: { at: 'append', why: 'past every block in the document, which is the '
+            + 'longest travel this fixture offers a single block' },
+          expect: withMove(paraOps, moved('# Doc\n\nbravo\n\ncharlie\n\nalpha\n')) },
         { id: '2 blocks', md: T8_P, anchor: 3, focus: 5, members: [[3, 3], [5, 5]],
-          expect: paraOps },
+          moveTo: { at: 'append', why: 'past the one block the pair does not cover — the '
+            + 'set must arrive whole AND in its own order' },
+          expect: withMove(paraOps, moved('# Doc\n\ncharlie\n\nalpha\n\nbravo\n')) },
+        // `append` here would be the SECOND HOME POSITION (this set already
+        // ends the document) and the cell would answer nothing, so the whole
+        // set travels to the TOP instead — the heading, the one block it does
+        // not hold, ends up last.
         { id: 'N blocks', md: T8_P, anchor: 3, focus: 7,
-          members: [[3, 3], [5, 5], [7, 7]], expect: paraOps },
+          members: [[3, 3], [5, 5], [7, 7]],
+          moveTo: { at: 0, why: 'above the heading — the only destination this '
+            + 'whole-but-one set has that is not a home position' },
+          expect: withMove(paraOps, moved('alpha\n\nbravo\n\ncharlie\n\n# Doc\n')) },
         // A span of list items, deliberately NOT starting at the run's first
         // item: an anchor that is the list's own start has delta 0 by
         // indentListItem()'s list-start clause, and the Tab cell would then be
         // a no-op for a reason that has nothing to do with the batch.
         { id: 'list-item span', md: T8_L, anchor: 4, focus: 6,
           members: [[4, 4], [5, 5], [6, 6]],
+          // The one row whose move goes down performListItemDrop() rather
+          // than planBlockMove(): three of the run's four items travel to its
+          // HEAD, which is the only destination that makes the run RENUMBER
+          // (§3.8) and the only one that moves `data-list-start` off the item
+          // that used to be first. A destination further down would leave
+          // '1. alpha' first and the renumbering claim untested.
+          moveTo: { at: 1, why: 'before the run\'s own first item — the head of the run' },
+          // A move re-serializes the run, so the members' bytes come back
+          // through carryOver and only the ordinals are re-stated. This is
+          // the ONLY applied move cell whose saved lines are not a
+          // permutation of the fixture's, which is why the permutation
+          // invariant below normalises ordinals away before comparing.
+          renumbers: true,
           expect: {
+            move: moved('# Doc\n\n1. bravo\n2. charlie\n3. delta\n4. alpha\n'),
             'convert-quote': applied, 'convert-ul': applied, duplicate: applied,
             'delete-menu': applied, 'delete-key': applied, tab: applied,
             // T7 carry 5: the delta is measured from the set's MINIMUM old
@@ -17485,24 +17775,50 @@ async function gutterGeometry(page, sel) {
             'shift-tab': noop('T7 carry 5: minimum old indent is already 0, so the '
               + 'one delta is 0 and §3.5 forbids a per-item floor'),
           } },
-        // §3.6's 2026-08-31 ruling. Every one of the seven refuses.
+        // §3.6's 2026-08-31 ruling. Every one of the EIGHT refuses — the
+        // drag included, since S4 Task 8.
         { id: 'crossing kinds', md: T8_MIX, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], mixed: true, expect: allRefuse(MIXED) },
+          members: [[3, 3], [5, 5]], mixed: true,
+          // Deliberately a destination the set could otherwise reach: MIXED is
+          // a property of the SET, so it gives the same answer at every drop
+          // target and there is no aim that would have worked (§4.5's own T6
+          // note). A destination inside the set would be a HOME POSITION and
+          // the cell would be measuring the silence, not the refusal.
+          moveTo: { at: 'append', why: 'past the last block — outside the set, so the '
+            + 'refusal is the gate\'s and not a home position\'s silence' },
+          expect: allRefuse(MIXED) },
         // §4.3's run-wide gate. The fixture is one LOOSE list, so
         // serializeBlocks() reports 'P' for every item and the gate refuses
         // ahead of the columnOnly bail — which is why Tab refuses here too.
         { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], degraded: true, expect: allRefuse(RUN_GATE) },
+          members: [[3, 3], [5, 5]], degraded: true,
+          // NOT `append`: this set ends the document, so append is the li
+          // path's SECOND HOME POSITION — answered ABOVE the §4.3 gate, on
+          // purpose (a put-it-back gesture must not raise a banner), and the
+          // cell would come back silent for a reason that has nothing to do
+          // with the degraded run. The top is outside the set and reaches the
+          // gate.
+          moveTo: { at: 0, why: 'above the heading — outside the set, so the §4.3 '
+            + 'run-wide gate is actually reached' },
+          expect: allRefuse(RUN_GATE) },
         // Task 1 carry 2 / Task 6 carry 15: a no-line PHANTOM sits BETWEEN two
         // real members, so the set cannot be expressed as one contiguous index
         // range in `blocks`.
         { id: 'phantom in span', md: T8_GAP, anchor: 3, focus: 5,
-          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2, expect: allRefuse(GAP) },
+          members: [[3, 3], [4, 4], [5, 5]], phantomAt: 2,
+          // Any destination at all: resolveGutterOperands()'s contiguity gate
+          // runs in the shared preamble, ahead of both home positions, so the
+          // gap is refused before the drop target is ever consulted. MEASURED
+          // at all six of this fixture's targets — the same banner at every
+          // one.
+          moveTo: { at: 'append', why: 'past the last block; the gap is refused in the '
+            + 'preamble, so every target gives this same answer' },
+          expect: allRefuse(GAP) },
         // A table is ONE block owning four source lines. The anchor is put on
         // the table's startLine and the FOCUS on the paragraph, so the roving
         // holder — and therefore the ⠿ the menu opens on — is the paragraph:
         // §3.7 gives a table block no 轉換成 at all, and a grip that could not
-        // offer the item would make two of the seven cells unreachable rather
+        // offer the item would make two of the eight cells unreachable rather
         // than answered.
         // ⚠ RULED 2026-08-31 (stage-closure gap 2), and this row is where the
         // ruling is enforced. The two conversion cells used to APPLY and to
@@ -17523,7 +17839,16 @@ async function gutterGeometry(page, sel) {
         // are — which is what makes this row the guard against the refusal
         // being widened by accident as well as against it being dropped.
         { id: 'table in span', md: T8_TBL, anchor: 5, focus: 3,
-          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] }, expect: {
+          members: [[3, 3], [5, 7]], withheld: { type: 'table', lines: [5, 7] },
+          // The set covers every block but the heading, so the top is its
+          // only non-home destination. It is also the interesting one: the
+          // table's THREE source lines travel as part of a batch, relocated
+          // verbatim, and the block count must still move by 0 — a move is
+          // the one operation §3.7's 轉換成 withholding has nothing to say
+          // about, because it rewrites no cell.
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            move: moved('alpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n# Doc\n'),
             'convert-quote': refused(TABLE_CONVERT),
             'convert-ul': refused(TABLE_CONVERT),
             duplicate: applied,
@@ -17553,7 +17878,15 @@ async function gutterGeometry(page, sel) {
         // resolveGutterOperands() shows up here as a failure too.
         { id: 'hr in span', md: T8_HR, anchor: 3, focus: 7,
           members: [[3, 3], [5, 5], [7, 7]],
-          withheld: { type: 'hr', lines: [5, 5] }, expect: {
+          withheld: { type: 'hr', lines: [5, 5] },
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            // The hr travels with the set and comes back an hr. The row's
+            // 轉換成 cells refuse because a rule has no content to re-host;
+            // a MOVE re-hosts nothing, so it applies — and the derived
+            // token-kind invariant below is what proves '---' did not land
+            // somewhere that re-lexes it as a setext underline.
+            move: moved('alpha\n\n---\n\nbravo\n\n# Doc\n'),
             'convert-quote': refused(HR_CONVERT),
             'convert-ul': refused(HR_CONVERT),
             duplicate: applied,
@@ -17562,26 +17895,143 @@ async function gutterGeometry(page, sel) {
           } },
         { id: 'html in span', md: T8_HTML, anchor: 3, focus: 7,
           members: [[3, 3], [5, 5], [7, 7]],
-          withheld: { type: 'html', lines: [5, 5] }, expect: {
+          withheld: { type: 'html', lines: [5, 5] },
+          moveTo: { at: 0, why: 'above the heading — the set\'s only non-home destination' },
+          expect: {
+            move: moved('alpha\n\n<div>x</div>\n\nbravo\n\n# Doc\n'),
             'convert-quote': refused(HTML_CONVERT),
             'convert-ul': refused(HTML_CONVERT),
             duplicate: applied,
             'delete-menu': applied, 'delete-key': applied,
             tab: PARA_TAB, 'shift-tab': PARA_TAB,
           } },
+        // The two edge rows are each other's mirror, deliberately: the set at
+        // the document's START can only move DOWN and the set at its END can
+        // only move UP, and planBlockMove()'s two branches (`ins > de + 1`
+        // and its else) are exactly those two directions. One row would
+        // exercise one branch.
         { id: 'document start', md: T8_EDGE, anchor: 1, focus: 3,
-          members: [[1, 1], [3, 3]], expect: paraOps },
+          members: [[1, 1], [3, 3]],
+          moveTo: { at: 'append', why: 'the set opens the file, so DOWN is the only '
+            + 'direction it has' },
+          expect: withMove(paraOps, moved('charlie\n\nalpha\n\nbravo\n')) },
         { id: 'document end', md: T8_EDGE, anchor: 3, focus: 5,
-          members: [[3, 3], [5, 5]], expect: paraOps },
+          members: [[3, 3], [5, 5]],
+          moveTo: { at: 0, why: 'the set closes the file, so UP is the only direction '
+            + 'it has' },
+          expect: withMove(paraOps, moved('bravo\n\ncharlie\n\nalpha\n')) },
         // T7 carry 7: a whole-document set is allowed and its delete empties
         // the file. One Ctrl+Z brings it back, which is what makes it safe.
+        // MEASURED at every one of this fixture's three drop targets: all
+        // three are home positions, so the row's move cell is a documented
+        // no-op rather than a chosen one. That is the honest answer and it
+        // is worth a cell — a set that covers every block has nowhere to go,
+        // and §3.6's 「靜默不動作是缺陷」 is about a gesture that COULD have
+        // done something, not about one whose document has no other order.
         { id: 'whole document', md: T8_WHOLE, anchor: 1, focus: 3,
-          members: [[1, 1], [3, 3]], empties: true, expect: paraOps },
+          members: [[1, 1], [3, 3]], empties: true,
+          moveTo: { at: 'append', why: 'past the last block — and the set IS every block, '
+            + 'so this is the second home position and there is no destination that is not' },
+          expect: withMove(paraOps, noop('the set covers every block in the document, so '
+            + 'every drop target is a home position and a move has nowhere to put it')) },
       ];
 
-      // The seven operations. Two conversions — one list target and one
+      // ── S4 Task 8: the EIGHTH column — the ⠿ DRAG-MOVE ─────────────────
+      //
+      // Every other column is a menu item or a keystroke, and the sweep can
+      // fire it from a selector alone. A move is a GESTURE: it needs the
+      // grip's own pixel, a destination measured in the live layout, and the
+      // drop indicator read back BEFORE the release to prove the drag was
+      // aimed where the row claims. Those three facts are why the driver
+      // lives here with its own geometry reader instead of in `run:`.
+      //
+      // THE DESTINATION IS PER ROW, and that is not a weakening of "every
+      // shape gets the same question". The question a move asks is «where
+      // does this set go», and a document has no destination that means the
+      // same thing to all thirteen fixtures: `append` is a real move for a
+      // set that does not end the document and the SECOND HOME POSITION for
+      // one that does — a byte no-op, so a uniform destination would have
+      // turned five rows into no-ops answering nothing. Each row therefore
+      // names its own `moveTo` and the REASON it is the interesting one, and
+      // the driver asserts the drop indicator really landed on it.
+      //
+      // MEASURED, and this is the sweep's own Step-0 evidence: every drop
+      // target these thirteen fixtures offer — 61 gestures, not the 13 the
+      // column runs — was driven before this column was written. 12 moved,
+      // 11 refused with a banner, and all 38 of the rest are one of the two
+      // documented HOME POSITIONS (the destination is a member of the set,
+      // or it is the seam immediately below the set). Not one silent
+      // non-home outcome, which is §3.6's 「靜默不動作是缺陷」 asked of the
+      // whole matrix rather than of one gesture.
+      const t8Geometry = (page) => page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block')).map((el) => {
+          const r = el.getBoundingClientRect();
+          const h = el.querySelector(':scope > .ed-handle');
+          const hr = h ? h.getBoundingClientRect() : null;
+          return {
+            id: el.getAttribute('data-block-id'),
+            type: el.getAttribute('data-block-type'),
+            top: r.top, bottom: r.bottom,
+            handle: hr ? { x: (hr.left + hr.right) / 2, y: (hr.top + hr.bottom) / 2 } : null,
+          };
+        }));
+      const t8IndicatorBox = (page) => page.evaluate(() => {
+        const el = document.querySelector('.ed-block-drop-indicator');
+        if (!el) return { present: false, hidden: true, top: null };
+        const r = el.getBoundingClientRect();
+        return { present: true, hidden: !!el.hidden, top: r.top };
+      });
+
+      const t8Move = async (page, gripSel, shape) => {
+        const cell = shape.id + ' × move';
+        const to = shape.moveTo;
+        assert.ok(to, 'FIXTURE SANITY ' + cell + ': every row must name its own move '
+          + 'destination and the reason it is the interesting one — a row with no '
+          + '`moveTo` sweeps whatever the layout happened to put under the pointer');
+        const g = await t8Geometry(page);
+        const holderId = /data-block-id="([^"]+)"/.exec(gripSel)[1];
+        const src = g.filter((b) => b.id === holderId)[0];
+        assert.ok(src && src.handle,
+          'PRECONDITION ' + cell + ': the roving focus holder must carry a ⠿ of its own — '
+          + 'a press that misses the button satisfies every "nothing happened" assertion '
+          + 'below trivially. Got ' + JSON.stringify(src));
+        const last = g[g.length - 1];
+        assert.ok(to.at === 'append' || g[to.at],
+          'FIXTURE SANITY ' + cell + ': block ordinal ' + to.at + ' must exist — this '
+          + 'fixture has ' + g.length + ' blocks');
+        const destY = to.at === 'append' ? last.bottom + 20 : g[to.at].top + 1;
+        const wantTop = to.at === 'append' ? last.bottom : g[to.at].top;
+        const idle = await t8IndicatorBox(page);
+        assert.deepStrictEqual([idle.present, idle.hidden], [true, true],
+          'ANTI-VACUITY ' + cell + ': the drop-indicator singleton must EXIST and be DOWN '
+          + 'before the gesture — "the indicator came up on the right seam" proves nothing '
+          + 'if it was already up. Got ' + JSON.stringify(idle));
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        // Two legs: the first crosses TE_DRAG_THRESHOLD_PX so the gesture
+        // ENGAGES (a single jump to the destination would too, but a press
+        // that never engaged is exactly the vacuous pass this column has to
+        // rule out), the second travels to the destination.
+        await page.mouse.move(src.handle.x, src.handle.y + 30, { steps: 4 });
+        await page.mouse.move(src.handle.x, destY, { steps: 6 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const ind = await t8IndicatorBox(page);
+        // Read WHILE THE POINTER IS STILL DOWN: this is the assertion that
+        // the drop went where the row aimed, and the pointer's coordinates
+        // are not that proof (a layout this scenario did not predict would
+        // put a different seam under the same y).
+        expectApprox(ind.top, wantTop,
+          'PRECONDITION ' + cell + ': the drop target must be ' + JSON.stringify(to.at)
+          + ' (' + to.why + ') — the indicator must sit on '
+          + (to.at === 'append' ? 'the LAST block\'s BOTTOM edge, a position no '
+            + 'before-block target can produce' : 'that block\'s own TOP edge'));
+        await page.mouse.up();
+      };
+
+      // The eight operations. Two conversions — one list target and one
       // non-list target, the two sides of §4.3's rules 1 and 2 — plus the ⠿'s
-      // other two set operations and the three keyboard ones.
+      // other two set operations, the three keyboard ones, and (S4 Task 8)
+      // the ⠿ drag itself, driven by t8Move() above.
       const T8_OPS = [
         { id: 'convert-quote', run: (page, sel) => convertVia(page, sel, '引用') },
         { id: 'convert-ul', run: (page, sel) => convertVia(page, sel, '項目符號列表') },
@@ -17594,6 +18044,9 @@ async function gutterGeometry(page, sel) {
           await page.keyboard.press('Tab');
           await page.keyboard.up('Shift');
         } },
+        // S4 Task 8. Third argument: the whole row, because a gesture needs
+        // its own destination. The seven above ignore it.
+        { id: 'move', run: (page, sel, shape) => t8Move(page, sel, shape) },
       ];
 
       const t8Banner = (page) => page.evaluate(() => {
@@ -17618,7 +18071,7 @@ async function gutterGeometry(page, sel) {
         const mdPath = path.join(dir, 'doc.md');
         fs.writeFileSync(mdPath, shape.md, 'utf8');
         // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
-        // has one: seven cells on one server outlive createEditorServer()'s
+        // has one: eight cells on one server outlive createEditorServer()'s
         // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
         // that reads as a broken test.
         const srv8 = await createEditorServer({
@@ -17626,6 +18079,13 @@ async function gutterGeometry(page, sel) {
         });
         try {
           const page = await newPage(browser);
+          // S4 Task 8: PINNED, for the same reason s4Scenario() pins it —
+          // the move column presses a ⠿ at a measured pixel and reads the
+          // drop indicator's own top edge back. Every other column is
+          // selector-driven and indifferent to it; this one is not, and a
+          // viewport that varies with the harness is a cell that varies with
+          // the harness.
+          await page.setViewport({ width: 1400, height: 900 });
           // The batch paths are async handlers with no catch of their own, so
           // a throw inside one is silent and looks exactly like "the gesture
           // did nothing" (Task 6 carry 17).
@@ -17675,7 +18135,7 @@ async function gutterGeometry(page, sel) {
               assert.deepStrictEqual(unsupported, [],
                 'PRECONDITION ' + cell + ': every list run in the fixture must be '
                 + 'structurally EDITABLE at the start of this cell — a degraded run refuses '
-                + 'all seven operations and this whole row would be green without a single '
+                + 'all eight operations and this whole row would be green without a single '
                 + 'one of them happening. Got ' + JSON.stringify(unsupported));
             }
             const blocksNow = await t8Blocks(page);
@@ -17734,7 +18194,7 @@ async function gutterGeometry(page, sel) {
 
             // ── THE OPERATION ────────────────────────────────────────────
             const gripSel = '.ed-block[data-block-id="' + before.focusHolderId + '"]';
-            await op.run(page, gripSel);
+            await op.run(page, gripSel, shape);
             await settleEditor(page);
 
             const nAfter = (await t8Blocks(page)).length;
@@ -17765,6 +18225,12 @@ async function gutterGeometry(page, sel) {
             // was written down; a cell that ever needs a different number is a
             // finding, not a constant to edit.
             const n = shape.members.length;
+            // S4 Task 8: a move falls in the `: 0` tail with the conversions
+            // and the indent changes, and it belongs there for a reason of
+            // its own — it RELOCATES lines and creates none, so a move that
+            // "worked" by duplicating the set at the destination and leaving
+            // the original behind, or by dropping a member on the way, is
+            // caught here and by nothing else in this block.
             const wantDelta = want.kind !== 'applied' ? 0
               : op.id === 'duplicate' ? n
                 : (op.id === 'delete-menu' || op.id === 'delete-key') ? -n : 0;
@@ -17784,8 +18250,14 @@ async function gutterGeometry(page, sel) {
             // cannot see it there (a conversion creates and destroys no
             // blocks), and "the file changed" is satisfied by converting only
             // the first member.
+            // S4 Task 8: `move` is excluded, and the exclusion is the whole
+            // difference between the two families. A conversion or a delete
+            // makes a member's line DISAPPEAR; a move RELOCATES it, so every
+            // one of those lines must still be in the file. The move column's
+            // own equivalent — the members' lines are still there, still
+            // contiguous, and now in the place the row names — is below.
             if (want.kind === 'applied' && op.id !== 'duplicate' && op.id !== 'tab'
-                && op.id !== 'shift-tab') {
+                && op.id !== 'shift-tab' && op.id !== 'move') {
               const src = shape.md.split('\n');
               const gone = [];
               shape.members.forEach((m) => {
@@ -17831,6 +18303,103 @@ async function gutterGeometry(page, sel) {
                 cell + ': the operation is expected to APPLY, and the file came back '
                 + 'byte-identical with no banner — a silently dropped gesture, which '
                 + '§3.6\'s ruling calls a defect outright');
+            }
+
+            // ── THE MOVE COLUMN'S OWN INVARIANTS (S4 Task 8) ─────────────
+            // Four, and only the first is authored. The block-count delta
+            // above and the four byte-level checks below are all satisfied by
+            // a document in which NOTHING happened, so a move needs
+            // assertions that say WHERE the set went — and the S3 author's
+            // own lesson (the block-count and member-line invariants had to
+            // be added because a "batch acts on only the first member" build
+            // passed everything else) applies to this column twice over: a
+            // move destroys no block, so the delta cannot see a short operand
+            // set at all.
+            if (op.id === 'move') {
+              // (1) AUTHORED — the exact saved bytes, measured by driving the
+              //     real gesture before they were written down. This is what
+              //     pins the DESTINATION; nothing derived from the fixture
+              //     can, because every legal destination produces a legal
+              //     document.
+              if (want.kind === 'applied') {
+                assert.strictEqual(after, want.bytes,
+                  cell + ': the drag must write exactly these bytes — the set at '
+                  + JSON.stringify(shape.moveTo.at) + ' (' + shape.moveTo.why + '). Got:\n'
+                  + JSON.stringify(after));
+              }
+              // (2) DERIVED — a move is a PERMUTATION OF THE FILE'S LINES.
+              //     Computed from the fixture, so it holds even if the
+              //     literal above was transcribed from a broken build: a move
+              //     that re-escaped a character, dropped a member, absorbed a
+              //     separator or emitted one changes the multiset and fails
+              //     here without anybody having to predict the wrong bytes.
+              //     Ordinals are normalised away because the li path
+              //     RE-SERIALIZES its run (§3.8 renumbering), and the row that
+              //     needs that is required to SAY so — `renumbers` is asserted
+              //     in both directions below, so the flag cannot rot into a
+              //     comment.
+              const norm = (t) => t.split('\n')
+                .map((l) => l.replace(/^(\s*)\d+([.)])(\s)/, '$1<n>$3'));
+              const sortedRaw = (t) => t.split('\n').slice().sort();
+              const sortedNorm = (t) => norm(t).slice().sort();
+              if (want.kind === 'applied') {
+                assert.deepStrictEqual(sortedNorm(after), sortedNorm(shape.md),
+                  cell + ': a move RELOCATES lines and creates none, so the saved file must '
+                  + 'be a permutation of the fixture\'s own lines (ordinals normalised). '
+                  + 'Derived from the fixture, not authored — this is what catches a move '
+                  + 'that re-escaped a character, lost a member or changed the separator '
+                  + 'count. Got\n' + JSON.stringify(after));
+                const renumbered =
+                  JSON.stringify(sortedRaw(after)) !== JSON.stringify(sortedRaw(shape.md));
+                assert.strictEqual(renumbered, !!shape.renumbers,
+                  cell + ': `renumbers` must say whether this row\'s move re-states any '
+                  + 'ordinal. Only the li path re-serializes (§3.8); every other move '
+                  + 'relocates its lines byte-for-byte. Declared '
+                  + JSON.stringify(!!shape.renumbers) + ', measured '
+                  + JSON.stringify(renumbered));
+              }
+              // (3) DERIVED — the SET TRAVELLED TOGETHER. The members plus the
+              //     separators between them are one contiguous source span
+              //     (that is what makes a batch move one commitRangeEdit), so
+              //     after the move that span must still be in the file, whole
+              //     and unbroken. THIS is the column's answer to "a batch that
+              //     acts on only the first member": move member 1 alone and a
+              //     non-member lands between it and member 2, so the span is
+              //     no longer a substring. Nothing else here can see that —
+              //     the block count does not move, the permutation still
+              //     holds, and the file did change.
+              if (want.kind === 'applied') {
+                const src = shape.md.split('\n');
+                const span = src
+                  .slice(shape.members[0][0] - 1, shape.members[shape.members.length - 1][1])
+                  .join('\n');
+                assert.ok(norm(after).join('\n').indexOf(norm(span).join('\n')) !== -1,
+                  cell + ': all ' + shape.members.length + ' member(s) must arrive TOGETHER '
+                  + 'and in their own order — their source span '
+                  + JSON.stringify(span) + ' must still be one unbroken run of the saved '
+                  + 'file. An operand set one member short still writes a different file '
+                  + 'and still passes every other invariant here. Got\n'
+                  + JSON.stringify(after));
+              }
+              // (4) DERIVED — NO TOKEN CHANGED KIND. A move relocates lines
+              //     verbatim, so every block must lex back as what it was:
+              //     the multiset of the file's own token types is preserved.
+              //     Strictly stronger than the code-token scan below for this
+              //     column, and it is the assertion that makes the `hr` and
+              //     `html` rows worth their cells — '---' landing under a
+              //     paragraph re-lexes as a SETEXT UNDERLINE, which changes no
+              //     line, creates no code token and leaves every list tight.
+              //     'space' tokens are dropped: they are separators, and a
+              //     permutation legitimately moves one from the head of the
+              //     file to its tail.
+              if (want.kind === 'applied') {
+                const kinds = (t) => lexTypes(t).filter((k) => k !== 'space').slice().sort();
+                assert.deepStrictEqual(kinds(after), kinds(shape.md),
+                  cell + ': every block must lex back as the type it was — a move rewrites '
+                  + 'no marker and no content. Got ' + JSON.stringify(kinds(after))
+                  + ' against a baseline of ' + JSON.stringify(kinds(shape.md)) + ', from\n'
+                  + JSON.stringify(after));
+              }
             }
 
             // ── CORRUPTION, on the SAVED BYTES ───────────────────────────
@@ -18301,6 +18870,3086 @@ async function gutterGeometry(page, sel) {
         }, 'T10');
     }
     // <<<T10SECTION
+
+    // >>>S4T2SECTION  (and <<<S4T2SECTION at the end: same marker-sliced
+    // scratch subset runner every S3 task has used.)
+    //
+    // ── S4 Task 2: the drag gesture on ⠿ — MOTION ONLY, the drop is a no-op ─
+    //
+    // spec §4.5 says to reuse the table row drag's skeleton, and this does:
+    // TE_DRAG_THRESHOLD_PX, pointer capture, a discriminated-union drop
+    // target, ONE document.body singleton indicator, and the same five
+    // cancellation paths. Nothing writes bytes until Task 3, so every
+    // scenario below ends by proving the file is byte-identical.
+    //
+    // MEASURED on cc4eece before the implementation landed (the RED phase):
+    // a pointerdown on `.ed-handle` recorded NO state at all — hitTestGrip()
+    // misses (the ⠿ is not `.ed-te-grip-*`) and armBlockSelDrag()'s very
+    // first line returns for `.ed-handle`, which is a member of
+    // ED_SEL_GESTURE_CHROME. There was no `.ed-block-drop-indicator` node in
+    // the document either. So a "press the ⠿ and drag" gesture was
+    // indistinguishable from a press that never moved: the ⠿ menu opened on
+    // release, every time, however far the pointer had travelled.
+    //
+    // ANTI-VACUITY, stated per shape because three of the four claims below
+    // are NEGATIVE and a negative is exactly what a missed press satisfies:
+    //   * "the menu did not open" is satisfied by a press that landed on
+    //     `main.content` 2px left of the ⠿. Every scenario therefore asserts
+    //     document.elementFromPoint(press point) IS that block's own
+    //     `.ed-handle` before it presses, and the sub-threshold scenario
+    //     asserts the menu DOES open from the same coordinates — the partner
+    //     that proves the coordinates are live.
+    //   * "the indicator is showing" is satisfied by an indicator that was
+    //     already showing. Every scenario reads it back BEFORE the press and
+    //     asserts it is hidden, and the tracking scenario asserts the four
+    //     probe positions are pairwise DISTINCT — a frozen line satisfies
+    //     "it is showing" at all four.
+    //   * "nothing was written" is satisfied by a gesture that never started.
+    //     Every write assertion is preceded by a live-drag precondition (the
+    //     indicator visible with the pointer still down).
+    const S4_DOC = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n\ndelta\n';
+
+    // Same isolation / one-server-per-scenario reasoning as s3Scenario()
+    // above; the viewport is pinned because every assertion here is
+    // geometric.
+    const s4Scenario = async (label, md, fn, tag) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-s4-'));
+      const mdPath = path.join(dir, 'doc.md');
+      fs.writeFileSync(mdPath, md, 'utf8');
+      const ssrv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await settleEditor(page);
+        await fn(page, mdPath);
+        await page.close();
+        console.log('S4 ' + (tag || 'T2') + ' ' + label + ' — OK');
+      } finally { ssrv.close(); }
+    };
+
+    // Every TOP-LEVEL block's own box plus its ⠿'s centre, in document order.
+    // MEASURED on this branch: every `.ed-block` — list items and the
+    // zero-line phantom outer of a same-line nest included — is a DIRECT
+    // child of `main.content` (S1 flattened the <ul>/<ol> containers away),
+    // so this array is the document's block sequence with no nesting to
+    // flatten.
+    const s4Geometry = (page) => page.evaluate(() => {
+      const content = document.querySelector('main.content');
+      return Array.prototype.slice.call(content.querySelectorAll('.ed-block')).map((el) => {
+        const r = el.getBoundingClientRect();
+        const h = el.querySelector(':scope > .ed-handle');
+        const hr = h ? h.getBoundingClientRect() : null;
+        return {
+          id: el.getAttribute('data-block-id'),
+          type: el.getAttribute('data-block-type'),
+          text: (el.textContent || '').replace(/[＋⠿]/g, '').trim(),
+          top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+          mid: r.top + r.height / 2,
+          handle: hr ? { x: (hr.left + hr.right) / 2, y: (hr.top + hr.bottom) / 2 } : null,
+        };
+      });
+    });
+
+    // What actually answers at a point — the PRECONDITION every scenario
+    // below asserts before it presses.
+    const s4ElementAt = (page, x, y) => page.evaluate((px, py) => {
+      const el = document.elementFromPoint(px, py);
+      if (!el) return null;
+      const b = el.closest ? el.closest('.ed-block') : null;
+      return {
+        tag: el.tagName,
+        isHandle: !!(el.closest && el.closest('.ed-handle')),
+        blockId: b ? b.getAttribute('data-block-id') : null,
+      };
+    }, x, y);
+
+    // The block drop indicator's own state. `present:false` is the RED
+    // answer — the node does not exist at all before Task 2 lands.
+    const s4Indicator = (page) => page.evaluate(() => {
+      const el = document.querySelector('.ed-block-drop-indicator');
+      if (!el) return { present: false, hidden: true };
+      const r = el.getBoundingClientRect();
+      return { present: true, hidden: !!el.hidden,
+        top: r.top, left: r.left, width: r.width, height: r.height };
+    });
+
+    // The TABLE drop indicator, read the same way — the cross-guard below
+    // asserts the two gestures never raise each other's line.
+    const s4TeIndicator = (page) => page.evaluate(() => {
+      const el = document.querySelector('.ed-te-drop-indicator');
+      return el ? { present: true, hidden: !!el.hidden } : { present: false, hidden: true };
+    });
+
+    // The whole content column's markup. Task 2's central invariant is that a
+    // drag mutates NOTHING in the DOM (only the indicator, which lives on
+    // document.body and is therefore outside this string) — that is what lets
+    // every cancellation path below be unconditional with nothing to revert.
+    const s4Content = (page) => page.evaluate(
+      () => document.querySelector('main.content').innerHTML);
+
+    const s4MenuOpen = (page) => page.evaluate(
+      () => !!document.querySelector('.ed-handle-menu'));
+
+    // ── the threshold: a press is a click, a drag is a drag ──────────────
+    await s4Scenario('a sub-threshold press on ⠿ still opens the menu; a press that '
+      + 'crosses the threshold does not', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 5,
+        'FIXTURE SANITY: the doc must render as five top-level blocks '
+        + '(heading, alpha, bravo, charlie, delta). Got ' + JSON.stringify(g.map((b) => b.text)));
+      const src = g[1];
+      assert.strictEqual(src.text, 'alpha',
+        'FIXTURE SANITY: block index 1 must be the "alpha" paragraph, got ' + JSON.stringify(src.text));
+      assert.ok(src.handle, 'FIXTURE SANITY: the alpha block must carry a ⠿');
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must actually be alpha\'s OWN ⠿. Every negative '
+        + 'claim below ("no menu", "no bytes") is satisfied by a press that missed the '
+        + 'button entirely — this is what rules that out. Got ' + JSON.stringify(at));
+      const idle = await s4Indicator(page);
+      assert.strictEqual(idle.present, true,
+        'ANTI-VACUITY: the block drop indicator SINGLETON must exist (Task 2 appends it '
+        + 'to document.body once at startup, exactly as the table\'s own indicator is). '
+        + 'Without this, every "the indicator is hidden" claim below is satisfied by a '
+        + 'node that was never created. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.hidden, true,
+        'ANTI-VACUITY: the drop indicator must be hidden before any gesture. Got '
+        + JSON.stringify(idle));
+
+      // ── sub-threshold: 2.83px of travel, under TE_DRAG_THRESHOLD_PX = 5 ──
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x + 2, src.handle.y + 2);
+      const wiggle = await s4Indicator(page);
+      assert.strictEqual(wiggle.hidden, true,
+        'a press that has not crossed TE_DRAG_THRESHOLD_PX is still a CLICK — the drop '
+        + 'indicator must not appear. Got ' + JSON.stringify(wiggle));
+      await page.mouse.up();
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + src.id + '"]');
+      assert.strictEqual(await s4MenuOpen(page), true,
+        'the ⠿ menu must still open on a press that never crossed the drag threshold — '
+        + 'this is the ANTI-VACUITY PARTNER of the "no menu after a drag" assertion '
+        + 'below: it proves these very coordinates do open the menu');
+
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+
+      // ── over-threshold: the same coordinates, a real drag ───────────────
+      // MIGRATED by Task 3 (never skipped): this scenario's subject is the
+      // THRESHOLD — a press that crosses it is a drag and its trailing click
+      // must not open the ⠿ menu — and that half is untouched. What changed
+      // underneath it is the drop: Task 2 shipped it as a no-op and this
+      // scenario asserted "the content column is byte-identical" and "no bytes
+      // at all", which are now false BY DESIGN. They are replaced by the
+      // actual move rather than deleted, so the scenario still ends on a
+      // byte-exact claim.
+      // The 120px of travel it used to release at is also replaced by a
+      // geometry-derived point: 120px landed 1px above delta's midline, i.e.
+      // one subpixel of layout drift away from silently testing a different
+      // drop target. `g[3].mid + 2` is unambiguously between charlie's midline
+      // and delta's.
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[3].mid + 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const during = await s4Indicator(page);
+      assert.strictEqual(during.hidden, false,
+        'PRECONDITION for everything below: the drag must actually have ENGAGED. Without '
+        + 'this, "the menu did not open" and "the block moved" are both satisfied '
+        + 'by a gesture that never started. Got ' + JSON.stringify(during));
+      expectApprox(during.top, g[4].top,
+        'PRECONDITION: the drop target must be before-block 4 — the indicator sits on '
+        + 'delta\'s own top edge');
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4MenuOpen(page), false,
+        'a press that crossed the drag threshold is a DRAG, not a click — its trailing '
+        + 'click must not open the ⠿ menu');
+      assert.strictEqual((await s4Indicator(page)).hidden, true,
+        'the drop indicator must be hidden again once the pointer is released');
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+        'MIGRATED: Task 2 wrote no bytes here and this asserted the file was untouched. '
+        + 'Task 3 makes the drop real, so the same gesture now RELOCATES the block — and '
+        + 'the assertion is migrated to the exact bytes rather than dropped, because "the '
+        + 'trailing click opened no menu" is worth much less without a partner proving '
+        + 'the gesture did something. Got:\n' + fileText);
+    });
+
+    // ── the drop target: {mode:'before-block', blockIndex, y} | {mode:'append', y} ──
+    // nearestBlockDropTarget() is internal (a window test hook would be
+    // test-only surface in production code — the same call the table's own
+    // §4.6 threshold scenario made). This drives an ACTUAL drag to each probe
+    // coordinate, holding without releasing, and reads the singleton
+    // indicator's on-screen box back. `before-block i` puts the line on block
+    // i's TOP; `append` puts it on the LAST block's BOTTOM, which is a
+    // position no `before-block` target can produce.
+    await s4Scenario('the drop indicator appears on threshold and tracks the pointer '
+      + 'across the before-block / append union', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const idle = await s4Indicator(page);
+      assert.strictEqual(idle.present, true,
+        'ANTI-VACUITY: the singleton must EXIST before "it is hidden" means anything. Got '
+        + JSON.stringify(idle));
+      assert.strictEqual(idle.hidden, true,
+        'ANTI-VACUITY: the indicator must be HIDDEN before the drag — "the indicator is '
+        + 'showing" proves nothing about the gesture if it was already showing. Got '
+        + JSON.stringify(idle));
+
+      // Press, drag (WITHOUT releasing) to `y`, read the indicator back, then
+      // cancel via Escape so nothing can land — the table's own §4.6
+      // threshold scenario uses exactly this shape.
+      const indicatorAt = async (y, label) => {
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, src.handle.y + (y - src.handle.y) / 2, { steps: 5 });
+        await page.mouse.move(src.handle.x, y, { steps: 5 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const r = await s4Indicator(page);
+        assert.strictEqual(r.hidden, false, label + ' PRECONDITION: the drag must be live');
+        await page.keyboard.press('Escape');
+        await page.mouse.up();
+        return r;
+      };
+
+      const first = await indicatorAt(1, 'above every block');
+      expectApprox(first.top, g[0].top,
+        'above the first block\'s midline the target is before-block 0 — the line snaps '
+        + 'to the heading\'s own top');
+      const beforeBravo = await indicatorAt(g[2].mid - 2, 'before bravo');
+      expectApprox(beforeBravo.top, g[2].top,
+        'above bravo\'s midline (and below alpha\'s) the target is before-block 2 — the '
+        + 'line snaps to bravo\'s top');
+      const beforeDelta = await indicatorAt(g[3].mid + 2, 'before delta');
+      expectApprox(beforeDelta.top, g[4].top,
+        'below charlie\'s midline (and above delta\'s) the target is before-block 4 — the '
+        + 'line snaps to delta\'s top');
+      const append = await indicatorAt(g[4].bottom + 200, 'append');
+      expectApprox(append.top, g[4].bottom,
+        'below the LAST block the target is {mode:\'append\'} — the line snaps to the last '
+        + 'block\'s bottom, a position no before-block target can produce');
+
+      // A frozen line satisfies every "it is showing" assertion above.
+      const tops = [first.top, beforeBravo.top, beforeDelta.top, append.top];
+      const uniq = tops.filter((t, i) => tops.every((u, j) => j >= i || Math.abs(t - u) > 1));
+      assert.strictEqual(uniq.length, 4,
+        'ANTI-VACUITY: the four probe positions must be pairwise DISTINCT — an indicator '
+        + 'that never moves is "showing" at all four. Got ' + JSON.stringify(tops));
+
+      // ...and it must be a real horizontal rule over the content column, not
+      // a zero-width leftover.
+      expectApprox(append.left, g[4].left,
+        'the indicator spans the block it marks — its left edge is that block\'s left edge');
+      expectApprox(append.width, g[4].right - g[4].left,
+        'the indicator spans the block it marks — its width is that block\'s width');
+      expectApprox(append.height, 3,
+        'the indicator is a 3px horizontal rule (the table row drop indicator\'s own '
+        + 'thickness); a vertical line here would mean a column drag\'s width leaked in');
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'every probe above was cancelled via Escape — the file must be byte-identical. Got:\n'
+        + fileText);
+    });
+
+    // ── the three abort paths ────────────────────────────────────────────
+    await s4Scenario('Escape, pointercancel and window blur each cancel a block drag '
+      + 'with no DOM change and no bytes', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const before = await s4Content(page);
+
+      const cancelVia = async (label, fire) => {
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const during = await s4Indicator(page);
+        assert.strictEqual(during.hidden, false,
+          label + ' PRECONDITION: a drag must actually be IN FLIGHT before the abort — '
+          + 'every claim below is satisfied by a gesture that never started');
+        await fire();
+        await new Promise((r) => setTimeout(r, 100));
+        assert.strictEqual((await s4Indicator(page)).hidden, true,
+          label + ' must hide the drop indicator');
+        await page.mouse.up(); // the drag state is already gone — an inert no-op
+        await settleEditor(page);
+        assert.strictEqual(await s4Content(page), before,
+          label + ' must leave the content column byte-identical: nothing in the DOM is '
+          + 'ever mutated during a drag, which is exactly why this path can clean up '
+          + 'unconditionally');
+        assert.strictEqual(await s4MenuOpen(page), false,
+          label + ' must not leave (or open) a ⠿ menu — the aborted gesture\'s trailing '
+          + 'click belongs to the drag, not to the button');
+      };
+
+      await cancelVia('Escape mid-drag', () => page.keyboard.press('Escape'));
+      await cancelVia('pointercancel mid-drag', () => page.evaluate(
+        () => document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }))));
+      await cancelVia('window blur mid-drag', () => page.evaluate(
+        () => window.dispatchEvent(new Event('blur'))));
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'a cancelled drag must never touch the file. Got:\n' + fileText);
+    });
+
+    // ── released where it started ────────────────────────────────────────
+    await s4Scenario('a block drag released where it started is a byte no-op',
+      S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[1];
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s own ⠿. Got ' + JSON.stringify(at));
+      const before = await s4Content(page);
+
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const away = await s4Indicator(page);
+      assert.strictEqual(away.hidden, false,
+        'PRECONDITION: the drag must have engaged before it is brought home');
+      await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+      const home = await s4Indicator(page);
+      assert.strictEqual(home.hidden, false,
+        'PRECONDITION: the drag must still be live at the moment of release');
+      expectApprox(home.top, src.top,
+        'PRECONDITION: the drop target at release must be the SOURCE block\'s OWN '
+        + 'position — otherwise this is not the "released where it started" case at all');
+      assert.ok(Math.abs(away.top - home.top) > 1,
+        'ANTI-VACUITY: the indicator must genuinely have travelled away and come back — '
+        + 'a gesture that never moved satisfies "released where it started" trivially. '
+        + 'away=' + away.top + ' home=' + home.top);
+
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4Content(page), before,
+        'a drop that lands where it started changes nothing in the DOM');
+      assert.strictEqual(await s4MenuOpen(page), false,
+        'the drag\'s trailing click must not open the ⠿ menu even when the pointer came '
+        + 'back to (near) the button it started on');
+      // MIGRATED by Task 3, and this is the assertion that keeps the scenario
+      // DISCRIMINATING now that the drop is real. MEASURED: with only the byte
+      // claim below, the scenario stayed green against an implementation that
+      // took the release-on-my-own-top-edge case for a DROPPED GESTURE and put
+      // '文件已更新，請重試這個操作' on screen — the file is untouched either
+      // way, so bytes alone cannot see the difference. A no-op must be SILENT.
+      assert.strictEqual(
+        await page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.textContent : null;
+        }), null,
+        'a drop that lands where it started is a no-op, not a refusal and not a dropped '
+        + 'gesture — it must put NO banner on screen');
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'a drop that lands where it started must be a BYTE no-op. Got:\n' + fileText);
+    });
+
+    // ── the two incumbent drags must be untouched ────────────────────────
+    // §4.5 reuses the table drag's skeleton; S3's selection drag is armed on
+    // the very next line of the same pointerdown branch. Both are guarded
+    // here in the one place that can see all three at once: the ⠿ arm runs
+    // FIRST, so the failure mode is that it swallows presses that belong to
+    // one of the others.
+    await s4Scenario('the S3 selection drag still builds a set, and never raises the '
+      + 'block drop indicator', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 4,
+        'FIXTURE SANITY: heading + three paragraphs. Got ' + JSON.stringify(g.map((b) => b.text)));
+      const a = g[1], c = g[3];
+      const at = await s4ElementAt(page, a.left + 20, a.mid);
+      assert.ok(at && !at.isHandle && at.blockId === a.id,
+        'PRECONDITION: the press point must be INSIDE alpha\'s own body and NOT on its ⠿ '
+        + '— that is what makes this the S3 gesture rather than the S4 one. Got '
+        + JSON.stringify(at));
+
+      await page.mouse.move(a.left + 20, a.mid);
+      await page.mouse.down();
+      await page.mouse.move(c.left + 20, c.mid, { steps: 8 });
+      const ind = await s4Indicator(page);
+      // MEASURED: without this line the whole scenario was GREEN on cc4eece, before a
+      // single line of Task 2 existed — `hidden` is trivially true for a node that was
+      // never created. This is the assertion that makes the scenario name a Task 2
+      // deliverable rather than merely restate S3's own coverage.
+      assert.strictEqual(ind.present, true,
+        'ANTI-VACUITY: the block drop indicator singleton must EXIST for "it stayed '
+        + 'hidden during a selection drag" to mean anything at all. Got ' + JSON.stringify(ind));
+      assert.strictEqual(ind.hidden, true,
+        'a press inside a block\'s BODY is an S3 selection drag — the S4 block drop '
+        + 'indicator must stay hidden throughout. Got ' + JSON.stringify(ind));
+      await page.mouse.up();
+      await settleEditor(page);
+      const sel = await page.evaluate(() => window.__edTestGetSelection());
+      assert.deepStrictEqual(sel && sel.memberLines, [[3, 3], [5, 5], [7, 7]],
+        'the S3 selection drag must still build the whole set it crossed — the S4 arm '
+        + 'runs one line ABOVE armBlockSelDrag() in the same pointerdown branch, so a '
+        + 'too-wide arm swallows this gesture. Got ' + JSON.stringify(sel));
+    });
+
+    await s4Scenario('the table row drag still reorders, and the two drop indicators '
+      + 'never raise each other', '# Doc\n\n| A |\n|---|\n| 1 |\n| 2 |\n| 3 |\n',
+      async (page, mdPath) => {
+      const table0 = await tableBlockSel(page, 0);
+      const from = await rowGripCoords(page, table0, 2); // the "3" row's own grip
+      const to = await rowBoundaryCoords(page, table0, -1); // just under the header
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 8 });
+      await page.waitForSelector('.ed-te-drop-indicator:not([hidden])', { timeout: 3000 });
+      const teInd = await s4TeIndicator(page);
+      const blockInd = await s4Indicator(page);
+      assert.strictEqual(teInd.hidden, false,
+        'PRECONDITION: the TABLE drag must really be in flight');
+      assert.strictEqual(blockInd.present, true,
+        'ANTI-VACUITY: the singleton must EXIST for "the table drag did not raise it" to '
+        + 'mean anything. Got ' + JSON.stringify(blockInd));
+      assert.strictEqual(blockInd.hidden, true,
+        'a table row drag must not raise the BLOCK drop indicator. Got ' + JSON.stringify(blockInd));
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(
+        await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' tbody td'))
+          .map((c) => c.textContent).join(','), table0),
+        '3,1,2',
+        'the table row drag must still reorder — S4 Task 2 adds a third pointer gesture '
+        + 'to the same pointerdown listener and must not disturb the incumbent');
+
+      // ...and the converse, on the SAME page: a ⠿ drag must not raise the
+      // table's line.
+      const g = await s4Geometry(page);
+      const para = g.find((b) => b.type !== 'table' && b.handle);
+      assert.ok(para && para.handle, 'FIXTURE SANITY: a non-table block with a ⠿ must exist');
+      const at = await s4ElementAt(page, para.handle.x, para.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === para.id,
+        'PRECONDITION: the press point must be that block\'s own ⠿ (spec §4.2 conflict 2, '
+        + 'landed in Task 1, is what makes this true while a table is on the page). Got '
+        + JSON.stringify(at));
+      await page.mouse.move(para.handle.x, para.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(para.handle.x, para.handle.y + 120, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      assert.strictEqual((await s4TeIndicator(page)).hidden, true,
+        'a ⠿ drag must not raise the TABLE drop indicator. The two are separate singleton '
+        + 'nodes precisely so neither gesture can leak the other\'s axis');
+      await page.keyboard.press('Escape');
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual((await s4Indicator(page)).hidden, true,
+        'Escape must cancel the ⠿ drag here too');
+    });
+    // <<<S4T2SECTION
+
+    // >>>S4T2BSECTION  (and <<<S4T2BSECTION at the end.)
+    //
+    // ── S4 Task 2b: visual feedback while a block is being dragged ────────
+    //
+    // T2 shipped the gesture with NO feedback on the source block, and the
+    // user asked for some: `.ed-handle` is `opacity: 0` off-hover, so the
+    // moment the pointer leaves the block there is nothing under the cursor
+    // but the indicator line.
+    //
+    // The RULING (2026-09-01) is `cursor: grabbing`, applied as a class on
+    // `document.documentElement` — OUTSIDE `contentEl`, so "nothing in the
+    // content DOM is mutated during a drag" still holds. That invariant is
+    // the only reason Escape / pointercancel / window blur can all clean up
+    // unconditionally, so this scenario pins it rather than assuming it: the
+    // content column's innerHTML is read back MID-DRAG, not merely after.
+    // The table drag's `ed-te-row-dragging` dim is deliberately NOT copied —
+    // it dims a node INSIDE the content and paid for it with a `class=""`
+    // residue the burst's zero-edit guard then had to strip by hand.
+    //
+    // ANTI-VACUITY — "the class is gone" is trivially true of a gesture that
+    // never started, and a class with no CSS behind it is not feedback:
+    //   * every path asserts the class is ABSENT before it presses, and that
+    //     the drag actually ENGAGED (the drop indicator is up) before it
+    //     asserts the class is present;
+    //   * the sub-threshold press is the partner that proves the class is
+    //     tied to ENGAGEMENT rather than to the press;
+    //   * the computed `cursor` is read back on `body` AND on `.ed-handle`
+    //     (which carries its own `cursor: pointer`, so it is the one that
+    //     proves the override actually wins the cascade).
+    const s4DragChrome = (page) => page.evaluate(() => {
+      const handle = document.querySelector('.ed-handle');
+      const ind = document.querySelector('.ed-block-drop-indicator');
+      return {
+        indicatorPresent: !!ind,
+        indicatorHidden: !ind || !!ind.hidden,
+        htmlHasClass: document.documentElement.classList.contains('ed-block-dragging'),
+        bodyCursor: getComputedStyle(document.body).cursor,
+        handleCursor: handle ? getComputedStyle(handle).cursor : null,
+      };
+    });
+
+    await s4Scenario('a live ⠿ drag puts the grabbing cursor on <html>, and each of '
+      + 'pointerup / Escape / pointercancel / window blur takes it off again',
+      S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(g.length, 5,
+        'FIXTURE SANITY: five top-level blocks. Got ' + JSON.stringify(g.map((b) => b.text)));
+      const src = g[1];
+      assert.strictEqual(src.text, 'alpha',
+        'FIXTURE SANITY: block index 1 must be the "alpha" paragraph, got ' + JSON.stringify(src.text));
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        'PRECONDITION: the press point must be alpha\'s OWN ⠿ — every "the class is '
+        + 'absent" claim below is satisfied by a press that missed the button. Got '
+        + JSON.stringify(at));
+
+      const idle = await s4DragChrome(page);
+      assert.strictEqual(idle.indicatorPresent, true,
+        'ANTI-VACUITY: the drop indicator singleton must exist, or "the drag engaged" '
+        + 'cannot be checked at all. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.htmlHasClass, false,
+        'ANTI-VACUITY: `ed-block-dragging` must be ABSENT before any gesture — "it was '
+        + 'removed" is trivially true of a class that is never added. Got ' + JSON.stringify(idle));
+      assert.notStrictEqual(idle.bodyCursor, 'grabbing',
+        'ANTI-VACUITY: the resting cursor must NOT already be grabbing. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.handleCursor, 'pointer',
+        'FIXTURE SANITY: `.ed-handle` carries `cursor: pointer` at rest — that is what '
+        + 'makes it the element that proves the drag override wins the cascade. Got '
+        + JSON.stringify(idle));
+      const before = await s4Content(page);
+
+      // ── the partner: a press that never crosses the threshold is a CLICK,
+      //    and must not put the drag cursor up at all ──────────────────────
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x + 2, src.handle.y + 2);
+      const wiggle = await s4DragChrome(page);
+      assert.strictEqual(wiggle.indicatorHidden, true,
+        'PRECONDITION: 2.83px is under TE_DRAG_THRESHOLD_PX, so no drag has engaged. Got '
+        + JSON.stringify(wiggle));
+      assert.strictEqual(wiggle.htmlHasClass, false,
+        'a press that has not crossed the drag threshold is still a CLICK — the grabbing '
+        + 'cursor must not appear. This is the partner that proves the class is tied to '
+        + 'ENGAGEMENT and not merely to the press. Got ' + JSON.stringify(wiggle));
+      await page.mouse.up();
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + src.id + '"]');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+
+      // ── every end path, each from a drag that genuinely engaged ─────────
+      // `homeFirst` is what keeps the pointerup case a BYTE NO-OP once Task 3
+      // makes the drop real: the pointer is brought back over the source's own
+      // position before it is released, which is the "released where it
+      // started" case. Task 2b is chrome, and its scenario must not become a
+      // move test the day the drop lands.
+      const endVia = async (label, homeFirst, fire) => {
+        const pre = await s4DragChrome(page);
+        assert.strictEqual(pre.htmlHasClass, false,
+          label + ' ANTI-VACUITY: the class must be ABSENT before this path presses. Got '
+          + JSON.stringify(pre));
+        await page.mouse.move(src.handle.x, src.handle.y);
+        await page.mouse.down();
+        await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+        await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+        const during = await s4DragChrome(page);
+        assert.strictEqual(during.indicatorHidden, false,
+          label + ' PRECONDITION: the drag must actually have ENGAGED before anything '
+          + 'below means anything. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.htmlHasClass, true,
+          label + ': a live ⠿ drag must carry `ed-block-dragging` on <html> — the source '
+          + 'block itself cannot show the drag (nothing in the content DOM may be mutated '
+          + 'during one) and `.ed-handle` is opacity:0 the moment the pointer leaves the '
+          + 'block, so this class IS the feedback. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.bodyCursor, 'grabbing',
+          label + ': the class must actually PAINT — a class with no CSS behind it is not '
+          + 'feedback. Got ' + JSON.stringify(during));
+        assert.strictEqual(during.handleCursor, 'grabbing',
+          label + ': the grabbing cursor must win over `.ed-handle`\'s own '
+          + '`cursor: pointer`, or the one element the pointer started on keeps showing a '
+          + 'click affordance for the whole drag. Got ' + JSON.stringify(during));
+        assert.strictEqual(await s4Content(page), before,
+          label + ' MID-DRAG: the content column must be byte-identical WHILE the drag is '
+          + 'live. The class lives on <html>, outside contentEl, precisely so the '
+          + '"mutate nothing during a drag" invariant — the only reason Escape / '
+          + 'pointercancel / blur can clean up unconditionally — still holds');
+        if (homeFirst) {
+          await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+          const home = await s4DragChrome(page);
+          assert.strictEqual(home.htmlHasClass, true,
+            label + ' PRECONDITION: the drag must still be live at the moment of release');
+        }
+        await fire();
+        await new Promise((r) => setTimeout(r, 100));
+        const post = await s4DragChrome(page);
+        assert.strictEqual(post.indicatorHidden, true,
+          label + ' must hide the drop indicator. Got ' + JSON.stringify(post));
+        assert.strictEqual(post.htmlHasClass, false,
+          label + ' must take `ed-block-dragging` back off <html> — teardownBlockDrag() is '
+          + 'the single funnel both endBlockDrag() and cancelBlockDrag() go through, so '
+          + 'every abort path inherits the removal. Got ' + JSON.stringify(post));
+        assert.notStrictEqual(post.bodyCursor, 'grabbing',
+          label + ' must leave the cursor back to normal. Got ' + JSON.stringify(post));
+        if (!homeFirst) await page.mouse.up(); // already torn down — an inert no-op
+        await settleEditor(page);
+        assert.strictEqual(await s4Content(page), before,
+          label + ' must leave the content column byte-identical across the whole gesture');
+      };
+
+      await endVia('pointerup (released where it started)', true, () => page.mouse.up());
+      await endVia('Escape mid-drag', false, () => page.keyboard.press('Escape'));
+      await endVia('pointercancel mid-drag', false, () => page.evaluate(
+        () => document.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }))));
+      await endVia('window blur mid-drag', false, () => page.evaluate(
+        () => window.dispatchEvent(new Event('blur'))));
+
+      const fileText = await saveAndRead(page, mdPath);
+      assert.strictEqual(fileText, S4_DOC,
+        'Task 2b is chrome only — no path above may write a byte. Got:\n' + fileText);
+    }, 'T2b');
+    // <<<S4T2BSECTION
+
+    // >>>S4T3SECTION  (and <<<S4T3SECTION at the end.)
+    //
+    // ── S4 Task 3: moving ONE block that is not a list item ───────────────
+    //
+    // The first S4 task that writes bytes. The architecture is fixed by the
+    // plan: a move is ONE commitRangeEdit over
+    // `min(source, destination) .. max(source, destination)`. UndoStack's op
+    // is a single contiguous line range with no notion of a source and a
+    // destination, so "removal here + insertion there" is two ops and two
+    // Ctrl+Z, which §3.4 forbids. For a block that is not a li the lines are
+    // relocated VERBATIM — nothing is re-serialized, so nothing can be
+    // re-escaped and no marker arithmetic is involved.
+    //
+    // THE BLANK-LINE RULE (defined here, and this is the whole of it):
+    //
+    //   1. The block's own lines move byte-for-byte.
+    //   2. At the seam it LEAVES, the blank run that surrounded it is
+    //      absorbed and replaced by exactly one blank line — or by none when
+    //      the block was at the start or the end of the file.
+    //   3. At the seam it LANDS in, one blank line is emitted on each side of
+    //      it whose neighbouring line is not already blank.
+    //
+    // Neither `commitRangeRemoval` (absorbs exactly one adjacent blank) nor
+    // `commitBlockInsertion` (always adds a leading one) is the right tool:
+    // each is half of a move and the halves do not compose — a removal that
+    // eats one blank plus an insertion that adds one leaves the document one
+    // separator short at the seam that was left and one long at the seam that
+    // was landed in, and it is two ops.
+    //
+    // CONSEQUENCE, measured on every fixture below with marked.lexer and
+    // blockmap.buildBlockMap before a single byte was pinned: in a document
+    // whose blocks are separated by exactly one blank line — which is
+    // everything this editor's own serializer emits — a move is a PERMUTATION
+    // OF THE FILE'S LINES. Same lines, same count, same number of blank
+    // separators. The one document shape where the count moves is one that
+    // already jams two blocks onto adjacent lines with no blank between them
+    // ('# A\n# B\n# C\n'), and there the move ADDS the separators the landing
+    // seam needs; that case is pinned by its own scenario below, because a
+    // rule with an unstated exception is a rule nobody can rely on.
+    //
+    // ANTI-VACUITY, per shape:
+    //   * "one Ctrl+Z restored the file" is trivially TRUE when the gesture
+    //     did nothing at all. Every scenario therefore asserts the move
+    //     LANDED first — the block order in the DOM and the exact saved bytes
+    //     — and only then undoes.
+    //   * "the drop went where I aimed" is not proven by the pointer's
+    //     coordinates. Every drag reads the drop indicator back BEFORE
+    //     releasing and asserts it is on the intended block's own top edge
+    //     (or, for an append, on the last block's bottom, a position no
+    //     before-block target can produce).
+    //   * a refusal is satisfied by a gesture that never started. Both
+    //     refusal scenarios assert the drag ENGAGED (the indicator is up on
+    //     the intended seam) before they release, and both assert the banner
+    //     TEXT, not merely that some banner exists.
+    //   * the no-op case is satisfied by a drop path that does nothing at
+    //     all. It shares its scenario with a real move on the same page, so
+    //     the same drop path is proven live in the same breath.
+    const s4BlockTexts = (page) => page.evaluate(() => Array.prototype.slice.call(
+      document.querySelectorAll('main.content .ed-block'))
+      .map((el) => (el.textContent || '').replace(/[＋⠿]/g, '').replace(/\s+/g, ' ').trim()));
+
+    const s4Banner = (page) => page.evaluate(() => {
+      const b = document.querySelector('.ed-conflict');
+      return b ? b.textContent : null;
+    });
+
+    // Presses a block's ⠿, drags to `y`, reads the drop indicator back WHILE
+    // THE POINTER IS STILL DOWN (that reading is the caller's precondition
+    // that the drop target is the one it aimed at), then releases and drains
+    // the commit + re-render the drop starts.
+    const s4DragHandleTo = async (page, src, y) => {
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, src.handle.y + (y - src.handle.y) / 2, { steps: 5 });
+      await page.mouse.move(src.handle.x, y, { steps: 5 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const ind = await s4Indicator(page);
+      await page.mouse.up();
+      await settleEditor(page);
+      return ind;
+    };
+
+    const s4UndoOnce = async (page) => {
+      await page.keyboard.down('Control');
+      await page.keyboard.press('KeyZ');
+      await page.keyboard.up('Control');
+      await settleEditor(page);
+    };
+
+    // The PRECONDITION every scenario opens with: the press point is that
+    // block's own ⠿, and the drop indicator singleton exists and is down.
+    const s4ArmedOn = async (page, src, label) => {
+      assert.ok(src && src.handle, label + ' FIXTURE SANITY: the source block must carry a ⠿');
+      const at = await s4ElementAt(page, src.handle.x, src.handle.y);
+      assert.ok(at && at.isHandle && at.blockId === src.id,
+        label + ' PRECONDITION: the press point must be that block\'s OWN ⠿ — every claim '
+        + 'below is satisfied by a press that missed the button. Got ' + JSON.stringify(at));
+      const idle = await s4Indicator(page);
+      assert.strictEqual(idle.present, true,
+        label + ' ANTI-VACUITY: the drop indicator singleton must exist. Got ' + JSON.stringify(idle));
+      assert.strictEqual(idle.hidden, true,
+        label + ' ANTI-VACUITY: the indicator must be down before the gesture. Got '
+        + JSON.stringify(idle));
+      assert.strictEqual(await s4Banner(page), null,
+        label + ' ANTI-VACUITY: no banner may be standing before the gesture — "a banner '
+        + 'appeared" proves nothing if one was already there');
+    };
+
+    // ── 1. a paragraph moved DOWN past two blocks (and, first, the drop that
+    //       lands where it already is) ──────────────────────────────────────
+    await s4Scenario('a paragraph dragged down past two blocks lands between them, in '
+      + 'exactly one undo op — and a drop just below itself writes nothing',
+      S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+        'FIXTURE SANITY: five top-level blocks in this order. Got ' + JSON.stringify(g.map((b) => b.text)));
+      const src = g[1];
+      await s4ArmedOn(page, src, 'alpha');
+
+      // ── the no-op half: released ONE SEAM BELOW where it started ────────
+      // `before-block (sourceIndex + 1)` is the seam immediately under the
+      // source — visually "put it back" — and must write nothing. Its partner
+      // is the real move on the very same page below: without one, "no bytes
+      // were written" is satisfied by a drop path that never does anything.
+      //
+      // MEASURED, and stated so nobody trusts this further than it goes: this
+      // gesture-level claim CANNOT discriminate the home-position guard
+      // itself. Narrowing that guard leaves the branch arithmetic producing an
+      // INVERTED range, refuseInvertedRange() swallows it, and the file is
+      // byte-identical for the wrong reason — the exact "an assertion that
+      // holds under a refusal" shape this project keeps hitting. The
+      // discriminating assertion is on planBlockMove() in
+      // test/editor-client.test.js; this one is the end-to-end partner.
+      // (a) released on the block's OWN top edge. The destination IS the
+      //     source, which is the case that made an early version of this path
+      //     answer '文件已更新，請重試這個操作'.
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[4].mid + 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const away = await s4Indicator(page);
+      await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+      const home = await s4Indicator(page);
+      expectApprox(home.top, src.top,
+        'PRECONDITION: the drop target at release must be the SOURCE block\'s own top '
+        + 'edge — otherwise this is not the home case at all');
+      assert.ok(Math.abs(away.top - home.top) > 1,
+        'ANTI-VACUITY: the drag must genuinely have travelled away and come back — a '
+        + 'gesture that never moved satisfies "released where it started" trivially. '
+        + 'away=' + away.top + ' home=' + home.top);
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4Banner(page), null,
+        'a no-op drop must be SILENT: not a refusal, and not a dropped gesture. The file '
+        + 'is untouched either way, so this is the only assertion that can see it');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+        'a drop on the source\'s own top edge must not reorder anything');
+      assert.strictEqual(await saveAndRead(page, mdPath), S4_DOC,
+        'a drop on the source\'s own top edge must be a BYTE no-op');
+
+      // (b) released on the seam immediately BELOW it — the same position on
+      //     screen, a different `blockIndex`.
+      const noopInd = await s4DragHandleTo(page, src, g[2].mid - 2);
+      expectApprox(noopInd.top, g[2].top,
+        'PRECONDITION: the drop target must be before-block 2 (bravo\'s own top) — the '
+        + 'seam immediately BELOW alpha, i.e. alpha\'s own position');
+      assert.strictEqual(await s4Banner(page), null,
+        'the seam immediately below the source is a no-op too, and equally silent');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+        'a drop on the seam immediately below the source must not reorder anything');
+      assert.strictEqual(await saveAndRead(page, mdPath), S4_DOC,
+        'a drop on the seam immediately below the source must be a BYTE no-op');
+
+      // ── the real move: released below charlie's midline → before delta ──
+      const g2 = await s4Geometry(page);
+      const src2 = g2[1];
+      await s4ArmedOn(page, src2, 'alpha (real move)');
+      const ind = await s4DragHandleTo(page, src2, g2[3].mid + 2);
+      expectApprox(ind.top, g2[4].top,
+        'PRECONDITION: below charlie\'s midline and above delta\'s, the drop target is '
+        + 'before-block 4 — the indicator must sit on delta\'s own top edge');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'bravo', 'charlie', 'alpha', 'delta'],
+        'the moved block must be between charlie and delta in the RENDERED document');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+        'the source lines are relocated verbatim and the separators are conserved — the '
+        + 'file is a PERMUTATION of the lines it had. Got:\n' + JSON.stringify(moved));
+
+      // ── exactly one Ctrl+Z ─────────────────────────────────────────────
+      await s4UndoOnce(page);
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+        'ONE Ctrl+Z must put the document back — a move written as a removal plus an '
+        + 'insertion is TWO ops and would leave the block still moved here');
+      const undone = await saveAndRead(page, mdPath);
+      assert.strictEqual(undone, S4_DOC,
+        'ONE Ctrl+Z must restore the file byte-for-byte. Got:\n' + JSON.stringify(undone));
+    }, 'T3');
+
+    // ── 2. a paragraph moved UP to the very top ──────────────────────────
+    await s4Scenario('a paragraph dragged above the first block becomes the first block, '
+      + 'in exactly one undo op', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      const src = g[3];
+      assert.strictEqual(src.text, 'charlie',
+        'FIXTURE SANITY: block index 3 must be the "charlie" paragraph, got ' + JSON.stringify(src.text));
+      await s4ArmedOn(page, src, 'charlie');
+      const ind = await s4DragHandleTo(page, src, 1);
+      expectApprox(ind.top, g[0].top,
+        'PRECONDITION: above every block\'s midline the drop target is before-block 0 — '
+        + 'the indicator must sit on the heading\'s own top edge');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['charlie', 'Doc', 'alpha', 'bravo', 'delta'],
+        'the moved paragraph must now be the FIRST block');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, 'charlie\n\n# Doc\n\nalpha\n\nbravo\n\ndelta\n',
+        'moved to the top: no leading blank is invented (there is no neighbour above) and '
+        + 'the seam it left keeps exactly one. Got:\n' + JSON.stringify(moved));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), S4_DOC,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T3');
+
+    // ── 3. a HEADING ─────────────────────────────────────────────────────
+    await s4Scenario('a heading dragged down moves as one block, in exactly one undo op',
+      '# Doc\n\nalpha\n\n## Section two\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+      const original = '# Doc\n\nalpha\n\n## Section two\n\nbravo\n\ncharlie\n';
+      const g = await s4Geometry(page);
+      const src = g[2];
+      assert.strictEqual(src.type, 'heading',
+        'FIXTURE SANITY: block index 2 must be the "## Section two" HEADING, got ' + src.type);
+      assert.strictEqual(src.text, 'Section two',
+        'FIXTURE SANITY: ...and it must be that heading, got ' + JSON.stringify(src.text));
+      await s4ArmedOn(page, src, 'heading');
+      const ind = await s4DragHandleTo(page, src, g[3].mid + 2);
+      expectApprox(ind.top, g[4].top,
+        'PRECONDITION: below bravo\'s midline the drop target is before-block 4 (charlie)');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'Section two', 'charlie'],
+        'the heading must now sit between bravo and charlie');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\nalpha\n\nbravo\n\n## Section two\n\ncharlie\n',
+        'a heading relocates verbatim — its "## " is never re-derived. Got:\n' + JSON.stringify(moved));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T3');
+
+    // ── 4. a MULTI-LINE fenced code block ────────────────────────────────
+    // The fence contains its OWN blank line. A rule that scanned for blanks
+    // without respecting the block's line range would absorb it and split the
+    // fence; the block map's range is what makes that impossible.
+    await s4Scenario('a multi-line fenced code block moves whole, blank line inside the '
+      + 'fence included, in exactly one undo op',
+      '# Doc\n\nalpha\n\n```js\nconst a = 1;\n\nconst b = 2;\n```\n\nbravo\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\nalpha\n\n```js\nconst a = 1;\n\nconst b = 2;\n```\n\nbravo\n';
+      const g = await s4Geometry(page);
+      const src = g[2];
+      assert.strictEqual(src.type, 'code',
+        'FIXTURE SANITY: block index 2 must be the fenced code block, got ' + src.type);
+      assert.ok(/const a = 1;/.test(src.text) && /const b = 2;/.test(src.text),
+        'FIXTURE SANITY: ...spanning BOTH statements, i.e. genuinely multi-line across an '
+        + 'internal blank line. Got ' + JSON.stringify(src.text));
+      await s4ArmedOn(page, src, 'code');
+      const ind = await s4DragHandleTo(page, src, 1);
+      expectApprox(ind.top, g[0].top,
+        'PRECONDITION: the drop target is before-block 0 (the heading\'s own top edge)');
+      assert.deepStrictEqual((await s4BlockTexts(page)).slice(1),
+        ['Doc', 'alpha', 'bravo'],
+        'the code block must now be the FIRST block, with the other three in their old order');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '```js\nconst a = 1;\n\nconst b = 2;\n```\n\n# Doc\n\nalpha\n\nbravo\n',
+        'all five fence lines relocate verbatim and the blank INSIDE the fence survives. '
+        + 'Got:\n' + JSON.stringify(moved));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T3');
+
+    // ── 5. a TABLE, to the append target ─────────────────────────────────
+    await s4Scenario('a table dragged below every block appends, in exactly one undo op',
+      '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nbravo\n', async (page, mdPath) => {
+      const original = '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nbravo\n';
+      const g = await s4Geometry(page);
+      const src = g[2];
+      assert.strictEqual(src.type, 'table',
+        'FIXTURE SANITY: block index 2 must be the table, got ' + src.type);
+      await s4ArmedOn(page, src, 'table');
+      const ind = await s4DragHandleTo(page, src, g[3].bottom + 200);
+      expectApprox(ind.top, g[3].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'} — the '
+        + 'indicator sits on that block\'s BOTTOM, a position no before-block target can '
+        + 'produce');
+      assert.deepStrictEqual((await s4BlockTexts(page)).slice(0, 3),
+        ['Doc', 'alpha', 'bravo'],
+        'the table must have left the middle of the document');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\nalpha\n\nbravo\n\n| A | B |\n|---|---|\n| 1 | 2 |\n',
+        'all three table lines relocate verbatim; the appended block takes its separator '
+        + 'ABOVE it (the side that has a neighbour) and the file keeps its trailing '
+        + 'newline. Got:\n' + JSON.stringify(moved));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T3');
+
+    // ── 6. the DESTINATION seam is inside ONE list run → refused ────────
+    // MIGRATED BY TASK 5, twice over, and the reasons are recorded here
+    // rather than in a commit message nobody will find:
+    //   (a) the WORDING. Task 3 raised this with the provisional
+    //       BLOCK_MOVE_LIST_SEAM_MESSAGE, which covered the source seam and
+    //       the destination seam with one sentence. They are different
+    //       problems with different remedies — "you cannot put a block
+    //       INSIDE a list" vs "moving this block would JOIN the two lists
+    //       around it" — so Task 5 split the constant in two and this
+    //       scenario now pins the destination one.
+    //   (b) the GATE. Task 3's predicate refused any two adjacent li; Task 5
+    //       narrowed the destination half to two li OF THE SAME RUN. This
+    //       fixture is the same-run case, so the answer is unchanged — which
+    //       is exactly why it is the one that has to keep asserting it.
+    // The ACCEPTED PARTNER comes first, on the same fixture and through the
+    // same drop path: without it "the move was refused" is satisfied by an
+    // implementation that refuses every move on this page.
+    await s4Scenario('a paragraph dropped between two items of ONE list run is REFUSED '
+      + 'with a banner and writes nothing — while an ordinary move on the same page is '
+      + 'accepted', '# Doc\n\npara\n\n- a\n- b\n\ntail\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\npara\n\n- a\n- b\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'paragraph', 'li', 'li', 'paragraph'],
+        'FIXTURE SANITY: heading, paragraph, TWO li of one run, paragraph. Got '
+        + JSON.stringify(g.map((b) => b.type)));
+      // The fixture is PROVEN to be in the state the refusal is about: the
+      // two items are one RUN, not two lists that happen to be adjacent.
+      // Measured through the same attributes performBlockDrop() reads.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/-'],
+        'FIXTURE PROOF: ONE run — the second item does NOT open a list of its own. If '
+        + 'it ever does, this fixture has become the different-runs case Task 5 now '
+        + 'ACCEPTS and the assertion below would be testing nothing. Got '
+        + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false],
+        'FIXTURE PROOF: exactly ONE list, and it is tight');
+
+      // ── the accepted partner, first and on a page with no banner ───────
+      const src = g[1];
+      await s4ArmedOn(page, src, 'para (the partner move)');
+      const okInd = await s4DragHandleTo(page, src, g[4].bottom + 200);
+      expectApprox(okInd.top, g[4].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'}');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- a\n- b\n\ntail\n\npara\n',
+        'the SAME block, through the SAME drop path, moves when the seam is legal — '
+        + 'this is what stops the refusal below from being satisfied by a page nothing '
+        + 'can move on');
+      assert.strictEqual(await s4Banner(page), null,
+        'and an accepted move raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now the destination seam inside the run ───────────────────────
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[1], 'para');
+      const ind = await s4DragHandleTo(page, g2[1], g2[3].mid - 2);
+      expectApprox(ind.top, g2[3].top,
+        'PRECONDITION: the drop target must be before-block 3 — the seam BETWEEN the two '
+        + 'list items, which is the whole point of this scenario');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('無法把區塊放進清單項目之間') !== -1,
+        'a drop into the middle of a list run must REFUSE OUT LOUD — §3.6: a silent no-op '
+        + 'is a defect. The EXACT wording is asserted, not merely the presence of a '
+        + 'banner mentioning 清單: five other refusals in this file (the default '
+        + 'structural-edit message, BATCH_MIXED_MESSAGE, BATCH_MULTIRUN_MESSAGE, and '
+        + 'Task 5\'s own source-seam and out-of-run messages) contain that word too, and '
+        + 'any of them appearing here would mean the gesture was refused for a reason '
+        + 'this scenario is not about. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('會讓上下兩串清單接在一起'), -1,
+        'and specifically NOT the SOURCE-seam message: this block\'s own seam (heading '
+        + 'above, list below) is perfectly legal — one message for both seams would tell '
+        + 'the user to go and fix the wrong end of the gesture');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'para', 'a', 'b', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'a refused move must not write a byte');
+    }, 'T3/T5');
+
+    // ── 7. the SOURCE seam is between two list items → refused ──────────
+    // The mirror case, and the one the plan's own enumeration does not list:
+    // lifting the paragraph out of '- a\n\npara\n\n- b\n' leaves
+    // '- a\n\n- b\n', which marked.lexer answers as ONE list with
+    // `loose === true` — the same read-only degradation, arriving from the
+    // seam the block LEFT rather than the one it landed in.
+    //
+    // MIGRATED BY TASK 5 in three ways, all recorded here:
+    //   (a) the WORDING — Task 5 split the provisional one-size message into
+    //       a source-seam one and a destination-seam one, because the two
+    //       have different remedies.
+    //   (b) the GATE — Task 5 narrowed the DESTINATION half to same-run, and
+    //       deliberately did NOT narrow this one. The measurement that
+    //       decides it is in this scenario's own assertions below.
+    //   (c) the ORDERING HOLE Task 4 reported and no fixture exercised:
+    //       `planBlockMove()`'s null answer is asked BEFORE this gate, so a
+    //       put-it-back gesture on a block that sits between two list items
+    //       is SILENT rather than refused. That combination is now driven
+    //       here, in the middle of this scenario, on the one fixture where
+    //       the gate is provably armed.
+    await s4Scenario('a paragraph lifted from between two list items is REFUSED with a '
+      + 'banner and writes nothing — while a put-it-back gesture on the same block is '
+      + 'SILENT, and an ordinary move on the same page is accepted',
+      '# Doc\n\n- a\n\npara\n\n- b\n', async (page, mdPath) => {
+      const original = '# Doc\n\n- a\n\npara\n\n- b\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'li', 'paragraph', 'li'],
+        'FIXTURE SANITY: the paragraph must sit BETWEEN two list items. Got '
+        + JSON.stringify(g.map((b) => b.type)));
+      // THE MEASUREMENT THIS WHOLE SCENARIO RESTS ON, asserted rather than
+      // narrated: the bytes the move would leave behind are ONE LOOSE LIST.
+      // If marked ever stops answering that, the refusal below is no longer
+      // protecting anything and this scenario must be re-decided, not
+      // re-pointed.
+      assert.deepStrictEqual(lexLooseDeep('- a\n\n- b\n'), [true],
+        'FIXTURE PROOF: the document this move WOULD produce at the source seam is one '
+        + 'list with loose === true — every item renders as a <p>, serializeBlocks() '
+        + 'reports \'P\' for each, and the whole run degrades read-only with no banner');
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: and right now it is TWO tight lists — so the corruption above '
+        + 'is caused by the move and not already present');
+      // The two items are in DIFFERENT runs, which is precisely the case
+      // Task 5 narrowed the DESTINATION seam on. Asserting it here is what
+      // makes this scenario the proof that the source seam could NOT be
+      // narrowed the same way: same model-visible facts, opposite answer.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/START'],
+        'FIXTURE PROOF: TWO separate runs — each item opens its own list token. The '
+        + 'destination gate would ACCEPT this pair; the source gate must not. Got '
+        + JSON.stringify(runShape));
+
+      // ── (1) the accepted partner, on the same page and the same path ───
+      await s4ArmedOn(page, g[0], '# Doc (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[0], g[3].bottom + 200);
+      expectApprox(okInd.top, g[3].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'}');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '- a\n\npara\n\n- b\n\n# Doc\n',
+        'a block whose own seam has a list on ONE side only moves freely — the partner '
+        + 'that stops everything below from being satisfied by a page nothing can move on');
+      assert.strictEqual(await s4Banner(page), null, 'and it raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the rest of this scenario: the fixture is back, byte for byte');
+
+      // ── (2) THE ORDERING HOLE: put it back where it already is ─────────
+      // `before-block 3` is the seam immediately BELOW the paragraph — the
+      // same place on screen as its own top edge, and the gesture the drag's
+      // release-where-you-started case produces. planBlockMove() answers null
+      // for it, and that answer is asked BEFORE the seam gate. If the two
+      // were the other way round this gesture would raise the source-seam
+      // banner for a move in which nothing whatsoever went wrong — and until
+      // Task 5 no fixture put a block between two list items AND released it
+      // at home, so nothing held the order in place.
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[2], 'para (the put-it-back gesture)');
+      const homeInd = await s4DragHandleTo(page, g2[2], g2[3].mid - 2);
+      expectApprox(homeInd.top, g2[3].top,
+        'PRECONDITION: the drop target IS before-block 3 — the seam just below the '
+        + 'paragraph. This is a real, engaged drag onto a real target, not a press that '
+        + 'never moved: the indicator was read back with the pointer still down');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE ORDERING ASSERTION: a put-it-back gesture must be SILENT. It is a byte '
+        + 'no-op, not a refusal — and the seam gate, which IS armed on this fixture '
+        + '(see the refusal below), must not get to speak first. Got '
+        + JSON.stringify(await s4Banner(page)));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b'],
+        'and nothing moved on screen');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and not a byte was written');
+
+      // ── (3) the refusal, out loud ──────────────────────────────────────
+      const g3 = await s4Geometry(page);
+      await s4ArmedOn(page, g3[2], 'para');
+      const ind = await s4DragHandleTo(page, g3[2], 1);
+      expectApprox(ind.top, g3[0].top,
+        'PRECONDITION: the drop target is before-block 0 — a perfectly legal DESTINATION, '
+        + 'so the refusal below can only be about the seam the block would LEAVE');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('移走這個區塊會讓上下兩串清單接在一起') !== -1,
+        'lifting the only thing separating two list runs merges them into one LOOSE list '
+        + '— it must refuse out loud rather than corrupt. The EXACT wording again, for '
+        + 'the same reason: five other refusals in this file also say 清單. Got '
+        + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
+        'and specifically NOT the DESTINATION-seam message: the destination here is the '
+        + 'top of the document, which is legal. Telling the user to aim somewhere else '
+        + 'would be a lie — there is nowhere this block can go');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'a refused move must not write a byte');
+    }, 'T3/T5');
+
+    // ── 8. the one document shape where the separator count MOVES ────────
+    // Rule 3 emits the blank the landing seam needs. In a document that
+    // already jams its blocks onto adjacent lines there was none to carry, so
+    // the count goes up — and it MUST: measured, 'paraA\n# H\n\nparaB\n' with
+    // paraA appended and no blank emitted produces '# H\n\nparaB\nparaA\n',
+    // which marked.lexer answers as ONE paragraph. The exception is pinned
+    // here rather than left as folklore.
+    await s4Scenario('a move into a seam that has no blank line emits the one it needs',
+      '# A\n# B\n# C\n', async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['A', 'B', 'C'],
+        'FIXTURE SANITY: three headings on three ADJACENT lines, no blanks at all. Got '
+        + JSON.stringify(g.map((b) => b.text)));
+      const src = g[0];
+      await s4ArmedOn(page, src, '# A');
+      const ind = await s4DragHandleTo(page, src, g[1].mid + 2);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: below # B\'s midline the drop target is before-block 2 (# C)');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['B', 'A', 'C'],
+        'the heading must have moved between # B and # C');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# B\n\n# A\n\n# C\n',
+        'the landing seam had NO blank to carry, so rule 3 emits one on each side of the '
+        + 'moved block. This is the ONLY documented case where a move changes the blank '
+        + 'count, and it changes it in the safe direction. Got:\n' + JSON.stringify(moved));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), '# A\n# B\n# C\n',
+        'ONE Ctrl+Z must restore the file byte-for-byte, jammed seams and all');
+    }, 'T3');
+    // <<<S4T3SECTION
+
+    // >>>S4T4SECTION  (and <<<S4T4SECTION at the end.)
+    //
+    // ── S4 Task 4: moving a LIST ITEM within its own run ──────────────────
+    //
+    // Task 3's drop refused to touch a li at all — silently, which §3.6 calls
+    // a defect in so many words (「靜默不動作是缺陷」). After this task a li
+    // drag either MOVES or refuses WITH A BANNER; the only silent outcome
+    // left is the home position, which is Task 3's own ruling (a drop where
+    // the block already is is a byte no-op, not a refusal) and is asserted as
+    // such below rather than left to inference.
+    //
+    // THE SHAPE, and it is `duplicateListItems()`'s, not planBlockMove()'s: a
+    // li's lines CANNOT be relocated verbatim, because markers and ordinals
+    // are run-global — '3. charlie' moved to the head of its run has to come
+    // back as '1. charlie' and renumber everything behind it. So the run is
+    // re-serialized as ONE commitRangeEdit over its own line range: capture
+    // `presetRange` BEFORE mutating, build the REORDERED span array, move the
+    // node with mutateListRun(), then commitListStructure() with
+    // `carryOver: bystanderCarryOver(span)`. serializeBlocks() emits in span
+    // ARRAY order and carryOver replays each block's original bytes by id, so
+    // nothing is re-escaped and only the markers and the leading columns move.
+    // One commitRangeEdit is one undo op, which is §3.4's requirement.
+    //
+    // `data-list-start` is a POSITION property, not an item property — it is
+    // the only carrier of "marked's lexer opened a list token here" (§3.8 rule
+    // (d)) and serializeBlocks() resets its ordinal counter on it. A reorder
+    // that changes which item stands FIRST therefore has to carry the
+    // attribute across, exactly as duplicateListItems() strips it from a copy
+    // for the mirror-image reason. Without that, the run RESTARTS its
+    // numbering mid-way — measured, not reasoned: see the ordered-list
+    // scenario's own comment for the exact bytes.
+    //
+    // ANTI-VACUITY, per shape:
+    //   * every scenario asserts the move LANDED — the rendered block order
+    //     AND the saved bytes — before it asserts anything about undo. "One
+    //     Ctrl+Z restored the file" is trivially true of a gesture that did
+    //     nothing, and a li drag did exactly nothing until this task.
+    //   * "the children stayed put" is worthless unless the children were
+    //     provably there first. That scenario asserts the child's index, its
+    //     data-indent AND its source line BEFORE the drag, and the same three
+    //     after.
+    //   * a byte assertion proves nothing when the bytes would be identical
+    //     either way, which is why the ORDERED fixture carries the
+    //     renumbering claim: '- a' reordered is a permutation of its own
+    //     lines and cannot see a serializer that lost the run's numbering.
+    //   * every refusal asserts the drag ENGAGED (the indicator up on the
+    //     intended seam, read back with the pointer still down) and the EXACT
+    //     banner text — four other refusals in this file also contain 清單.
+    //   * `lexLooseDeep()` everywhere, never `lexLoose()`: the shallow one
+    //     inspects top-level tokens only, misses a NESTED list going loose,
+    //     and has already produced a false green in this project.
+    const T4_BULLET = '# Doc\n\n- alpha\n- bravo\n- charlie\n\ntail\n';
+    const T4_OL = '# Doc\n\n1. alpha\n2. bravo\n3. charlie\n\ntail\n';
+    const T4_KIDS = '# Doc\n\n- alpha\n- bravo\n  - b1\n- charlie\n\ntail\n';
+    const T4_TASK = '# Doc\n\n- [ ] alpha\n- [x] bravo\n- [ ] charlie\n\ntail\n';
+    const T4_LOOSE = '# Doc\n\n- alpha\n\n- bravo\n\n- charlie\n\ntail\n';
+    const T4_ORPHAN = '# Doc\n\n- alpha\n  - a1\n- bravo\n\ntail\n';
+
+    // The li fixtures' own sanity check, folded into one call so no scenario
+    // can forget it: the blocks really are `li`, at the indents named, and the
+    // run's head really does carry `data-list-start` (without which the
+    // renumbering scenario would be asserting nothing).
+    const t4Fixture = async (page, types, indents, label) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), types,
+        label + ' FIXTURE SANITY: block types. Got ' + JSON.stringify(g.map((b) => b.type)));
+      const got = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(got, indents,
+        label + ' FIXTURE SANITY: data-indent per block. Got ' + JSON.stringify(got));
+      return g;
+    };
+
+    // ── 1. two items of a BULLET run swapped — plus both home positions ───
+    await s4Scenario('a list item dragged above its neighbour swaps them, in exactly one '
+      + 'undo op — and a drop where it already is writes nothing', T4_BULLET,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'bullet');
+      const src = g[3];
+      assert.strictEqual(src.text, 'charlie', 'FIXTURE SANITY: block 3 is the charlie item');
+      await s4ArmedOn(page, src, 'charlie');
+
+      // ── the home half, and it is SILENT — Task 3's ruling, applied to a li
+      //    for the first time. Its partner is the real move on the same page
+      //    below: without one, "no bytes were written" is satisfied by the
+      //    do-nothing path a li drag had until this task.
+      // (a) released on the item's OWN top edge.
+      await page.mouse.move(src.handle.x, src.handle.y);
+      await page.mouse.down();
+      await page.mouse.move(src.handle.x, g[1].mid - 2, { steps: 8 });
+      await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 });
+      const away = await s4Indicator(page);
+      await page.mouse.move(src.handle.x, src.top + 1, { steps: 8 });
+      const home = await s4Indicator(page);
+      expectApprox(home.top, src.top,
+        'PRECONDITION: the drop target at release must be the ITEM\'s own top edge');
+      assert.ok(Math.abs(away.top - home.top) > 1,
+        'ANTI-VACUITY: the drag must genuinely have travelled away and come back. away='
+        + away.top + ' home=' + home.top);
+      await page.mouse.up();
+      await settleEditor(page);
+      assert.strictEqual(await s4Banner(page), null,
+        'a li dropped where it already is is a BYTE NO-OP, not a refusal — the same '
+        + 'ruling Task 3 made for every other block type');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'and it writes nothing');
+
+      // (b) released on the seam immediately BELOW it — for the run's LAST
+      //     item that seam is the paragraph after the run, i.e. a block
+      //     OUTSIDE the run, and it must still be read as "already there"
+      //     rather than as a cross-boundary refusal.
+      const noop = await s4DragHandleTo(page, g[3], g[4].mid - 2);
+      expectApprox(noop.top, g[4].top,
+        'PRECONDITION: the drop target must be before-block 4 (the tail paragraph) — the '
+        + 'seam immediately below charlie, which is charlie\'s own position');
+      assert.strictEqual(await s4Banner(page), null,
+        'the seam immediately below the last item is the home position, not a boundary '
+        + 'crossing — it must be silent, and this is the only assertion that can see the '
+        + 'difference (the file is untouched either way)');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'and it writes nothing');
+
+      // ── the real move ──────────────────────────────────────────────────
+      const g2 = await s4Geometry(page);
+      await s4ArmedOn(page, g2[3], 'charlie (real move)');
+      const ind = await s4DragHandleTo(page, g2[3], g2[2].mid - 2);
+      expectApprox(ind.top, g2[2].top,
+        'PRECONDITION: above bravo\'s midline the drop target is before-block 2 — the '
+        + 'indicator must sit on bravo\'s own top edge');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'charlie', 'bravo', 'tail'],
+        'the item must have moved ABOVE bravo in the RENDERED document');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- alpha\n- charlie\n- bravo\n\ntail\n',
+        'the run is re-serialized in the NEW span order and nothing else moves. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false],
+        'the run must stay TIGHT — a stray blank line either side of the moved item '
+        + 'makes marked call the whole list loose, every item renders as <p>, and the '
+        + 'run degrades read-only with no banner');
+
+      await s4UndoOnce(page);
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'ONE Ctrl+Z must put the run back — a reorder written as a removal plus an '
+        + 'insertion is TWO ops and would leave the item still moved here');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 2. an ORDERED run: the item moved to FIRST, and the renumbering ───
+    // The scenario that carries the `data-list-start` claim. MEASURED with
+    // the handling removed: the attribute stays on `alpha`, which is now the
+    // span's SECOND block, and serializeBlocks() resets its ordinal counter
+    // there — '1. charlie\n1. alpha\n2. bravo'. A bullet fixture cannot see
+    // that at all (every marker is '- '), which is why the renumbering claim
+    // lives on an ordered one.
+    await s4Scenario('an item dragged to the head of an ORDERED run renumbers the whole '
+      + 'run, in exactly one undo op', T4_OL, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'ordered');
+      const headStart = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-list-start')));
+      assert.deepStrictEqual(headStart, [null, '1', null, null, null],
+        'FIXTURE SANITY: the run\'s HEAD carries data-list-start and no other item does '
+        + '— the whole renumbering claim below is about that attribute moving with the '
+        + 'head. Got ' + JSON.stringify(headStart));
+      await s4ArmedOn(page, g[3], 'charlie');
+      const ind = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top,
+        'PRECONDITION: above alpha\'s midline the drop target is before-block 1 — the '
+        + 'head of the run');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'charlie', 'alpha', 'bravo', 'tail'],
+        'the item must now be the run\'s FIRST');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n1. charlie\n2. alpha\n3. bravo\n\ntail\n',
+        'the ordinals are re-stated 1,2,3 in the NEW order — a run that kept a stale '
+        + 'data-list-start on the item that used to be first comes back as '
+        + '"1. charlie / 1. alpha / 2. bravo". Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_OL,
+        'ONE Ctrl+Z must restore the file byte-for-byte, ordinals included');
+    }, 'T4');
+
+    // ── 3. an item WITH CHILDREN — the children stay where they are ───────
+    // §4.5: 「只搬 grip 那一個 block，子項留在原地」. The child is asserted to
+    // BE there first — its index, its data-indent and its own source line —
+    // because "it did not move" is satisfied by a child that was never in the
+    // fixture, and by a gesture that did nothing at all.
+    await s4Scenario('an item dragged out from above its own child leaves the child where '
+      + 'it stands', T4_KIDS, async (page, mdPath) => {
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '1', '0', null], 'kids');
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'b1', 'charlie', 'tail'],
+        'FIXTURE SANITY: b1 sits at index 3, between bravo and charlie');
+      assert.ok(T4_KIDS.indexOf('- bravo\n  - b1\n') !== -1,
+        'FIXTURE SANITY: and in the FILE the child line follows bravo\'s own line, so '
+        + '"the child stayed" below is a claim about a child that was provably there');
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top,
+        'PRECONDITION: the drop target is before-block 1 — the head of the run');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'b1', 'charlie', 'tail'],
+        'bravo moved to the head; b1 did NOT follow it — it is still at index 3, which '
+        + 'is where it stood');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block')).map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '0', '1', '0', null],
+        'and it kept its own indent — the child is re-anchored under whatever now stands '
+        + 'above it, not promoted. Got ' + JSON.stringify(indents));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- alpha\n  - b1\n- charlie\n\ntail\n',
+        'ONLY the grip\'s own block moved. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'neither the outer run NOR the nested one may go loose — lexLooseDeep(), never '
+        + 'lexLoose(): the shallow scan reports only [false] for this file and cannot see '
+        + 'the nested list at all');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_KIDS,
+        'ONE Ctrl+Z must restore the file byte-for-byte, nesting included');
+    }, 'T4');
+
+    // ── 4. to the run's LAST position ────────────────────────────────────
+    // The destination is the paragraph AFTER the run — a block the run does
+    // not contain. It is the only way to name "the end of the run" when
+    // something follows it, and it must NOT be read as a boundary crossing.
+    await s4Scenario('an item dragged past the last item of its run becomes the last item',
+      T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'last');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].mid + 2);
+      expectApprox(ind.top, g[4].top,
+        'PRECONDITION: below charlie\'s midline the drop target is before-block 4 — the '
+        + 'tail PARAGRAPH, which is outside the run and is the only name the run\'s own '
+        + 'end has here');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'charlie', 'alpha', 'tail'],
+        'the item must now be the run\'s LAST — and still inside the run, not after it');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- charlie\n- alpha\n\ntail\n',
+        'the paragraph after the run is untouched and no blank line is invented between '
+        + 'the run and it. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 5. a TASK item keeps its checked state ───────────────────────────
+    // The marker is RE-STATED by the serializer on every reorder (that is
+    // what renumbers an ordered run), and the checkbox is part of the marker
+    // — so a reorder is exactly the path on which a checked item can silently
+    // come back unchecked. The fixture checks the item that MOVES, and the
+    // two that do not are unchecked, so "[x] survived" cannot be satisfied by
+    // a serializer that checks everything.
+    await s4Scenario('a checked task item keeps its checkbox across a reorder', T4_TASK,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'task');
+      const checks = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"] .ed-li-check'))
+        .map((el) => el.getAttribute('data-checked')));
+      assert.deepStrictEqual(checks, ['0', '1', '0'],
+        'FIXTURE SANITY: exactly the MIDDLE item is checked — the one that moves. Got '
+        + JSON.stringify(checks));
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'charlie', 'tail'],
+        'the checked item must have moved to the head');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- [x] bravo\n- [ ] alpha\n- [ ] charlie\n\ntail\n',
+        'the checkbox travels with the item and the other two stay unchecked. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_TASK,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T4');
+
+    // ── 6. OUT of its own run → refused with a banner ────────────────────
+    // §4.5's ruling, already made: a cross-boundary move is REFUSED in 3.0.0
+    // and the capability deferred. What this scenario adds is that a li drag
+    // is no longer SILENT when it declines — the defect §3.6 names.
+    //
+    // MIGRATED BY TASK 5: the wording. Task 3's provisional
+    // BLOCK_MOVE_LIST_SEAM_MESSAGE covered three unrelated problems with one
+    // sentence — a block landing inside a run, a block whose removal joins
+    // two runs, and THIS, a list item leaving the run it belongs to. Only the
+    // third is about the item's own membership, and it is the only one whose
+    // remedy is "drop it somewhere inside its own list", so it got its own
+    // constant. Task 5 also added the ACCEPTED PARTNER below: the refusal
+    // stood alone on this page, which an implementation that refuses every li
+    // drag would have passed.
+    await s4Scenario('a list item dragged out of its own run is REFUSED with a banner '
+      + 'and writes nothing — while a move inside the run is accepted on the same page',
+      T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
+      // ── the accepted partner, first, on a page with no banner ─────────
+      await s4ArmedOn(page, g[3], 'charlie (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(okInd.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- charlie\n- alpha\n- bravo\n\ntail\n',
+        'a li move INSIDE the run, through the same drop path, is accepted — without '
+        + 'this the refusal below is satisfied by a page on which no li can move at all, '
+        + 'which is exactly what shipped up to Task 3');
+      assert.strictEqual(await s4Banner(page), null, 'and it raises NO banner');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now out of the run entirely ───────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
+      await s4ArmedOn(page, g2[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g2[2], 1);
+      expectApprox(ind.top, g2[0].top,
+        'PRECONDITION: above every block\'s midline the drop target is before-block 0 — '
+        + 'ABOVE the heading, which is outside the item\'s run by any reading');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'a li that leaves its run must refuse OUT LOUD — until Task 4 the same '
+        + 'gesture did nothing at all and said nothing at all, which §3.6 calls a '
+        + 'defect. The EXACT wording is asserted, not merely a banner mentioning 清單: '
+        + 'five other refusals in this file contain that word. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('移走這個區塊會讓上下兩串清單接在一起'), -1,
+        'and NOT the source-seam message, which belongs to the non-li path and would '
+        + 'mean the gesture was declined for a reason this scenario is not about');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'a refused move must not write a byte');
+    }, 'T4/T5');
+
+    // ── 7. a DEGRADED run → §4.3's run-wide gate refuses ─────────────────
+    // §4.3: 「轉換／建立副本／刪除／拖曳一律在 mutation 前走
+    // listRunSupportsStructuralEdit()」. A loose run's items each render as a
+    // <p>, serializeBlocks() reports 'P' for every one of them and STRIPS
+    // what it cannot represent — committing such a run deletes the user's
+    // text. There is no shared helper for the gate; the four existing call
+    // sites each make the call themselves and so does this one.
+    await s4Scenario('a drag inside a DEGRADED list run is refused by §4.3\'s run-wide '
+      + 'gate, and writes nothing', T4_LOOSE, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'loose');
+      assert.deepStrictEqual(lexLooseDeep(T4_LOOSE), [true],
+        'FIXTURE SANITY: this run really is LOOSE — the whole point of the gate. If this '
+        + 'ever reports [false] the fixture stopped expressing the shape under test');
+      await s4ArmedOn(page, g[3], 'charlie');
+      const ind = await s4DragHandleTo(page, g[3], g[2].mid - 2);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: the drop target is before-block 2 — a perfectly ORDINARY '
+        + 'destination inside the item\'s own run, so the refusal below can only be '
+        + 'about the run\'s condition');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('此清單含不支援的格式，無法調整結構') !== -1,
+        '§4.3\'s gate must refuse the drag, with ITS OWN wording — not the cross-boundary '
+        + 'one, which would mean the move was declined for a reason this scenario is not '
+        + 'about. Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_LOOSE,
+        'a refused move must not write a byte — and this is the assertion that bites '
+        + 'when the gate is removed: without it the run is committed through '
+        + 'serializeBlocks(), which strips every <p> item it cannot represent');
+    }, 'T4');
+
+    // ── 8. THE SEAM TASK 7 OWNS: a destination that needs an indent clamp ─
+    // MIGRATED BY S4 TASK 7, and the reason is in the assertions below rather
+    // than only here. Task 4 shipped this scenario as a REFUSAL, on the
+    // measured ground that `applyIndentClamp()` could not express a move:
+    // `clampIndents()`'s rule-2 scope starts after the operated block's NEW
+    // index while a move's orphans are left behind at its OLD one, so handed
+    // the REORDERED span it clamps nothing.
+    //
+    // Task 7 measured the other half of that sentence and it is the whole
+    // finding: a move IS a removal at the old index plus an insertion at the
+    // new one, and the removal half is `{ removed: true }` — the mode the ⠿
+    // delete has used since S1 — asked of the run in DOCUMENT order, BEFORE
+    // the reorder. No contract change, no new mode, no §3.4 amendment. So
+    // this scenario is now the ACCEPTANCE it was always going to become, and
+    // the exact bytes below are what the clamp answers.
+    await s4Scenario('a move that leaves a child behind RE-ANCHORS it, at the column '
+      + 'the clamp computes', T4_ORPHAN, async (page, mdPath) => {
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', null], 'orphan');
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'a1', 'bravo', 'tail'],
+        'FIXTURE SANITY: a1 is alpha\'s ONLY child and stands directly below it — moving '
+        + 'alpha away is what leaves a1 as the span\'s first block, at indent 1');
+      // THE PARTNER FIRST, on a page with no banner standing: the SAME run,
+      // an item that orphans nobody, and it is ACCEPTED. Without it "the move
+      // was refused" is satisfied by a run nothing can move in at all — and a
+      // li drag moved nothing anywhere until this task, so that is not a
+      // hypothetical.
+      await s4ArmedOn(page, g[3], 'bravo (the partner move)');
+      const ok = await s4DragHandleTo(page, g[3], g[1].mid - 2);
+      expectApprox(ok.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- alpha\n  - a1\n\ntail\n',
+        'a move in this very run, of an item that orphans nobody, must be ACCEPTED. '
+        + 'Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'and neither list went loose');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
+        'PRECONDITION for the move below: the fixture is back, byte for byte');
+
+      // ── now the one that needs the clamp ────────────────────────────────
+      const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', null], 'orphan (after undo)');
+      await s4ArmedOn(page, g2[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g2[1], g2[3].mid + 2);
+      expectApprox(ind.top, g2[4].top,
+        'PRECONDITION: the drop target is before-block 4 — the end of the run, an '
+        + 'otherwise perfectly ordinary destination');
+      assert.strictEqual(await s4Banner(page), null,
+        'MIGRATED FROM A REFUSAL (S4 T7): until this task the gesture raised '
+        + 'BLOCK_MOVE_ORPHAN_MESSAGE here, because nothing re-anchored a1 and committing '
+        + 'the span would have emitted it at column 0 — a different document from the one '
+        + 'on screen. The clamp now answers that, so there is nothing left to refuse. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const orphaned = await saveAndRead(page, mdPath);
+      assert.strictEqual(orphaned, '# Doc\n\n- a1\n- bravo\n- alpha\n\ntail\n',
+        'a1 lost its parent and is RE-ANCHORED at column 0 — §3.4 rule 3\'s segment '
+        + 'delta, computed against the block that now stands above it (none). This is '
+        + 'the byte assertion that bites when the clamp is dropped: without it the DOM '
+        + 'says indent 1 and serializeBlocks() emits column 0 anyway. Got:\n'
+        + JSON.stringify(orphaned));
+      assert.deepStrictEqual(lexLooseDeep(orphaned), [false],
+        'and the run stays TIGHT — one list, not a nested pair');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '0', '0', null],
+        'and the DOM AGREES with the file — a1 carries data-indent="0", not the 1 it had. '
+        + 'A clamp that writes only the file is the same "looks right on screen, cannot '
+        + 'be saved" bug in the other direction. Got ' + JSON.stringify(indents));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_ORPHAN,
+        'ONE Ctrl+Z restores the file byte-for-byte — the clamp rides inside the same '
+        + 'single commitRangeEdit, it is not a second op');
+    }, 'T4/T7');
+
+    // ── 9. a HARD-WRAPPED item is draggable, and nothing is re-escaped ───
+    // The scenario that earns §4.3's gate its `columnOnly` argument. A reorder
+    // rewrites no item's content and no item's line COUNT — only markers and
+    // leading columns — so a multi-line li must not veto the drag; without
+    // `columnOnly` a single hard-wrapped item anywhere in the run refuses
+    // every move in it, and 80.6% of this repo's own CHANGELOG.md list items
+    // are hard-wrapped. The `~5px` belongs to a BYSTANDER the gesture never
+    // touched: carryOver replays its bytes, and the round trip through
+    // escapeText() that would otherwise return '\\~5px' is what this pins.
+    await s4Scenario('a hard-wrapped item moves whole, and an untouched item\'s bytes '
+      + 'are replayed rather than re-serialized',
+      '# Doc\n\n- alpha ~5px\n- bravo has a\n  lazy continuation\n- charlie\n\ntail\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\n- alpha ~5px\n- bravo has a\n  lazy continuation\n- charlie\n\ntail\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', null], 'hard-wrapped');
+      assert.strictEqual(g[2].text.replace(/\s+/g, ' '), 'bravo has a lazy continuation',
+        'FIXTURE SANITY: block 2 really is ONE list item owning TWO source lines — if '
+        + 'this ever splits into two blocks the scenario stops expressing the shape');
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[1].mid - 2);
+      expectApprox(ind.top, g[1].top, 'PRECONDITION: the drop target is before-block 1');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- bravo has a\n  lazy continuation\n- alpha ~5px\n- charlie\n\ntail\n',
+        'both of the moved item\'s lines travel, the continuation keeps its column, and '
+        + 'the bystander\'s tilde is NOT escaped. Got:\n' + JSON.stringify(moved));
+      assert.strictEqual(moved.indexOf('\\~'), -1,
+        'no byte of an item the gesture never touched may be re-escaped — that is the '
+        + 'whole job of carryOver, and a single backslash here is the measured '
+        + 'regression list-md.js\'s own header records');
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte, continuation line included');
+    }, 'T4');
+    // <<<S4T4SECTION
+
+    // >>>S4T5SECTION  (and <<<S4T5SECTION at the end.)
+    //
+    // ── S4 Task 5: moves that cross a boundary ────────────────────────────
+    //
+    // THE RULING IS §4.5's, made by the user on 2026-09-01 and NOT re-opened
+    // here: a cross-boundary move is REFUSED with a banner in 3.0.0, and the
+    // capability is deferred to 3.1.0 whose first step is amending the spec
+    // with the blank-line rule for a run/non-run seam. What this task owns is
+    // making the refusals CORRECT, COHERENT and HONESTLY WORDED, and making
+    // sure the ones that were over-broad stop refusing what is safe.
+    //
+    // THE ENUMERATION, both seams, every case measured with marked.lexer +
+    // blockmap.buildBlockMap before a line of it was implemented:
+    //
+    //   DESTINATION (where the block lands). An insertion can only ever
+    //   SPLIT — it has no way to merge two lists — so the only thing it can
+    //   break is a run it lands INSIDE:
+    //     * a non-li into the middle of ONE run: '- a' | para | '- b' with
+    //       the blanks rule 3 emits either side. Two one-item runs where
+    //       there was one two-item run. REFUSED (scenario T3/T5 #6).
+    //     * a non-li between two li of DIFFERENT runs: already two lists;
+    //       nothing to merge. MEASURED '# Doc\n\n- a\n\n1. b\n\ntail\n'
+    //       + para at the seam = heading | ul(1,tight) | paragraph |
+    //       ol(1,tight) | paragraph. ACCEPTED — this is Task 3's deliberate
+    //       over-refusal, paid back here (scenario #1 below).
+    //     * a li out of its run: into a slot between two non-li, into a
+    //       DIFFERENT run, into the middle of a run of another list type, or
+    //       past the end of a document its run does not end. All four are the
+    //       same branch of performListItemDrop() (`insertAt < 0`) and all
+    //       four are REFUSED (scenarios T4/T5 #6, #2 and #3 below).
+    //     * a block moved ACROSS a table: not a boundary at all — a table is
+    //       not a list and neither seam involves a li. Already covered by
+    //       T3 #5, which drags the table itself past every block.
+    //
+    //   SOURCE (where the block leaves). A removal MERGES, and this is the
+    //   seam the plan's own enumeration did not have. It CANNOT be narrowed
+    //   with anything the block model carries:
+    //     * '- a' | para | '- b'        -> '- a\n\n- b\n'     ONE list, loose
+    //     * '1. a' | para | '2. b'      -> '1. a\n\n2. b\n'   ONE list, loose
+    //     * '- [ ] a' | para | '- [x] b'                        ONE list, loose
+    //     * '- a' | para | '  1. a1'    -> '- a\n\n  1. a1\n' ONE list, loose
+    //       — and this is the one that kills every clever narrowing.
+    //       blockmap reports those two items as indent 0 / listType 'ul' and
+    //       indent 0 / listType 'ol', i.e. DIFFERENT RUNS and DIFFERENT
+    //       TYPES: every fact the model exposes says "two lists, safe", and
+    //       the file says loose === true. What decides it is the 2-space
+    //       prefix on a raw line, which no block attribute carries and which
+    //       the client cannot lex (there is no lexer in the browser — render
+    //       is a server round trip).
+    //     * '- a' | para | '* b'        -> '- a\n\n* b\n'     two tight lists
+    //       — genuinely safe, and still refused. The discriminator is the
+    //       bullet CHARACTER, another raw byte the model does not carry.
+    //       Recorded as a deliberate over-refusal, not as a correctness
+    //       claim; 3.1.0 gets it back with the spec rule.
+    //   So the source seam keeps Task 3's wide predicate: two li neighbours,
+    //   refused. The scenario that proves it is T3/T5 #7, which asserts the
+    //   loose bytes the move would have produced AND that the two items are
+    //   in different runs — the same model-visible facts the destination gate
+    //   now ACCEPTS, with the opposite answer.
+    //
+    // THE VOCABULARY. Task 3's single provisional message covered three
+    // unrelated problems. Task 5 splits it, following the BATCH_*_MESSAGE
+    // convention already in the file:
+    //   BLOCK_MOVE_SOURCE_SEAM_MESSAGE — moving this block would join the two
+    //     lists it stands between. The remedy is "don't move it", and no
+    //     other destination helps.
+    //   BLOCK_MOVE_DEST_SEAM_MESSAGE — this block cannot go INSIDE a list.
+    //     The remedy is "aim somewhere else", which is the opposite advice.
+    //   BLOCK_MOVE_OUT_OF_RUN_MESSAGE — a list item can only move within its
+    //     own run. The remedy is "stay inside your list".
+    // Each scenario asserts its own message AND that the other two are
+    // absent: one sentence for all three would pass an assertion that only
+    // looked for 清單, and would send the user to fix the wrong end of the
+    // gesture.
+    //
+    // ANTI-VACUITY, and it is the whole reason the scenarios are shaped the
+    // way they are: a refusal test is worthless unless (a) the fixture is
+    // PROVEN to be in the state that triggers it — every scenario asserts the
+    // run shape through the same attributes the gate reads, and the source
+    // one asserts the loose bytes the move would produce; (b) the banner TEXT
+    // is asserted, not its existence; (c) the file is asserted byte-identical;
+    // and (d) there is an ACCEPTED partner on the SAME fixture through the
+    // SAME drop path — otherwise an implementation that refuses everything
+    // passes the entire task.
+
+    // ── 1. THE NARROWING: a block between two DIFFERENT runs is accepted ──
+    // Task 3 refused this on purpose and said so in its own comment: "two
+    // adjacent li of DIFFERENT runs are refused too, though that case is
+    // safe. Task 5 owns the cross-boundary enumeration and can narrow it;
+    // corrupting a list in the meantime cannot be narrowed afterwards."
+    // This is the repayment, and it is the only behaviour change Task 5 makes
+    // that lets a gesture write bytes it could not write before.
+    await s4Scenario('a paragraph dropped between two lists that are ALREADY separate '
+      + 'is accepted — an insertion cannot merge what is not one run',
+      '# Doc\n\npara\n\n- a\n\n1. b\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\npara\n\n- a\n\n1. b\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type), ['heading', 'paragraph', 'li', 'li', 'paragraph'],
+        'FIXTURE SANITY: heading, paragraph, TWO li, paragraph. Got '
+        + JSON.stringify(g.map((b) => b.type)));
+      // THE PRECONDITION THE WHOLE SCENARIO IS ABOUT, asserted through the
+      // very attributes performBlockDrop() reads: the two li are adjacent
+      // BLOCKS but two separate RUNS. Under Task 3's gate this fixture was
+      // refused; if it ever collapses into one run the acceptance below stops
+      // being the narrowing and becomes a corruption.
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ol/START'],
+        'FIXTURE PROOF: TWO runs of DIFFERENT type, each opening its own list token — '
+        + 'the shape Task 3 over-refused. Got ' + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: two lists, both tight, before the move');
+
+      await s4ArmedOn(page, g[1], 'para');
+      const ind = await s4DragHandleTo(page, g[1], g[3].mid - 2);
+      expectApprox(ind.top, g[3].top,
+        'PRECONDITION: the drop target is before-block 3 — the seam BETWEEN the two '
+        + 'list items, i.e. the exact position Task 3 refused');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE NARROWING: this must NOT refuse. A banner here means the gate is still '
+        + 'Task 3\'s wide one. Got ' + JSON.stringify(await s4Banner(page)));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b', 'tail'],
+        'the paragraph must now stand BETWEEN the two lists');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- a\n\npara\n\n1. b\n\ntail\n',
+        'the paragraph relocates verbatim and each list keeps its own marker. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'AND NOTHING WENT LOOSE — the assertion that makes the acceptance safe rather '
+        + 'than merely permitted. Two lists before, two tight lists after');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T5');
+
+    // ── 2. a li dragged into the MIDDLE of a different run → refused ──────
+    // Two of the plan's destination cases at once: "li into a different run"
+    // and "li into the middle of a run of a different list type". Both are
+    // the same branch — `insertAt` never leaves −1 because the destination is
+    // neither one of the item's own §3.8 siblings nor the block just past its
+    // subtree — and both are refused with the same, accurate message.
+    await s4Scenario('a list item dragged into the middle of ANOTHER run is REFUSED '
+      + 'with a banner and writes nothing — while a move to the end of its own run is '
+      + 'accepted on the same page',
+      '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', '0', null], 'two-runs');
+      const runShape = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block[data-block-type="li"]'))
+        .map((el) => el.getAttribute('data-list-type') + '/'
+          + (el.getAttribute('data-list-start') === '1' ? 'START' : '-')));
+      assert.deepStrictEqual(runShape, ['ul/START', 'ul/-', 'ol/START', 'ol/-'],
+        'FIXTURE PROOF: a TWO-item bullet run followed by a TWO-item ordered run. The '
+        + 'second run must have a member on BOTH sides of the destination seam, or the '
+        + '"middle of another run" this scenario names does not exist in the fixture. '
+        + 'Got ' + JSON.stringify(runShape));
+      assert.deepStrictEqual(lexLooseDeep(original), [false, false],
+        'FIXTURE PROOF: two lists, both tight');
+
+      // ── the accepted partner: the same item, the same path, to the end
+      //    of its OWN run. Its destination is the ordered run's FIRST item —
+      //    the only way a drop target can name "past the last sibling" when
+      //    something follows the run — so it lands one pixel from the
+      //    refusal below and is nonetheless legal.
+      await s4ArmedOn(page, g[1], 'a (the partner move)');
+      const okInd = await s4DragHandleTo(page, g[1], g[3].mid - 2);
+      expectApprox(okInd.top, g[3].top,
+        'PRECONDITION: the drop target is before-block 3, the ordered run\'s FIRST item '
+        + '— which for the bullet run is the slot immediately past its last sibling');
+      assert.strictEqual(await s4Banner(page), null, 'the partner must NOT refuse');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- b\n- a\n\n1. c\n1. d\n\ntail\n',
+        'a move to the END of the item\'s own run is accepted, and the ordered run is '
+        + 'untouched');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── now ONE slot further: inside the other run ────────────────────
+      const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '0', '0', '0', null], 'two-runs (after undo)');
+      await s4ArmedOn(page, g2[1], 'a');
+      const ind = await s4DragHandleTo(page, g2[1], g2[4].mid - 2);
+      expectApprox(ind.top, g2[4].top,
+        'PRECONDITION: the drop target is before-block 4 — BETWEEN the two members of '
+        + 'the ordered run, which is the one slot the partner above is not');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'a li may not enter another run — the marker widths and ordinals of BOTH runs '
+        + 'would have to be restated and §3.4 allows one contiguous range per gesture. '
+        + 'The EXACT wording. Got ' + JSON.stringify(banner));
+      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
+        'and NOT the non-li destination message: this source IS a list item, and the '
+        + 'advice it needs is different');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'b', 'c', 'd', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'a refused move must not write a byte');
+      assert.deepStrictEqual(lexLooseDeep(await saveAndRead(page, mdPath)), [false, false],
+        'and neither run degraded');
+    }, 'T5');
+
+    // ── 3. a li dragged PAST THE END of the document → refused ────────────
+    // The {mode:'append'} destination, which is a separate branch of
+    // performListItemDrop(): `destEl === null` names the end of the item's run
+    // only when the run ENDS the document. Here a paragraph follows it, so the
+    // append target is outside the run and the move is refused. Without this
+    // scenario the `destEl === null` arm of the out-of-run refusal has no
+    // coverage at all — the other three cases all arrive with a real element.
+    await s4Scenario('a list item dragged below every block is REFUSED when its run does '
+      + 'not end the document — and accepted when it does',
+      T4_BULLET, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'append');
+      assert.strictEqual(g[4].type, 'paragraph',
+        'FIXTURE PROOF: a block FOLLOWS the run, which is what makes the append target '
+        + 'land outside it. Got ' + g[4].type);
+
+      // ── the accepted partner: the same gesture on a document whose run
+      //    DOES end it. Same path, same {mode:'append'} target, opposite
+      //    answer — so "the append target refuses" cannot be satisfied by an
+      //    append that never works.
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[4].bottom + 200);
+      expectApprox(ind.top, g[4].bottom,
+        'PRECONDITION: below the LAST block the drop target is {mode:\'append\'} — the '
+        + 'indicator sits on that block\'s BOTTOM, a position no before-block target '
+        + 'can produce');
+      const banner = await s4Banner(page);
+      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
+        'the end of the DOCUMENT is not the end of this item\'s run — a paragraph '
+        + 'stands between them — so the move leaves the run and must refuse out loud. '
+        + 'Got ' + JSON.stringify(banner));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
+        'a refused move must not write a byte');
+    }, 'T5');
+
+    // ── 4. the partner for #3, on a document whose run DOES end it ────────
+    // Same gesture, same branch, opposite answer. Split into its own scenario
+    // because #3 leaves a banner standing and a second refusal-or-acceptance
+    // on the same page could not be told from the first.
+    await s4Scenario('a list item dragged below every block IS accepted when its own run '
+      + 'ends the document', '# Doc\n\n- alpha\n- bravo\n- charlie\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\n- alpha\n- bravo\n- charlie\n';
+      const g = await t4Fixture(page, ['heading', 'li', 'li', 'li'],
+        [null, '0', '0', '0'], 'append-accepted');
+      assert.strictEqual(g[g.length - 1].type, 'li',
+        'FIXTURE PROOF: the run ENDS the document — the difference from #3, and the '
+        + 'only difference');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].bottom + 200);
+      expectApprox(ind.top, g[3].bottom,
+        'PRECONDITION: the same {mode:\'append\'} target as #3');
+      assert.strictEqual(await s4Banner(page), null,
+        'and here it must NOT refuse — the append target names the end of the item\'s '
+        + 'own run. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- bravo\n- charlie\n- alpha\n',
+        'alpha moves to the end of its run. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false], 'and the run stays tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z must restore the file byte-for-byte');
+    }, 'T5');
+    // <<<S4T5SECTION
+
+    // >>>S4T6SECTION  (and <<<S4T6SECTION at the end.)
+    //
+    // ── S4 Task 6: DRAGGING A SELECTION (spec §4.5, §3.3, §3.6) ───────────
+    //
+    // §4.5: 「grip 在選取集合內 → 整批搬（3.3 的成員資格規則）」. §3.6 lists
+    // 整批拖曳搬移 in its inclusion list and assigns it to S4; it is the LAST
+    // outstanding item on that list.
+    //
+    // WHAT THIS TASK CLOSES. Task 3 shipped `if (operands.batch) return;` —
+    // two SILENT no-ops (a multi-block operand set and a mixed one), which
+    // §3.6 calls a defect in so many words (「靜默不動作是缺陷」). After this
+    // task every ⠿ drag either MOVES or refuses WITH A BANNER; the only
+    // silent outcomes left are the two HOME POSITIONS, which are Task 3's own
+    // ruling (a drop where the block already is is a byte no-op, not a
+    // refusal).
+    //
+    // ANTI-VACUITY, and it is why every scenario below is shaped the way it
+    // is. Nineteen tests have been vacuous across S1–S4:
+    //   * every refusal scenario asserts (a) its fixture is PROVEN to be in
+    //     the triggering state, through the same facts the gate reads — the
+    //     selected blocks' own types for MIXED, the DOM indices of the
+    //     `.ed-selected` nodes for GAP, the neighbours' block types plus the
+    //     MEASURED loose bytes for the source seam; (b) the banner TEXT, and
+    //     that the other four move messages are absent; (c) the file
+    //     byte-identical; and (d) an ACCEPTED PARTNER on the SAME fixture
+    //     through the SAME drop path — without which an implementation that
+    //     refuses every drag passes the whole task.
+    //   * every "one Ctrl+Z restored the file" is preceded by an assertion
+    //     that the move LANDED — the saved bytes AND the block order.
+    //   * "the selection followed the blocks" is asserted as the member LINE
+    //     RANGES after the move, and the pre-gesture set is asserted too, so
+    //     a selection that never moved cannot pass for one that did.
+    const t6Sel = (page) => page.evaluate(() => {
+      const s = window.__edTestGetSelection();
+      return s === null ? null : s.memberLines;
+    });
+    // The document-order INDICES of the tinted blocks. A gap is exactly
+    // "these indices are not consecutive", which is the fact
+    // spanIsContiguous() refuses on — asserted through the DOM so the fixture
+    // proof does not depend on the same module the gate uses.
+    const t6SelectedIndices = (page) => page.evaluate(() => {
+      const all = [].slice.call(document.querySelectorAll('main.content .ed-block'));
+      return all.map((el, i) => (el.classList.contains('ed-selected') ? i : -1))
+        .filter((i) => i >= 0);
+    });
+    const t6SelectedTypes = (page) => page.evaluate(() =>
+      [].slice.call(document.querySelectorAll('main.content .ed-block.ed-selected'))
+        .map((el) => el.getAttribute('data-block-type')));
+    // Every move refusal in the file, so a scenario can assert WHICH one
+    // fired rather than "some banner mentioning 清單 appeared". None is a
+    // substring of another (S4 Task 5's own naming constraint).
+    const T6_MESSAGES = {
+      mixed: '選取範圍同時含有清單項目與其他區塊，無法整批操作',
+      gap: '選取範圍不連續，無法整批操作',
+      multirun: '選取範圍跨越兩個清單，無法整批操作',
+      srcSeam: '移走這個區塊會讓上下兩串清單接在一起，無法搬移',
+      destSeam: '無法把區塊放進清單項目之間',
+      outOfRun: '清單項目只能在所屬清單內搬移',
+      // S4 Task 7's, narrowed from Task 4's wide one and re-worded with it.
+      // Listed here so every OTHER refusal in the file now also asserts that
+      // this one did not fire — the distinctness constraint Task 5 set.
+      orphan: '落點的子項目會失去上層項目，無法搬移到這裡',
+    };
+    // The banner's own dismiss button (`✕`) is part of its textContent; it is
+    // stripped rather than matched with indexOf() so the assertion still pins
+    // the WHOLE sentence — a message that merely CONTAINS the expected one
+    // would pass an indexOf check.
+    const t6AssertOnly = async (page, key, label) => {
+      const raw = await s4Banner(page);
+      const got = raw === null ? null : String(raw).replace(/✕$/, '');
+      assert.strictEqual(got, T6_MESSAGES[key],
+        label + ': the banner must say ' + key + ' — asserting the TEXT, not that some '
+        + 'banner exists. Got ' + JSON.stringify(got));
+      Object.keys(T6_MESSAGES).forEach((k) => {
+        if (k === key) return;
+        assert.ok(String(got).indexOf(T6_MESSAGES[k]) === -1,
+          label + ': and it must NOT also be ' + k + ' — one sentence for several causes '
+          + 'sends the user to fix the wrong end of the gesture');
+      });
+    };
+
+    // ── 1. a set of THREE moved down, in one undo op, selection following ──
+    await s4Scenario('a standing set of three blocks moves as one, the selection follows '
+      + 'to the NEW position, and one Ctrl+Z restores everything', S4_DOC,
+      async (page, mdPath) => {
+      const original = S4_DOC;
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+        'FIXTURE SANITY: five top-level blocks in this order. Got '
+        + JSON.stringify(g.map((b) => b.text)));
+      assert.strictEqual(await t6Sel(page), null,
+        'PRECONDITION: nothing is selected before the gesture — otherwise the member '
+        + 'ranges asserted after the move could be measuring a set this gesture never made');
+      await page.evaluate(() => window.__edTestSetSelection(3, 7));
+      assert.deepStrictEqual(await t6Sel(page), [[3, 3], [5, 5], [7, 7]],
+        'PRECONDITION: the standing set is alpha+bravo+charlie — THREE members, so a '
+        + '"the operand set is one short" implementation writes a different document '
+        + 'rather than the same one');
+      assert.deepStrictEqual(await t6SelectedIndices(page), [1, 2, 3],
+        'PRECONDITION: and the set is CONTIGUOUS, so nothing below is measuring the gap gate');
+      // The grip is pressed on the set's MIDDLE member, deliberately: §3.3
+      // says membership decides, not "the grip is the first member", and a
+      // first-member press cannot tell the two apart.
+      await s4ArmedOn(page, g[2], 'bravo');
+      const ind = await s4DragHandleTo(page, g[2], g[4].bottom + 200);
+      expectApprox(ind.top, g[4].bottom,
+        'PRECONDITION: the drop target is the {mode:\'append\'} one — the indicator sits '
+        + 'on the LAST block\'s bottom edge, a position no before-block target produces');
+      assert.strictEqual(await s4Banner(page), null,
+        'a contiguous, all-paragraph set has nothing to refuse. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\ndelta\n\nalpha\n\nbravo\n\ncharlie\n',
+        'the WHOLE set travels, in its own order, past delta. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'delta', 'alpha', 'bravo', 'charlie'],
+        'and the DOM agrees with the file');
+      // §3.3's collapse, and the mutation this assertion exists to kill: a
+      // declared range narrowed to the first member leaves the user with
+      // ONE block selected out of the three they were dragging.
+      assert.deepStrictEqual(await t6Sel(page), [[5, 5], [7, 7], [9, 9]],
+        'the set collapses onto the lines the operation COVERS — all three members at '
+        + 'their NEW lines (5/7/9), not the first one alone and not the old 3/5/7');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z restores the file byte-for-byte — a batch move is ONE '
+        + 'commitRangeEdit over min(source, destination)..max(...), not three');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'], 'and the DOM is back too');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and there is no SECOND op behind it: a second Ctrl+Z has nothing to pop');
+    }, 'T6');
+
+    // ── 2. the grip pressed on a block OUTSIDE the set ────────────────────
+    await s4Scenario('a ⠿ pressed OUTSIDE the standing set moves only that block, and '
+      + 'the set collapses onto it first (§3.3)', S4_DOC, async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6Sel(page), [[3, 3], [5, 5]],
+        'PRECONDITION: the standing set is alpha+bravo — and it does NOT contain delta');
+      assert.deepStrictEqual(await t6SelectedIndices(page), [1, 2],
+        'PRECONDITION: proved through the paint as well as the model');
+      // ── the HOME-POSITION half, and it is here for a MEASURED reason ───
+      // §3.3's 「grip 在集合外 → 先把集合換成該單一 block 再作用」 happens in
+      // resolveGutterOperands(), BEFORE the operation, so that a refused or
+      // no-op gesture leaves the documented state behind too. A gesture that
+      // MOVES cannot see that: declareCollapse() re-declares the range
+      // afterwards and lands on the same single block either way. MEASURED —
+      // deleting the collapse from resolveGutterOperands() left the
+      // post-move assertion below GREEN. A drop in the block's own home
+      // position is the shape that discriminates it: no bytes, no render, no
+      // post-operation collapse — only the pre-operation one.
+      await s4ArmedOn(page, g[4], 'delta (home position)');
+      const ind0 = await s4DragHandleTo(page, g[4], g[4].bottom + 200);
+      expectApprox(ind0.top, g[4].bottom,
+        'PRECONDITION: the drag ENGAGED and aimed at the append target, which for the '
+        + 'LAST block is its own position');
+      assert.strictEqual(await s4Banner(page), null,
+        'a home position is a byte no-op, NOT a refusal — no banner. Got '
+        + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath), S4_DOC,
+        'and no byte was written');
+      assert.deepStrictEqual(await t6Sel(page), [[9, 9]],
+        '§3.3, and this is the assertion that actually tests it: the set was replaced '
+        + 'by the grip\'s own block BEFORE the operation, so it is delta at line 9 — '
+        + 'even though the operation itself did nothing at all');
+
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6Sel(page), [[3, 3], [5, 5]],
+        'PRECONDITION: the alpha+bravo set is put back for the real move');
+      const ind = await s4DragHandleTo(page, g[4], g[0].top - 200);
+      expectApprox(ind.top, g[0].top,
+        'PRECONDITION: the drop target is before-block 0 — the very top of the document');
+      assert.strictEqual(await s4Banner(page), null, 'nothing to refuse here');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, 'delta\n\n# Doc\n\nalpha\n\nbravo\n\ncharlie\n',
+        '§3.3: 「grip 在集合外 → 先把集合換成該單一 block 再作用」 — ONLY delta moves. '
+        + 'alpha and bravo stay exactly where they were. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(await t6Sel(page), [[1, 1]],
+        'and afterwards the set is that ONE block at its NEW line 1 — not the '
+        + 'alpha+bravo pair, and not three blocks. (This one is the POST-operation '
+        + 'collapse; the pre-operation one is proved by the home-position gesture '
+        + 'above, which is the only shape that can tell them apart.)');
+    }, 'T6');
+
+    // ── 3. a NON-CONTIGUOUS set refuses, and a contiguous one on the same
+    //       fixture is accepted ─────────────────────────────────────────────
+    // The gap is not a disjoint gesture — a selection is one line range. It is
+    // a no-line PHANTOM block sitting between two real members: `- - b`
+    // yields li{7,7} | phantom{8,7} | li{8,8}, so lines 7–8 (an entirely
+    // natural selection) land on block indices 3 and 5.
+    await s4Scenario('a set with a no-line phantom between its members refuses the drag '
+      + 'with the gap banner, and a contiguous set on the same document still moves',
+      '# Doc\n\nalpha\n\nbravo\n\n- a\n- - b\n- c\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\nalpha\n\nbravo\n\n- a\n- - b\n- c\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type),
+        ['heading', 'paragraph', 'paragraph', 'li', 'li', 'li', 'li', 'paragraph'],
+        'FIXTURE SANITY: the `- - b` line contributes TWO li blocks — the phantom outer '
+        + 'and the real inner. Got ' + JSON.stringify(g.map((b) => b.type)));
+      await page.evaluate(() => window.__edTestSetSelection(7, 8));
+      assert.deepStrictEqual(await t6Sel(page), [[7, 7], [8, 8]],
+        'PRECONDITION: two members, both real');
+      assert.deepStrictEqual(await t6SelectedIndices(page), [3, 5],
+        'THE PRECONDITION THIS SCENARIO IS ABOUT: the two members are block 3 and block '
+        + '5 — block 4, the phantom, sits BETWEEN them and is not a member. That is the '
+        + 'gap, asserted through the paint');
+      await s4ArmedOn(page, g[3], 'the first member');
+      const ind = await s4DragHandleTo(page, g[3], g[0].top - 200);
+      expectApprox(ind.top, g[0].top, 'PRECONDITION: the drag ENGAGED and aimed at the top');
+      await t6AssertOnly(page, 'gap', 'a set with a phantom in the middle');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical — a refusal writes nothing');
+
+      // THE ACCEPTED PARTNER, same document, same drop path, same batch
+      // branch: without it "it refused" is satisfied by an implementation
+      // that refuses every set.
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [1, 2],
+        'PARTNER PRECONDITION: alpha+bravo, contiguous — the ONLY difference from the '
+        + 'refused gesture above');
+      const ind2 = await s4DragHandleTo(page, g[1], g[0].top - 200);
+      expectApprox(ind2.top, g[0].top, 'PARTNER PRECONDITION: the same drop target');
+      assert.strictEqual(await s4Banner(page), null,
+        'the refusal banner is gone and no new one was raised — the successful render '
+        + 'dismissed it. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, 'alpha\n\nbravo\n\n# Doc\n\n- a\n- - b\n- c\n\ntail\n',
+        'the contiguous set moves. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'and the list it was dragged past stays tight — TWO answers, because `- - b` is '
+        + 'a nested list inside the outer one and lexLooseDeep() walks into it (the '
+        + 'shallow lexLoose() sees only the outer, and has already produced a false '
+        + 'green on this project)');
+    }, 'T6');
+
+    // ── 4. a MIXED set refuses; an all-li set on the same fixture moves ────
+    // §3.6's 2026-08-31 ruling: 「混合 span 一律拒絕」, with the EXISTING
+    // banner. Task 6 does not invent a second message for it, and does not
+    // invent a blank-line rule at the run/non-run seam — §3.6 records that the
+    // spec lacks one and that inventing it late repeats the marker-width error.
+    await s4Scenario('a set holding a paragraph AND a list item refuses the drag with the '
+      + 'existing mixed banner, and an all-li set on the same list still moves',
+      '# Doc\n\npara\n\n- a\n- b\n- c\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\npara\n\n- a\n- b\n- c\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type),
+        ['heading', 'paragraph', 'li', 'li', 'li', 'paragraph'], 'FIXTURE SANITY');
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6SelectedTypes(page), ['paragraph', 'li'],
+        'THE PRECONDITION: the set holds one paragraph and one list item — the mixed '
+        + 'shape, asserted through the very attribute spanListKinds() reads');
+      await s4ArmedOn(page, g[1], 'para');
+      const ind = await s4DragHandleTo(page, g[1], g[5].bottom + 200);
+      expectApprox(ind.top, g[5].bottom, 'PRECONDITION: the drag ENGAGED, aimed at append');
+      await t6AssertOnly(page, 'mixed', 'a paragraph + li set');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+
+      // THE ACCEPTED PARTNER: the same list, the same drop path, a set of TWO
+      // list items reordered inside their own run. Without it, "the mixed set
+      // refused" is satisfied by an implementation that refuses every set.
+      await page.evaluate(() => window.__edTestSetSelection(5, 6));
+      assert.deepStrictEqual(await t6SelectedTypes(page), ['li', 'li'],
+        'PARTNER PRECONDITION: now the set is two list items — the ONLY difference');
+      assert.deepStrictEqual(await t6SelectedIndices(page), [2, 3],
+        'PARTNER PRECONDITION: and they are contiguous');
+      const ind2 = await s4DragHandleTo(page, g[2], g[5].top + 1);
+      expectApprox(ind2.top, g[5].top,
+        'PARTNER PRECONDITION: the drop lands on `tail`\'s top edge, which is the ONE '
+        + 'way to name "past the last sibling of the run"');
+      assert.strictEqual(await s4Banner(page), null,
+        'no banner: an all-li set moving inside its own run crosses no boundary. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\npara\n\n- c\n- a\n- b\n\ntail\n',
+        'the two members travel TOGETHER and in their own order, past `c`. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false],
+        'and the run stays TIGHT — a re-serialized run that went loose degrades every '
+        + 'item of it read-only with no banner');
+      assert.deepStrictEqual(await t6Sel(page), [[6, 6], [7, 7]],
+        'the set collapses onto BOTH members at their new lines, not onto the first');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z restores the run — the whole batch reorder is one commitRangeEdit');
+    }, 'T6');
+
+    // ── 5. the SOURCE seam, for a SET ─────────────────────────────────────
+    // Task 5 measured that the source seam cannot be narrowed by run identity:
+    // the block model does not carry the byte that decides it. A batch has to
+    // refuse there exactly as a single move does — the removal is the same
+    // removal, only wider.
+    await s4Scenario('a SET whose removal would join the two lists it stands between is '
+      + 'refused at the source seam, and another set on the same document still moves',
+      '# Doc\n\nx1\n\nx2\n\n- a\n\npara1\n\npara2\n\n- b\n\ntail\n',
+      async (page, mdPath) => {
+      const original = '# Doc\n\nx1\n\nx2\n\n- a\n\npara1\n\npara2\n\n- b\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type),
+        ['heading', 'paragraph', 'paragraph', 'li', 'paragraph', 'paragraph', 'li',
+          'paragraph'], 'FIXTURE SANITY');
+      // THE MEASUREMENT, pinned here rather than reasoned about: this is the
+      // document the move would leave behind, and marked answers ONE list
+      // with loose === true — every item renders as a <p>,
+      // serializeBlocks() reports 'P' for each, and the whole run degrades
+      // read-only WITH NO BANNER. That is what the refusal is buying.
+      assert.deepStrictEqual(lexTypes('- a\n\n- b\n'), ['list'],
+        'MEASURED: lifting the set out leaves `- a` and `- b` adjacent, and marked '
+        + 'answers ONE list token — not two');
+      assert.deepStrictEqual(lexLooseDeep('- a\n\n- b\n'), [true],
+        'MEASURED: and that one list is LOOSE. This is the corruption the source seam '
+        + 'gate exists to prevent, and it is not undoable once it lands');
+      await page.evaluate(() => window.__edTestSetSelection(9, 11));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [4, 5],
+        'THE PRECONDITION: the set is blocks 4 and 5 — the two paragraphs that sit '
+        + 'BETWEEN the two list items');
+      assert.deepStrictEqual([g[3].type, g[6].type], ['li', 'li'],
+        'and its two neighbours, block 3 and block 6, are BOTH list items — the fact '
+        + 'blockMoveSeamRefusal() reads');
+      await s4ArmedOn(page, g[4], 'para1');
+      const ind = await s4DragHandleTo(page, g[4], g[7].bottom + 200);
+      expectApprox(ind.top, g[7].bottom, 'PRECONDITION: the drag ENGAGED, aimed at append');
+      await t6AssertOnly(page, 'srcSeam', 'a set lifted out from between two lists');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+
+      // THE ACCEPTED PARTNER: a set of the same size and kind on the same
+      // document, whose source seam has no list on it.
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [1, 2],
+        'PARTNER PRECONDITION: two paragraphs again — but their neighbours are a '
+        + 'heading and one list item, not two list items');
+      const ind2 = await s4DragHandleTo(page, g[1], g[0].top - 200);
+      expectApprox(ind2.top, g[0].top, 'PARTNER PRECONDITION: aimed at the top');
+      assert.strictEqual(await s4Banner(page), null,
+        'accepted. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        'x1\n\nx2\n\n# Doc\n\n- a\n\npara1\n\npara2\n\n- b\n\ntail\n',
+        'the set moves to the top. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'and both one-item lists stay tight and separate');
+    }, 'T6');
+
+    // ── 6. the DESTINATION seam, for a SET ────────────────────────────────
+    // An insertion can only SPLIT, so the destination gate refuses exactly one
+    // thing: landing INSIDE one run. Same fixture, same set, two destinations
+    // — which makes this the strongest partner shape in the file: only the
+    // AIM differs.
+    await s4Scenario('a SET dropped between two items of ONE run is refused at the '
+      + 'destination seam, and the SAME set aimed past the list is accepted',
+      '# Doc\n\nx1\n\nx2\n\n- a\n- b\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\nx1\n\nx2\n\n- a\n- b\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type),
+        ['heading', 'paragraph', 'paragraph', 'li', 'li', 'paragraph'], 'FIXTURE SANITY');
+      assert.deepStrictEqual(lexTypes(original), ['heading', 'paragraph', 'space',
+        'paragraph', 'space', 'list', 'space', 'paragraph'],
+        'MEASURED: `- a` and `- b` are ONE list token — the fixture really does have a '
+        + 'two-item run for the set to land inside');
+      assert.strictEqual(g[3].id !== null && g[4].id !== null, true, 'both li are real blocks');
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [1, 2],
+        'PRECONDITION: the set is the two paragraphs');
+      await s4ArmedOn(page, g[1], 'x1');
+      const ind = await s4DragHandleTo(page, g[1], g[4].top + 1);
+      expectApprox(ind.top, g[4].top,
+        'THE PRECONDITION THIS SCENARIO IS ABOUT: the drop indicator is on the SECOND '
+        + 'list item\'s top edge, i.e. the seam BETWEEN the two items of one run');
+      await t6AssertOnly(page, 'destSeam', 'a set dropped inside a run');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+
+      // THE ACCEPTED PARTNER: the SAME set, the SAME fixture, the same drop
+      // path — only the aim differs.
+      const ind2 = await s4DragHandleTo(page, g[1], g[5].bottom + 200);
+      expectApprox(ind2.top, g[5].bottom, 'PARTNER PRECONDITION: aimed past the whole list');
+      assert.strictEqual(await s4Banner(page), null,
+        'accepted. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- a\n- b\n\ntail\n\nx1\n\nx2\n',
+        'the set lands after `tail`. Got:\n' + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false],
+        'and the run it was NOT put inside is still one tight two-item list');
+      assert.deepStrictEqual(await t6Sel(page), [[8, 8], [10, 10]],
+        'and the set follows to its new lines');
+    }, 'T6');
+    // ── 7. THE THIRD SILENT SHAPE, found by auditing every `return` ───────
+    // The plan named two silent no-ops for this task (a multi-block set and a
+    // mixed one). Walking every `return;` in the drag path afterwards turned
+    // up a THIRD, and Task 3's comment above it asserted it was unreachable:
+    // a destination that owns no source line.
+    //
+    // MEASURED, by driving the gesture: the same-line nest `- - b` yields a
+    // PHANTOM outer item whose range is INVERTED (li{5,4}) — and the phantom
+    // has a box of its own, so the drop-target picker names it like any other
+    // block. Its upper neighbour is a paragraph, so the seam gate has no
+    // objection; and planBlockMove() answers a REAL plan for it, so it is not
+    // a home position. The drag therefore did nothing, wrote nothing and said
+    // nothing. §3.6: 靜默不動作是缺陷.
+    await s4Scenario('a block dropped on a no-line PHANTOM list item is refused with the '
+      + 'destination banner rather than silently ignored, and the same block aimed one '
+      + 'block higher on the same fixture is accepted',
+      '# Doc\n\npara\n\n- - b\n- c\n\ntail\n', async (page, mdPath) => {
+      const original = '# Doc\n\npara\n\n- - b\n- c\n\ntail\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.type),
+        ['heading', 'paragraph', 'li', 'li', 'li', 'paragraph'],
+        'FIXTURE SANITY: `- - b` is ONE line and contributes TWO li blocks. Got '
+        + JSON.stringify(g.map((b) => b.type)));
+      // THE PRECONDITION THIS SCENARIO IS ABOUT, asserted through what is
+      // observable in the page: block 2 is the phantom — a list item with no
+      // text of its own standing immediately above the real one — and it has
+      // a NON-ZERO box, which is the only reason the drop target can name it.
+      assert.strictEqual(g[2].text, '',
+        'PRECONDITION: block 2 is the phantom outer item — it carries no text of its '
+        + 'own. Got ' + JSON.stringify(g[2].text));
+      assert.strictEqual(g[3].text, 'b', 'PRECONDITION: and block 3 is the real inner one');
+      assert.ok(g[2].bottom - g[2].top > 3,
+        'PRECONDITION: the phantom has a box of its own (' + (g[2].bottom - g[2].top)
+        + 'px) — with a zero-height box nearestBlockDropTarget() could never name it '
+        + 'and this whole scenario would be unreachable');
+      assert.ok(g[3].top - g[2].top > 3,
+        'PRECONDITION: and its top edge is separated from the real item\'s by '
+        + (g[3].top - g[2].top) + 'px, so the indicator reading below can tell the two '
+        + 'drop targets apart');
+      await s4ArmedOn(page, g[5], 'tail');
+      const ind = await s4DragHandleTo(page, g[5], g[2].top + 1);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: the drop indicator is on the PHANTOM\'s top edge, not the real '
+        + 'item\'s — the two are ' + (g[3].top - g[2].top) + 'px apart');
+      await t6AssertOnly(page, 'destSeam', 'a drop on a no-line phantom');
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'para', '', 'b', 'c', 'tail'],
+        'and the rendered document is untouched too');
+
+      // THE ACCEPTED PARTNER: the same block, the same fixture, the same drop
+      // path — one block higher, where the destination owns its own line.
+      // Without it "it refused" is satisfied by an implementation that
+      // refuses every drop onto anything near a list.
+      const ind2 = await s4DragHandleTo(page, g[5], g[1].top + 1);
+      expectApprox(ind2.top, g[1].top,
+        'PARTNER PRECONDITION: aimed at `para`, a block that DOES own a source line');
+      assert.strictEqual(await s4Banner(page), null,
+        'accepted — the refusal is about the phantom, not about the source block or the '
+        + 'list below it. Got ' + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\ntail\n\npara\n\n- - b\n- c\n',
+        'MEASURED with planBlockMove + marked.lexer before it was pinned. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false],
+        'and neither the outer list nor the nested one went loose');
+    }, 'T6');
+
+    // <<<S4T6SECTION
+
+    // >>>S4T7SECTION  (and <<<S4T7SECTION at the end.)
+    //
+    // ── S4 Task 7: the indent clamp on a moved block (§4.5, §3.4) ─────────
+    //
+    // THE FINDING, and it is the opposite of what the plan assumed. The plan
+    // said `applyIndentClamp()` could not express a move and that fixing it
+    // meant extending `indent-clamp.js`'s contract. Task 4's measurement was
+    // right about the symptom — handed the REORDERED span, rule 2's scope
+    // starts after the operated block's NEW index and is empty — and wrong
+    // about the remedy. A move is a REMOVAL at the old index plus an
+    // INSERTION at the new one, and `{ removed: true }` on the run in
+    // DOCUMENT order is exactly the first half. That mode has existed since
+    // S1 and the ⠿ delete uses it. Nothing in `indent-clamp.js` changed.
+    //
+    // MEASURED over the whole shape space before a line was written: every
+    // legal indent array up to length 6 and depth 3, every operand set size,
+    // every legal destination the run gate admits — 4067 drops.
+    //   * 1425 were refused by Task 4's predicate.
+    //   * the removal-clamp answers 1411 of them, leaving 14.
+    //   * all 14 are BATCH sets, and in every one of them the span breaks at
+    //     the block immediately AFTER the landed set — the DESTINATION side,
+    //     which no removal-clamp can reach. Those keep the refusal.
+    //   * 0 drops leave the MOVED block's own indent illegal. §4.5's 「保留
+    //     自己的 indent，落點使其非法時夾到合法值」 has no reachable case,
+    //     because the destination gate (§4.5's 2026-09-01 run ruling) only
+    //     ever admits a slot among the item's own same-depth siblings. That
+    //     is asserted below rather than left as an argument.
+    // test/editor-client.test.js re-runs that sweep as a pure pin.
+    //
+    // ANTI-VACUITY, per shape:
+    //   * "the orphans re-anchored" is asserted as BYTES and as the surviving
+    //     block's own `data-indent` — a clamp that writes only one of the two
+    //     is the "looks right on screen, cannot be saved" bug in whichever
+    //     direction it missed.
+    //   * "nothing shifted" carries a PARTNER on the SAME fixture through the
+    //     SAME drop path that provably DOES shift. Without it the assertion is
+    //     satisfied by a clamp that was never called.
+    //   * the surviving refusal carries an ACCEPTED partner on the same
+    //     fixture and the same DESTINATION, differing only in the operand set.
+    //   * every fixture's indents are read back through `t4Fixture()` before
+    //     the gesture, so a fixture that stopped expressing its shape fails
+    //     as a precondition rather than passing as a green test.
+
+    // ── 1. TWO SEGMENTS, DIFFERENT DELTAS — the discriminating shape ──────
+    // S3's D1 review established that a single-segment clamp and a correct
+    // one give the same answer on a one-segment fixture, and that
+    // `serializeBlocks()` rebuilds its width stack per span so a span's FIRST
+    // block emits at column 0 whatever it claims. This is the shape that can
+    // tell them apart. Removing `alpha` puts rule 3's scope into two
+    // segments:
+    //   segment 1 = alpha's whole subtree [a1(1), a1a(2), a2(1)], delta 1
+    //               (its bound is 0 — nothing survives above it)
+    //   segment 2 = the sibling bravo plus ITS subtree [bravo(0), b1(1)],
+    //               delta 0 (its bound is a2's settled 0, plus one)
+    // ONE delta for the whole scope drags b1 to column 0 too; a PER-ITEM
+    // clamp leaves a2 at 1, i.e. adopted by a1a, which is a restructure of
+    // content the user never touched (rule 3's own worked failure).
+    const T7_TWOSEG = '# Doc\n\n- alpha\n  - a1\n    - a1a\n  - a2\n- bravo\n  - b1\n\ntail\n';
+    await s4Scenario('a move whose scope holds TWO segments shifts each by its own delta',
+      T7_TWOSEG, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '1', '0', '1', null], 'two-segment');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a2', 'bravo', 'b1', 'tail'],
+        'FIXTURE SANITY: alpha owns a1/a1a/a2; bravo owns b1. TWO top-level items, so '
+        + 'the scope after alpha leaves really does split into two segments — a fixture '
+        + 'with one top-level item cannot express this at all');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[7].top + 1);
+      expectApprox(ind.top, g[7].top,
+        'PRECONDITION: the drop lands on `tail`\'s top edge — the ONE way to name "past '
+        + 'the last sibling\'s whole subtree", which is where the run ends');
+      assert.strictEqual(await s4Banner(page), null,
+        'no refusal: the orphans are re-anchored, not declined. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- a1\n  - a1a\n- a2\n- bravo\n  - b1\n- alpha\n\ntail\n',
+        'segment 1 shifts by 1 (a1 1->0, a1a 2->1, a2 1->0) and segment 2 by 0 (bravo '
+        + 'and b1 keep 0/1). BOTH mutants were run: one global delta for the whole scope '
+        + 'writes `- b1` at column 0, and dropping rule 3 for rule 4 alone writes '
+        + '"- a1 /   - a1a /   - a2" — a2 ADOPTED by a1, standing beside the nephew it '
+        + 'never had a relationship with. The single-segment fixture (T4 #8) is green '
+        + 'under that second mutant, which is why this fixture exists. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false, false],
+        'and nothing went loose — THREE answers, because a1 and bravo each keep a nested '
+        + 'list and lexLooseDeep() walks into both');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '0', '0', '1', '0', null],
+        'and the DOM carries the same depths the file does, in the new order '
+        + '(a1, a1a, a2, bravo, b1, alpha). Got ' + JSON.stringify(indents));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_TWOSEG,
+        'ONE Ctrl+Z restores every one of those columns — the clamp is part of the same '
+        + 'commitRangeEdit, not a second op behind it');
+    }, 'T7');
+
+    // ── 2. an indent that is ALREADY legal is left alone — with a partner ──
+    // Both halves are on ONE fixture and go through ONE drop path; the only
+    // difference is which item is dragged. `alpha`'s child cannot stay where
+    // it is (nothing survives above it), `bravo`'s can (zulu does). A clamp
+    // that shifts unconditionally fails the second; a clamp that never runs
+    // fails the first.
+    const T7_LEGAL = '# Doc\n\n- alpha\n  - a1\n- zulu\n- bravo\n  - b1\n\ntail\n';
+    await s4Scenario('an orphan whose indent is still legal is NOT shifted, and the same '
+      + 'gesture on the same run DOES shift one that is not', T7_LEGAL,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', '0', '1', null], 'already-legal');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'zulu', 'bravo', 'b1', 'tail'],
+        'FIXTURE SANITY: a1 is alpha\'s child and alpha is FIRST; b1 is bravo\'s child '
+        + 'and `zulu` stands above bravo. That asymmetry is the whole scenario');
+
+      // ── the PARTNER: this one SHIFTS ─────────────────────────────────────
+      await s4ArmedOn(page, g[1], 'alpha (the partner — this one shifts)');
+      const ind1 = await s4DragHandleTo(page, g[1], g[6].top + 1);
+      expectApprox(ind1.top, g[6].top, 'PRECONDITION: aimed past the last sibling\'s subtree');
+      const shifted = await saveAndRead(page, mdPath);
+      assert.strictEqual(shifted, '# Doc\n\n- a1\n- zulu\n- bravo\n  - b1\n- alpha\n\ntail\n',
+        'THE PARTNER: a1 had nothing left above it, so the clamp pulls it to column 0. '
+        + 'Without this half, "nothing shifted" below is satisfied by a clamp that is '
+        + 'never called at all. Got:\n' + JSON.stringify(shifted));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_LEGAL,
+        'PRECONDITION for the half below: the fixture is back, byte for byte');
+
+      // ── the assertion: this one does NOT ─────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '0', '0', '1', null], 'already-legal (after undo)');
+      await s4ArmedOn(page, g2[4], 'bravo');
+      const ind2 = await s4DragHandleTo(page, g2[4], g2[6].top + 1);
+      expectApprox(ind2.top, g2[6].top, 'PRECONDITION: the SAME drop target as the partner');
+      assert.strictEqual(await s4Banner(page), null, 'nothing to refuse');
+      const same = await saveAndRead(page, mdPath);
+      assert.strictEqual(same, '# Doc\n\n- alpha\n  - a1\n- zulu\n  - b1\n- bravo\n\ntail\n',
+        'b1 keeps column 2: `zulu` is still standing above it and can parent it, so '
+        + 'rule 3\'s delta is 0. A clamp that shifts every orphan writes `- b1` at column '
+        + '0 and silently re-parents content nobody dragged. Got:\n' + JSON.stringify(same));
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '0', '1', '0', null],
+        'and NOT ONE data-indent changed value — alpha 0 / a1 1 / zulu 0 / b1 1 / bravo '
+        + '0, the same five numbers the fixture had, in the new order. Got '
+        + JSON.stringify(indents));
+      assert.deepStrictEqual(lexLooseDeep(same), [false, false, false],
+        'and nothing went loose');
+    }, 'T7');
+
+    // ── 3. a DEPTH-2 item aimed where only depth 0 is legal ───────────────
+    // The plan asked for this shape and the answer is a measurement that
+    // contradicts it: the gesture cannot be made. §4.5's destination ruling
+    // (2026-09-01) admits only a slot among the item's own §3.8 siblings, so
+    // a depth-2 item aimed at a depth-0 seam is refused by Task 5's OUT OF
+    // RUN gate before any clamp is asked — and over the whole 4067-drop sweep
+    // there is no drop at all (0 of 4067) that leaves the moved block's own
+    // indent illegal. §4.5's 「落點使其非法時夾到合法值」 is therefore unreachable in
+    // 3.0.0, not unimplemented; it is the destination gate that makes it so,
+    // and if that gate is ever widened (3.1.0) this is the assertion that
+    // says the clamp for the moved block itself is now owed.
+    const T7_DEEP = '# Doc\n\n- alpha\n  - a1\n    - a1a\n    - a1b\n- bravo\n\ntail\n';
+    await s4Scenario('a depth-2 item aimed at a depth-0 seam is REFUSED by the run gate, '
+      + 'never clamped — and among its own siblings it keeps its depth',
+      T7_DEEP, async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'depth-2');
+      assert.deepStrictEqual(g.map((b) => b.text),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a1b', 'bravo', 'tail'],
+        'FIXTURE SANITY: a1a and a1b are a TWO-member depth-2 run under a1 — one member '
+        + 'would make every sibling destination its own home position and the scenario '
+        + 'would assert nothing');
+
+      // ── the ACCEPTED half first: among its own siblings, depth is kept ──
+      await s4ArmedOn(page, g[4], 'a1b (the partner move)');
+      const ok = await s4DragHandleTo(page, g[4], g[3].mid - 2);
+      expectApprox(ok.top, g[3].top, 'PRECONDITION: the drop target is before-block 3 (a1a)');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved,
+        '# Doc\n\n- alpha\n  - a1\n    - a1b\n    - a1a\n- bravo\n\ntail\n',
+        'a depth-2 item moved among its own siblings keeps column 4 — its new '
+        + 'predecessor is the same parent it always had. Got:\n' + JSON.stringify(moved));
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '2', '2', '0', null],
+        'and its data-indent is still 2 — the moved block KEEPS ITS OWN INDENT (§4.5), '
+        + 'which is the half of that sentence that IS reachable. Got '
+        + JSON.stringify(indents));
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+
+      // ── the refusal: a depth-0 destination is out of the run ────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'depth-2 (after undo)');
+      await s4ArmedOn(page, g2[4], 'a1b');
+      const ind = await s4DragHandleTo(page, g2[4], g2[1].mid - 2);
+      expectApprox(ind.top, g2[1].top,
+        'PRECONDITION: the drop target is before-block 1 — the head of the OUTER list, '
+        + 'the one seam in this document where only depth 0 is legal');
+      await t6AssertOnly(page, 'outOfRun', 'a depth-2 item aimed at a depth-0 seam');
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'and not a byte was written: the item is neither moved to column 0 nor clamped — '
+        + 'the destination is refused outright, which is why the moved block\'s own '
+        + 'clamp has no reachable case in 3.0.0');
+    }, 'T7');
+
+    // ── 4. THE SURVIVING REFUSAL: a batch whose LANDING orphans a block ────
+    // 14 drops out of 4067 are still unanchored after the removal-clamp, and
+    // all 14 look like this one: a BATCH whose last member is SHALLOWER than
+    // the block it lands before, so the destination block loses the parent
+    // chain that stood above it. A removal-clamp cannot reach that — it is
+    // the insertion half, at the NEW index, and §3.4 has no rule for it. The
+    // refusal is kept, narrowed to exactly this family and re-worded from
+    // Task 4's 「搬移後子項目會失去上層項目，暫時無法搬移到這裡」: the remedy
+    // here is to aim somewhere else, which is what the new wording says.
+    await s4Scenario('a batch whose last member is shallower than its destination is '
+      + 'refused, and the same destination accepts the same grip alone', T7_DEEP,
+      async (page, mdPath) => {
+      const g = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'residual-orphan');
+
+      // ── THE ACCEPTED PARTNER FIRST: same grip, same destination ─────────
+      // The ONLY difference between this gesture and the refused one is
+      // whether `bravo` is in the operand set. Without it "the batch was
+      // refused" is satisfied by an implementation that refuses this
+      // destination outright.
+      assert.strictEqual(await t6Sel(page), null,
+        'PARTNER PRECONDITION: no selection is standing, so the grip acts on a1b alone');
+      await s4ArmedOn(page, g[4], 'a1b alone (the partner)');
+      const ok = await s4DragHandleTo(page, g[4], g[3].mid - 2);
+      expectApprox(ok.top, g[3].top, 'PARTNER PRECONDITION: the drop target is a1a');
+      assert.strictEqual(await s4Banner(page), null, 'the single-item move is accepted');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- alpha\n  - a1\n    - a1b\n    - a1a\n- bravo\n\ntail\n',
+        'and it really moved');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'PRECONDITION for the refusal: the fixture is back, byte for byte');
+
+      // ── the refusal ─────────────────────────────────────────────────────
+      const g2 = await t4Fixture(page,
+        ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
+        [null, '0', '1', '2', '2', '0', null], 'residual-orphan (after undo)');
+      await page.evaluate(() => window.__edTestSetSelection(6, 7));
+      assert.deepStrictEqual(await t6SelectedIndices(page), [4, 5],
+        'THE PRECONDITION THIS SCENARIO IS ABOUT: the set is a1b (depth 2) AND bravo '
+        + '(depth 0) — contiguous, all list items, so every OTHER batch gate passes and '
+        + 'the only thing left to object is the landing. Asserted through the paint');
+      assert.deepStrictEqual(await t6SelectedTypes(page), ['li', 'li'],
+        'and both members really are list items, so BATCH_MIXED cannot be what fires');
+      await s4ArmedOn(page, g2[4], 'a1b (with bravo in the set)');
+      const ind = await s4DragHandleTo(page, g2[4], g2[3].mid - 2);
+      expectApprox(ind.top, g2[3].top,
+        'PRECONDITION: the SAME drop target the partner above was accepted at — a1a. '
+        + 'The destination is identical; only the operand set differs');
+      await t6AssertOnly(page, 'orphan', 'a batch landing above a deeper block');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'a1', 'a1a', 'a1b', 'bravo', 'tail'],
+        'a refused move must leave the rendered document exactly as it was');
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
+        'a refused move must not write a byte — and committing this one would put a1a '
+        + '(column 4) directly under bravo (column 0), which serializeBlocks() emits at '
+        + 'column 0 and the DOM never showed');
+      const indents = await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block'))
+        .map((el) => el.getAttribute('data-indent')));
+      assert.deepStrictEqual(indents, [null, '0', '1', '2', '2', '0', null],
+        'and the REFUSAL WROTE NO data-indent EITHER — a refused gesture must leave the '
+        + 'model exactly as it found it. NOTE, honestly: on THIS fixture the clamp is '
+        + 'empty anyway (the removal side is clean, which is true of all 14 residual '
+        + 'shapes), so this assertion does not by itself prove the compute-then-write '
+        + 'ordering in performListItemDrop(). That ordering is defensive: it is what '
+        + 'keeps the guarantee true if the residual family ever grows past the depth-3, '
+        + 'length-6 space the sweep covers. Got ' + JSON.stringify(indents));
+    }, 'T7');
+
+    // <<<S4T7SECTION
+
+    // >>>S4RVSECTION  (and <<<S4RVSECTION at the end: same marker-sliced
+    // scratch subset runner every S3/S4 task has used.)
+    //
+    // ── S4 review round (2026-09-01) ──────────────────────────────────────
+    //
+    // An independent review of the finished stage returned "ship, no blocking
+    // items" plus one MEDIUM user-facing defect and five tests that survived
+    // their own mutation. Every scenario below exists because something was
+    // GREEN when it should not have been, so each one was RED-proved against
+    // the tree as it stood at e2a2b9f before a line of the fix was written.
+    const rvSel = (page) => page.evaluate(() => {
+      const s = window.__edTestGetSelection();
+      return s === null ? null : s.memberLines;
+    });
+    const rvIndents = (page) => page.evaluate(() => Array.prototype.slice.call(
+      document.querySelectorAll('main.content .ed-block'))
+      .map((el) => (el.getAttribute('data-block-type') === 'li'
+        ? Number(el.getAttribute('data-indent')) || 0 : null)));
+
+    // ── RV1: a drop onto a block whose OWN burst is dirty ─────────────────
+    //
+    // MEASURED on e2a2b9f, as a real gesture: open '# Doc\n\nalpha\n\nbravo\n\n
+    // charlie\n', click into `charlie`, type ' EDITED', then drag `alpha`'s ⠿
+    // onto charlie's top edge. Result: the banner '文件已更新，請重試這個操作'
+    // and the file '# Doc\n\nalpha\n\nbravo\n\ncharlie EDITED\n' — THE EDIT
+    // COMMITTED AND THE MOVE DID NOT.
+    //
+    // The cause is an ASYMMETRY, not a race. performBlockDrop() captures the
+    // destination's identity and re-resolves it with reresolveBlockEl(), whose
+    // fingerprint is the block's SOURCE — and that fingerprint MUST miss here,
+    // because the commit that changed the source is the drop's own
+    // resolveGutterOperands() → switchAwayFrom(). The SOURCE side has had
+    // reresolveBlockElAfterSelfCommit() for exactly this since S2 (gated on
+    // ownsOpenSession, so no other caller loses the fingerprint); the
+    // destination side had no counterpart at all.
+    await s4Scenario('a drop onto a block with an OPEN DIRTY burst of its own completes '
+      + 'the move — the destination gets the same self-commit re-resolve the source has '
+      + 'had since S2', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      assert.deepStrictEqual(g0.map((b) => b.text), ['Doc', 'alpha', 'bravo', 'charlie'],
+        'FIXTURE SANITY: four top-level blocks in this order. Got '
+        + JSON.stringify(g0.map((b) => b.text)));
+      const destSel = '.ed-block[data-block-id="' + g0[3].id + '"]';
+      await openWysiwyg(page, destSel);
+      await page.keyboard.press('End');
+      await page.keyboard.type(' EDITED');
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'),
+          destSel), true,
+        'PRECONDITION: the burst must be open and DIRTY on the DESTINATION block before '
+        + 'the drag — the whole defect is that the drop\'s own switchAwayFrom() is what '
+        + 'rewrites that block\'s source, so a clean burst cannot express it');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent,
+          destSel), 'charlie EDITED',
+        'PRECONDITION: and the typed text really is in the surface');
+
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top,
+        'PRECONDITION: the drop indicator is on CHARLIE\'s own top edge — the block that '
+        + 'owns the dirty burst, which is what makes this the destination-side case');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE DEFECT: e2a2b9f raised 文件已更新，請重試這個操作 here, for a gesture in '
+        + 'which nothing whatsoever went wrong — the fingerprint missed because the '
+        + 'drop itself had just rewritten the block it was fingerprinting. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const out = await saveAndRead(page, mdPath);
+      assert.strictEqual(out, '# Doc\n\nbravo\n\nalpha\n\ncharlie EDITED\n',
+        'and BOTH halves land: the burst\'s edit AND the move. e2a2b9f wrote only the '
+        + 'edit. Got:\n' + JSON.stringify(out));
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'bravo', 'alpha', 'charlie EDITED'],
+        'and the DOM agrees with the file');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nalpha\n\nbravo\n\ncharlie EDITED\n',
+        'ONE Ctrl+Z takes back the MOVE and leaves the burst\'s own commit standing — '
+        + 'they are two gestures and therefore two ops');
+    }, 'RV');
+
+    // ── RV1b: the CONTROL the review measured, kept as a partner ──────────
+    // A burst open on the destination but NOT dirty. switchAwayFrom() cancels
+    // it instead of committing, so nothing re-renders, `destEl` is still
+    // attached and no re-resolve is attempted at all. Without this partner
+    // "the move landed" above is satisfied by an implementation that stopped
+    // re-resolving the destination altogether.
+    await s4Scenario('a drop onto a block with a CLEAN burst open on it was never broken '
+      + '— the partner that proves RV1 is about the COMMIT, not about the burst',
+      '# Doc\n\nalpha\n\nbravo\n\ncharlie\n', async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      const destSel = '.ed-block[data-block-id="' + g0[3].id + '"]';
+      await openWysiwyg(page, destSel);
+      assert.strictEqual(
+        await page.evaluate((s) => document.activeElement === document.querySelector(s + ' > *'),
+          destSel), true, 'PRECONDITION: the burst is open on charlie');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent,
+          destSel), 'charlie',
+        'PRECONDITION: and it is CLEAN — nothing was typed, which is the ONE difference '
+        + 'from RV1');
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top, 'PRECONDITION: the indicator is on charlie\'s top edge');
+      assert.strictEqual(await s4Banner(page), null,
+        'no banner. Got ' + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nbravo\n\nalpha\n\ncharlie\n',
+        'and the move lands with charlie\'s own text untouched');
+    }, 'RV');
+
+    // ── RV1c: the SOURCE-side control ─────────────────────────────────────
+    // The asymmetry cuts one way only, and this is the half that already
+    // worked. Kept so a fix that "unified" the two re-resolves and lost the
+    // source's own gate fails here rather than in review.
+    await s4Scenario('a drop whose SOURCE owns the dirty burst still completes — the '
+      + 'S2 half of the asymmetry, pinned', '# Doc\n\nalpha\n\nbravo\n\ncharlie\n',
+      async (page, mdPath) => {
+      const g0 = await s4Geometry(page);
+      const srcSel = '.ed-block[data-block-id="' + g0[1].id + '"]';
+      await openWysiwyg(page, srcSel);
+      await page.keyboard.press('End');
+      await page.keyboard.type(' EDITED');
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s + ' > *').textContent, srcSel),
+        'alpha EDITED', 'PRECONDITION: the dirty burst is on the SOURCE block this time');
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[3].top + 1);
+      expectApprox(ind.top, g[3].top, 'PRECONDITION: the indicator is on charlie\'s top edge');
+      assert.strictEqual(await s4Banner(page), null,
+        'no banner — reresolveBlockElAfterSelfCommit() has covered the source since S2. '
+        + 'Got ' + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\nbravo\n\nalpha EDITED\n\ncharlie\n',
+        'and the edit travels with the block it was made in');
+    }, 'RV');
+
+    // ── RV2: writeIndentClamp() — the write, not the computation ──────────
+    //
+    // The review measured that `writeIndentClamp(clamp);` can be DELETED from
+    // performListItemDrop() and all 39 S4 scenarios stay green, the four T7
+    // ones named after the clamp included. That was true, and the reason is
+    // that every T7 fixture moves a SINGLE item: re-run over the whole
+    // 4067-drop space with the real serializeBlocks(), `count === 1` never
+    // produces a byte difference at all — serializeBlocks() rebuilds its width
+    // stack per span (`widths.length = indent + 1` after every block), so an
+    // over-deep `data-indent` is emitted at its anchor's column anyway, which
+    // is the same column the clamp would have written.
+    //
+    // It is NOT true for a BATCH set. 53 of the 4053 admitted drops differ in
+    // bytes on a `ul` and 123 on an `ol`, every one of them `count > 1`. This
+    // is the smallest `ul` shape that does (measured, not reasoned):
+    //
+    //   - x0            move {x1, x2} past the end of the run
+    //   - x1              with the write:  - x0 / ␣␣- x3 / - x4 / - x1 / ␣␣- x2
+    //     - x2            without it:      - x0 / ␣␣- x3 / ␣␣- x4 / - x1 / ␣␣- x2
+    //       - x3
+    //     - x4          x4's parent left the run, so it belongs at depth 0 —
+    //                   without the write it is ADOPTED BY x0, an item the
+    //                   user never touched. That is rule 3's own worked
+    //                   failure, produced by dropping the write.
+    await s4Scenario('a BATCH li move writes the clamped indents of the orphans it leaves '
+      + 'behind — the shape that discriminates the WRITE from the computation',
+      '# Doc\n\n- x0\n- x1\n  - x2\n    - x3\n  - x4\n', async (page, mdPath) => {
+      const original = '# Doc\n\n- x0\n- x1\n  - x2\n    - x3\n  - x4\n';
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'x0', 'x1', 'x2', 'x3', 'x4'],
+        'FIXTURE SANITY: six blocks in this order. Got ' + JSON.stringify(g.map((b) => b.text)));
+      assert.deepStrictEqual(await rvIndents(page), [null, 0, 0, 1, 2, 1],
+        'FIXTURE PRECONDITION: the indent array is 0,0,1,2,1 — the shape the sweep named. '
+        + 'A fixture that stopped expressing it would pass this scenario while testing '
+        + 'nothing. Got ' + JSON.stringify(await rvIndents(page)));
+      await page.evaluate(() => window.__edTestSetSelection(4, 5));
+      assert.deepStrictEqual(await rvSel(page), [[4, 4], [5, 5]],
+        'PRECONDITION: the standing set is {x1, x2} — TWO members, which is what makes '
+        + 'this a batch. Got ' + JSON.stringify(await rvSel(page)));
+      await s4ArmedOn(page, g[2], 'x1');
+      const ind = await s4DragHandleTo(page, g[2], g[5].bottom + 200);
+      expectApprox(ind.top, g[5].bottom,
+        'PRECONDITION: the drop target is the {mode:\'append\'} one — the indicator sits '
+        + 'on the LAST block\'s bottom edge, which is how the end of this run is named');
+      assert.strictEqual(await s4Banner(page), null,
+        'the drop is admitted — spanIndentsAreAnchored() answers true on the CLAMPED '
+        + 'span, so this is not one of the 14 residual refusals. Got '
+        + JSON.stringify(await s4Banner(page)));
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- x0\n  - x3\n- x4\n- x1\n  - x2\n',
+        'THE MUTATION THIS KILLS: with `writeIndentClamp(clamp);` removed the file comes '
+        + 'back \'# Doc\\n\\n- x0\\n  - x3\\n  - x4\\n- x1\\n  - x2\\n\' — x4 keeps the '
+        + 'depth its departed parent gave it and is adopted by x0. Got:\n'
+        + JSON.stringify(moved));
+      assert.deepStrictEqual(await rvIndents(page), [null, 0, 1, 0, 0, 1],
+        'and the SCREEN agrees with the bytes: x3 settled at 1 and x4 at 0. A clamp that '
+        + 'writes only one of the two is the "looks right, cannot be saved" bug in '
+        + 'whichever direction it missed. Got ' + JSON.stringify(await rvIndents(page)));
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false, false],
+        'and nothing went loose — the outer run and its two sublists. Stated for '
+        + 'completeness and NOT as the discriminator: the mutant emits three tight '
+        + 'lists too. The bytes and the data-indent readback above are what bite');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'ONE Ctrl+Z restores the file byte-for-byte');
+    }, 'RV');
+
+    // ── RV3: declareCollapse() must NOT invent a selection ────────────────
+    //
+    // The review measured that mutating `declareCollapse(...)` to
+    // `declareSelectionRange(...)` survives on BOTH drop paths. The mutant's
+    // consequence is exactly what declareCollapse()'s own `if (blockSelection)`
+    // guard exists to stop: a single-block drag with NO selection standing
+    // CREATES one ({anchorLine:7, focusLine:7} on the non-li path), tinting a
+    // block and pulling the roving focus onto it. One assertion closes both
+    // paths: the selection is still null after a single-block drag.
+    await s4Scenario('a single PARAGRAPH drag with no selection standing leaves no '
+      + 'selection behind — declareCollapse()\'s guard, pinned', S4_DOC,
+      async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.strictEqual(await rvSel(page), null,
+        'PRECONDITION: nothing is selected before the gesture — "no selection after" is '
+        + 'worth nothing without it');
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[1], g[4].top + 1);
+      expectApprox(ind.top, g[4].top, 'PRECONDITION: the indicator is on delta\'s top edge');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n',
+        'ANTI-VACUITY: the drag must actually have MOVED the block — "no selection was '
+        + 'created" is trivially true of a gesture that never ran');
+      assert.strictEqual(await rvSel(page), null,
+        'THE MUTATION THIS KILLS: with declareCollapse() replaced by '
+        + 'declareSelectionRange() this answers [[7,7]] — a set the user never made, '
+        + 'which changes the resting state of every following gesture. Got '
+        + JSON.stringify(await rvSel(page)));
+      assert.deepStrictEqual(await page.evaluate(() => Array.prototype.slice.call(
+        document.querySelectorAll('main.content .ed-block.ed-selected')).length), 0,
+        'and nothing is tinted on screen either');
+    }, 'RV');
+
+    await s4Scenario('a single LIST ITEM drag with no selection standing leaves no '
+      + 'selection behind — the li path\'s own half of the same guard',
+      '# Doc\n\n- a\n- b\n- c\n', async (page, mdPath) => {
+      const g = await s4Geometry(page);
+      assert.deepStrictEqual(g.map((b) => b.text), ['Doc', 'a', 'b', 'c'],
+        'FIXTURE SANITY: four blocks. Got ' + JSON.stringify(g.map((b) => b.text)));
+      assert.strictEqual(await rvSel(page), null,
+        'PRECONDITION: nothing is selected before the gesture');
+      await s4ArmedOn(page, g[1], 'a');
+      const ind = await s4DragHandleTo(page, g[1], g[3].bottom + 200);
+      expectApprox(ind.top, g[3].bottom,
+        'PRECONDITION: the drop target is the {mode:\'append\'} one, i.e. the end of the run');
+      assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- b\n- c\n- a\n',
+        'ANTI-VACUITY: the item must actually have MOVED — this is the li path, which '
+        + 'declares its collapse from a DIFFERENT call site');
+      assert.strictEqual(await rvSel(page), null,
+        'THE MUTATION THIS KILLS: declareSelectionRange() in place of declareCollapse() '
+        + 'in performListItemDrop() creates a set on a gesture that had none. Got '
+        + JSON.stringify(await rvSel(page)));
+    }, 'RV');
+
+    // ── RV4: the FIRST home position is MEMBERSHIP, not "the first member" ─
+    //
+    // The review measured that narrowing `opEls.indexOf(liveDestEl) !== -1` to
+    // `opEls[0] === liveDestEl` survives every existing scenario. Its
+    // consequence: a three-member set dropped on its own SECOND member raises
+    // '文件已更新，請重試這個操作' — the destination is not in the source-less
+    // array, so its index is -1 — for a gesture in which nothing went wrong.
+    await s4Scenario('a set dropped on a NON-FIRST member of itself is a silent byte '
+      + 'no-op, not a dropped gesture', S4_DOC, async (page, mdPath) => {
+      const original = S4_DOC;
+      const g = await s4Geometry(page);
+      await page.evaluate(() => window.__edTestSetSelection(3, 7));
+      assert.deepStrictEqual(await rvSel(page), [[3, 3], [5, 5], [7, 7]],
+        'PRECONDITION: the standing set is alpha+bravo+charlie — THREE members, so a '
+        + '"drop on the SECOND member" is expressible at all. Got '
+        + JSON.stringify(await rvSel(page)));
+      await s4ArmedOn(page, g[1], 'alpha');
+      const ind = await s4DragHandleTo(page, g[2], g[2].top + 1);
+      expectApprox(ind.top, g[2].top,
+        'PRECONDITION: the indicator is on BRAVO\'s top edge — the set\'s SECOND member, '
+        + 'which is the whole point: a first-member drop cannot tell the two predicates '
+        + 'apart');
+      assert.strictEqual(await s4Banner(page), null,
+        'THE MUTATION THIS KILLS: with the membership test narrowed to '
+        + '`opEls[0] === liveDestEl` this raises 文件已更新，請重試這個操作. Any '
+        + 'member\'s top edge is the SET\'S OWN FOOTPRINT — dropping there is "put it '
+        + 'back", which §4.5 rules is a byte no-op and not a refusal. Got '
+        + JSON.stringify(await s4Banner(page)));
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and the file is byte-identical');
+      assert.deepStrictEqual(await s4BlockTexts(page),
+        ['Doc', 'alpha', 'bravo', 'charlie', 'delta'], 'and so is the DOM');
+      assert.deepStrictEqual(await rvSel(page), [[3, 3], [5, 5], [7, 7]],
+        'and the set is still standing, unchanged');
+
+      // THE ACCEPTED PARTNER, same page, same set, same drop path — without
+      // it "no banner" is satisfied by a drop path that answers nothing at all.
+      const ind2 = await s4DragHandleTo(page, g[1], g[4].bottom + 200);
+      expectApprox(ind2.top, g[4].bottom, 'PARTNER PRECONDITION: aimed past delta');
+      assert.strictEqual(await s4Banner(page), null, 'accepted');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\ndelta\n\nalpha\n\nbravo\n\ncharlie\n',
+        'and the very same set really does move when it is aimed somewhere else');
+    }, 'RV');
+
+    // ── RV5: Shift / Ctrl / Alt + ⠿ starts a drag ─────────────────────────
+    //
+    // RECORDED, because nobody had. Before S4 a modified press on ⠿ did
+    // NOTHING (armBlockSelDrag() and beginShiftClickSelection() both return
+    // for `.ed-handle`, a member of ED_SEL_GESTURE_CHROME) and its trailing
+    // click opened the menu. armBlockDrag() checks no modifiers and is ordered
+    // above the Shift branch, so a modified press now drags.
+    //
+    // THE RULING: keep it. It is exactly what the table row/column grips do —
+    // their pointerdown branch reads no modifier either — and ⠿ behaving
+    // differently from every other grip in the editor would be the surprise.
+    // Nothing in §3.3 or §4.5 assigns a modified ⠿ press a meaning of its own,
+    // and the sub-threshold press still opens the menu with any modifier held,
+    // so nothing was taken away.
+    await s4Scenario('a ⠿ drag engages and completes with Shift, Ctrl or Alt held — the '
+      + 'same answer the table grips give, pinned rather than left unrecorded', S4_DOC,
+      async (page, mdPath) => {
+      const original = S4_DOC;
+      const moved = '# Doc\n\nbravo\n\ncharlie\n\nalpha\n\ndelta\n';
+      for (const mod of ['Shift', 'Control', 'Alt']) {
+        const g = await s4Geometry(page);
+        assert.deepStrictEqual(g.map((b) => b.text),
+          ['Doc', 'alpha', 'bravo', 'charlie', 'delta'],
+          mod + ': PRECONDITION — the document is back to its original order before this '
+          + 'pass. Got ' + JSON.stringify(g.map((b) => b.text)));
+        await s4ArmedOn(page, g[1], mod + ' + alpha');
+        await page.keyboard.down(mod);
+        try {
+          await page.mouse.move(g[1].handle.x, g[1].handle.y);
+          await page.mouse.down();
+          await page.mouse.move(g[1].handle.x, g[4].top + 1, { steps: 8 });
+          // Deliberately NOT a bare waitForSelector: the failure this scenario
+          // exists to name is "the modified press engaged nothing", and a raw
+          // puppeteer TimeoutError says none of that. Swallow the wait and let
+          // the assertion below speak.
+          await page.waitForSelector('.ed-block-drop-indicator:not([hidden])', { timeout: 3000 })
+            .catch(() => {});
+          const ind = await s4Indicator(page);
+          assert.strictEqual(ind.hidden, false,
+            mod + ': the drag must ENGAGE with the modifier held — before S4 a modified '
+            + 'press on ⠿ recorded no pointer state at all, and a modifier check added '
+            + 'to armBlockDrag() puts it back there. Got ' + JSON.stringify(ind));
+          expectApprox(ind.top, g[4].top,
+            mod + ': and the drop target is delta\'s top edge');
+          await page.mouse.up();
+          await settleEditor(page);
+        } finally { await page.keyboard.up(mod); }
+        assert.strictEqual(await s4Banner(page), null,
+          mod + ': no banner. Got ' + JSON.stringify(await s4Banner(page)));
+        assert.strictEqual(await s4MenuOpen(page), false,
+          mod + ': and the trailing click does not open the ⠿ menu — a drag is a drag '
+          + 'whatever is held');
+        assert.strictEqual(await saveAndRead(page, mdPath), moved,
+          mod + ': the block really moved. Got:\n' + JSON.stringify(await saveAndRead(page, mdPath)));
+        await s4UndoOnce(page);
+        assert.strictEqual(await saveAndRead(page, mdPath), original,
+          mod + ': and one Ctrl+Z puts it back, ready for the next modifier');
+      }
+      // THE PARTNER that keeps the sub-threshold half honest: a modified press
+      // that never crosses TE_DRAG_THRESHOLD_PX is still a CLICK and still
+      // opens the menu, so the ruling above took nothing away.
+      const g = await s4Geometry(page);
+      await s4ArmedOn(page, g[1], 'Shift + alpha (sub-threshold)');
+      await page.keyboard.down('Shift');
+      try {
+        await page.mouse.move(g[1].handle.x, g[1].handle.y);
+        await page.mouse.down();
+        await page.mouse.move(g[1].handle.x + 2, g[1].handle.y + 2);
+        assert.strictEqual((await s4Indicator(page)).hidden, true,
+          'a sub-threshold press is not a drag, modifier or not');
+        await page.mouse.up();
+      } finally { await page.keyboard.up('Shift'); }
+      await page.waitForFunction(
+        (s) => document.querySelectorAll(s + ' .ed-handle-menu-btn').length > 0,
+        { timeout: 5000 }, '.ed-block[data-block-id="' + g[1].id + '"]');
+      assert.strictEqual(await s4MenuOpen(page), true,
+        'and the ⠿ menu still opens from a Shift-held press that never moved');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'), { timeout: 5000 });
+      assert.strictEqual(await saveAndRead(page, mdPath), original,
+        'and nothing was written by any of it');
+    }, 'RV');
+
+    // <<<S4RVSECTION
 
     console.log('editor-client-runtime.test.js OK');
   } finally {
