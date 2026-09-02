@@ -8353,6 +8353,139 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // v3.0.1 defect: a bullet nested under an ORDERED item could be
+    // outdented once and then never indented again. Shift+Tab drops it to
+    // indent 0, where it becomes the first item of a NEW list token (a ul
+    // following an ol), and indentListItem()'s `if (self.listStart) return
+    // false` refused every Tab from then on.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '1. XXX', '   - OOO', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const ooo = await liBlockSelByText(page, 'OOO');
+        await openWysiwyg(page, ooo);
+        await placeCaretInListText(page, ooo, 'OOO', true);
+
+        // Shift+Tab: OOO rises to indent 0.
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return !!hit && hit.getAttribute('data-indent') === '0';
+        });
+        await settleEditor(page);
+        // Fixture fix (RED-phase finding): structural Tab/Shift+Tab commits
+        // land in the in-memory `lines` and re-render via /api/render, but
+        // ONLY Ctrl+S's save() persists to disk (lib/editor/client.js's only
+        // caller of save() is its Ctrl+S handler, at the `if ((e.ctrlKey ||
+        // e.metaKey) && ... e.key === 's')` branch). A bare
+        // fs.readFileSync(lmdPath) after settleEditor() therefore always
+        // reads back the pristine original — that read is what the brief's
+        // Step 1 block shipped with, and it is why the RED run failed at
+        // this precondition assertion instead of at the Tab-after-Shift+Tab
+        // assertion below (the defect this test targets). Every sibling
+        // list-WYSIWYG scenario in this file reads the file via
+        // saveAndRead() for the same reason; matching that idiom here.
+        //
+        // The click-away-to-heading-then-Escape below (same idiom the
+        // "Tab indents item as child of previous sibling" scenario above
+        // uses right before ITS OWN saveAndRead) matters here for a second,
+        // independent reason: the structural Tab/Shift+Tab commit ends its
+        // burst via endBurstWithoutResolve() and re-renders, leaving NOTHING
+        // focused. Calling saveAndRead() (Ctrl+S) from that empty-focus state
+        // and then immediately clicking straight back into the SAME li text
+        // races client.js's `switching`/focusin bookkeeping (a DIFFERENT,
+        // pre-existing timing sensitivity, unrelated to this defect, in
+        // handleBurstKeydown()'s "already resolving" path around Ctrl+S) —
+        // observed directly by instrumenting client.js: the second click's
+        // focusin can land before startBurst() has re-armed the surface, so
+        // the following Tab keydown finds no burst to act on and is silently
+        // swallowed (not a timeout — nothing happens because nothing runs).
+        // A real user's next keypress is never this fast on the heels of
+        // Ctrl+S; giving the page one settled, unambiguous focus transition
+        // before each save — heading, then Escape, same as every other
+        // saveAndRead call in this file — sidesteps it deterministically.
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+        const outdented = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(outdented, lorig,
+          'precondition: Shift+Tab must actually have changed the file');
+
+        // Tab: OOO must go back to indent 1. THIS is the defect.
+        const ooo2 = await liBlockSelByText(page, 'OOO');
+        await openWysiwyg(page, ooo2);
+        await placeCaretInListText(page, ooo2, 'OOO', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return !!hit && hit.getAttribute('data-indent') === '1';
+        }, { timeout: 5000 });
+        await settleEditor(page);
+
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+        const reindented = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(reindented, outdented,
+          'Tab after Shift+Tab must change the file back, got:\n' + reindented);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab works again after Shift+Tab on a bullet under an ordered item — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Guard for the narrowed listStart rule: two list tokens separated by a
+    // BLANK LINE must stay separate. Indenting the second one would make
+    // listRunOf() span both, and re-serializing that span swallows the blank
+    // line between them — a rewrite of lines the user never touched.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha', '- Bravo', '',
+          '1. Charlie', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const charlie = await liBlockSelByText(page, 'Charlie');
+        await openWysiwyg(page, charlie);
+        await placeCaretInListText(page, charlie, 'Charlie', true);
+        await page.keyboard.press('Tab');
+        await settleEditor(page);
+
+        const after = fs.readFileSync(lmdPath, 'utf8');
+        assert.strictEqual(after, lorig,
+          'Tab on a list token separated from the previous list by a blank ' +
+          'line must be a no-op — the blank line is the user\'s, got:\n' + after);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab refuses to merge two lists across a blank line — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     // Row 7: Tab with NO previous sibling is a no-op (first item can't indent).
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
