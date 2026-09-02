@@ -3,6 +3,48 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.0.1 — 2026-09-02
+
+A bugfix release for `md2doc --edit`, aimed squarely at the thing that makes this
+editor worth using: editing one block must not rewrite any other bytes.
+
+### Fixed
+
+- **清單 Tab 在 Shift+Tab 之後失效。** `indentListItem()` 拒絕所有 list-start 區塊的 Tab，
+  所以一個縮排在編號項底下的項目符號，Shift+Tab 之後落到 indent 0 就成為新清單的第一項，
+  再也無法縮排回去。拒絕規則收窄成「前一個區塊不是清單項，或兩張清單之間隔著空行」——
+  後者才是原規則真正要防的情況，而且它讀的是檔案的行號相鄰性，不是 DOM。多選 Tab 走的
+  `memberIndentHeadroom()` 是同一條規則的另一條軸，一併收窄。
+- **「轉換成」子選單沒有圖示，兩層選單的文字不對齊。** 子選單每一列現在都帶一個與
+  `CONVERT_TARGETS` id 對應的圖示，圖示靠左，文字距圖示一個空格。同時修掉一個 cascade
+  缺陷：`.content svg { margin: 0 auto }` 的優先權壓過裸的 `.ed-menu-icon`，圖示因此被塞了
+  置中的 auto margin，偏移量會隨標籤長度在 11–40px 之間晃。
+- **表格左側的列 grip 不在表格邊框上。** v2.12.0 為了避開 ⠿ 的命中測試把 grip 整個推進
+  表格內，導致它與表格上緣的欄 grip 不對稱。改成把 gutter 的 ＋／⠿ 兩顆鈕往左移
+  （`--ed-gutter-shift`），從源頭消除重疊：grip 騎回邊框、⠿ 與它之間保有 4px 間隙、
+  第一欄取回預設 padding。順帶修好 `.ed-block::before` 沒有跟著位移造成的一條 10px
+  hover 死區——它壓在 ＋ 自己的左半邊，在每個清單列底部與高標題的垂直中段都會出現。
+
+### Changed
+
+- **表格重新序列化時保留作者原本的欄寬。** 先前不論原始表格長什麼樣，一律輸出 minimal form（單空格 padding、
+  分隔列不拉長），所以手工對齊過的表格只要改一格，整張表的每一行都是 diff。
+  現在序列化器會讀取該表格目前的原始行，並在**每一欄在每一列都是同寬、且該寬度大於 3**
+  時，把它當成 padding 下限沿用；空格填充的分隔列（Prettier 與 VS Code 產出的那種，破折號兩側帶空格）在對齊未變且寬度未變時原樣保留，不再被改寫。內容變長的欄位只會變寬，不會被截斷。
+- 沒有原始來源、原始來源無法解析、或**表頭被改名、有欄位被刪除**時，整張表仍回退成 minimal form。後兩者是已知限制，會在後續版本處理。
+
+### Internal
+
+- `lib/editor/client.js` 中 `tableIdentityOf()` 的兩個分隔符從字面控制位元組改成 `'\x01'`
+  / `'\x00'` 轉義。執行期值不變，但 `grep` 不再把這個 9600 行的檔案判定為 binary 並靜默
+  截斷輸出。
+
+### Known issues
+
+- 表格**表頭那一列**的 grip 顯示時，它會蓋住 ⠿ 進場走廊的 10px。滑鼠從表格往左移向 ⠿ 時
+  會看到 ⠿ 短暫淡出再淡回。⠿ 不會變成點不到，資料列的 grip 也沒有這個問題。grip 必須是
+  `document.body` 的子節點才能在表格捲動時保持固定，所以這無法用幾何解決，要靠狀態規則。
+
 ## v3.0.0 — 2026-09-01
 
 3.0.0 is a milestone, not a break. The `md2doc` command takes the same arguments and

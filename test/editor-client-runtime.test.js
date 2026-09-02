@@ -1987,6 +1987,60 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // v3.0.1: the 轉換成 submenu carried no icons, so its labels started at
+    // the button's own padding while the parent menu's labels started past a
+    // 16px icon — the two levels' text did not share a vertical line.
+    {
+      const { srv: t4Srv, url: t4Url } = await setupTableDoc(['A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t4Url, { waitUntil: 'networkidle0' });
+
+        const paraSel = await blockSelByType(page, 'paragraph');
+        await openGutterMenu(page, paraSel);
+        await clickGutterMenuItem(page, paraSel, '轉換成 ›');
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+
+        const shape = await page.evaluate(() => {
+          const sub = document.querySelector('.ed-handle-submenu');
+          const btns = Array.prototype.slice.call(sub.querySelectorAll('.ed-handle-menu-btn'));
+          return {
+            count: btns.length,
+            withIcon: btns.filter((b) => !!b.querySelector('svg.ed-menu-icon')).length,
+            // Every submenu row's icon must start at the same x as the parent
+            // menu's icons — that is what "aligned" means here.
+            subIconLefts: btns.map((b) => {
+              const i = b.querySelector('svg.ed-menu-icon');
+              return i ? Math.round(i.getBoundingClientRect().left - b.getBoundingClientRect().left) : null;
+            }),
+            parentIconLefts: Array.prototype.slice.call(
+              document.querySelectorAll('.ed-handle-menu:not(.ed-handle-submenu) > .ed-handle-menu-btn'))
+              .filter((b) => !b.hidden)
+              .map((b) => {
+                const i = b.querySelector('svg.ed-menu-icon');
+                return i ? Math.round(i.getBoundingClientRect().left - b.getBoundingClientRect().left) : null;
+              }),
+          };
+        });
+
+        assert.strictEqual(shape.withIcon, shape.count,
+          'every 轉換成 submenu row must carry an icon, got ' +
+          shape.withIcon + ' of ' + shape.count);
+        const allLefts = shape.subIconLefts.concat(shape.parentIconLefts);
+        assert.ok(allLefts.every((v) => v !== null),
+          'no menu row may be missing its icon: ' + JSON.stringify(allLefts));
+        assert.strictEqual(new Set(allLefts).size, 1,
+          'every menu row across BOTH levels must start its icon at the same ' +
+          'offset, got ' + JSON.stringify(allLefts));
+
+        await page.keyboard.press('Escape');
+        await page.close();
+        console.log('gutter menu: both levels share one icon/text baseline — OK');
+      } finally {
+        t4Srv.close();
+      }
+    }
+
     // ── S2 Task 2: 轉換成 on a block that owns its own lines (paragraph ↔
     //    heading ↔ quote ↔ code). List sources and list targets land in
     //    Tasks 3-5 and refuse until then. ────────────────────────────────
@@ -6346,15 +6400,15 @@ async function gutterGeometry(page, sel) {
           return { gTop: g.top, gLeft: g.left, gH: g.height, gW: g.width,
                    hrTop: hr.top, hrH: hr.height, tLeft: table.getBoundingClientRect().left };
         }, table0);
-        // MIGRATED (S4 T1, spec §5.2a item 2): this asserted the grip's
-        // CENTRELINE was on the table's left border. §4.2 hit-test conflict 2
-        // reversed that — the grip's LEFT EDGE is on the border now, so the
-        // whole grip is inside the table and shares no pixel with the block
-        // gutter's ⠿. Same rule for every row, header included; only the
-        // expected number moved.
-        expectApprox(hg.gLeft, hg.tLeft,
-          'header row grip sits ENTIRELY INSIDE the table like any other row '
-          + '(its LEFT EDGE on the border, §4.2 conflict 2)');
+        // MIGRATED (v3.0.1): S4 T1 (spec §5.2a item 2) moved the grip's LEFT
+        // EDGE onto the border to stop it winning the hit test over the ⠿.
+        // v3.0.1 restores the original CENTRELINE-on-border straddle instead
+        // (the ⠿/＋ pair itself moved left by --ed-gutter-shift, which
+        // removes the overlap without moving the grip) — same rule for every
+        // row, header included; only the expected number moved back.
+        expectApprox(hg.gLeft + hg.gW / 2, hg.tLeft,
+          'header row grip is CENTRED on the table\'s left border, like any '
+          + 'other row (straddling it, §4.2 conflict 2 / v3.0.1)');
         expectApprox(hg.gTop + hg.gH / 2, hg.hrTop + hg.hrH / 2,
           'header row grip is centred on its OWN row, exactly like a body row (no header-only offset)');
         // The column grip must still work over the header row's own cells
@@ -6363,15 +6417,16 @@ async function gutterGeometry(page, sel) {
           await page.evaluate(() => document.querySelector('.ed-te-grip-col').hidden), false,
           'hovering the header row must still reveal the COLUMN grip for that column');
 
-        // Position (uniform geometry): the row grip STRADDLES the table's
-        // left border — its LEFT EDGE on that border, so the whole grip is
-        // inside the table (§4.2 hit-test conflict 2, landed S4 T1). This is
-        // NOT what the column grip does on the top border: nothing of the
-        // page's own chrome lives above a table, but the block's ⠿ lives
-        // immediately left of one, and a straddling row grip ate its right
-        // 6px. The grip is kept off the first cell's TEXT by the edit-mode
-        // first-column padding (--ed-te-cell-pad-left) in lib/md2doc.js —
-        // the 14px default is narrower than the grip.
+        // Position (uniform geometry, v3.0.1): the row grip STRADDLES the
+        // table's left border — its CENTRELINE on that border, same as the
+        // column grip does on the top border. S4 T1 (§4.2 hit-test conflict
+        // 2) briefly moved the row grip's LEFT EDGE onto the border instead
+        // (the whole grip inside the table) because the straddle overlapped
+        // the block's ⠿ by 6px; v3.0.1 fixes that overlap by moving the
+        // ⠿/＋ pair itself further left (--ed-gutter-shift) instead of
+        // moving the grip, so the straddle is restored. The grip's
+        // straddling half sits well inside the first cell's default 14px
+        // padding, so no extra edit-mode padding token is needed either.
         // expectApprox(actual, expected) allows ±1px for subpixel rounding.
         // Re-hover body row 0 first — the header hover above moved the
         // (shared, singleton) row grip onto the header row, so reading it
@@ -6392,11 +6447,11 @@ async function gutterGeometry(page, sel) {
         }, table0);
         {
           const { gr, tableRect, rowRect } = rowGripRects;
-          // row grip 的左緣落在表格左邊界上，整個 grip 在表格內側
-          // （§4.2 衝突 2，S4 T1 落地）；colGrip 仍跨在上邊界，兩軸不再對稱。
-          expectApprox(gr.left, tableRect.left,
-            'row grip\'s LEFT EDGE sits ON the table\'s left border (the whole '
-            + 'grip inside the table, §4.2 conflict 2)');
+          // row grip 的中心線落在表格左邊界上（v3.0.1 恢復跨界）；
+          // colGrip 也跨在上邊界，兩軸重新對稱。
+          expectApprox(gr.left + gr.width / 2, tableRect.left,
+            'row grip is CENTRED on the table\'s left border (straddling it, '
+            + 'same as the column grip on the top border, §4.2 conflict 2 / v3.0.1)');
           expectApprox(gr.top + gr.height / 2, rowRect.top + rowRect.height / 2,
             'a body row grip stays vertically centred on its own row');
         }
@@ -6451,7 +6506,80 @@ async function gutterGeometry(page, sel) {
         }
 
         await page.close();
-        console.log('table grip handles: adequately sized (>=18x24px); one position for every row, inside the table\'s left border — OK');
+        console.log('table grip handles: adequately sized (>=18x24px); one position for every row, straddling the table\'s left border — OK');
+      } finally {
+        tsrv.close();
+      }
+    }
+
+    // v3.0.1: the row grip was pushed fully INSIDE the table by S4 T1 to stop
+    // it winning the hit test over the ⠿. The user reported the visual
+    // regression (the column grip still straddles the top border, so the two
+    // axes disagreed). Moving the gutter pair left restores the straddle AND
+    // keeps the two apart.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc([
+        '# Table doc', '',
+        '| Name  | Age |',
+        '|-------|-----|',
+        '| Alice | 30  |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.hover('.ed-block[data-block-type="table"] tbody td');
+        await page.waitForFunction(() => {
+          const g = document.querySelector('.ed-te-grip-row');
+          return g && !g.hidden;
+        });
+
+        const geom = await page.evaluate(() => {
+          const tbl = document.querySelector('.ed-block[data-block-type="table"] table');
+          const grip = document.querySelector('.ed-te-grip-row');
+          const handle = document.querySelector('.ed-block[data-block-type="table"] .ed-handle');
+          const insert = document.querySelector('.ed-block[data-block-type="table"] .ed-insert');
+          const box = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right }; };
+          return {
+            table: box(tbl), grip: box(grip), handle: box(handle), insert: box(insert),
+          };
+        });
+
+        // 1. The grip STRADDLES the table's left border: its centre is on the
+        //    border, within half a pixel.
+        const gripCentre = (geom.grip.l + geom.grip.r) / 2;
+        assert.ok(Math.abs(gripCentre - geom.table.l) <= 0.5,
+          'the row grip must be centred on the table left border; centre=' +
+          gripCentre + ' border=' + geom.table.l);
+
+        // 2. It shares NO pixel with the ⠿, and keeps the 4px gutter gap.
+        const gap = geom.grip.l - geom.handle.r;
+        assert.ok(gap >= 3.5,
+          'the ⠿ right edge and the grip left edge must keep the 4px gutter ' +
+          'gap; gap=' + gap);
+
+        // 3. The ＋ is still on screen.
+        assert.ok(geom.insert.l > 0,
+          'the ＋ must not be pushed off the left of the viewport; left=' +
+          geom.insert.l);
+
+        // 4. The hit test at the ⠿'s own centre still resolves to the ⠿ —
+        //    this is the regression S4 T1 existed to prevent.
+        const owner = await page.evaluate((x, y) => {
+          const el = document.elementFromPoint(x, y);
+          return el && el.closest ? (el.closest('.ed-handle') ? 'handle' :
+            el.closest('.ed-te-grip-row') ? 'grip' : 'other') : 'none';
+        }, (geom.handle.l + geom.handle.r) / 2,
+           await page.evaluate(() => {
+             const h = document.querySelector('.ed-block[data-block-type="table"] .ed-handle');
+             const b = h.getBoundingClientRect();
+             return b.top + b.height / 2;
+           }));
+        assert.strictEqual(owner, 'handle',
+          'the ⠿ must still win the hit test at its own centre, got ' + owner);
+
+        await page.close();
+        console.log('table grips: the row grip straddles the border and clears the ⠿ — OK');
       } finally {
         tsrv.close();
       }
@@ -6635,13 +6763,14 @@ async function gutterGeometry(page, sel) {
     // with the table's left border covers the whole of a 14px cell padding
     // plus ~6px of the text itself.
     //
-    // S4 T1 lands that ruling anyway, and this assertion is exactly why it
-    // could not be landed by moving the grip alone: the first column's LEFT
-    // PADDING is widened in edit mode to --ed-te-cell-pad-left (the grip's
-    // own width plus --ed-gutter-gap) so the inset grip ends inside the
-    // padding again. The assertion below is unchanged and is now the guard
-    // on that padding — if the padding token is dropped or drifts below the
-    // grip's width, this goes red rather than the defect shipping.
+    // v3.0.1 restores the STRADDLE (centred on the border) instead of that
+    // flush-left-edge geometry: only the grip's right HALF (10px) reaches
+    // into the first cell, which is comfortably inside the default 14px
+    // padding — no edit-mode padding widening needed any more (the
+    // --ed-te-cell-pad-left token this comment used to describe is gone).
+    // The assertion below is unchanged and is still the guard against a
+    // regression — if the straddle math drifts, this goes red rather than
+    // the defect shipping.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -7185,23 +7314,18 @@ async function gutterGeometry(page, sel) {
           'moving to the left margin at a DIFFERENT row\'s height must hide row 1\'s grip, ' +
           'not keep it visible at its stale position');
 
-        // ANTI-VACUITY PARTNER (S4 T1). spec §4.6 predicted precisely this:
-        // once §4.2 conflict 2 moves the row grip inside the table,
-        // pointInRowGripZone()'s corridor (`x >= gr.left && x <= tableRect.left`)
-        // collapses to an empty set, and the assertion above stops
-        // DISCRIMINATING — with no corridor at any height, "hidden at a
-        // different row's height" is true of every geometry, including one
-        // that ignored the anchor row entirely. It goes vacuous, not red.
-        //
-        // The probe that actually changed answer with the ruling is the SAME
-        // x at the ANCHOR row's own height. MEASURED on v2.12.0 (grip
-        // straddling, corridor live) it was inside row 1's corridor and the
-        // grip stayed up: hidden === false. With the grip inside the table
-        // there is no corridor to be in, and leaving the table on the left is
-        // a genuine exit at every height — including the one the grip is
-        // anchored to. Asserting both halves is what keeps the pair honest;
-        // if a future change restores a corridor, THIS is the assertion that
-        // notices.
+        // ANTI-VACUITY PARTNER (MIGRATED v3.0.1). S4 T1's version of this
+        // assertion proved the corridor formula had gone vacuous once the
+        // grip moved fully inside the table. v3.0.1 restores the straddle
+        // (--ed-gutter-shift on the ⠿/＋ pair instead of moving the grip),
+        // so this probe flips: the SAME x (tableRect.left - 5) at the ANCHOR
+        // row's own height is now INSIDE the grip's own straddling footprint
+        // (its padded rect reaches from tableLeft - 10 - 4 to tableLeft + 10
+        // + 4), so it must KEEP the grip visible — proving
+        // pointInRowGripZone()'s padded-rect check is doing real work again,
+        // not that it is vacuous. The assertion above it (different row's
+        // height still hides) still discriminates on its own, since the y
+        // band excludes it regardless of x.
         await hoverBodyRowCell(page, table0, 0);
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
@@ -7214,29 +7338,29 @@ async function gutterGeometry(page, sel) {
         await page.mouse.move(sameRow.x, sameRow.y);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
         assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
-          'spec §4.2 conflict 2 / §4.6: with the row grip inside the table there is no '
-          + 'corridor outside it, so the left margin at the ANCHOR row\'s own height must '
-          + 'hide the grip too. This is the half that changed answer with the ruling — the '
-          + 'assertion above it passes either way and is vacuous on its own');
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'v3.0.1: with the row grip straddling the table\'s left border again, the SAME x '
+          + 'at the ANCHOR row\'s own height sits on the grip\'s own (padded) footprint and '
+          + 'must keep it visible — this is the half that changed answer when the straddle '
+          + 'was restored');
 
-        // And the reason the row axis needs no corridor at all: the grip is
-        // inside the table, so a pointer travelling from a cell to it never
-        // leaves. Asserted directly rather than left as prose.
+        // And the straddle itself, asserted directly: the grip's left edge
+        // now sits OUTSIDE the table (mirroring the column grip on the top
+        // border), not entirely inside it.
         await hoverBodyRowCell(page, table0, 0);
-        const inside = await page.evaluate((ts) => {
+        const straddle = await page.evaluate((ts) => {
           const t = document.querySelector(ts + ' table').getBoundingClientRect();
           const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
           return { gLeft: g.left, gRight: g.right, tLeft: t.left, tRight: t.right };
         }, table0);
-        assert.ok(inside.gLeft >= inside.tLeft - 1 && inside.gRight <= inside.tRight + 1,
-          'the row grip must lie inside the table\'s own horizontal extent — that is what '
-          + 'makes the corridor unnecessary rather than merely deleted. grip ['
-          + inside.gLeft.toFixed(2) + ', ' + inside.gRight.toFixed(2) + '] vs table ['
-          + inside.tLeft.toFixed(2) + ', ' + inside.tRight.toFixed(2) + ']');
+        assert.ok(straddle.gLeft < straddle.tLeft - 1 && straddle.gRight > straddle.tLeft + 1,
+          'the row grip must STRADDLE the table\'s left border (left edge outside, right '
+          + 'edge inside), same as the column grip on the top border. grip ['
+          + straddle.gLeft.toFixed(2) + ', ' + straddle.gRight.toFixed(2) + '] vs table left '
+          + straddle.tLeft.toFixed(2));
 
         await page.close();
-        console.log('table grips: no corridor outside the table on the row axis; the keep-zone is the grip itself — OK');
+        console.log('table grips: the row grip straddles the table\'s left border again; the keep-zone tracks its own footprint — OK');
       } finally {
         tsrv.close();
       }
@@ -8348,6 +8472,222 @@ async function gutterGeometry(page, sel) {
 
         await page.close();
         console.log('list WYSIWYG: Tab indents item as child of previous sibling (2-space) — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // v3.0.1 defect: a bullet nested under an ORDERED item could be
+    // outdented once and then never indented again. Shift+Tab drops it to
+    // indent 0, where it becomes the first item of a NEW list token (a ul
+    // following an ol), and indentListItem()'s `if (self.listStart) return
+    // false` refused every Tab from then on.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '1. XXX', '   - OOO', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const ooo = await liBlockSelByText(page, 'OOO');
+        await openWysiwyg(page, ooo);
+        await placeCaretInListText(page, ooo, 'OOO', true);
+
+        // Shift+Tab: OOO rises to indent 0.
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return !!hit && hit.getAttribute('data-indent') === '0';
+        });
+        await settleEditor(page);
+        // Fixture fix (RED-phase finding): structural Tab/Shift+Tab commits
+        // land in the in-memory `lines` and re-render via /api/render, but
+        // ONLY Ctrl+S's save() persists to disk (lib/editor/client.js's only
+        // caller of save() is its Ctrl+S handler, at the `if ((e.ctrlKey ||
+        // e.metaKey) && ... e.key === 's')` branch). A bare
+        // fs.readFileSync(lmdPath) after settleEditor() therefore always
+        // reads back the pristine original — that read is what the brief's
+        // Step 1 block shipped with, and it is why the RED run failed at
+        // this precondition assertion instead of at the Tab-after-Shift+Tab
+        // assertion below (the defect this test targets). Every sibling
+        // list-WYSIWYG scenario in this file reads the file via
+        // saveAndRead() for the same reason; matching that idiom here.
+        //
+        // The click-away-to-heading-then-Escape below (same idiom the
+        // "Tab indents item as child of previous sibling" scenario above
+        // uses right before ITS OWN saveAndRead) matters here for a second,
+        // independent reason: the structural Tab/Shift+Tab commit ends its
+        // burst via endBurstWithoutResolve() and re-renders, leaving NOTHING
+        // focused. Calling saveAndRead() (Ctrl+S) from that empty-focus state
+        // and then immediately clicking straight back into the SAME li text
+        // races client.js's `switching`/focusin bookkeeping (a DIFFERENT,
+        // pre-existing timing sensitivity, unrelated to this defect, in
+        // handleBurstKeydown()'s "already resolving" path around Ctrl+S) —
+        // observed directly by instrumenting client.js: the second click's
+        // focusin can land before startBurst() has re-armed the surface, so
+        // the following Tab keydown finds no burst to act on and is silently
+        // swallowed (not a timeout — nothing happens because nothing runs).
+        // A real user's next keypress is never this fast on the heels of
+        // Ctrl+S; giving the page one settled, unambiguous focus transition
+        // before each save — heading, then Escape, same as every other
+        // saveAndRead call in this file — sidesteps it deterministically.
+        const heading = '.ed-block[data-block-type="heading"]';
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+        const outdented = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(outdented, lorig,
+          'precondition: Shift+Tab must actually have changed the file');
+
+        // Tab: OOO must go back to indent 1. THIS is the defect.
+        const ooo2 = await liBlockSelByText(page, 'OOO');
+        await openWysiwyg(page, ooo2);
+        await placeCaretInListText(page, ooo2, 'OOO', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return !!hit && hit.getAttribute('data-indent') === '1';
+        }, { timeout: 5000 });
+        await settleEditor(page);
+
+        await page.click(heading + ' > *');
+        await page.keyboard.press('Escape');
+        const reindented = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(reindented, outdented,
+          'Tab after Shift+Tab must change the file back, got:\n' + reindented);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab works again after Shift+Tab on a bullet under an ordered item — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // Guard for the narrowed listStart rule: two list tokens separated by a
+    // BLANK LINE must stay separate. Indenting the second one would make
+    // listRunOf() span both, and re-serializing that span swallows the blank
+    // line between them — a rewrite of lines the user never touched.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '- Alpha', '- Bravo', '',
+          '1. Charlie', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        const charlie = await liBlockSelByText(page, 'Charlie');
+        await openWysiwyg(page, charlie);
+        await placeCaretInListText(page, charlie, 'Charlie', true);
+        await page.keyboard.press('Tab');
+        await settleEditor(page);
+
+        const after = fs.readFileSync(lmdPath, 'utf8');
+        assert.strictEqual(after, lorig,
+          'Tab on a list token separated from the previous list by a blank ' +
+          'line must be a no-op — the blank line is the user\'s, got:\n' + after);
+
+        await page.close();
+        console.log('list WYSIWYG: Tab refuses to merge two lists across a blank line — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
+    // v3.0.1 review round 1 (Important finding): memberIndentHeadroom() —
+    // the per-member ceiling batch Tab uses via batchIndentDelta() /
+    // indentListItemsBySelection() — still carried the unconditional
+    // `if (self.listStart) return 0;` that indentListItem() (the SINGLE-item
+    // path, above) has already been narrowed away from. Same fixture shape
+    // as the single-item scenario above (a bullet directly below a
+    // contiguous ordered item), but reached through the STANDING-SET Tab
+    // path (tabSelection() -> batchIndentDelta() -> memberIndentHeadroom()),
+    // which never calls indentListItem() at all — so narrowing one left the
+    // other's refusal in place. No existing test exercised "batch Tab on a
+    // listStart item with a valid contiguous predecessor" before this.
+    //
+    // The standing set here holds OOO ALONE, not "XXX and OOO together":
+    // batchRunOf() — a DIFFERENT, pre-existing, correct gate, unrelated to
+    // this defect — refuses any multi-member set whose members span two
+    // list RUNS (BATCH_MULTIRUN_MESSAGE, "選取範圍跨越兩個清單"), and XXX
+    // (an 'ol' run) and OOO (a separate 'ul' run immediately below it, per
+    // rule (d)) are always two runs regardless of contiguity — that is
+    // exactly what makes OOO a listStart in the first place. Selecting both
+    // together was tried first and confirmed (via the banner text) to hit
+    // that gate before ever reaching memberIndentHeadroom() — a different
+    // code path than the one under test here, so it would not have
+    // exercised the fix at all. A ONE-member standing set on OOO still goes
+    // through the exact same batch call chain (tabSelection() ->
+    // batchIndentDelta() -> memberIndentHeadroom()) as a real multi-member
+    // batch would, and batchRunOf(liEls=[OOO]) accepts a single-member set
+    // trivially (every member is, tautologically, inside its own run) — so
+    // this is the narrowest fixture that reaches the fixed function without
+    // also exercising the unrelated multirun gate.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '1. XXX', '- OOO', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // OOO is line 4 (1-indexed source line, matching blocks' own
+        // startLine/endLine) — select it alone as a STANDING SET via the
+        // same test-only hook the S3/S4 batch-Tab scenarios elsewhere in
+        // this file use throughout (window.__edTestSetSelection), then press
+        // Tab with focus on the block wrapper (not inside the item's own
+        // text) — the exact precondition tabSelection()'s keydown gate
+        // requires (`blockSelection && !e.ctrlKey && ...`).
+        await page.evaluate(() => window.__edTestSetSelection(4, 4));
+        const pre = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(pre && pre.memberLines, [[4, 4]],
+          'precondition: OOO alone is really the standing set (model AND ' +
+          'paint) before the key is pressed, got ' + JSON.stringify(pre));
+
+        await page.keyboard.press('Tab');
+        await settleEditor(page);
+
+        const domIndent = await page.evaluate(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return hit ? hit.getAttribute('data-indent') : null;
+        });
+        assert.strictEqual(domIndent, '1',
+          'batch Tab on a listStart bullet directly below a contiguous ' +
+          'ordered item must move it — the same block indents fine on its ' +
+          'own (the single-item scenario above); refusing it only because ' +
+          'it is part of a batch is the cross-axis gap review round 1 ' +
+          'found. Got data-indent=' + JSON.stringify(domIndent));
+
+        const after = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(after, lorig,
+          'and the move must actually be written to the file, got byte-' +
+          'identical:\n' + after);
+
+        await page.close();
+        console.log('list WYSIWYG: batch Tab moves a listStart bullet directly below a contiguous ordered item — OK');
       } finally {
         lsrv.close();
       }
@@ -16068,15 +16408,18 @@ async function gutterGeometry(page, sel) {
         await page.goto(hovUrl, { waitUntil: 'networkidle0' });
         const beta = await liBlockSelByText(page, 'beta');
         const geo = await gutterGeometry(page, beta);
-        // Spec §4.2's number contract: the pair occupies
-        // [contentLeft-40, contentLeft-4], one Y, no gap between them, 4px of
-        // breathing room on the right.
-        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -22,
-          'spec §4.2: ⠿ must start 22px left of the block, got ' + (geo.handle.l - geo.block.l));
-        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -4,
-          'spec §4.2: ⠿ must end 4px left of the block, got ' + (geo.handle.r - geo.block.l));
-        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -40,
-          'spec §4.2: ＋ must start 40px left of the block, got ' + (geo.insert.l - geo.block.l));
+        // Spec §4.2's number contract, MIGRATED (v3.0.1): the pair moved a
+        // further --ed-gutter-shift (10px) left of spec §4.2's own numbers so
+        // the table row grip can straddle the table's left border again (see
+        // the --ed-gutter-shift comment in lib/md2doc.js) — it now occupies
+        // [contentLeft-50, contentLeft-14], one Y, no gap between them, 4px
+        // of breathing room on the right.
+        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -32,
+          'spec §4.2 + v3.0.1 shift: ⠿ must start 32px left of the block, got ' + (geo.handle.l - geo.block.l));
+        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -14,
+          'spec §4.2 + v3.0.1 shift: ⠿ must end 14px left of the block, got ' + (geo.handle.r - geo.block.l));
+        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -50,
+          'spec §4.2 + v3.0.1 shift: ＋ must start 50px left of the block, got ' + (geo.insert.l - geo.block.l));
         assert.strictEqual(Math.round(geo.insert.r - geo.handle.l), 0,
           'spec §4.2: ＋ and ⠿ sit flush, no gap');
         // A REAL pointer walk from inside the text out past the ＋. Jumping
