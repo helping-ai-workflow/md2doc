@@ -273,7 +273,7 @@ function table(headerRow, bodyRows) {
 // 14. A RENAMED header (documented, ruled behaviour — 2026-09-02 review
 //     round 1 I2: rename-vs-permutation detection is explicitly OUT of
 //     scope for this patch release) reflows the WHOLE table to minimal
-//     form, exactly like today's shipped v3.0.1 already does on any other
+//     form, exactly like today's shipped v3.0.0 already does on any other
 //     edit. This pins that decision so the next change to it is
 //     deliberate, not accidental.
 {
@@ -361,6 +361,60 @@ function table(headerRow, bodyRows) {
   assert.strictEqual(lines[1], '|-------|-------------|',
     'a matched-but-non-uniform column must reproduce its ORIGINAL separator width, not the 3-dash minimal, got:\n' + md);
   assert.strictEqual(lines[0], '| Name  | Description |', 'header untouched, got:\n' + md);
+}
+
+// ── 2026-09-02 final whole-branch review: cases 18-19 (F1, Critical) ─────
+// A SPACE-PADDED separator row ('| ----- | --- |') is what Prettier,
+// prettier-plugin-markdown and VS Code's table formatter all emit — the most
+// common machine-aligned markdown table in the wild. Before F1, sepCellFor()
+// rebuilt every separator field as a bare dash run of the target width, so
+// '| ----- | --- |' came back as '|-------|-----|': same width, different
+// bytes. commitRangeEdit() short-circuits only on a byte-identical result, so
+// that is a REAL op — undo entry pushed, `lines` replaced, next save writes
+// it. Clicking into such a table and clicking away modified the user's file.
+//
+// The fix reuses the ORIGINAL separator field verbatim when the field already
+// expresses the current alignment AND the target width equals that field's
+// own length. Any width growth or alignment change still falls through to
+// sepCellFor() unchanged (cases 5 and 12 pin that).
+
+// 18. A PADDED PLAIN separator, nothing changed → byte-identical.
+{
+  const original = [
+    '| Name  | Age |',
+    '| ----- | --- |',
+    '| Alice | 30  |',
+  ].join('\n');
+  const t = table(tr(th({}, 'Name'), th({}, 'Age')),
+    [tr(td({}, 'Alice'), td({}, '30'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, original,
+    'a padded plain separator must survive a no-op byte-identical, got:\n' + md);
+}
+
+// 19. A PADDED ALIGNED separator (':----' / '--:' with padding), nothing
+//     changed → byte-identical. The colons must be read off the ORIGINAL
+//     field, not re-synthesised flush against the delimiters.
+{
+  const original = [
+    '| Name  | Age |',
+    '| :---- | --: |',
+    '| Alice | 30  |',
+  ].join('\n');
+  const t = table(
+    tr(th({ style: 'text-align:left' }, 'Name'),
+       th({ style: 'text-align:right' }, 'Age')),
+    [tr(td({ style: 'text-align:left' }, 'Alice'),
+        td({ style: 'text-align:right' }, '30'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, original,
+    'a padded aligned separator must survive a no-op byte-identical, got:\n' + md);
+
+  // And the padded aligned form is legal GFM in the first place.
+  const toks = marked.lexer(original);
+  assert.strictEqual(toks.length, 1);
+  assert.strictEqual(toks[0].type, 'table');
+  assert.deepStrictEqual(toks[0].align, ['left', 'right']);
 }
 
 console.log('table-width: all cases OK');
