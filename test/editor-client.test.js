@@ -635,19 +635,13 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
       allTwo + '. If this collapsed, re-check whether the exclusion is still needed.');
   }
 
-  // The premise of all of the above: client.js really does contain the control
-  // bytes that make grep call it binary. If a future edit removes them the
-  // "always grep -a" rule stops being load-bearing — and this comment stops
-  // being true — so the fact is pinned rather than described. Written with
-  // charCodeAt rather than a literal, so this test file itself stays text.
-  const ctrl = [];
-  for (let i = 0; i < src.length; i++) {
-    const c = src.charCodeAt(i);
-    if (c < 32 && c !== 10 && c !== 9 && c !== 13) ctrl.push(c);
-  }
-  assert.ok(ctrl.length > 0,
-    'client.js is expected to contain literal control bytes (the table fingerprint ' +
-    'separators) — that is WHY grep needs -a on it and why this check exists');
+  // Verify that client.js contains the two delimiter escape sequences in
+  // tableIdentityOf. They are written as '\\x01' and '\\x00' in the source
+  // (not as literal control bytes), which keeps the file as text so grep can
+  // search it without needing -a. The runtime value is identical.
+  assert.ok(/tableIdentityOf[\s\S]*?'\\x01'[\s\S]*?'\\x00'/.test(src),
+    'client.js is expected to contain the escape sequences \\x01 and \\x00 in ' +
+    'tableIdentityOf to keep the file text');
 }
 
 // -- T8 review MEDIUM-1: a REFUSED commit must not roll back somebody else --
