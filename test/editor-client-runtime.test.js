@@ -1987,6 +1987,60 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // v3.0.1: the 轉換成 submenu carried no icons, so its labels started at
+    // the button's own padding while the parent menu's labels started past a
+    // 16px icon — the two levels' text did not share a vertical line.
+    {
+      const { srv: t4Srv, url: t4Url } = await setupTableDoc(['A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t4Url, { waitUntil: 'networkidle0' });
+
+        const paraSel = await blockSelByType(page, 'paragraph');
+        await openGutterMenu(page, paraSel);
+        await clickGutterMenuItem(page, paraSel, '轉換成 ›');
+        await page.waitForSelector('.ed-handle-submenu', { visible: true, timeout: 5000 });
+
+        const shape = await page.evaluate(() => {
+          const sub = document.querySelector('.ed-handle-submenu');
+          const btns = Array.prototype.slice.call(sub.querySelectorAll('.ed-handle-menu-btn'));
+          return {
+            count: btns.length,
+            withIcon: btns.filter((b) => !!b.querySelector('svg.ed-menu-icon')).length,
+            // Every submenu row's icon must start at the same x as the parent
+            // menu's icons — that is what "aligned" means here.
+            subIconLefts: btns.map((b) => {
+              const i = b.querySelector('svg.ed-menu-icon');
+              return i ? Math.round(i.getBoundingClientRect().left - b.getBoundingClientRect().left) : null;
+            }),
+            parentIconLefts: Array.prototype.slice.call(
+              document.querySelectorAll('.ed-handle-menu:not(.ed-handle-submenu) > .ed-handle-menu-btn'))
+              .filter((b) => !b.hidden)
+              .map((b) => {
+                const i = b.querySelector('svg.ed-menu-icon');
+                return i ? Math.round(i.getBoundingClientRect().left - b.getBoundingClientRect().left) : null;
+              }),
+          };
+        });
+
+        assert.strictEqual(shape.withIcon, shape.count,
+          'every 轉換成 submenu row must carry an icon, got ' +
+          shape.withIcon + ' of ' + shape.count);
+        const allLefts = shape.subIconLefts.concat(shape.parentIconLefts);
+        assert.ok(allLefts.every((v) => v !== null),
+          'no menu row may be missing its icon: ' + JSON.stringify(allLefts));
+        assert.strictEqual(new Set(allLefts).size, 1,
+          'every menu row across BOTH levels must start its icon at the same ' +
+          'offset, got ' + JSON.stringify(allLefts));
+
+        await page.keyboard.press('Escape');
+        await page.close();
+        console.log('gutter menu: both levels share one icon/text baseline — OK');
+      } finally {
+        t4Srv.close();
+      }
+    }
+
     // ── S2 Task 2: 轉換成 on a block that owns its own lines (paragraph ↔
     //    heading ↔ quote ↔ code). List sources and list targets land in
     //    Tasks 3-5 and refuse until then. ────────────────────────────────
