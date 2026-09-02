@@ -8486,6 +8486,89 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // v3.0.1 review round 1 (Important finding): memberIndentHeadroom() —
+    // the per-member ceiling batch Tab uses via batchIndentDelta() /
+    // indentListItemsBySelection() — still carried the unconditional
+    // `if (self.listStart) return 0;` that indentListItem() (the SINGLE-item
+    // path, above) has already been narrowed away from. Same fixture shape
+    // as the single-item scenario above (a bullet directly below a
+    // contiguous ordered item), but reached through the STANDING-SET Tab
+    // path (tabSelection() -> batchIndentDelta() -> memberIndentHeadroom()),
+    // which never calls indentListItem() at all — so narrowing one left the
+    // other's refusal in place. No existing test exercised "batch Tab on a
+    // listStart item with a valid contiguous predecessor" before this.
+    //
+    // The standing set here holds OOO ALONE, not "XXX and OOO together":
+    // batchRunOf() — a DIFFERENT, pre-existing, correct gate, unrelated to
+    // this defect — refuses any multi-member set whose members span two
+    // list RUNS (BATCH_MULTIRUN_MESSAGE, "選取範圍跨越兩個清單"), and XXX
+    // (an 'ol' run) and OOO (a separate 'ul' run immediately below it, per
+    // rule (d)) are always two runs regardless of contiguity — that is
+    // exactly what makes OOO a listStart in the first place. Selecting both
+    // together was tried first and confirmed (via the banner text) to hit
+    // that gate before ever reaching memberIndentHeadroom() — a different
+    // code path than the one under test here, so it would not have
+    // exercised the fix at all. A ONE-member standing set on OOO still goes
+    // through the exact same batch call chain (tabSelection() ->
+    // batchIndentDelta() -> memberIndentHeadroom()) as a real multi-member
+    // batch would, and batchRunOf(liEls=[OOO]) accepts a single-member set
+    // trivially (every member is, tautologically, inside its own run) — so
+    // this is the narrowest fixture that reaches the fixed function without
+    // also exercising the unrelated multirun gate.
+    {
+      const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
+        await setupListDoc([
+          '# List doc', '',
+          '1. XXX', '- OOO', '',
+        ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(lurl, { waitUntil: 'networkidle0' });
+
+        // OOO is line 4 (1-indexed source line, matching blocks' own
+        // startLine/endLine) — select it alone as a STANDING SET via the
+        // same test-only hook the S3/S4 batch-Tab scenarios elsewhere in
+        // this file use throughout (window.__edTestSetSelection), then press
+        // Tab with focus on the block wrapper (not inside the item's own
+        // text) — the exact precondition tabSelection()'s keydown gate
+        // requires (`blockSelection && !e.ctrlKey && ...`).
+        await page.evaluate(() => window.__edTestSetSelection(4, 4));
+        const pre = await page.evaluate(() => window.__edTestGetSelection());
+        assert.deepStrictEqual(pre && pre.memberLines, [[4, 4]],
+          'precondition: OOO alone is really the standing set (model AND ' +
+          'paint) before the key is pressed, got ' + JSON.stringify(pre));
+
+        await page.keyboard.press('Tab');
+        await settleEditor(page);
+
+        const domIndent = await page.evaluate(() => {
+          const lis = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const hit = lis.find((li) => {
+            const s = li.querySelector(':scope > .ed-li-text');
+            return s && s.textContent.trim() === 'OOO';
+          });
+          return hit ? hit.getAttribute('data-indent') : null;
+        });
+        assert.strictEqual(domIndent, '1',
+          'batch Tab on a listStart bullet directly below a contiguous ' +
+          'ordered item must move it — the same block indents fine on its ' +
+          'own (the single-item scenario above); refusing it only because ' +
+          'it is part of a batch is the cross-axis gap review round 1 ' +
+          'found. Got data-indent=' + JSON.stringify(domIndent));
+
+        const after = await saveAndRead(page, lmdPath);
+        assert.notStrictEqual(after, lorig,
+          'and the move must actually be written to the file, got byte-' +
+          'identical:\n' + after);
+
+        await page.close();
+        console.log('list WYSIWYG: batch Tab moves a listStart bullet directly below a contiguous ordered item — OK');
+      } finally {
+        lsrv.close();
+      }
+    }
+
     // Row 7: Tab with NO previous sibling is a no-op (first item can't indent).
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
