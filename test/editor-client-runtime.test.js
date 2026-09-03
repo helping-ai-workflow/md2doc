@@ -5043,8 +5043,40 @@ async function gutterGeometry(page, sel) {
       const sel2 = await paragraphSelByText(page, 'Burst undo target');
       const editEl2 = sel2 + ' > *';
       await openWysiwyg(page, sel2);
-      await page.evaluate((s) => document.querySelector(s).focus(), editEl2);
-      await page.keyboard.type(' EDIT-TWO');
+      // HARDENED (v3.1.0, controller Ruling 23): ONE synthetic `input`, not
+      // nine keystrokes. createBurstHistory()'s noteTyping() snaps the text as
+      // it stands whenever the gap since the previous keystroke has reached
+      // debounceMs (400) — so if a stall landed between two of the nine
+      // characters page.keyboard.type(' EDIT-TWO') produced, the HALF-TYPED
+      // text became a real stack entry and the Ctrl+Z below landed there
+      // instead of on the pre-focus snapshot. Measured symptom, intermittent
+      // and machine-dependent: '... EDIT-ONE EDIT-TW', one character short.
+      // Reproduced byte-for-byte on main (206e945) with a forced stall, so the
+      // fragility is the SCENARIO's, not the editor's: a real user who pauses
+      // 400ms mid-word has genuinely earned a finer-grained undo step.
+      // A single input event cannot straddle the window at all, and the
+      // assertion below is unchanged. The debounce arithmetic this used to
+      // cover by accident is now pinned deterministically, and far better, by
+      // test/history.test.js's own boundary cases.
+      await page.evaluate((s, text) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const w = window.getSelection();
+        w.removeAllRanges();
+        w.addRange(r);
+        const node = document.createTextNode(text);
+        r.insertNode(node);
+        r.setStartAfter(node);
+        r.collapse(true);
+        w.removeAllRanges();
+        w.addRange(r);
+        // client.js's delegated `input` listener is what drives noteTyping(),
+        // so this is the faithful single-keystroke equivalent.
+        el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }, editEl2, ' EDIT-TWO');
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).textContent, editEl2),
         originalText + ' EDIT-ONE EDIT-TWO',
