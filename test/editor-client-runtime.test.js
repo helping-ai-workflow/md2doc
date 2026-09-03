@@ -22477,6 +22477,138 @@ async function gutterGeometry(page, sel) {
       } finally { srv.close(); }
     }
 
+    // ── v3.0.2: the header row's grip must not blank the ⠿'s approach ──────
+    // The row grip straddles the table's left border ([tableLeft-10,
+    // tableLeft+10]) and is a document.body child at z-index 7, while a table
+    // block's ⠿ sits at top:0 — the header row's own Y. So a pointer moving
+    // left from a header cell toward the ⠿ crosses the grip first,
+    // elementFromPoint returns the grip, .ed-block:hover goes false, and the
+    // ⠿ fades out and back in. Geometry cannot fix it (the grip must stay a
+    // body child to hold position while the table scrolls), so this is a
+    // state rule: while the pointer is in the ROW grip's zone and that grip
+    // is anchored to the HEADER row, the block keeps its gutter lit.
+    //
+    // The filter here looks at opacity ONLY, unlike the three gutter walks
+    // above which also require `s.hover`. :hover genuinely IS false over the
+    // grip — it is not a .ed-block descendant — and this rule does not (and
+    // cannot) restore it.
+    {
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const geo = await gutterGeometry(page, tsel);
+
+        const walk = await gutterOpacityWalk(page, tsel,
+          geo.block.l + 6, geo.block.l - 20, geo.block.t + 6, 2);
+        const dark = walk.filter((s) => s.handle < 0.99);
+        assert.strictEqual(dark.length, 0,
+          'the ⠿ must stay lit while the pointer crosses the HEADER row grip — ' +
+          dark.length + ' of ' + walk.length + ' samples dropped it: ' +
+          JSON.stringify(dark.slice(0, 12)));
+
+        await page.close();
+        console.log('table grips: the header row grip no longer blanks the ⠿ — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 SCOPE GUARDS for the keep-alive — the three ways it must NOT
+    // fire, each of which was a real hazard in the first draft of this fix.
+    {
+      // (a) a BODY row's grip shares no Y with the ⠿, so it must not light it.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '| Bob   | 41  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        const bodyY = await page.evaluate((sl) => {
+          const rows = document.querySelector(sl).querySelectorAll('tbody tr');
+          const r = rows[rows.length - 1].getBoundingClientRect();
+          return r.top + r.height / 2;
+        }, tsel);
+        const bodyX = await page.evaluate((sl) => {
+          const t = document.querySelector(sl).querySelector('table');
+          return t.getBoundingClientRect().left + 20;
+        }, tsel);
+        await movePointerAndSettle(page, bodyX, bodyY);
+        await movePointerAndSettle(page, bodyX - 26, bodyY);
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a BODY row grip must not light the gutter — the ⠿ is nowhere near its Y');
+        await page.close();
+        console.log('table grips: the keep-alive is scoped to the HEADER row — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (b) a header-only table nulls gripRowTableEl while still showing the
+      //     COLUMN grip. Both seams are reached in that state; without the
+      //     null guard this throws in the pointermove hot path.
+      const { srv, url } = await setupTableDoc(['| A | B |', '|---|---|', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        const errors = [];
+        page.on('pageerror', (e) => errors.push(String(e && e.message)));
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const colXY = await page.evaluate(() => {
+          const g = document.querySelector('.ed-te-grip-col');
+          const r = g.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await movePointerAndSettle(page, colXY.x, colXY.y);
+        assert.deepStrictEqual(errors, [],
+          'moving onto a header-only table\'s column grip must not throw: ' + JSON.stringify(errors));
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a COLUMN grip must not light the gutter');
+        await page.close();
+        console.log('table grips: a header-only table\'s column grip is safe and inert — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (c) teardown — the class must not survive hideTableGrips(), including
+      //     the rerenderAll() call site that reaches it with the table already
+      //     detached.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const geo = await gutterGeometry(page, tsel);
+        await movePointerAndSettle(page, geo.block.l - 6, geo.block.t + 6);
+        await movePointerAndSettle(page, geo.block.l + 400, geo.block.t + 400);
+        const afterLeave = await page.evaluate(() =>
+          document.querySelectorAll('.ed-keep-lit').length);
+        assert.strictEqual(afterLeave, 0,
+          'leaving the grip zone must clear the keep-alive class, got ' + afterLeave);
+        await page.evaluate(() => window.__edTestForceRerender());
+        const afterRerender = await page.evaluate(() =>
+          document.querySelectorAll('.ed-keep-lit').length);
+        assert.strictEqual(afterRerender, 0,
+          'a full rerender must not leave the keep-alive class behind, got ' + afterRerender);
+        await page.close();
+        console.log('table grips: the keep-alive class is torn down on leave and on rerender — OK');
+      } finally { srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
