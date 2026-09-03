@@ -34,6 +34,13 @@ All notable changes to this project will be documented here. This project adhere
   的人。離開時若渲染失敗，textarea 會原地留著、內容不動——一次失敗的往返不該是那個
   把整份文件的編輯丟掉的東西。
 
+### Changed
+
+- **編輯器伺服器只回應 loopback 的 `Host`。** 只接受 `127.0.0.1`、`localhost` 或
+  `[::1]`，而且必須是它當下實際監聽的那個埠；其餘一律 403，包含沒有帶 `Host` 的請求。
+  這擋的是指向新的資產寫入端點的 DNS rebinding。**若你是透過 hosts 檔的別名或容器
+  主機名連進編輯器，現在會拿到 403 而不是頁面。**
+
 ### Fixed
 
 - **清單項的 ⠿ 選單重新提供「MD 原始碼」。** 先前的 RULING F-O 永久隱藏了清單項的這個
