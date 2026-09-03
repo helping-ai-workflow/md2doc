@@ -22418,9 +22418,9 @@ async function gutterGeometry(page, sel) {
     // on first failure and this whole file is one script, a mutation-kill
     // claim can only ever be "the suite kills the mutant", never "these
     // named downstream lines reddened" — nothing past the first throw is
-    // observable in a single run.) For the ⠿ drop site (client.js:8456)
+    // observable in a single run.) For the ⠿ drop site (client.js:8504)
     // the argument IS structural, not just "some earlier scenario happens
-    // to cover it": orphan indents at client.js:8458-8462 come ONLY from
+    // to cover it": orphan indents at client.js:8506-8511 come ONLY from
     // the clamp map, with no direct-write fallback, so the S4 RV "a BATCH
     // li move writes the clamped indents of the orphans it leaves behind"
     // scenario is a targeted guard against a wrongly-firing assert there.
@@ -22576,6 +22576,44 @@ async function gutterGeometry(page, sel) {
           'a COLUMN grip must not light the gutter');
         await page.close();
         console.log('table grips: a header-only table\'s column grip is safe and inert — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (d, added by the final-review fix wave) the same first ternary as
+      // (b) above
+      // (`target.closest('.ed-te-grip-row') ? headerGripBlock() : null`), but
+      // this time gripRowTableEl/gripRowEl are a REAL header anchor —
+      // headerGripBlock() itself would return a truthy block if it ran.
+      // (b)'s header-only fixture leaves that guard untested: its own null
+      // check (`!gripRowTableEl || !gripRowEl`) already returns null
+      // regardless of which side of the ternary runs, so the ternary could
+      // be replaced with `target.closest('.ed-te-grip-row') ||
+      // headerGripBlock()` and the suite would stay green. A table WITH a
+      // body row closes that gap — hovering the header cell makes both grips
+      // real, then the pointer lands on the COLUMN grip, whose target is
+      // never `.ed-te-grip-row`.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const colXY = await page.evaluate(() => {
+          const g = document.querySelector('.ed-te-grip-col');
+          const r = g.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await movePointerAndSettle(page, colXY.x, colXY.y);
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a COLUMN grip must not light the gutter even when the row grip is a REAL header anchor');
+        await page.close();
+        console.log('table grips: a real header anchor still withholds the class from the COLUMN grip — OK');
       } finally { srv.close(); }
     }
 
