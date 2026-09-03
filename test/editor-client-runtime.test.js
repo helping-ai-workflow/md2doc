@@ -13418,8 +13418,9 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-          '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
-          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 建立副本; ' +
+          '轉換成 ›,建立副本,刪除,MD 原始碼'.split(',').sort().join(','),
+          'sanity: §5.4 fallout — ✕ is gone (§3.7), a li offers 轉換成 › / 建立副本, and ' +
+          'v3.1.0 修正 4 restored MD 原始碼 to every block type including this one; ' +
           '刪除 is still the item this scenario drives');
         await page.evaluate(() => {
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
