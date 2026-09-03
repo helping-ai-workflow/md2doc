@@ -135,6 +135,62 @@ function baseCtx(overrides) {
   }
 }
 
+// --- preview.active tracks mode (tri-state edit/source/preview) -------------
+// Fix round 1, Important: the module threads `mode` into ctx precisely so it
+// can answer "which of the three modes is current" for its own button,
+// instead of making the integration task re-derive this outside the module.
+// Ruling: active is true whenever mode !== 'edit'.
+
+{
+  const state = tm.deriveState(baseCtx({ mode: 'edit' }));
+  eq(state.preview.active, false, "mode 'edit': preview.active is false");
+}
+{
+  const state = tm.deriveState(baseCtx({ mode: 'preview' }));
+  eq(state.preview.active, true, "mode 'preview': preview.active is true");
+}
+{
+  const state = tm.deriveState(baseCtx({ mode: 'source' }));
+  eq(state.preview.active, true, "mode 'source': preview.active is true");
+  // The pre-existing source-mode rule must not regress: preview stays
+  // enabled even though it's now also active.
+  eq(state.preview.disabled, false, "mode 'source': preview still stays enabled");
+}
+
+// --- fix round 1, Minor: bold/italic tooltips must not promise keybindings --
+// that don't exist. client.js only wires Ctrl+Z / Ctrl+Y / Ctrl+Enter /
+// Ctrl+S. undo/redo name real bindings and keep them; bold/italic don't.
+
+{
+  const bold = tm.BUTTONS.find((b) => b.id === 'bold');
+  const italic = tm.BUTTONS.find((b) => b.id === 'italic');
+  eq(bold.title, '粗體', 'bold title carries no shortcut hint');
+  eq(italic.title, '斜體', 'italic title carries no shortcut hint');
+  ok(!/Ctrl/i.test(bold.title), 'bold title never mentions Ctrl');
+  ok(!/Ctrl/i.test(italic.title), 'italic title never mentions Ctrl');
+
+  const undo = tm.BUTTONS.find((b) => b.id === 'undo');
+  const redo = tm.BUTTONS.find((b) => b.id === 'redo');
+  ok(/Ctrl\+Z/i.test(undo.title), 'undo title still names its real Ctrl+Z binding');
+  ok(/Ctrl\+Y/i.test(redo.title), 'redo title still names its real Ctrl+Y binding');
+}
+
+// --- fix round 1, Minor: check is a block-group conversion target, not -----
+// gated on already being in a list (that made it dead for the primary case:
+// converting a bare paragraph into a task-list item). It follows the same
+// rule as its block-group siblings quote/code/list/ordered-list — no extra
+// gate beyond the shared no-block / source-mode rules.
+
+{
+  const state = tm.deriveState(baseCtx({ blockType: 'paragraph', inList: false }));
+  eq(state.check.disabled, false, 'check is enabled on a bare paragraph, not gated on inList');
+  eq(state.quote.disabled, false, "check's block-group sibling quote is enabled too, for comparison");
+}
+{
+  const state = tm.deriveState(baseCtx({ blockType: 'li', inList: true, listOrdered: true, indent: 1 }));
+  eq(state.check.disabled, false, 'check stays enabled inside a list too');
+}
+
 // --- indent / outdent ---------------------------------------------------------
 
 // not in a list: both outdent and indent disabled
