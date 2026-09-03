@@ -16437,7 +16437,7 @@ async function gutterGeometry(page, sel) {
         // v3.0.2: this walk's endpoint stays at -38 ON PURPOSE. It samples
         // at midY, which for a 24.75px li row is ~12.4px down — inside the
         // 20px-tall buttons — and .ed-insert is itself a descendant of
-        // .ed-block (lib/editor/client.js:1935-1936 and 1965-1966), so at
+        // .ed-block (lib/editor/client.js:1947-1948 and 1977-1978), so at
         // midY the ＋/⠿ pair forms a continuous span [blockLeft-50,
         // blockLeft-14] and .ed-block:hover holds across the whole band
         // regardless of ::before, at any endpoint — a direct Chromium probe
@@ -22396,17 +22396,17 @@ async function gutterGeometry(page, sel) {
     }
 
     // v3.0.2 REGRESSION GUARD — these two pin that a caret Tab and a caret
-    // Shift+Tab (both handled by ONE call site, client.js:6016 — batch
-    // Tab/Shift+Tab is the separate call site at :5766, not covered by
+    // Shift+Tab (both handled by ONE call site, client.js:6028 — batch
+    // Tab/Shift+Tab is the separate call site at :5778, not covered by
     // these two) commit exactly the same bytes with the stale-span assert
     // in place as they did before it existed. They do NOT prove the assert
     // can't wrongly fire on a real gesture: indentListItem()/
-    // outdentListItem() (client.js:5548-5644) write the operated item's own
+    // outdentListItem() (client.js:5567-5623) write the operated item's own
     // indent directly and unconditionally, before applyIndentClamp() is
     // ever called, and in this flat 3-item fixture no sibling needs
     // reclamping — so a clamp that always refused (returned null) would
     // still produce byte-identical SAVED output here. Reviewed 2026-09-03:
-    // neither this call site nor the batch one at :5766 has ANY scenario in
+    // neither this call site nor the batch one at :5778 has ANY scenario in
     // this file whose correct answer requires reclamping a TRAILING
     // sibling, so a wrongly-always-refusing assert on either Tab site is
     // not caught by a targeted case — only by the suite's overall
@@ -22418,9 +22418,9 @@ async function gutterGeometry(page, sel) {
     // on first failure and this whole file is one script, a mutation-kill
     // claim can only ever be "the suite kills the mutant", never "these
     // named downstream lines reddened" — nothing past the first throw is
-    // observable in a single run.) For the ⠿ drop site (client.js:8504)
+    // observable in a single run.) For the ⠿ drop site (client.js:8516)
     // the argument IS structural, not just "some earlier scenario happens
-    // to cover it": orphan indents at client.js:8506-8511 come ONLY from
+    // to cover it": orphan indents at client.js:8518-8523 come ONLY from
     // the clamp map, with no direct-write fallback, so the S4 RV "a BATCH
     // li move writes the clamped indents of the orphans it leaves behind"
     // scenario is a targeted guard against a wrongly-firing assert there.
@@ -22444,7 +22444,7 @@ async function gutterGeometry(page, sel) {
           '# List doc', '',
           '- Alpha item', '  - Bravo item', '- Charlie item', '',
         ].join('\n'),
-          'clamp assert must not fire on Tab (client.js:6016) — bytes differ:\n' + text);
+          'clamp assert must not fire on Tab (client.js:6028) — bytes differ:\n' + text);
         await page.close();
       } finally { srv.close(); }
     }
@@ -22471,7 +22471,7 @@ async function gutterGeometry(page, sel) {
           '# List doc', '',
           '- Alpha item', '- Bravo item', '- Charlie item', '',
         ].join('\n'),
-          'clamp assert must not fire on Shift+Tab (client.js:6016) — bytes differ:\n' + text);
+          'clamp assert must not fire on Shift+Tab (client.js:6028) — bytes differ:\n' + text);
         await page.close();
         console.log('clamp assert: Tab and Shift+Tab still commit the same bytes — OK');
       } finally { srv.close(); }
