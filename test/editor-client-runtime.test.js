@@ -16434,6 +16434,18 @@ async function gutterGeometry(page, sel) {
         // straight to a button's centre — which every other gutter helper in
         // this file does — cannot see a corridor, because it never enters one.
         const midY = geo.block.t + geo.block.h / 2;
+        // v3.0.2: this walk's endpoint stays at -38 ON PURPOSE. It samples
+        // at midY, which for a 24.75px li row is ~12.4px down — inside the
+        // 20px-tall buttons — and .ed-insert is itself a descendant of
+        // .ed-block (lib/editor/client.js:1935-1936 and 1965-1966), so at
+        // midY the ＋/⠿ pair forms a continuous span [blockLeft-50,
+        // blockLeft-14] and .ed-block:hover holds across the whole band
+        // regardless of ::before, at any endpoint — a direct Chromium probe
+        // during design confirmed hover=true and opacity 1.00 at -42, -46,
+        // -48 and -50 with ::before reverted to var(--ed-gutter-w) alone;
+        // this walk itself never reaches those offsets, since it stops at
+        // -38. Extending it buys nothing; the two walks below are the ones
+        // that can see the defect.
         const walk = await gutterOpacityWalk(page, beta,
           geo.block.l + 6, geo.block.l - 38, midY, 2);
         const dead = walk.filter((s) => s.handle < 0.99 || !s.hover);
@@ -16443,8 +16455,21 @@ async function gutterGeometry(page, sel) {
           JSON.stringify(dead.slice(0, 12)));
         // Row bottom: the buttons are 20px tall and the row is taller.
         const lowY = geo.block.b - 2;
+        // v3.0.2: -48, not the -38 this walk shipped with. v3.0.1 moved the
+        // ＋/⠿ pair a further --ed-gutter-shift left, to [blockLeft-50,
+        // blockLeft-14], and repaired .ed-block::before to span the same
+        // [-50, 0] — but this walk stopped 2px short of -40, so the band the
+        // repair created was never entered and the suite was green both
+        // before and after the fix. -48 is the correct geometric bound: -50
+        // is the zone's own edge (subpixel) and -51 is already outside it
+        // (.content's padding-left is 56px), where a walk would go red
+        // against CORRECT code. The loop steps by 4 from blockLeft+6, so
+        // -48 itself is never a sampled offset — -46 is the deepest point
+        // actually sampled, 4px inside the -50 edge and 6px inside the
+        // repaired band's -40 boundary. -48 stays the right endpoint anyway,
+        // since it is still correct if the step or start point ever change.
         const lowWalk = await gutterOpacityWalk(page, beta,
-          geo.block.l + 6, geo.block.l - 38, lowY, 4);
+          geo.block.l + 6, geo.block.l - 48, lowY, 4);
         const lowDead = lowWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(lowDead.length, 0,
           'the gutter must stay live along the BOTTOM of a row, below the 20px buttons — ' +
@@ -16459,8 +16484,11 @@ async function gutterGeometry(page, sel) {
         assert.ok(hMidY > hGeo.handle.b,
           'fixture sanity: the heading\'s vertical centre must sit BELOW its ⠿ — that is the ' +
           'gap being closed');
+        // v3.0.2: -48, same reasoning as the row-bottom walk above — the
+        // loop's step of 4 from blockLeft+6 makes -46 the deepest point
+        // actually sampled here too.
         const hWalk = await gutterOpacityWalk(page, hSel,
-          hGeo.block.l + 6, hGeo.block.l - 38, hMidY, 4);
+          hGeo.block.l + 6, hGeo.block.l - 48, hMidY, 4);
         const hDead = hWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(hDead.length, 0,
           'moving left from the MIDDLE of a heading must reveal and keep its ⠿ — ' +
