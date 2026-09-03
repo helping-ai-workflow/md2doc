@@ -22302,6 +22302,153 @@ async function gutterGeometry(page, sel) {
 
     // <<<S4RVSECTION
 
+    // ── v3.0.2: computeIndentClamp()'s stale-span assert ───────────────────
+    // The span handed to the clamp must still BE the run it was derived from,
+    // at the moment the clamp is computed. Two ways it can go stale, both of
+    // which the pre-v3.0.2 code answered with a confident wrong number rather
+    // than a refusal: a member detached from the document (getAttribute still
+    // answers on a detached node), and a span whose members are all still
+    // attached but no longer in the run's document order (indexOf() then
+    // reports an opIndex for a layout that no longer exists, so §3.4 rule 2's
+    // scope starts in the wrong place).
+    {
+      const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const detached = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const victim = run[1];
+          victim.remove();
+          return window.__edTestClampProbe(run, run[2], 1, {});
+        });
+        assert.strictEqual(detached, null,
+          'a span holding a DETACHED member must refuse the clamp, got: ' + JSON.stringify(detached));
+
+        const written = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((el) => el.getAttribute('data-indent')));
+        assert.deepStrictEqual(written, ['0', '1'],
+          'a refused clamp must write NO data-indent at all, got: ' + JSON.stringify(written));
+
+        await page.reload({ waitUntil: 'networkidle0' });
+        const shuffled = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const out = run.slice();
+          out.reverse();
+          return window.__edTestClampProbe(out, out[0], 1, {});
+        });
+        assert.strictEqual(shuffled, null,
+          'a span in the wrong ORDER must refuse the clamp, got: ' + JSON.stringify(shuffled));
+
+        await page.close();
+        console.log('clamp assert: a detached or reordered span refuses instead of answering — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 REGRESSION GUARD: a legitimate, freshly derived run still gets
+    // exactly the answer it got before the assert existed. (Green before and
+    // after — it is here to stay green.)
+    {
+      const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const answer = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const r = window.__edTestClampProbe(run, run[1], 1, { removed: true });
+          return r && r.map((x) => x.indent);
+        });
+        assert.ok(Array.isArray(answer),
+          'a fresh, in-order run must still get a real answer, got: ' + JSON.stringify(answer));
+        await page.close();
+        console.log('clamp assert: a fresh in-order run is unaffected — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 REGRESSION GUARD — these two pin that a caret Tab and a caret
+    // Shift+Tab (both handled by ONE call site, client.js:6016 — batch
+    // Tab/Shift+Tab is the separate call site at :5766, not covered by
+    // these two) commit exactly the same bytes with the stale-span assert
+    // in place as they did before it existed. They do NOT prove the assert
+    // can't wrongly fire on a real gesture: indentListItem()/
+    // outdentListItem() (client.js:5548-5644) write the operated item's own
+    // indent directly and unconditionally, before applyIndentClamp() is
+    // ever called, and in this flat 3-item fixture no sibling needs
+    // reclamping — so a clamp that always refused (returned null) would
+    // still produce byte-identical SAVED output here. Reviewed 2026-09-03:
+    // neither this call site nor the batch one at :5766 has ANY scenario in
+    // this file whose correct answer requires reclamping a TRAILING
+    // sibling, so a wrongly-always-refusing assert on either Tab site is
+    // not caught by a targeted case — only by the suite's overall
+    // behaviour. (A forced-always-refuse mutant of the assert IS killed by
+    // this file, but by an unrelated, earlier §3.4 rule 3 convert scenario
+    // at test/editor-client-runtime.test.js:2612 — every rule-3-family
+    // scenario in this file belongs to the batch-delete, convert or drop
+    // call sites, none to either Tab site. Because node's `assert` throws
+    // on first failure and this whole file is one script, a mutation-kill
+    // claim can only ever be "the suite kills the mutant", never "these
+    // named downstream lines reddened" — nothing past the first throw is
+    // observable in a single run.) For the ⠿ drop site (client.js:8456)
+    // the argument IS structural, not just "some earlier scenario happens
+    // to cover it": orphan indents at client.js:8458-8462 come ONLY from
+    // the clamp map, with no direct-write fallback, so the S4 RV "a BATCH
+    // li move writes the clamped indents of the orphans it leaves behind"
+    // scenario is a targeted guard against a wrongly-firing assert there.
+    {
+      const { srv, url, mdPath } = await setupListDoc([
+        '# List doc', '',
+        '- Alpha item', '- Bravo item', '- Charlie item', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(() =>
+          document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length === 1,
+          { timeout: 5000 });
+        const text = await saveAndRead(page, mdPath);
+        assert.strictEqual(text, [
+          '# List doc', '',
+          '- Alpha item', '  - Bravo item', '- Charlie item', '',
+        ].join('\n'),
+          'clamp assert must not fire on Tab (client.js:6016) — bytes differ:\n' + text);
+        await page.close();
+      } finally { srv.close(); }
+    }
+
+    {
+      const { srv, url, mdPath } = await setupListDoc([
+        '# List doc', '',
+        '- Alpha item', '  - Bravo item', '- Charlie item', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(() =>
+          document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length === 0,
+          { timeout: 5000 });
+        const text = await saveAndRead(page, mdPath);
+        assert.strictEqual(text, [
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+        ].join('\n'),
+          'clamp assert must not fire on Shift+Tab (client.js:6016) — bytes differ:\n' + text);
+        await page.close();
+        console.log('clamp assert: Tab and Shift+Tab still commit the same bytes — OK');
+      } finally { srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
