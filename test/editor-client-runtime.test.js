@@ -8145,12 +8145,20 @@ async function gutterGeometry(page, sel) {
           ['col-narrow', 'col-prose'],
           'deleting the middle column must remove exactly that <col>, not a different one');
         const fileText = await saveAndRead(page, tmdPath);
+        // v3.0.2: a column delete no longer discards the survivors' hand-aligned
+        // widths (table-md.js's forward-scan match). This scenario is a UI-driven
+        // middle-column delete, so it doubles as the end-to-end pin for the
+        // width-memory fix that test/table-width.test.js cases 15 and 20 pin at
+        // the unit level. The right-align colon on Name survives too: the F1
+        // verbatim gate re-emits the original separator field when neither the
+        // width nor the alignment changed.
         assert.strictEqual(fileText,
-          ['| Name | Detail |',
-           '|---:|---|',
-           '| Alice | It is fine. Really. |',
-           '| Bob | Also fine. Truly. |', ''].join('\n'),
-          'deleting the middle column must remove it from every row, got:\n' + fileText);
+          ['| Name   | Detail              |',
+           '|-------:|---------------------|',
+           '| Alice  | It is fine. Really. |',
+           '| Bob    | Also fine. Truly.   |', ''].join('\n'),
+          'deleting the middle column must remove it from every row AND leave the ' +
+          'survivors\' hand-aligned widths alone (v3.0.2), got:\n' + fileText);
         await page.close();
         console.log('table delete column: colgroup loses exactly the deleted <col>, order preserved — OK');
       } finally { tsrv.close(); }
@@ -16426,6 +16434,18 @@ async function gutterGeometry(page, sel) {
         // straight to a button's centre — which every other gutter helper in
         // this file does — cannot see a corridor, because it never enters one.
         const midY = geo.block.t + geo.block.h / 2;
+        // v3.0.2: this walk's endpoint stays at -38 ON PURPOSE. It samples
+        // at midY, which for a 24.75px li row is ~12.4px down — inside the
+        // 20px-tall buttons — and .ed-insert is itself a descendant of
+        // .ed-block (lib/editor/client.js:1947-1948 and 1977-1978), so at
+        // midY the ＋/⠿ pair forms a continuous span [blockLeft-50,
+        // blockLeft-14] and .ed-block:hover holds across the whole band
+        // regardless of ::before, at any endpoint — a direct Chromium probe
+        // during design confirmed hover=true and opacity 1.00 at -42, -46,
+        // -48 and -50 with ::before reverted to var(--ed-gutter-w) alone;
+        // this walk itself never reaches those offsets, since it stops at
+        // -38. Extending it buys nothing; the two walks below are the ones
+        // that can see the defect.
         const walk = await gutterOpacityWalk(page, beta,
           geo.block.l + 6, geo.block.l - 38, midY, 2);
         const dead = walk.filter((s) => s.handle < 0.99 || !s.hover);
@@ -16435,8 +16455,21 @@ async function gutterGeometry(page, sel) {
           JSON.stringify(dead.slice(0, 12)));
         // Row bottom: the buttons are 20px tall and the row is taller.
         const lowY = geo.block.b - 2;
+        // v3.0.2: -48, not the -38 this walk shipped with. v3.0.1 moved the
+        // ＋/⠿ pair a further --ed-gutter-shift left, to [blockLeft-50,
+        // blockLeft-14], and repaired .ed-block::before to span the same
+        // [-50, 0] — but this walk stopped 2px short of -40, so the band the
+        // repair created was never entered and the suite was green both
+        // before and after the fix. -48 is the correct geometric bound: -50
+        // is the zone's own edge (subpixel) and -51 is already outside it
+        // (.content's padding-left is 56px), where a walk would go red
+        // against CORRECT code. The loop steps by 4 from blockLeft+6, so
+        // -48 itself is never a sampled offset — -46 is the deepest point
+        // actually sampled, 4px inside the -50 edge and 6px inside the
+        // repaired band's -40 boundary. -48 stays the right endpoint anyway,
+        // since it is still correct if the step or start point ever change.
         const lowWalk = await gutterOpacityWalk(page, beta,
-          geo.block.l + 6, geo.block.l - 38, lowY, 4);
+          geo.block.l + 6, geo.block.l - 48, lowY, 4);
         const lowDead = lowWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(lowDead.length, 0,
           'the gutter must stay live along the BOTTOM of a row, below the 20px buttons — ' +
@@ -16451,8 +16484,11 @@ async function gutterGeometry(page, sel) {
         assert.ok(hMidY > hGeo.handle.b,
           'fixture sanity: the heading\'s vertical centre must sit BELOW its ⠿ — that is the ' +
           'gap being closed');
+        // v3.0.2: -48, same reasoning as the row-bottom walk above — the
+        // loop's step of 4 from blockLeft+6 makes -46 the deepest point
+        // actually sampled here too.
         const hWalk = await gutterOpacityWalk(page, hSel,
-          hGeo.block.l + 6, hGeo.block.l - 38, hMidY, 4);
+          hGeo.block.l + 6, hGeo.block.l - 48, hMidY, 4);
         const hDead = hWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(hDead.length, 0,
           'moving left from the MIDDLE of a heading must reveal and keep its ⠿ — ' +
@@ -22293,6 +22329,323 @@ async function gutterGeometry(page, sel) {
     }, 'RV');
 
     // <<<S4RVSECTION
+
+    // ── v3.0.2: computeIndentClamp()'s stale-span assert ───────────────────
+    // The span handed to the clamp must still BE the run it was derived from,
+    // at the moment the clamp is computed. Two ways it can go stale, both of
+    // which the pre-v3.0.2 code answered with a confident wrong number rather
+    // than a refusal: a member detached from the document (getAttribute still
+    // answers on a detached node), and a span whose members are all still
+    // attached but no longer in the run's document order (indexOf() then
+    // reports an opIndex for a layout that no longer exists, so §3.4 rule 2's
+    // scope starts in the wrong place).
+    {
+      const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const detached = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const victim = run[1];
+          victim.remove();
+          return window.__edTestClampProbe(run, run[2], 1, {});
+        });
+        assert.strictEqual(detached, null,
+          'a span holding a DETACHED member must refuse the clamp, got: ' + JSON.stringify(detached));
+
+        const written = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .map((el) => el.getAttribute('data-indent')));
+        assert.deepStrictEqual(written, ['0', '1'],
+          'a refused clamp must write NO data-indent at all, got: ' + JSON.stringify(written));
+
+        await page.reload({ waitUntil: 'networkidle0' });
+        const shuffled = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const out = run.slice();
+          out.reverse();
+          return window.__edTestClampProbe(out, out[0], 1, {});
+        });
+        assert.strictEqual(shuffled, null,
+          'a span in the wrong ORDER must refuse the clamp, got: ' + JSON.stringify(shuffled));
+
+        await page.close();
+        console.log('clamp assert: a detached or reordered span refuses instead of answering — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 REGRESSION GUARD: a legitimate, freshly derived run still gets
+    // exactly the answer it got before the assert existed. (Green before and
+    // after — it is here to stay green.)
+    {
+      const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const answer = await page.evaluate(() => {
+          const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
+          const r = window.__edTestClampProbe(run, run[1], 1, { removed: true });
+          return r && r.map((x) => x.indent);
+        });
+        assert.ok(Array.isArray(answer),
+          'a fresh, in-order run must still get a real answer, got: ' + JSON.stringify(answer));
+        await page.close();
+        console.log('clamp assert: a fresh in-order run is unaffected — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 REGRESSION GUARD — these two pin that a caret Tab and a caret
+    // Shift+Tab (both handled by ONE call site, client.js:6028 — batch
+    // Tab/Shift+Tab is the separate call site at :5778, not covered by
+    // these two) commit exactly the same bytes with the stale-span assert
+    // in place as they did before it existed. They do NOT prove the assert
+    // can't wrongly fire on a real gesture: indentListItem()/
+    // outdentListItem() (client.js:5567-5623) write the operated item's own
+    // indent directly and unconditionally, before applyIndentClamp() is
+    // ever called, and in this flat 3-item fixture no sibling needs
+    // reclamping — so a clamp that always refused (returned null) would
+    // still produce byte-identical SAVED output here. Reviewed 2026-09-03:
+    // neither this call site nor the batch one at :5778 has ANY scenario in
+    // this file whose correct answer requires reclamping a TRAILING
+    // sibling, so a wrongly-always-refusing assert on either Tab site is
+    // not caught by a targeted case — only by the suite's overall
+    // behaviour. (A forced-always-refuse mutant of the assert IS killed by
+    // this file, but by an unrelated, earlier §3.4 rule 3 convert scenario
+    // at test/editor-client-runtime.test.js:2612 — every rule-3-family
+    // scenario in this file belongs to the batch-delete, convert or drop
+    // call sites, none to either Tab site. Because node's `assert` throws
+    // on first failure and this whole file is one script, a mutation-kill
+    // claim can only ever be "the suite kills the mutant", never "these
+    // named downstream lines reddened" — nothing past the first throw is
+    // observable in a single run.) For the ⠿ drop site (client.js:8516)
+    // the argument IS structural, not just "some earlier scenario happens
+    // to cover it": orphan indents at client.js:8518-8523 come ONLY from
+    // the clamp map, with no direct-write fallback, so the S4 RV "a BATCH
+    // li move writes the clamped indents of the orphans it leaves behind"
+    // scenario is a targeted guard against a wrongly-firing assert there.
+    {
+      const { srv, url, mdPath } = await setupListDoc([
+        '# List doc', '',
+        '- Alpha item', '- Bravo item', '- Charlie item', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.press('Tab');
+        await page.waitForFunction(() =>
+          document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length === 1,
+          { timeout: 5000 });
+        const text = await saveAndRead(page, mdPath);
+        assert.strictEqual(text, [
+          '# List doc', '',
+          '- Alpha item', '  - Bravo item', '- Charlie item', '',
+        ].join('\n'),
+          'clamp assert must not fire on Tab (client.js:6028) — bytes differ:\n' + text);
+        await page.close();
+      } finally { srv.close(); }
+    }
+
+    {
+      const { srv, url, mdPath } = await setupListDoc([
+        '# List doc', '',
+        '- Alpha item', '  - Bravo item', '- Charlie item', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const list0 = await listBlockSel(page, 0);
+        await openWysiwyg(page, list0);
+        await placeCaretInListText(page, list0, 'Bravo item', true);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        await page.waitForFunction(() =>
+          document.querySelectorAll('.ed-block[data-block-type="li"][data-indent="1"]').length === 0,
+          { timeout: 5000 });
+        const text = await saveAndRead(page, mdPath);
+        assert.strictEqual(text, [
+          '# List doc', '',
+          '- Alpha item', '- Bravo item', '- Charlie item', '',
+        ].join('\n'),
+          'clamp assert must not fire on Shift+Tab (client.js:6028) — bytes differ:\n' + text);
+        await page.close();
+        console.log('clamp assert: Tab and Shift+Tab still commit the same bytes — OK');
+      } finally { srv.close(); }
+    }
+
+    // ── v3.0.2: the header row's grip must not blank the ⠿'s approach ──────
+    // The row grip straddles the table's left border ([tableLeft-10,
+    // tableLeft+10]) and is a document.body child at z-index 7, while a table
+    // block's ⠿ sits at top:0 — the header row's own Y. So a pointer moving
+    // left from a header cell toward the ⠿ crosses the grip first,
+    // elementFromPoint returns the grip, .ed-block:hover goes false, and the
+    // ⠿ fades out and back in. Geometry cannot fix it (the grip must stay a
+    // body child to hold position while the table scrolls), so this is a
+    // state rule: while the pointer is in the ROW grip's zone and that grip
+    // is anchored to the HEADER row, the block keeps its gutter lit.
+    //
+    // The filter here looks at opacity ONLY, unlike the three gutter walks
+    // above which also require `s.hover`. :hover genuinely IS false over the
+    // grip — it is not a .ed-block descendant — and this rule does not (and
+    // cannot) restore it.
+    {
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const geo = await gutterGeometry(page, tsel);
+
+        const walk = await gutterOpacityWalk(page, tsel,
+          geo.block.l + 6, geo.block.l - 20, geo.block.t + 6, 2);
+        const dark = walk.filter((s) => s.handle < 0.99);
+        assert.strictEqual(dark.length, 0,
+          'the ⠿ must stay lit while the pointer crosses the HEADER row grip — ' +
+          dark.length + ' of ' + walk.length + ' samples dropped it: ' +
+          JSON.stringify(dark.slice(0, 12)));
+
+        await page.close();
+        console.log('table grips: the header row grip no longer blanks the ⠿ — OK');
+      } finally { srv.close(); }
+    }
+
+    // v3.0.2 SCOPE GUARDS for the keep-alive — the three ways it must NOT
+    // fire, each of which was a real hazard in the first draft of this fix.
+    {
+      // (a) a BODY row's grip shares no Y with the ⠿, so it must not light it.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '| Bob   | 41  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        const bodyY = await page.evaluate((sl) => {
+          const rows = document.querySelector(sl).querySelectorAll('tbody tr');
+          const r = rows[rows.length - 1].getBoundingClientRect();
+          return r.top + r.height / 2;
+        }, tsel);
+        const bodyX = await page.evaluate((sl) => {
+          const t = document.querySelector(sl).querySelector('table');
+          return t.getBoundingClientRect().left + 20;
+        }, tsel);
+        await movePointerAndSettle(page, bodyX, bodyY);
+        await movePointerAndSettle(page, bodyX - 26, bodyY);
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a BODY row grip must not light the gutter — the ⠿ is nowhere near its Y');
+        await page.close();
+        console.log('table grips: the keep-alive is scoped to the HEADER row — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (b) a header-only table nulls gripRowTableEl while still showing the
+      //     COLUMN grip. Both seams are reached in that state; without the
+      //     null guard this throws in the pointermove hot path.
+      const { srv, url } = await setupTableDoc(['| A | B |', '|---|---|', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        const errors = [];
+        page.on('pageerror', (e) => errors.push(String(e && e.message)));
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const colXY = await page.evaluate(() => {
+          const g = document.querySelector('.ed-te-grip-col');
+          const r = g.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await movePointerAndSettle(page, colXY.x, colXY.y);
+        assert.deepStrictEqual(errors, [],
+          'moving onto a header-only table\'s column grip must not throw: ' + JSON.stringify(errors));
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a COLUMN grip must not light the gutter');
+        await page.close();
+        console.log('table grips: a header-only table\'s column grip is safe and inert — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (d, added by the final-review fix wave) the same first ternary as
+      // (b) above
+      // (`target.closest('.ed-te-grip-row') ? headerGripBlock() : null`), but
+      // this time gripRowTableEl/gripRowEl are a REAL header anchor —
+      // headerGripBlock() itself would return a truthy block if it ran.
+      // (b)'s header-only fixture leaves that guard untested: its own null
+      // check (`!gripRowTableEl || !gripRowEl`) already returns null
+      // regardless of which side of the ternary runs, so the ternary could
+      // be replaced with `target.closest('.ed-te-grip-row') ||
+      // headerGripBlock()` and the suite would stay green. A table WITH a
+      // body row closes that gap — hovering the header cell makes both grips
+      // real, then the pointer lands on the COLUMN grip, whose target is
+      // never `.ed-te-grip-row`.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const colXY = await page.evaluate(() => {
+          const g = document.querySelector('.ed-te-grip-col');
+          const r = g.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await movePointerAndSettle(page, colXY.x, colXY.y);
+        const kept = await page.evaluate((sl) =>
+          document.querySelector(sl).classList.contains('ed-keep-lit'), tsel);
+        assert.strictEqual(kept, false,
+          'a COLUMN grip must not light the gutter even when the row grip is a REAL header anchor');
+        await page.close();
+        console.log('table grips: a real header anchor still withholds the class from the COLUMN grip — OK');
+      } finally { srv.close(); }
+    }
+
+    {
+      // (c) teardown — the class must not survive hideTableGrips(), including
+      //     the rerenderAll() call site that reaches it with the table already
+      //     detached.
+      const { srv, url } = await setupTableDoc(
+        ['| Name  | Age |', '|-------|-----|', '| Alice | 30  |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        const tsel = await tableBlockSel(page, 0);
+        await hoverHeaderRowCell(page, tsel);
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const geo = await gutterGeometry(page, tsel);
+        await movePointerAndSettle(page, geo.block.l - 6, geo.block.t + 6);
+        await movePointerAndSettle(page, geo.block.l + 400, geo.block.t + 400);
+        const afterLeave = await page.evaluate(() =>
+          document.querySelectorAll('.ed-keep-lit').length);
+        assert.strictEqual(afterLeave, 0,
+          'leaving the grip zone must clear the keep-alive class, got ' + afterLeave);
+        await page.evaluate(() => window.__edTestForceRerender());
+        const afterRerender = await page.evaluate(() =>
+          document.querySelectorAll('.ed-keep-lit').length);
+        assert.strictEqual(afterRerender, 0,
+          'a full rerender must not leave the keep-alive class behind, got ' + afterRerender);
+        await page.close();
+        console.log('table grips: the keep-alive class is torn down on leave and on rerender — OK');
+      } finally { srv.close(); }
+    }
 
     console.log('editor-client-runtime.test.js OK');
   } finally {

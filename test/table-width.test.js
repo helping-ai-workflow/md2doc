@@ -270,12 +270,13 @@ function table(headerRow, bodyRows) {
   ].join('\n'), 'an empty header must still match by text and keep its column width, got:\n' + md);
 }
 
-// 14. A RENAMED header (documented, ruled behaviour — 2026-09-02 review
-//     round 1 I2: rename-vs-permutation detection is explicitly OUT of
-//     scope for this patch release) reflows the WHOLE table to minimal
-//     form, exactly like today's shipped v3.0.0 already does on any other
-//     edit. This pins that decision so the next change to it is
-//     deliberate, not accidental.
+// 14. v3.0.2: a RENAMED header no longer discards the whole table's width
+//     memory. The forward-scan match below lines each current column up
+//     with the original column of the same name, skipping over originals
+//     that no longer appear; a name that is absent from the original
+//     entirely (a rename, or an insert) is simply unmatched and falls to
+//     independent per-row minimal form, while its NEIGHBOURS keep theirs.
+//     Superseded the 2026-09-02 review round-1 ruling, deliberately.
 {
   const original = [
     '| Name  | Age |',
@@ -287,16 +288,15 @@ function table(headerRow, bodyRows) {
   const { md } = serializeTable(t, original);
   assert.strictEqual(md, [
     '| Full Name | Age |',
-    '|---|---|',
-    '| Alice | 30 |',
-  ].join('\n'), 'a renamed header must reflow the WHOLE table to minimal form (documented, not a bug), got:\n' + md);
+    '|---|-----|',
+    '| Alice | 30  |',
+  ].join('\n'), 'a renamed header must keep the OTHER columns\' widths, got:\n' + md);
 }
 
-// 15. A DELETED column (fewer current headers than original) can never
-//     satisfy the all-or-nothing match gate (some original column has no
-//     possible match at all) — the whole table falls back to minimal form,
-//     same as a renamed header. Permanent width-memory loss on delete is a
-//     recorded, accepted limitation (review round 1 Minor item), not a bug.
+// 15. v3.0.2: a DELETED column no longer discards the whole table's width
+//     memory either. The forward-scan skips the deleted original outright;
+//     every surviving column keeps the width it had. This is the defect
+//     PR #25 named as "do it before autosave lands, not after".
 {
   const original = [
     '| Name  | Age | City |',
@@ -307,10 +307,10 @@ function table(headerRow, bodyRows) {
     [tr(td({}, 'Alice'), td({}, '30'))]);
   const { md } = serializeTable(t, original);
   assert.strictEqual(md, [
-    '| Name | Age |',
-    '|---|---|',
-    '| Alice | 30 |',
-  ].join('\n'), 'a deleted column must reflow the WHOLE table to minimal form, got:\n' + md);
+    '| Name  | Age |',
+    '|-------|-----|',
+    '| Alice | 30  |',
+  ].join('\n'), 'a deleted column must leave the survivors\' widths alone, got:\n' + md);
 }
 
 // 16. C1 (review round 1, Critical): a NARROW hand-aligned separator
@@ -415,6 +415,103 @@ function table(headerRow, bodyRows) {
   assert.strictEqual(toks.length, 1);
   assert.strictEqual(toks[0].type, 'table');
   assert.deepStrictEqual(toks[0].align, ['left', 'right']);
+}
+
+// 20. v3.0.2: a column deleted from the MIDDLE — the forward scan must skip
+//     the vanished original rather than stall on it.
+{
+  const original = [
+    '| Name  | Age | City |',
+    '|-------|-----|------|',
+    '| Alice | 30  | NY   |',
+  ].join('\n');
+  const t = table(tr(th({}, 'Name'), th({}, 'City')),
+    [tr(td({}, 'Alice'), td({}, 'NY'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, [
+    '| Name  | City |',
+    '|-------|------|',
+    '| Alice | NY   |',
+  ].join('\n'), 'a mid-table column delete must keep the survivors aligned, got:\n' + md);
+}
+
+// 21. v3.0.2 GUARD: a column REORDER still discards the whole table. This
+//     is the case the `moved` test exists for — two of the three headers
+//     are byte-identical to their originals, and keeping their padding
+//     would leave it on columns that have moved out from under it.
+{
+  const original = [
+    '| Name  | Age | City |',
+    '|-------|-----|------|',
+    '| Alice | 30  | NY   |',
+  ].join('\n');
+  const t = table(tr(th({}, 'City'), th({}, 'Name'), th({}, 'Age')),
+    [tr(td({}, 'NY'), td({}, 'Alice'), td({}, '30'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, [
+    '| City | Name | Age |',
+    '|---|---|---|',
+    '| NY | Alice | 30 |',
+  ].join('\n'), 'a column REORDER must still fall back to minimal form, got:\n' + md);
+}
+
+// 22. v3.0.2 REGRESSION GUARD: inserting a column mid-table is byte-for-byte
+//     what v3.0.1 already emitted. (This case was green before v3.0.2 too —
+//     it is here to stay green, not to go red first.)
+{
+  const original = [
+    '| Name  | Age |',
+    '|-------|-----|',
+    '| Alice | 30  |',
+  ].join('\n');
+  const t = table(tr(th({}, 'Name'), th({}, ''), th({}, 'Age')),
+    [tr(td({}, 'Alice'), td({}, ''), td({}, '30'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, [
+    '| Name  |  | Age |',
+    '|-------|---|-----|',
+    '| Alice |  | 30  |',
+  ].join('\n'), 'a mid-table column INSERT must be unchanged from v3.0.1, got:\n' + md);
+}
+
+// 23. v3.0.2 REGRESSION GUARD for the empty-name exemption: a table that
+//     ALREADY holds a blank header, with another column inserted next to
+//     it. Without the `name !== ''` exemption in the `moved` test, the new
+//     column's '' finds the existing blank header in the original, the
+//     refusal fires, and every hand-aligned width in the table is lost.
+{
+  const original = [
+    '|      | B   |',
+    '|------|-----|',
+    '| a    | bb  |',
+  ].join('\n');
+  const t = table(tr(th({}, ''), th({}, ''), th({}, 'B')),
+    [tr(td({}, 'a'), td({}, ''), td({}, 'bb'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, [
+    '|      |  | B   |',
+    '|------|---|-----|',
+    '| a    |  | bb  |',
+  ].join('\n'), 'inserting beside an existing BLANK header must not trip the reorder refusal, got:\n' + md);
+}
+
+// 24. v3.0.2 REGRESSION GUARD: a table with DUPLICATE header names, nothing
+//     edited, keeps every width. The forward scan's monotonic pointer pairs
+//     the second 'X' with the second original 'X', so no name is unmatched
+//     and the refusal never fires. (See the CHANGELOG's known issue: after
+//     a DELETE such a table can inherit the wrong same-named column's
+//     width. Not fixed — text matching cannot tell the instances apart.)
+{
+  const original = [
+    '| X    | Y   | X        |',
+    '|------|-----|----------|',
+    '| a    | b   | bb       |',
+  ].join('\n');
+  const t = table(tr(th({}, 'X'), th({}, 'Y'), th({}, 'X')),
+    [tr(td({}, 'a'), td({}, 'b'), td({}, 'bb'))]);
+  const { md } = serializeTable(t, original);
+  assert.strictEqual(md, original,
+    'an untouched duplicate-header table must be byte-identical, got:\n' + md);
 }
 
 console.log('table-width: all cases OK');
