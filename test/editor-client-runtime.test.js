@@ -8145,12 +8145,20 @@ async function gutterGeometry(page, sel) {
           ['col-narrow', 'col-prose'],
           'deleting the middle column must remove exactly that <col>, not a different one');
         const fileText = await saveAndRead(page, tmdPath);
+        // v3.0.2: a column delete no longer discards the survivors' hand-aligned
+        // widths (table-md.js's forward-scan match). This scenario is a UI-driven
+        // middle-column delete, so it doubles as the end-to-end pin for the
+        // width-memory fix that test/table-width.test.js cases 15 and 20 pin at
+        // the unit level. The right-align colon on Name survives too: the F1
+        // verbatim gate re-emits the original separator field when neither the
+        // width nor the alignment changed.
         assert.strictEqual(fileText,
-          ['| Name | Detail |',
-           '|---:|---|',
-           '| Alice | It is fine. Really. |',
-           '| Bob | Also fine. Truly. |', ''].join('\n'),
-          'deleting the middle column must remove it from every row, got:\n' + fileText);
+          ['| Name   | Detail              |',
+           '|-------:|---------------------|',
+           '| Alice  | It is fine. Really. |',
+           '| Bob    | Also fine. Truly.   |', ''].join('\n'),
+          'deleting the middle column must remove it from every row AND leave the ' +
+          'survivors\' hand-aligned widths alone (v3.0.2), got:\n' + fileText);
         await page.close();
         console.log('table delete column: colgroup loses exactly the deleted <col>, order preserved — OK');
       } finally { tsrv.close(); }

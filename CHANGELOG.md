@@ -3,6 +3,23 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.0.2 — 2026-09-03
+
+v3.0.1 兩輪 review 的遺留項。
+
+### Fixed
+
+- **刪掉一欄或改掉一個表頭名稱，會清掉整張表的欄寬記憶。** 表頭配對原本是逐格對照，
+  一旦對不上就停在原地，於是「原始表格有一欄沒被配到」這個條件同時涵蓋了刪欄、改名
+  與換欄序三種操作，全部被當成換欄序處理、整張表退回 minimal form。改成往前掃描的
+  子序列比對之後，刪欄與改名只影響該欄自己，其餘欄位保留作者手工對齊的寬度；換欄序
+  仍然整張退化——那才是唯一會讓寬度留在錯誤欄位上的操作。
+
+### Known issues
+
+- **表頭有重複名稱的表格，刪欄後存活欄可能繼承到同名另一欄的寬度。** 配對是靠表頭
+  文字，分不出兩個同名欄哪個是哪個。GFM 未定義重複表頭的語意。
+
 ## v3.0.1 — 2026-09-02
 
 A bugfix release for `md2doc --edit`, aimed squarely at the thing that makes this
@@ -31,7 +48,7 @@ editor worth using: editing one block must not rewrite any other bytes.
   分隔列不拉長），所以手工對齊過的表格只要改一格，整張表的每一行都是 diff。
   現在序列化器會讀取該表格目前的原始行，並在**每一欄在每一列都是同寬、且該寬度大於 3**
   時，把它當成 padding 下限沿用；空格填充的分隔列（Prettier 與 VS Code 產出的那種，破折號兩側帶空格）在對齊未變且寬度未變時原樣保留，不再被改寫。內容變長的欄位只會變寬，不會被截斷。
-- 沒有原始來源、原始來源無法解析、或**表頭被改名、有欄位被刪除**時，整張表仍回退成 minimal form。後兩者是已知限制，會在後續版本處理。
+- 沒有原始來源、原始來源無法解析、或**欄位順序被調換**時，整張表仍回退成 minimal form。表頭改名與欄位刪除在 v3.0.2 已處理。
 
 ### Internal
 
