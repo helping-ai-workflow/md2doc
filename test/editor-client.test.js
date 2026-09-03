@@ -798,22 +798,36 @@ function countInCode(source, needle) {
   // all. The expected total is therefore DECLARED once + EXPORTED once +
   // 12 uses = 14.
   //
-  // MIGRATED by v3.1.0 Task E (14 -> 15), with the reason: leaveSourceMode() —
-  // 追加 4's whole-document source escape hatch — is a genuinely NEW
-  // commit-then-render site. It replaces the ENTIRE document through one
-  // commitRangeEdit(1, lines.length, …) and renders, which is none of the four
-  // existing shapes (a block edit, a list run, a block insertion, a block
-  // move). Its rollback matters more than most: the range is the whole file,
-  // so a failed render that left `lines` holding the new text while the server
-  // still had the old would desynchronise every subsequent edit. The other
-  // v3.1.0 additions add NONE, and that was checked rather than assumed:
-  // indentCaretLi() commits through commitListStructure()'s existing site, the
-  // toolbar's insert/convert/heading buttons all call functions that already
-  // owned their site, and the image/paste paths go through
-  // insertBlockBelow()'s. The expected total is therefore DECLARED once +
-  // EXPORTED once + 13 uses = 15.
-  assert.strictEqual(helperCalls, 15,
-    'the helper must be DECLARED once, EXPORTED once, and used at all thirteen ' +
+  // ⚠ THE ACCOUNTING SENTENCE ABOVE WAS WRONG FOR SEVERAL VERSIONS, and is
+  // corrected here rather than carried forward again. The probe is
+  // countInCode(src, 'rollbackFailedRender(') — WITH the open paren — so the
+  // `module.exports = { …, rollbackFailedRender, … }` line CANNOT match it:
+  // that name appears there bare. The real breakdown has always been
+  // 1 DECLARATION + N CALL SITES, never "declared + exported + N". Every
+  // "+ EXPORTED once" in the migration notes above is off by one in the
+  // narrative only; the numbers themselves were, and are, correct.
+  //
+  // MIGRATED by v3.1.0 Task E (14 -> 16). TWO genuinely new
+  // commit-then-render sites, both of which own their range outright and so
+  // cannot borrow another site's rollback:
+  //   * leaveSourceMode() — 追加 4's whole-document source escape hatch.
+  //     Replaces the ENTIRE document through one commitRangeEdit(1,
+  //     lines.length, …). Its rollback matters more than most: the range is
+  //     the whole file, so a failed render that left `lines` holding the new
+  //     text while the server still had the old would desynchronise every
+  //     later edit.
+  //   * insertParagraphAtTop() — the toolbar's ⬆ on the document's FIRST
+  //     block, which has no predecessor to insert below. It splices
+  //     [skeleton, '', line] over that block's own first line with
+  //     commitRangeEdit(), so it is neither commitBlockInsertion()'s site nor
+  //     any of the others.
+  // The rest of v3.1.0 adds NONE, and that was checked rather than assumed:
+  // indentCaretLi() commits through commitListStructure()'s existing site,
+  // the toolbar's convert/heading buttons call functions that already owned
+  // theirs, and the image/paste paths go through insertBlockBelow()'s.
+  // The expected total is therefore 1 declaration + 15 call sites = 16.
+  assert.strictEqual(helperCalls, 16,
+    'the helper must be DECLARED once and used at all fifteen ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 

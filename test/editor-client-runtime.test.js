@@ -1912,8 +1912,9 @@ async function gutterGeometry(page, sel) {
     // ── S2 Task 2: the ⠿ menu is VERTICAL and carries a 轉換成 submenu ──────
     //    Spec §3.7 fixes the item list to 轉換成 › / 建立副本 / 刪除 / MD 原始碼
     //    (no ✕, no heading ±); §3.2 fixes the submenu's twelve targets; §7
-    //    excludes a table block from 轉換成 and RULING F-O excludes a list
-    //    item from MD 原始碼. setupTableDoc() is used purely as the generic
+    //    excludes a table block from 轉換成. RULING F-O used to exclude a list
+    //    item from MD 原始碼; v3.1.0's Ruling 13 supersedes that for this
+    //    surface — see the list-item scenario below. setupTableDoc() is used purely as the generic
     //    "isolated doc + server" helper (it is byte-identical to
     //    setupListDoc()) so none of these scenarios can leak undo/save state
     //    into another.
@@ -2207,16 +2208,29 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(s2fUrl, { waitUntil: 'networkidle0' });
 
+        // MIGRATED by v3.1.0 Task E (修正 4 / controller Ruling 13). This
+        // asserted ['轉換成 ›','建立副本','刪除'] under RULING F-O, which
+        // hid MD 原始碼 on a list item permanently. F-O's stated premise was
+        // that openRawEditor() swaps the block's innerHTML for a <textarea>
+        // and that its restore() would then have to rebuild the li's
+        // marker/checkbox/text chrome back out of a captured string. 修正 4
+        // removes that premise rather than working around it: a li raw-edits
+        // an explicit LINE RANGE, commits through commitRangeEdit() instead
+        // of the run re-serializer, and restores by RE-RENDERING instead of
+        // rewriting innerHTML — so no serializer ever meets the textarea and
+        // no chrome is ever rebuilt by hand. The assertion is INVERTED rather
+        // than deleted: it is what pins the item's presence, and it would go
+        // red again the moment a future change re-hid it.
         await openGutterMenu(page, await liBlockSelByText(page, 'alpha'));
         assert.deepStrictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent)),
-          ['轉換成 ›', '建立副本', '刪除'],
-          'RULING F-O forbids openRawEditor on a list item, permanently');
+          ['轉換成 ›', '建立副本', '刪除', 'MD 原始碼'],
+          'v3.1.0 修正 4: a list item now offers MD 原始碼 like every other block type');
         await page.keyboard.press('Escape');
 
         await page.close();
-        console.log('S2 ⠿ menu: a list item still offers no MD 原始碼 (RULING F-O) — OK');
+        console.log('S2 ⠿ menu: a list item now offers MD 原始碼 too (修正 4 supersedes RULING F-O) — OK');
       } finally {
         s2fSrv.close();
       }
@@ -13081,9 +13095,9 @@ async function gutterGeometry(page, sel) {
     // S1: every block type gets the ⠿ handle — list items included, at every
     // indent depth. The ＋ stays hidden for li until S2 (insertBlockBelow has
     // no indent awareness yet: it writes a bare skeleton line at endLine + 1,
-    // which on a parent item orphans its children), and 'MD 原始碼' is hidden
-    // for li permanently (RULING F-O: injecting a textarea into a list item
-    // corrupts it).
+    // which on a parent item orphans its children). 'MD 原始碼' used to be
+    // hidden for li permanently under RULING F-O; v3.1.0's 修正 4 supersedes
+    // that — see the migrated assertion further down.
     {
       const { srv: lsrv, url: lurl } = await setupListDoc(['# List doc', '', '- Alpha', '  - Bravo', '- Charlie', '']);
       try {
@@ -13120,10 +13134,13 @@ async function gutterGeometry(page, sel) {
         assert.deepStrictEqual(clean, [],
           'gutter chrome must stay invisible to the serializer — otherwise the whole document degrades read-only');
 
-        // RULING F-O: the ⠿ menu on a li must hide 'MD 原始碼' permanently —
-        // openRawEditor() replaces the block's innerHTML with a textarea, and
-        // a list item that owns one source line of a shared run cannot host
-        // one. Every other item stays visible.
+        // MIGRATED by v3.1.0 Task E (修正 4 / controller Ruling 13). This
+        // used to assert that the ⠿ menu on a li HIDES 'MD 原始碼'
+        // permanently, on RULING F-O's premise that a list item owning one
+        // source line of a shared run cannot host a textarea. It can now: the
+        // raw editor takes an explicit line range and restores by
+        // re-rendering, so neither the run serializer nor a hand-rebuilt
+        // chrome is involved. All four items are expected.
         const liSel = await page.evaluate(() =>
           '.ed-block[data-block-id="' +
           document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id') + '"]');
@@ -13133,19 +13150,20 @@ async function gutterGeometry(page, sel) {
         const liMenu = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
-        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 建立副本,
-        // so a li now shows three of the four items — everything except
-        // MD 原始碼, which RULING F-O forbids on a list item permanently.
-        assert.strictEqual(liMenu, '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
-          "a list item's ⠿ menu must show 轉換成 › / 建立副本 / 刪除 — no MD 原始碼 (RULING F-O), got " +
+        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 建立副本;
+        // v3.1.0 restores MD 原始碼, so a li now shows all four.
+        assert.strictEqual(liMenu, '轉換成 ›,建立副本,刪除,MD 原始碼'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show all four items including MD 原始碼 (v3.1.0 修正 4), got " +
           JSON.stringify(liMenu));
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
-        // ...and the hiding must be per-type, not sticky: the SAME singleton
-        // menu reopened on a paragraph/heading must show MD 原始碼 again
-        // (test/editor-reader-rebind.test.js drives raw-edit through exactly
-        // that button, by its exact text).
+        // ...and MD 原始碼 must be there on a paragraph/heading too. Before
+        // v3.1.0 this checked that the li-specific HIDE was per-type rather
+        // than sticky on the singleton menu; 修正 4 removed the hide
+        // altogether, so what survives is the plain presence check — which is
+        // still worth keeping, because test/editor-reader-rebind.test.js
+        // drives raw-edit through exactly this button, by its exact text.
         const headSel = await page.evaluate(() => {
           const h = document.querySelector('.ed-block[data-block-type="heading"]') ||
             document.querySelector('.ed-block[data-block-type="paragraph"]');
@@ -13190,7 +13208,7 @@ async function gutterGeometry(page, sel) {
     //                 unchanged. Measured: '# Doc\n\n- a\n\n- - b\n' became
     //                 '# Doc\n\n- a\n- - b\n'.
     //   body click  -> the degraded-block branch opens a RAW TEXTAREA inside
-    //                 the list item (RULING F-O forbids exactly this), seeded
+    //                 the list item, seeded
     //                 with '' because extractBlockSource() of an inverted
     //                 range is empty; committing it runs commitRangeEdit(5, 4)
     //                 which INSERTS rather than replaces. Measured: typing
@@ -13275,8 +13293,10 @@ async function gutterGeometry(page, sel) {
         await settleEditor(page);
         assert.strictEqual(
           await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0,
-          'clicking a list item that owns no line must NOT open a raw textarea — RULING F-O forbids ' +
-          'a textarea inside a li, and extractBlockSource() of an inverted range seeds it empty');
+          'clicking a list item that owns no line must NOT open a raw textarea — extractBlockSource() ' +
+          'of an inverted range seeds it empty and the commit INSERTS instead of replacing. ' +
+          'LEFT STANDING by v3.1.0: 修正 4 supersedes RULING F-O for the ⠿ menu, but this refusal ' +
+          'was never F-O\'s — it is about owning no source line, which no teardown strategy fixes');
         assert.strictEqual(
           await page.evaluate(() => !!document.querySelector('.ed-conflict')), true,
           'the refused body click must REFUSE VISIBLY (banner), not fail silently');
