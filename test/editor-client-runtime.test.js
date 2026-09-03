@@ -4707,7 +4707,7 @@ async function gutterGeometry(page, sel) {
       assert.strictEqual(
         await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
         true,
-        'paste must never introduce a real <b> element — only plain text'
+        'paste must never introduce a real <b> element — the html flavour goes through markdown, never into the DOM'
       );
       // ...widened to the whole document, since the converted markdown now
       // lands in a block of its own rather than inside the paste target.
@@ -22789,6 +22789,332 @@ async function gutterGeometry(page, sel) {
         await page.close();
         console.log('table grips: the keep-alive class is torn down on leave and on rerender — OK');
       } finally { srv.close(); }
+    }
+
+
+    // ════════════════════════════════════════════════════════════════════
+    // v3.1.0 — the visible surface, end to end. Five scenarios, one per
+    // thing this version put in front of the user: the toolbar (that it
+    // survives a rerender at all, and that a button on it actually edits),
+    // the list item's restored MD 原始碼 escape hatch, HTML paste, and
+    // image drop. Everything else this version added is covered by the
+    // pure-function suites (toolbar-model / paste-md / asset / docsource).
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── v3.1.0 §4 (the blocker this case exists for): the toolbar is mounted
+    //    on document.body, never inside .content, precisely because
+    //    rerenderAll() does `contentEl.innerHTML = j.bodyHtml` and only
+    //    armEditables() rebuilds anything afterwards — a bar mounted in
+    //    .content would vanish on the first commit with nothing left to bring
+    //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
+    //    client.js's own comment on that seam), which is the only way to reach
+    //    that swap without going through a commit first. The bar must still be
+    //    there, still be the ONLY one, still carry the whole 22-button roster
+    //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
+    //    the tracked block on every rerender, so what a post-rerender click
+    //    meets is the model's documented no-block state (undo / redo /
+    //    outline / preview stay enabled, everything else greys out). ────────
+    {
+      const { srv, url } = await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        // Desktop width on purpose: toggleOutlineSidebar() branches on the
+        // stylesheet's own 1080px breakpoint, and the probe below reads the
+        // DESKTOP attribute (data-ed-outline-hidden, not data-sidebar-open).
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        assert.deepStrictEqual(
+          await page.evaluate(() => ({
+            bars: document.querySelectorAll('.ed-toolbar').length,
+            btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
+          })),
+          { bars: 1, btns: 22 },
+          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
+
+        await page.evaluate(() => window.__edTestForceRerender());
+        await settleEditor(page);
+
+        assert.deepStrictEqual(
+          await page.evaluate(() => ({
+            bars: document.querySelectorAll('.ed-toolbar').length,
+            btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
+            attached: document.body.contains(document.querySelector('.ed-toolbar')),
+          })),
+          { bars: 1, btns: 22, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
+
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-toolbar [data-ed-tb="outline"]').disabled),
+          false,
+          'outline is one of the four buttons the model keeps live in the no-block state rerenderAll() leaves behind');
+        const outlineHiddenBefore = await page.evaluate(() =>
+          document.body.hasAttribute('data-ed-outline-hidden'));
+        await page.click('.ed-toolbar [data-ed-tb="outline"]');
+        assert.notStrictEqual(
+          await page.evaluate(() => document.body.hasAttribute('data-ed-outline-hidden')),
+          outlineHiddenBefore,
+          'a post-rerender toolbar click must still DO something — the outline drawer toggled');
+
+        await page.close();
+        console.log('v3.1.0 toolbar: the bar survives a full rerenderAll() and stays clickable — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 §4: the bar's own Bold button. Not a duplicate of the
+    //    selection-toolbar Bold scenario above: that one clicks .ed-seltb-b,
+    //    the bubble that follows the selection; this one clicks the FIXED
+    //    bar's [data-ed-tb="bold"], which routes through runToolbarAction()
+    //    instead. The fixture carries filler paragraphs so the target sits
+    //    well down the page — .ed-seltb is positioned against the selection,
+    //    and a target near the top would park it over the fixed bar and eat
+    //    the click. ─────────────────────────────────────────────────────────
+    {
+      const { srv, url, mdPath } = await setupTableDoc([
+        '# Doc', '',
+        'Filler one.', '', 'Filler two.', '', 'Filler three.', '', 'Filler four.', '',
+        'Toolbar bold target word here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Toolbar bold target');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await selectWordInEl(page, editEl, 'target');
+        // .ed-seltb showing up is the real "the selection registered" signal —
+        // applyMarkToggle() reads the same armed-surface state that builds it.
+        await page.waitForSelector('.ed-seltb');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-toolbar [data-ed-tb="bold"]').disabled),
+          false,
+          'Bold must be enabled once the bar is tracking a block');
+
+        await page.click('.ed-toolbar [data-ed-tb="bold"]');
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const st = document.querySelector(s + ' strong');
+            return st ? st.textContent : null;
+          }, editEl),
+          'target',
+          'the toolbar Bold must wrap "target" in <strong> before commit');
+
+        await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
+        await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
+          { timeout: 5000 });
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/Toolbar bold \*\*target\*\* word here\./.test(fileText),
+          'toolbar Bold must reach the saved source as **target**, got: ' + fileText);
+
+        await page.close();
+        console.log('v3.1.0 toolbar: Bold from the fixed bar reaches the saved source — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 修正 4 (controller Ruling 13 supersedes RULING F-O for THIS
+    //    surface): the ⠿ menu's MD 原始碼 on a list item must not merely be
+    //    LISTED — it must open. The S2 scenario above pins the item's
+    //    presence; this one presses it and requires a real raw textarea
+    //    prefilled with the item's own source line. 修正 4's mechanism is what
+    //    makes that safe: a li raw-edits an explicit LINE RANGE and restores
+    //    by RE-RENDERING, so no serializer ever meets the textarea and no
+    //    marker/checkbox chrome is ever rebuilt by hand.
+    //    ⚠ The two cases RULING F-O still governs — a li that owns no source
+    //    line, and content the serializer cannot round-trip — keep their own
+    //    refusal coverage elsewhere in this file and are deliberately NOT
+    //    touched here. ──────────────────────────────────────────────────────
+    {
+      const { srv, url } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await liBlockSelByText(page, 'alpha');
+        await openGutterMenu(page, sel);
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .some((b) => b.textContent === 'MD 原始碼' && !b.hidden)),
+          true,
+          "a list item's ⠿ menu must offer MD 原始碼 (v3.1.0 修正 4)");
+
+        await clickGutterMenuItem(page, sel, 'MD 原始碼');
+        await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, sel),
+          '- alpha',
+          "the li's raw editor must open prefilled with that item's own source LINE, marker included");
+
+        // Esc discards without committing: the run must come back rendered,
+        // and the sibling item must be untouched by the round trip.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(
+          (s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 5000 }, sel);
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"] > .ed-li-text'))
+            .map((el) => el.textContent.trim())),
+          ['alpha', 'bravo'],
+          'cancelling the li raw editor must restore the rendered run unchanged');
+
+        await page.close();
+        console.log('v3.1.0 修正 4: a list item\'s MD 原始碼 actually OPENS a raw editor on its own line — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 追加 2: a clipboard carrying text/html is converted to
+    //    MARKDOWN (paste-md.js -> turndown) instead of being flattened to the
+    //    plain-text flavour. `<h2>x</h2>` becomes `## x`, which is real block
+    //    structure, so handleArmedPaste() lands it as SOURCE below the
+    //    caret's block through insertBlockBelow() — never spliced into the
+    //    WYSIWYG DOM as foreign nodes — and it therefore passes through
+    //    commitBlockInsertion()/replaceLines() and serializeBlocks()'s
+    //    existing gates like any other edit. The end-to-end proof is the
+    //    SAVED FILE, not the DOM. ──────────────────────────────────────────
+    {
+      const { srv, url, mdPath } = await setupTableDoc(
+        ['# Doc', '', 'Paste anchor paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Paste anchor');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.evaluate((s) => {
+          const el = document.querySelector(s);
+          el.focus();
+          const r = document.createRange();
+          r.selectNodeContents(el);
+          r.collapse(false);
+          const w = window.getSelection();
+          w.removeAllRanges();
+          w.addRange(r);
+          const dt = new DataTransfer();
+          dt.setData('text/plain', 'x');
+          dt.setData('text/html', '<h2>x</h2>');
+          el.dispatchEvent(new ClipboardEvent('paste', {
+            clipboardData: dt, bubbles: true, cancelable: true,
+          }));
+        }, editEl);
+
+        await page.waitForFunction(
+          () => !!document.querySelector('.ed-block[data-block-type="heading"] h2'),
+          { timeout: 5000 });
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-block[data-block-type="heading"] h2').textContent),
+          'x',
+          'the pasted HTML must land as a real H2 BLOCK, not as text in the pasted-into paragraph');
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s).textContent.trim(), editEl),
+          'Paste anchor paragraph.',
+          'the block that was pasted INTO must be left byte-identical — structure lands below it, never inside it');
+
+        await settleEditor(page);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\n## x\n/.test(fileText),
+          'the converted markdown must reach the saved source as `## x`, got: ' + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('v3.1.0 追加 2: pasting <h2>x</h2> lands as `## x` in the saved source — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 追加 3: dropping an image file uploads it through the new
+    //    POST /api/asset endpoint and lands `![](assets/<name>)` as a new
+    //    block. Both halves are asserted, because either alone would be a
+    //    lie: the markdown must reach the SAVED SOURCE, and the bytes must
+    //    actually be on disk under the document's own `assets/` directory.
+    //    The drop event is synthesised (Puppeteer cannot drive an OS-level
+    //    file drag), but everything downstream of it — dragCarriesFiles(),
+    //    the MIME whitelist, blobToBase64(), the fetch, the server's
+    //    sanitizeName/uniqueName/containment gates and the 'wx' write — is
+    //    the real path.
+    //    ⚠ The rendered <img> carries a data: URI, NOT 'assets/dropped.png':
+    //    lib/md2doc.js base64-inlines every local image src against the
+    //    SOURCE markdown's directory. That is the assertion to make, not a
+    //    bug to route around — it is what proves the round trip closed
+    //    (renderer found the file the endpoint had just written, on disk,
+    //    at the path the markdown names). ─────────────────────────────────
+    {
+      const { dir, srv, url, mdPath } = await setupTableDoc(
+        ['# Doc', '', 'Drop anchor paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Drop anchor');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.content img').length), 0,
+          'sanity: the fixture starts with no images at all');
+
+        await page.evaluate((s, b64) => {
+          const bin = atob(b64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+          const file = new File([bytes], 'dropped.png', { type: 'image/png' });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          document.querySelector(s).dispatchEvent(new DragEvent('drop', {
+            dataTransfer: dt, bubbles: true, cancelable: true,
+          }));
+        }, sel, PNG_B64);
+
+        await page.waitForFunction(
+          () => document.querySelectorAll('.content img').length === 1, { timeout: 10000 });
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.content img').getAttribute('src')),
+          'data:image/png;base64,' + PNG_B64,
+          'the re-render must have resolved assets/dropped.png off the disk and inlined those exact bytes');
+
+        await settleEditor(page);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\n!\[\]\(assets\/dropped\.png\)\n/.test(fileText),
+          'the drop must reach the saved source as ![](assets/dropped.png), got: ' + JSON.stringify(fileText));
+
+        const onDisk = path.join(dir, 'assets', 'dropped.png');
+        assert.ok(fs.existsSync(onDisk),
+          'the endpoint must have WRITTEN the file, not just answered a path: ' + onDisk);
+        assert.deepStrictEqual(
+          fs.readFileSync(onDisk),
+          Buffer.from(PNG_B64, 'base64'),
+          'the bytes on disk must be the dropped image, byte for byte');
+
+        await page.close();
+        console.log('v3.1.0 追加 3: dropping a PNG lands ![](assets/…) and writes the file to disk — OK');
+      } finally {
+        srv.close();
+      }
     }
 
     console.log('editor-client-runtime.test.js OK');
