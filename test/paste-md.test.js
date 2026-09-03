@@ -112,10 +112,28 @@ eq(
   'no text/html -> falls back to text/plain'
 );
 
+// Fix-round-2 ruling: in the default (non-plainOnly) path, text/html now
+// beats an image when both are present -- a rich-text copy (Word/browser/
+// Confluence) routinely carries a bitmap of the same content alongside the
+// HTML, and the image-first rule from round 1 made that bitmap win over the
+// markdown this whole track exists to produce. Three-flavour case: html +
+// image + plain, default path -> html wins.
 eq(
   pm.pickPayload({ 'image/png': 'BLOB', 'text/plain': 'fallback', 'text/html': '<p>fallback</p>' }, false),
+  { kind: 'markdown', value: 'fallback' },
+  'default path: html + image + plain all present -> html wins (fix-round-2)'
+);
+
+// The two branches fix-round-2 must NOT disturb, re-confirmed explicitly:
+eq(
+  pm.pickPayload({ 'image/png': 'BLOB' }, false),
   { kind: 'image', blob: 'BLOB' },
-  'image/png present -> kind:image, regardless of the other MIME types'
+  'default path: image-only (no text/html at all) -> still image'
+);
+eq(
+  pm.pickPayload({ 'image/png': 'BLOB', 'text/plain': 'fallback', 'text/html': '<p>fallback</p>' }, true),
+  { kind: 'text', value: 'fallback' },
+  'plainOnly path: html + image + plain all present -> text still wins (fix-round-1, unchanged)'
 );
 
 // Fix-round-1 ruling: plainOnly wins over an image when a text flavour
