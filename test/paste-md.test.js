@@ -55,6 +55,40 @@ eq(noHeadLines[0], '| 1 | 2 |', 'headerless table: first row becomes the header 
 ok(/^\|\s*---\s*\|\s*---\s*\|$/.test(noHeadLines[1]), 'headerless table: synthesized separator row');
 eq(noHeadLines[2], '| 3 | 4 |', 'headerless table: second row is data');
 
+// Fix-round-1, Critical: a literal `|` in cell content used to add a
+// phantom column instead of being escaped. Exact HTML from the review.
+const pipeTable = pm.htmlToMarkdown(
+  '<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>a|b</td><td>2</td></tr></tbody></table>'
+);
+const pipeLines = pipeTable.split('\n').filter((l) => l !== '');
+eq(pipeLines[0], '| A | B |', 'pipe-in-cell: header row unaffected');
+eq(pipeLines[2], '| a\\|b | 2 |', 'pipe-in-cell: literal | is escaped as \\|, not a phantom column');
+eq((pipeLines[2].match(/(?<!\\)\|/g) || []).length, 3,
+  'pipe-in-cell: exactly 3 unescaped | (2 columns) -- the pre-fix bug produced 4');
+
+// Fix-round-1, Important: colspan used to leave the row short of the
+// table's real width. Exact HTML from the review.
+const colspanTable = pm.htmlToMarkdown(
+  '<table><thead><tr><th colspan=2>AB</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>'
+);
+const colspanLines = colspanTable.split('\n').filter((l) => l !== '');
+eq(colspanLines[0], '| AB |  |', 'colspan=2 header expands to 2 cells, the second one empty');
+ok(/^\|\s*---\s*\|\s*---\s*\|$/.test(colspanLines[1]), 'colspan: separator row has 2 columns, matching the body');
+eq(colspanLines[2], '| 1 | 2 |', 'colspan: body row unaffected, now aligned to the header width');
+
+// Fix-round-1, Important: a nested <table> inside a <td>. After the pipe
+// escape and the rectangle normalization above, the inner table's own
+// pipes/newlines must collapse into ONE escaped, single-line outer cell
+// (not a stream of stray pipes that breaks the outer row's lex).
+const nestedTable = pm.htmlToMarkdown(
+  '<table><tbody><tr><td><table><tr><td>x</td><td>y</td></tr></table></td><td>z</td></tr></tbody></table>'
+);
+const nestedLines = nestedTable.split('\n').filter((l) => l !== '');
+eq(nestedLines.length, 2, 'nested table: outer table is exactly 2 lexable lines (header + separator)');
+nestedLines.forEach((l, i) => {
+  eq((l.match(/(?<!\\)\|/g) || []).length, 3, 'nested table line ' + i + ': exactly 3 unescaped | (2 columns)');
+});
+
 eq(pm.htmlToMarkdown(''), '', 'empty html -> empty string');
 eq(pm.htmlToMarkdown(null), '', 'null html -> empty string, does not throw');
 
@@ -84,10 +118,17 @@ eq(
   'image/png present -> kind:image, regardless of the other MIME types'
 );
 
+// Fix-round-1 ruling: plainOnly wins over an image when a text flavour
+// exists -- both branches of that ruling, explicit and side by side.
+eq(
+  pm.pickPayload({ 'image/png': 'BLOB', 'text/plain': 'plain text present' }, true),
+  { kind: 'text', value: 'plain text present' },
+  'plainOnly + image present + text/plain present -> text wins (honour the gesture)'
+);
 eq(
   pm.pickPayload({ 'image/png': 'BLOB' }, true),
   { kind: 'image', blob: 'BLOB' },
-  'image/png present -> kind:image even when plainOnly is true'
+  'plainOnly + image present + NO text flavour at all -> falls through to image'
 );
 
 eq(
