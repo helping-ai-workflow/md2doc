@@ -797,8 +797,23 @@ function countInCode(source, needle) {
   // geometry, and Tasks 2/2b are chrome that deliberately write no bytes at
   // all. The expected total is therefore DECLARED once + EXPORTED once +
   // 12 uses = 14.
-  assert.strictEqual(helperCalls, 14,
-    'the helper must be DECLARED once, EXPORTED once, and used at all twelve ' +
+  //
+  // MIGRATED by v3.1.0 Task E (14 -> 15), with the reason: leaveSourceMode() —
+  // 追加 4's whole-document source escape hatch — is a genuinely NEW
+  // commit-then-render site. It replaces the ENTIRE document through one
+  // commitRangeEdit(1, lines.length, …) and renders, which is none of the four
+  // existing shapes (a block edit, a list run, a block insertion, a block
+  // move). Its rollback matters more than most: the range is the whole file,
+  // so a failed render that left `lines` holding the new text while the server
+  // still had the old would desynchronise every subsequent edit. The other
+  // v3.1.0 additions add NONE, and that was checked rather than assumed:
+  // indentCaretLi() commits through commitListStructure()'s existing site, the
+  // toolbar's insert/convert/heading buttons all call functions that already
+  // owned their site, and the image/paste paths go through
+  // insertBlockBelow()'s. The expected total is therefore DECLARED once +
+  // EXPORTED once + 13 uses = 15.
+  assert.strictEqual(helperCalls, 15,
+    'the helper must be DECLARED once, EXPORTED once, and used at all thirteen ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
