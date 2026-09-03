@@ -4728,13 +4728,24 @@ async function gutterGeometry(page, sel) {
         'the pasted-into paragraph must be left ALONE — a converted rich paste lands as ' +
         'its own source block, it does not splice markdown text into the caret\'s block'
       );
+      // Scoped to the block the conversion actually landed in — the paste
+      // target's NEXT sibling, which the comment above already identifies as
+      // where a converted rich paste goes. A whole-document `.content strong`
+      // sweep states the same claim but cannot survive this fixture: the
+      // shared document carries 'Bold paragraph with **bold** text.' of its
+      // own, so the sweep reads 'evil|bold' and fails while the product is
+      // behaving correctly. PRESENCE claims get the narrowest scope that can
+      // still state them; only the ABSENCE claim above earns a broad one.
       assert.strictEqual(
-        await page.evaluate(() => Array.from(document.querySelectorAll('.content strong'))
-          .map((e) => e.textContent).join('|')),
-        'evil',
+        await page.evaluate((s) => {
+          const next = document.querySelector(s).nextElementSibling;
+          const p = next ? next.querySelector('p') : null;
+          return p ? p.innerHTML : null;
+        }, sel),
+        '<strong>evil</strong>',
         'the clipboard\'s text/html must be converted to markdown (**evil**) and rendered ' +
-        'back as <strong> — this is 追加 2\'s whole point, and the reversal of the ' +
-        'pre-v3.1.0 "discard text/html" default'
+        'back as <strong> in a block of its own — this is 追加 2\'s whole point, and the ' +
+        'reversal of the pre-v3.1.0 "discard text/html" default'
       );
 
       await page.keyboard.press('Escape');
