@@ -1912,8 +1912,9 @@ async function gutterGeometry(page, sel) {
     // ── S2 Task 2: the ⠿ menu is VERTICAL and carries a 轉換成 submenu ──────
     //    Spec §3.7 fixes the item list to 轉換成 › / 建立副本 / 刪除 / MD 原始碼
     //    (no ✕, no heading ±); §3.2 fixes the submenu's twelve targets; §7
-    //    excludes a table block from 轉換成 and RULING F-O excludes a list
-    //    item from MD 原始碼. setupTableDoc() is used purely as the generic
+    //    excludes a table block from 轉換成. RULING F-O used to exclude a list
+    //    item from MD 原始碼; v3.1.0's Ruling 13 supersedes that for this
+    //    surface — see the list-item scenario below. setupTableDoc() is used purely as the generic
     //    "isolated doc + server" helper (it is byte-identical to
     //    setupListDoc()) so none of these scenarios can leak undo/save state
     //    into another.
@@ -2207,16 +2208,29 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(s2fUrl, { waitUntil: 'networkidle0' });
 
+        // MIGRATED by v3.1.0 Task E (修正 4 / controller Ruling 13). This
+        // asserted ['轉換成 ›','建立副本','刪除'] under RULING F-O, which
+        // hid MD 原始碼 on a list item permanently. F-O's stated premise was
+        // that openRawEditor() swaps the block's innerHTML for a <textarea>
+        // and that its restore() would then have to rebuild the li's
+        // marker/checkbox/text chrome back out of a captured string. 修正 4
+        // removes that premise rather than working around it: a li raw-edits
+        // an explicit LINE RANGE, commits through commitRangeEdit() instead
+        // of the run re-serializer, and restores by RE-RENDERING instead of
+        // rewriting innerHTML — so no serializer ever meets the textarea and
+        // no chrome is ever rebuilt by hand. The assertion is INVERTED rather
+        // than deleted: it is what pins the item's presence, and it would go
+        // red again the moment a future change re-hid it.
         await openGutterMenu(page, await liBlockSelByText(page, 'alpha'));
         assert.deepStrictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent)),
-          ['轉換成 ›', '建立副本', '刪除'],
-          'RULING F-O forbids openRawEditor on a list item, permanently');
+          ['轉換成 ›', '建立副本', '刪除', 'MD 原始碼'],
+          'v3.1.0 修正 4: a list item now offers MD 原始碼 like every other block type');
         await page.keyboard.press('Escape');
 
         await page.close();
-        console.log('S2 ⠿ menu: a list item still offers no MD 原始碼 (RULING F-O) — OK');
+        console.log('S2 ⠿ menu: a list item now offers MD 原始碼 too (修正 4 supersedes RULING F-O) — OK');
       } finally {
         s2fSrv.close();
       }
@@ -4633,8 +4647,29 @@ async function gutterGeometry(page, sel) {
       console.log('wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK');
     }
 
-    // ── Task 3: paste inserts clipboard text as plain text only — no rich
-    //    markup (e.g. a real <b>) ever survives into the DOM ──────────────
+    // ── Task 3: paste — no rich markup (e.g. a real <b>) ever survives into
+    //    the DOM. MIGRATED by v3.1.0 Task E (追加 2 / controller Ruling 16).
+    //
+    //    What changed: this fixture's clipboard carries BOTH flavours, and
+    //    the old handler discarded `text/html` unconditionally and inserted
+    //    `text/plain` verbatim. 追加 2 is exactly the reversal of that
+    //    default — `text/html` now wins and is converted to markdown, which
+    //    is the headline "paste from Word and get markdown" case the version
+    //    exists to deliver. So the SECOND assertion below is migrated to what
+    //    the HTML flavour now correctly produces.
+    //
+    //    What did NOT change, and must not: the FIRST assertion. It is the
+    //    safety property, not an artefact of the old behaviour. Converted
+    //    markdown is inserted as SOURCE TEXT so it flows through
+    //    commitBlockInsertion() -> replaceLines() -> the server's own
+    //    renderer, exactly like every other edit; a live <b> element must
+    //    still never be spliced into the DOM. It is asserted unchanged, and
+    //    widened by a second check over the WHOLE .content (the converted
+    //    markdown now lands in a DIFFERENT block from the one pasted into,
+    //    so a scope limited to the paste target could no longer see it).
+    //
+    //    The plain-text-verbatim behaviour is NOT lost — it moved to
+    //    Ctrl+Shift+V, and has its own sibling scenario immediately below.
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -4663,19 +4698,130 @@ async function gutterGeometry(page, sel) {
         el.dispatchEvent(ev);
       }, editEl);
 
+      // The markdown conversion + insert is a commit, so wait for it to land
+      // before reading the DOM (the assertions below are about the state
+      // AFTER the source round trip, not the instant of the paste).
+      await settleEditor(page);
+
+      // UNCHANGED — the safety property.
       assert.strictEqual(
         await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
         true,
-        'paste must never introduce a real <b> element — only plain text'
+        'paste must never introduce a real <b> element — the html flavour goes through markdown, never into the DOM'
       );
-      assert.ok(
-        await page.evaluate((s) => document.querySelector(s).textContent.includes('PASTED<b>RICH</b>TEXT'), editEl),
-        'paste must insert the clipboard\'s plain-text form verbatim as text'
+      // ...widened to the whole document, since the converted markdown now
+      // lands in a block of its own rather than inside the paste target.
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.content b')),
+        true,
+        'paste must never introduce a real <b> element ANYWHERE — the clipboard\'s ' +
+        '<b>evil</b> reaches the page only as source text through the renderer'
+      );
+      // MIGRATED: text/html wins and converts. turndown maps <b> onto the
+      // strong delimiter, so '<b>evil</b>' becomes '**evil**' — which carries
+      // markdown syntax and is therefore inserted as a new SOURCE block below
+      // the caret's block rather than at the caret, and comes back from the
+      // server rendered as <strong>.
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl),
+        'Third paragraph.',
+        'the pasted-into paragraph must be left ALONE — a converted rich paste lands as ' +
+        'its own source block, it does not splice markdown text into the caret\'s block'
+      );
+      // Scoped to the block the conversion actually landed in — the paste
+      // target's NEXT sibling, which the comment above already identifies as
+      // where a converted rich paste goes. A whole-document `.content strong`
+      // sweep states the same claim but cannot survive this fixture: the
+      // shared document carries 'Bold paragraph with **bold** text.' of its
+      // own, so the sweep reads 'evil|bold' and fails while the product is
+      // behaving correctly. PRESENCE claims get the narrowest scope that can
+      // still state them; only the ABSENCE claim above earns a broad one.
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const next = document.querySelector(s).nextElementSibling;
+          const p = next ? next.querySelector('p') : null;
+          return p ? p.innerHTML : null;
+        }, sel),
+        '<strong>evil</strong>',
+        'the clipboard\'s text/html must be converted to markdown (**evil**) and rendered ' +
+        'back as <strong> in a block of its own — this is 追加 2\'s whole point, and the ' +
+        'reversal of the pre-v3.1.0 "discard text/html" default'
       );
 
       await page.keyboard.press('Escape');
       await page.close();
-      console.log('wysiwyg: paste inserts plain text only, rich markup discarded — OK');
+      console.log('wysiwyg: a rich paste converts to markdown source, no live markup enters the DOM — OK');
+    }
+
+    // ── 追加 2 sibling: Ctrl+Shift+V still pastes text/plain VERBATIM ──────
+    //    The plain-text-verbatim contract the scenario above used to own did
+    //    not disappear with 追加 2 — it moved to the explicit gesture, and it
+    //    is pinned here rather than left uncovered. Same clipboard, both
+    //    flavours present; the only difference is the keystroke.
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
+      const editEl = sel + ' > *';
+
+      await openWysiwyg(page, sel);
+      const blocksBefore = await page.evaluate(() => document.querySelectorAll('.ed-block').length);
+
+      // A ClipboardEvent carries no modifier state, so client.js arms the
+      // plain-only path on the KEYSTROKE. Press it for real rather than
+      // poking at internals — that is the mechanism under test.
+      //
+      // NOTE: Chromium dispatches its own EMPTY paste event for this
+      // keystroke (measured: types: [], text/plain: ''). client.js ignores a
+      // paste that carries nothing precisely so that event cannot disarm the
+      // real one that follows; if that guard regresses, this scenario goes
+      // red by landing a converted **evil** block instead.
+      await page.keyboard.down('Control');
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('KeyV');
+      await page.keyboard.up('Shift');
+      await page.keyboard.up('Control');
+
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(r);
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'PASTED<b>RICH</b>TEXT');
+        dt.setData('text/html', '<b>evil</b>');
+        const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        el.dispatchEvent(ev);
+      }, editEl);
+
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
+        true,
+        'Ctrl+Shift+V must never introduce a real <b> element either'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('PASTED<b>RICH</b>TEXT'), editEl),
+        'Ctrl+Shift+V must insert the clipboard\'s plain-text form verbatim as text, ' +
+        'text/html present or not'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => document.querySelectorAll('.ed-block').length),
+        blocksBefore,
+        'a plain-text paste lands AT THE CARET — it must not create a block, which is ' +
+        'what proves the text/html flavour really was ignored'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('wysiwyg: Ctrl+Shift+V pastes text/plain verbatim, ignoring text/html — OK');
     }
 
     // ── Task 3: unsupported content landing mid-session (drag/drop or any
@@ -4897,8 +5043,40 @@ async function gutterGeometry(page, sel) {
       const sel2 = await paragraphSelByText(page, 'Burst undo target');
       const editEl2 = sel2 + ' > *';
       await openWysiwyg(page, sel2);
-      await page.evaluate((s) => document.querySelector(s).focus(), editEl2);
-      await page.keyboard.type(' EDIT-TWO');
+      // HARDENED (v3.1.0, controller Ruling 23): ONE synthetic `input`, not
+      // nine keystrokes. createBurstHistory()'s noteTyping() snaps the text as
+      // it stands whenever the gap since the previous keystroke has reached
+      // debounceMs (400) — so if a stall landed between two of the nine
+      // characters page.keyboard.type(' EDIT-TWO') produced, the HALF-TYPED
+      // text became a real stack entry and the Ctrl+Z below landed there
+      // instead of on the pre-focus snapshot. Measured symptom, intermittent
+      // and machine-dependent: '... EDIT-ONE EDIT-TW', one character short.
+      // Reproduced byte-for-byte on main (206e945) with a forced stall, so the
+      // fragility is the SCENARIO's, not the editor's: a real user who pauses
+      // 400ms mid-word has genuinely earned a finer-grained undo step.
+      // A single input event cannot straddle the window at all, and the
+      // assertion below is unchanged. The debounce arithmetic this used to
+      // cover by accident is now pinned deterministically, and far better, by
+      // test/history.test.js's own boundary cases.
+      await page.evaluate((s, text) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const w = window.getSelection();
+        w.removeAllRanges();
+        w.addRange(r);
+        const node = document.createTextNode(text);
+        r.insertNode(node);
+        r.setStartAfter(node);
+        r.collapse(true);
+        w.removeAllRanges();
+        w.addRange(r);
+        // client.js's delegated `input` listener is what drives noteTyping(),
+        // so this is the faithful single-keystroke equivalent.
+        el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }, editEl2, ' EDIT-TWO');
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).textContent, editEl2),
         originalText + ' EDIT-ONE EDIT-TWO',
@@ -13081,9 +13259,9 @@ async function gutterGeometry(page, sel) {
     // S1: every block type gets the ⠿ handle — list items included, at every
     // indent depth. The ＋ stays hidden for li until S2 (insertBlockBelow has
     // no indent awareness yet: it writes a bare skeleton line at endLine + 1,
-    // which on a parent item orphans its children), and 'MD 原始碼' is hidden
-    // for li permanently (RULING F-O: injecting a textarea into a list item
-    // corrupts it).
+    // which on a parent item orphans its children). 'MD 原始碼' used to be
+    // hidden for li permanently under RULING F-O; v3.1.0's 修正 4 supersedes
+    // that — see the migrated assertion further down.
     {
       const { srv: lsrv, url: lurl } = await setupListDoc(['# List doc', '', '- Alpha', '  - Bravo', '- Charlie', '']);
       try {
@@ -13120,10 +13298,13 @@ async function gutterGeometry(page, sel) {
         assert.deepStrictEqual(clean, [],
           'gutter chrome must stay invisible to the serializer — otherwise the whole document degrades read-only');
 
-        // RULING F-O: the ⠿ menu on a li must hide 'MD 原始碼' permanently —
-        // openRawEditor() replaces the block's innerHTML with a textarea, and
-        // a list item that owns one source line of a shared run cannot host
-        // one. Every other item stays visible.
+        // MIGRATED by v3.1.0 Task E (修正 4 / controller Ruling 13). This
+        // used to assert that the ⠿ menu on a li HIDES 'MD 原始碼'
+        // permanently, on RULING F-O's premise that a list item owning one
+        // source line of a shared run cannot host a textarea. It can now: the
+        // raw editor takes an explicit line range and restores by
+        // re-rendering, so neither the run serializer nor a hand-rebuilt
+        // chrome is involved. All four items are expected.
         const liSel = await page.evaluate(() =>
           '.ed-block[data-block-id="' +
           document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id') + '"]');
@@ -13133,19 +13314,20 @@ async function gutterGeometry(page, sel) {
         const liMenu = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(','));
-        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 建立副本,
-        // so a li now shows three of the four items — everything except
-        // MD 原始碼, which RULING F-O forbids on a list item permanently.
-        assert.strictEqual(liMenu, '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
-          "a list item's ⠿ menu must show 轉換成 › / 建立副本 / 刪除 — no MD 原始碼 (RULING F-O), got " +
+        // §5.4 fallout: ✕ is gone (§3.7) and the S2 menu adds 轉換成 › / 建立副本;
+        // v3.1.0 restores MD 原始碼, so a li now shows all four.
+        assert.strictEqual(liMenu, '轉換成 ›,建立副本,刪除,MD 原始碼'.split(',').sort().join(','),
+          "a list item's ⠿ menu must show all four items including MD 原始碼 (v3.1.0 修正 4), got " +
           JSON.stringify(liMenu));
         await page.keyboard.press('Escape');
         await page.waitForFunction(() => !document.querySelector('.ed-handle-menu'));
 
-        // ...and the hiding must be per-type, not sticky: the SAME singleton
-        // menu reopened on a paragraph/heading must show MD 原始碼 again
-        // (test/editor-reader-rebind.test.js drives raw-edit through exactly
-        // that button, by its exact text).
+        // ...and MD 原始碼 must be there on a paragraph/heading too. Before
+        // v3.1.0 this checked that the li-specific HIDE was per-type rather
+        // than sticky on the singleton menu; 修正 4 removed the hide
+        // altogether, so what survives is the plain presence check — which is
+        // still worth keeping, because test/editor-reader-rebind.test.js
+        // drives raw-edit through exactly this button, by its exact text.
         const headSel = await page.evaluate(() => {
           const h = document.querySelector('.ed-block[data-block-type="heading"]') ||
             document.querySelector('.ed-block[data-block-type="paragraph"]');
@@ -13190,7 +13372,7 @@ async function gutterGeometry(page, sel) {
     //                 unchanged. Measured: '# Doc\n\n- a\n\n- - b\n' became
     //                 '# Doc\n\n- a\n- - b\n'.
     //   body click  -> the degraded-block branch opens a RAW TEXTAREA inside
-    //                 the list item (RULING F-O forbids exactly this), seeded
+    //                 the list item, seeded
     //                 with '' because extractBlockSource() of an inverted
     //                 range is empty; committing it runs commitRangeEdit(5, 4)
     //                 which INSERTS rather than replaces. Measured: typing
@@ -13236,8 +13418,9 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
             .filter((b) => !b.hidden).map((b) => b.textContent).sort().join(',')),
-          '轉換成 ›,建立副本,刪除'.split(',').sort().join(','),
-          'sanity: §5.4 fallout — ✕ is gone (§3.7) and a li now also offers 轉換成 › / 建立副本; ' +
+          '轉換成 ›,建立副本,刪除,MD 原始碼'.split(',').sort().join(','),
+          'sanity: §5.4 fallout — ✕ is gone (§3.7), a li offers 轉換成 › / 建立副本, and ' +
+          'v3.1.0 修正 4 restored MD 原始碼 to every block type including this one; ' +
           '刪除 is still the item this scenario drives');
         await page.evaluate(() => {
           Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -13275,8 +13458,10 @@ async function gutterGeometry(page, sel) {
         await settleEditor(page);
         assert.strictEqual(
           await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0,
-          'clicking a list item that owns no line must NOT open a raw textarea — RULING F-O forbids ' +
-          'a textarea inside a li, and extractBlockSource() of an inverted range seeds it empty');
+          'clicking a list item that owns no line must NOT open a raw textarea — extractBlockSource() ' +
+          'of an inverted range seeds it empty and the commit INSERTS instead of replacing. ' +
+          'LEFT STANDING by v3.1.0: 修正 4 supersedes RULING F-O for the ⠿ menu, but this refusal ' +
+          'was never F-O\'s — it is about owning no source line, which no teardown strategy fixes');
         assert.strictEqual(
           await page.evaluate(() => !!document.querySelector('.ed-conflict')), true,
           'the refused body click must REFUSE VISIBLY (banner), not fail silently');
@@ -18856,27 +19041,29 @@ async function gutterGeometry(page, sel) {
     // >>>T9SECTION  (and <<<T9SECTION at the end: same marker-sliced scratch
     // subset runner every S3 task has used.)
     //
-    // ── S3 stage-closure gap 1: §3.7's 「多選時不顯示 `MD 原始碼`」 ─────────
+    // ── §3.7's 「多選時不顯示 `MD 原始碼`」 — MIGRATED by v3.1.0 Task E ────
     //
-    // Written verbatim in §3.7 and delivered by none of S3's eight tasks. The
-    // only assignment to that item is `gutterMenuMd.hidden = (blockType ===
-    // 'li')`, with no `blockSelection` term in it, so with a set standing the
-    // row was still offered — and pressing it opened the raw editor for the
-    // GRIP's block alone. The risk is low (a raw commit rewrites only that
-    // block's lines, and a line-range selection re-resolves or clears on the
-    // next render), but it is a written contract and the point of the item is
-    // that it answers for the thing the ⠿ was pressed on. Over a set, it does
-    // not.
+    // HISTORY. S3 closed a gap where the item was offered over a set but
+    // pressing it opened the raw editor for the GRIP's block alone: it
+    // answered for one member and silently ignored the rest. The fix
+    // available then was to WITHHOLD the item, and §3.7 said so.
     //
-    // ANTI-VACUITY, stated because "the item is hidden" is worth nothing on
-    // its own — a menu that never opened, an item renamed, a selector typo and
-    // a wholesale `hidden = true` all produce it. Every phase asserts the WHOLE
-    // item list with its per-item hidden flag, so the other three items are
-    // proved present and VISIBLE in the same breath; and the same fixture is
-    // asked three more times, in states where the item must be SHOWN — with no
-    // selection at all, with a set of exactly one, and with a set standing
-    // somewhere else in the document. Dropping the condition from client.js
-    // turns phase 2 red; widening it turns phases 1, 3 and 4 red.
+    // v3.1.0's 修正 4 removes the reason instead. openRawViaGutter() now asks
+    // §3.3's membership question through resolveGutterOperands() — which
+    // brings the contiguity, emptiness and no-source-line gates with it — and
+    // opens the editor on the WHOLE span's line range, committing it with one
+    // commitRangeEdit(). The item now does what it appears to do over a set,
+    // so withholding it would be withholding a working operation. Phase 2 is
+    // therefore INVERTED, not deleted.
+    //
+    // ANTI-VACUITY is unchanged and still load-bearing: every phase asserts
+    // the WHOLE item list with its per-item hidden flag and in §3.7's order,
+    // so a menu that never opened, an item renamed, a selector typo or a
+    // wholesale `hidden = true` all fail here. What the four phases now pin
+    // together is that the item is offered in EVERY selection state — none,
+    // a set of two containing the grip, a set of exactly one, and a set
+    // standing elsewhere — so any future re-narrowing on `blockSelection`
+    // turns one of them red.
     {
       const T9_MENU = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
       // The items of the OPEN menu belonging to `sel`, each with its own hidden
@@ -18905,8 +19092,8 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 });
       };
 
-      await s3Scenario('§3.7: the ⠿ menu withholds MD 原始碼 only while a multi-block '
-        + 'set stands', T9_MENU, async (page) => {
+      await s3Scenario('§3.7 (v3.1.0 修正 4): the ⠿ menu offers MD 原始碼 in every '
+        + 'selection state', T9_MENU, async (page) => {
         const blockSelFor = (line) => page.evaluate((ln) => {
           const b = window.__edTestBlocks().find((x) => x.startLine === ln);
           return b ? '.ed-block[data-block-id="' + b.id + '"]' : null;
@@ -18928,7 +19115,7 @@ async function gutterGeometry(page, sel) {
           + 'rather than the selection condition');
         await t9CloseMenu(page);
 
-        // ── Phase 2: a set of TWO — that one item, and only it, is withheld ─
+        // ── Phase 2: a set of TWO — the item is OFFERED (was: withheld) ──
         await page.evaluate(() => window.__edTestSetSelection(3, 5));
         const two = await page.evaluate(() => window.__edTestGetSelection());
         assert.deepStrictEqual(two && two.memberLines, [[3, 3], [5, 5]],
@@ -18940,11 +19127,12 @@ async function gutterGeometry(page, sel) {
           + '8) — the pair is what catches the two drifting apart. Got '
           + JSON.stringify(two.domSelectedLines));
         await openGutterMenu(page, p3);
-        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(true),
-          '§3.7 「多選時不顯示 `MD 原始碼`」: with a set of two standing and the ⠿ pressed '
-          + 'on a MEMBER of it, MD 原始碼 is withheld and the other three items stay '
-          + 'offered. A raw commit rewrites the GRIP block\'s lines only, so over a set '
-          + 'the item answers for one member and silently ignores the rest');
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          'v3.1.0 修正 4: with a set of two standing and the ⠿ pressed on a MEMBER of it, '
+          + 'MD 原始碼 is OFFERED along with the other three. It used to be withheld '
+          + 'because a raw commit rewrote the GRIP block\'s lines only; it now opens on '
+          + 'the whole span\'s line range via resolveGutterOperands(), so it answers for '
+          + 'the set it appears to act on');
         await t9CloseMenu(page);
 
         // ── Phase 3: a set of exactly ONE is not a multi-selection ───────
@@ -22645,6 +22833,332 @@ async function gutterGeometry(page, sel) {
         await page.close();
         console.log('table grips: the keep-alive class is torn down on leave and on rerender — OK');
       } finally { srv.close(); }
+    }
+
+
+    // ════════════════════════════════════════════════════════════════════
+    // v3.1.0 — the visible surface, end to end. Five scenarios, one per
+    // thing this version put in front of the user: the toolbar (that it
+    // survives a rerender at all, and that a button on it actually edits),
+    // the list item's restored MD 原始碼 escape hatch, HTML paste, and
+    // image drop. Everything else this version added is covered by the
+    // pure-function suites (toolbar-model / paste-md / asset / docsource).
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── v3.1.0 §4 (the blocker this case exists for): the toolbar is mounted
+    //    on document.body, never inside .content, precisely because
+    //    rerenderAll() does `contentEl.innerHTML = j.bodyHtml` and only
+    //    armEditables() rebuilds anything afterwards — a bar mounted in
+    //    .content would vanish on the first commit with nothing left to bring
+    //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
+    //    client.js's own comment on that seam), which is the only way to reach
+    //    that swap without going through a commit first. The bar must still be
+    //    there, still be the ONLY one, still carry the whole 22-button roster
+    //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
+    //    the tracked block on every rerender, so what a post-rerender click
+    //    meets is the model's documented no-block state (undo / redo /
+    //    outline / preview stay enabled, everything else greys out). ────────
+    {
+      const { srv, url } = await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        // Desktop width on purpose: toggleOutlineSidebar() branches on the
+        // stylesheet's own 1080px breakpoint, and the probe below reads the
+        // DESKTOP attribute (data-ed-outline-hidden, not data-sidebar-open).
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        assert.deepStrictEqual(
+          await page.evaluate(() => ({
+            bars: document.querySelectorAll('.ed-toolbar').length,
+            btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
+          })),
+          { bars: 1, btns: 22 },
+          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
+
+        await page.evaluate(() => window.__edTestForceRerender());
+        await settleEditor(page);
+
+        assert.deepStrictEqual(
+          await page.evaluate(() => ({
+            bars: document.querySelectorAll('.ed-toolbar').length,
+            btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
+            attached: document.body.contains(document.querySelector('.ed-toolbar')),
+          })),
+          { bars: 1, btns: 22, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
+
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-toolbar [data-ed-tb="outline"]').disabled),
+          false,
+          'outline is one of the four buttons the model keeps live in the no-block state rerenderAll() leaves behind');
+        const outlineHiddenBefore = await page.evaluate(() =>
+          document.body.hasAttribute('data-ed-outline-hidden'));
+        await page.click('.ed-toolbar [data-ed-tb="outline"]');
+        assert.notStrictEqual(
+          await page.evaluate(() => document.body.hasAttribute('data-ed-outline-hidden')),
+          outlineHiddenBefore,
+          'a post-rerender toolbar click must still DO something — the outline drawer toggled');
+
+        await page.close();
+        console.log('v3.1.0 toolbar: the bar survives a full rerenderAll() and stays clickable — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 §4: the bar's own Bold button. Not a duplicate of the
+    //    selection-toolbar Bold scenario above: that one clicks .ed-seltb-b,
+    //    the bubble that follows the selection; this one clicks the FIXED
+    //    bar's [data-ed-tb="bold"], which routes through runToolbarAction()
+    //    instead. The fixture carries filler paragraphs so the target sits
+    //    well down the page — .ed-seltb is positioned against the selection,
+    //    and a target near the top would park it over the fixed bar and eat
+    //    the click. ─────────────────────────────────────────────────────────
+    {
+      const { srv, url, mdPath } = await setupTableDoc([
+        '# Doc', '',
+        'Filler one.', '', 'Filler two.', '', 'Filler three.', '', 'Filler four.', '',
+        'Toolbar bold target word here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Toolbar bold target');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await selectWordInEl(page, editEl, 'target');
+        // .ed-seltb showing up is the real "the selection registered" signal —
+        // applyMarkToggle() reads the same armed-surface state that builds it.
+        await page.waitForSelector('.ed-seltb');
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-toolbar [data-ed-tb="bold"]').disabled),
+          false,
+          'Bold must be enabled once the bar is tracking a block');
+
+        await page.click('.ed-toolbar [data-ed-tb="bold"]');
+        assert.strictEqual(
+          await page.evaluate((s) => {
+            const st = document.querySelector(s + ' strong');
+            return st ? st.textContent : null;
+          }, editEl),
+          'target',
+          'the toolbar Bold must wrap "target" in <strong> before commit');
+
+        await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
+        await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
+        await page.waitForFunction(
+          () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
+          { timeout: 5000 });
+
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/Toolbar bold \*\*target\*\* word here\./.test(fileText),
+          'toolbar Bold must reach the saved source as **target**, got: ' + fileText);
+
+        await page.close();
+        console.log('v3.1.0 toolbar: Bold from the fixed bar reaches the saved source — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 修正 4 (controller Ruling 13 supersedes RULING F-O for THIS
+    //    surface): the ⠿ menu's MD 原始碼 on a list item must not merely be
+    //    LISTED — it must open. The S2 scenario above pins the item's
+    //    presence; this one presses it and requires a real raw textarea
+    //    prefilled with the item's own source line. 修正 4's mechanism is what
+    //    makes that safe: a li raw-edits an explicit LINE RANGE and restores
+    //    by RE-RENDERING, so no serializer ever meets the textarea and no
+    //    marker/checkbox chrome is ever rebuilt by hand.
+    //    ⚠ The two cases RULING F-O still governs — a li that owns no source
+    //    line, and content the serializer cannot round-trip — keep their own
+    //    refusal coverage elsewhere in this file and are deliberately NOT
+    //    touched here. ──────────────────────────────────────────────────────
+    {
+      const { srv, url } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await liBlockSelByText(page, 'alpha');
+        await openGutterMenu(page, sel);
+        assert.strictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .some((b) => b.textContent === 'MD 原始碼' && !b.hidden)),
+          true,
+          "a list item's ⠿ menu must offer MD 原始碼 (v3.1.0 修正 4)");
+
+        await clickGutterMenuItem(page, sel, 'MD 原始碼');
+        await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s + ' textarea.ed-raw').value, sel),
+          '- alpha',
+          "the li's raw editor must open prefilled with that item's own source LINE, marker included");
+
+        // Esc discards without committing: the run must come back rendered,
+        // and the sibling item must be untouched by the round trip.
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(
+          (s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 5000 }, sel);
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(
+            document.querySelectorAll('.ed-block[data-block-type="li"] > .ed-li-text'))
+            .map((el) => el.textContent.trim())),
+          ['alpha', 'bravo'],
+          'cancelling the li raw editor must restore the rendered run unchanged');
+
+        await page.close();
+        console.log('v3.1.0 修正 4: a list item\'s MD 原始碼 actually OPENS a raw editor on its own line — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 追加 2: a clipboard carrying text/html is converted to
+    //    MARKDOWN (paste-md.js -> turndown) instead of being flattened to the
+    //    plain-text flavour. `<h2>x</h2>` becomes `## x`, which is real block
+    //    structure, so handleArmedPaste() lands it as SOURCE below the
+    //    caret's block through insertBlockBelow() — never spliced into the
+    //    WYSIWYG DOM as foreign nodes — and it therefore passes through
+    //    commitBlockInsertion()/replaceLines() and serializeBlocks()'s
+    //    existing gates like any other edit. The end-to-end proof is the
+    //    SAVED FILE, not the DOM. ──────────────────────────────────────────
+    {
+      const { srv, url, mdPath } = await setupTableDoc(
+        ['# Doc', '', 'Paste anchor paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Paste anchor');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.evaluate((s) => {
+          const el = document.querySelector(s);
+          el.focus();
+          const r = document.createRange();
+          r.selectNodeContents(el);
+          r.collapse(false);
+          const w = window.getSelection();
+          w.removeAllRanges();
+          w.addRange(r);
+          const dt = new DataTransfer();
+          dt.setData('text/plain', 'x');
+          dt.setData('text/html', '<h2>x</h2>');
+          el.dispatchEvent(new ClipboardEvent('paste', {
+            clipboardData: dt, bubbles: true, cancelable: true,
+          }));
+        }, editEl);
+
+        await page.waitForFunction(
+          () => !!document.querySelector('.ed-block[data-block-type="heading"] h2'),
+          { timeout: 5000 });
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.ed-block[data-block-type="heading"] h2').textContent),
+          'x',
+          'the pasted HTML must land as a real H2 BLOCK, not as text in the pasted-into paragraph');
+        assert.strictEqual(
+          await page.evaluate((s) => document.querySelector(s).textContent.trim(), editEl),
+          'Paste anchor paragraph.',
+          'the block that was pasted INTO must be left byte-identical — structure lands below it, never inside it');
+
+        await settleEditor(page);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\n## x\n/.test(fileText),
+          'the converted markdown must reach the saved source as `## x`, got: ' + JSON.stringify(fileText));
+
+        await page.close();
+        console.log('v3.1.0 追加 2: pasting <h2>x</h2> lands as `## x` in the saved source — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── v3.1.0 追加 3: dropping an image file uploads it through the new
+    //    POST /api/asset endpoint and lands `![](assets/<name>)` as a new
+    //    block. Both halves are asserted, because either alone would be a
+    //    lie: the markdown must reach the SAVED SOURCE, and the bytes must
+    //    actually be on disk under the document's own `assets/` directory.
+    //    The drop event is synthesised (Puppeteer cannot drive an OS-level
+    //    file drag), but everything downstream of it — dragCarriesFiles(),
+    //    the MIME whitelist, blobToBase64(), the fetch, the server's
+    //    sanitizeName/uniqueName/containment gates and the 'wx' write — is
+    //    the real path.
+    //    ⚠ The rendered <img> carries a data: URI, NOT 'assets/dropped.png':
+    //    lib/md2doc.js base64-inlines every local image src against the
+    //    SOURCE markdown's directory. That is the assertion to make, not a
+    //    bug to route around — it is what proves the round trip closed
+    //    (renderer found the file the endpoint had just written, on disk,
+    //    at the path the markdown names). ─────────────────────────────────
+    {
+      const { dir, srv, url, mdPath } = await setupTableDoc(
+        ['# Doc', '', 'Drop anchor paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Drop anchor');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.content img').length), 0,
+          'sanity: the fixture starts with no images at all');
+
+        await page.evaluate((s, b64) => {
+          const bin = atob(b64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+          const file = new File([bytes], 'dropped.png', { type: 'image/png' });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          document.querySelector(s).dispatchEvent(new DragEvent('drop', {
+            dataTransfer: dt, bubbles: true, cancelable: true,
+          }));
+        }, sel, PNG_B64);
+
+        await page.waitForFunction(
+          () => document.querySelectorAll('.content img').length === 1, { timeout: 10000 });
+        assert.strictEqual(
+          await page.evaluate(() =>
+            document.querySelector('.content img').getAttribute('src')),
+          'data:image/png;base64,' + PNG_B64,
+          'the re-render must have resolved assets/dropped.png off the disk and inlined those exact bytes');
+
+        await settleEditor(page);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\n!\[\]\(assets\/dropped\.png\)\n/.test(fileText),
+          'the drop must reach the saved source as ![](assets/dropped.png), got: ' + JSON.stringify(fileText));
+
+        const onDisk = path.join(dir, 'assets', 'dropped.png');
+        assert.ok(fs.existsSync(onDisk),
+          'the endpoint must have WRITTEN the file, not just answered a path: ' + onDisk);
+        assert.deepStrictEqual(
+          fs.readFileSync(onDisk),
+          Buffer.from(PNG_B64, 'base64'),
+          'the bytes on disk must be the dropped image, byte for byte');
+
+        await page.close();
+        console.log('v3.1.0 追加 3: dropping a PNG lands ![](assets/…) and writes the file to disk — OK');
+      } finally {
+        srv.close();
+      }
     }
 
     console.log('editor-client-runtime.test.js OK');
