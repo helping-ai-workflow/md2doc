@@ -4647,8 +4647,29 @@ async function gutterGeometry(page, sel) {
       console.log('wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK');
     }
 
-    // ── Task 3: paste inserts clipboard text as plain text only — no rich
-    //    markup (e.g. a real <b>) ever survives into the DOM ──────────────
+    // ── Task 3: paste — no rich markup (e.g. a real <b>) ever survives into
+    //    the DOM. MIGRATED by v3.1.0 Task E (追加 2 / controller Ruling 16).
+    //
+    //    What changed: this fixture's clipboard carries BOTH flavours, and
+    //    the old handler discarded `text/html` unconditionally and inserted
+    //    `text/plain` verbatim. 追加 2 is exactly the reversal of that
+    //    default — `text/html` now wins and is converted to markdown, which
+    //    is the headline "paste from Word and get markdown" case the version
+    //    exists to deliver. So the SECOND assertion below is migrated to what
+    //    the HTML flavour now correctly produces.
+    //
+    //    What did NOT change, and must not: the FIRST assertion. It is the
+    //    safety property, not an artefact of the old behaviour. Converted
+    //    markdown is inserted as SOURCE TEXT so it flows through
+    //    commitBlockInsertion() -> replaceLines() -> the server's own
+    //    renderer, exactly like every other edit; a live <b> element must
+    //    still never be spliced into the DOM. It is asserted unchanged, and
+    //    widened by a second check over the WHOLE .content (the converted
+    //    markdown now lands in a DIFFERENT block from the one pasted into,
+    //    so a scope limited to the paste target could no longer see it).
+    //
+    //    The plain-text-verbatim behaviour is NOT lost — it moved to
+    //    Ctrl+Shift+V, and has its own sibling scenario immediately below.
     {
       const page = await newPage(browser);
       await page.goto(url, { waitUntil: 'networkidle0' });
@@ -4677,19 +4698,119 @@ async function gutterGeometry(page, sel) {
         el.dispatchEvent(ev);
       }, editEl);
 
+      // The markdown conversion + insert is a commit, so wait for it to land
+      // before reading the DOM (the assertions below are about the state
+      // AFTER the source round trip, not the instant of the paste).
+      await settleEditor(page);
+
+      // UNCHANGED — the safety property.
       assert.strictEqual(
         await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
         true,
         'paste must never introduce a real <b> element — only plain text'
       );
-      assert.ok(
-        await page.evaluate((s) => document.querySelector(s).textContent.includes('PASTED<b>RICH</b>TEXT'), editEl),
-        'paste must insert the clipboard\'s plain-text form verbatim as text'
+      // ...widened to the whole document, since the converted markdown now
+      // lands in a block of its own rather than inside the paste target.
+      assert.strictEqual(
+        await page.evaluate(() => !document.querySelector('.content b')),
+        true,
+        'paste must never introduce a real <b> element ANYWHERE — the clipboard\'s ' +
+        '<b>evil</b> reaches the page only as source text through the renderer'
+      );
+      // MIGRATED: text/html wins and converts. turndown maps <b> onto the
+      // strong delimiter, so '<b>evil</b>' becomes '**evil**' — which carries
+      // markdown syntax and is therefore inserted as a new SOURCE block below
+      // the caret's block rather than at the caret, and comes back from the
+      // server rendered as <strong>.
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl),
+        'Third paragraph.',
+        'the pasted-into paragraph must be left ALONE — a converted rich paste lands as ' +
+        'its own source block, it does not splice markdown text into the caret\'s block'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => Array.from(document.querySelectorAll('.content strong'))
+          .map((e) => e.textContent).join('|')),
+        'evil',
+        'the clipboard\'s text/html must be converted to markdown (**evil**) and rendered ' +
+        'back as <strong> — this is 追加 2\'s whole point, and the reversal of the ' +
+        'pre-v3.1.0 "discard text/html" default'
       );
 
       await page.keyboard.press('Escape');
       await page.close();
-      console.log('wysiwyg: paste inserts plain text only, rich markup discarded — OK');
+      console.log('wysiwyg: a rich paste converts to markdown source, no live markup enters the DOM — OK');
+    }
+
+    // ── 追加 2 sibling: Ctrl+Shift+V still pastes text/plain VERBATIM ──────
+    //    The plain-text-verbatim contract the scenario above used to own did
+    //    not disappear with 追加 2 — it moved to the explicit gesture, and it
+    //    is pinned here rather than left uncovered. Same clipboard, both
+    //    flavours present; the only difference is the keystroke.
+    {
+      const page = await newPage(browser);
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const ids = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .map((el) => el.getAttribute('data-block-id')));
+      const sel = '.ed-block[data-block-id="' + ids[2] + '"]'; // "Third paragraph."
+      const editEl = sel + ' > *';
+
+      await openWysiwyg(page, sel);
+      const blocksBefore = await page.evaluate(() => document.querySelectorAll('.ed-block').length);
+
+      // A ClipboardEvent carries no modifier state, so client.js arms the
+      // plain-only path on the KEYSTROKE. Press it for real rather than
+      // poking at internals — that is the mechanism under test.
+      //
+      // NOTE: Chromium dispatches its own EMPTY paste event for this
+      // keystroke (measured: types: [], text/plain: ''). client.js ignores a
+      // paste that carries nothing precisely so that event cannot disarm the
+      // real one that follows; if that guard regresses, this scenario goes
+      // red by landing a converted **evil** block instead.
+      await page.keyboard.down('Control');
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('KeyV');
+      await page.keyboard.up('Shift');
+      await page.keyboard.up('Control');
+
+      await page.evaluate((s) => {
+        const el = document.querySelector(s);
+        el.focus();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        r.collapse(false);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(r);
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'PASTED<b>RICH</b>TEXT');
+        dt.setData('text/html', '<b>evil</b>');
+        const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+        el.dispatchEvent(ev);
+      }, editEl);
+
+      assert.strictEqual(
+        await page.evaluate((s) => !document.querySelector(s + ' b'), editEl),
+        true,
+        'Ctrl+Shift+V must never introduce a real <b> element either'
+      );
+      assert.ok(
+        await page.evaluate((s) => document.querySelector(s).textContent.includes('PASTED<b>RICH</b>TEXT'), editEl),
+        'Ctrl+Shift+V must insert the clipboard\'s plain-text form verbatim as text, ' +
+        'text/html present or not'
+      );
+      assert.strictEqual(
+        await page.evaluate(() => document.querySelectorAll('.ed-block').length),
+        blocksBefore,
+        'a plain-text paste lands AT THE CARET — it must not create a block, which is ' +
+        'what proves the text/html flavour really was ignored'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('wysiwyg: Ctrl+Shift+V pastes text/plain verbatim, ignoring text/html — OK');
     }
 
     // ── Task 3: unsupported content landing mid-session (drag/drop or any
@@ -18876,27 +18997,29 @@ async function gutterGeometry(page, sel) {
     // >>>T9SECTION  (and <<<T9SECTION at the end: same marker-sliced scratch
     // subset runner every S3 task has used.)
     //
-    // ── S3 stage-closure gap 1: §3.7's 「多選時不顯示 `MD 原始碼`」 ─────────
+    // ── §3.7's 「多選時不顯示 `MD 原始碼`」 — MIGRATED by v3.1.0 Task E ────
     //
-    // Written verbatim in §3.7 and delivered by none of S3's eight tasks. The
-    // only assignment to that item is `gutterMenuMd.hidden = (blockType ===
-    // 'li')`, with no `blockSelection` term in it, so with a set standing the
-    // row was still offered — and pressing it opened the raw editor for the
-    // GRIP's block alone. The risk is low (a raw commit rewrites only that
-    // block's lines, and a line-range selection re-resolves or clears on the
-    // next render), but it is a written contract and the point of the item is
-    // that it answers for the thing the ⠿ was pressed on. Over a set, it does
-    // not.
+    // HISTORY. S3 closed a gap where the item was offered over a set but
+    // pressing it opened the raw editor for the GRIP's block alone: it
+    // answered for one member and silently ignored the rest. The fix
+    // available then was to WITHHOLD the item, and §3.7 said so.
     //
-    // ANTI-VACUITY, stated because "the item is hidden" is worth nothing on
-    // its own — a menu that never opened, an item renamed, a selector typo and
-    // a wholesale `hidden = true` all produce it. Every phase asserts the WHOLE
-    // item list with its per-item hidden flag, so the other three items are
-    // proved present and VISIBLE in the same breath; and the same fixture is
-    // asked three more times, in states where the item must be SHOWN — with no
-    // selection at all, with a set of exactly one, and with a set standing
-    // somewhere else in the document. Dropping the condition from client.js
-    // turns phase 2 red; widening it turns phases 1, 3 and 4 red.
+    // v3.1.0's 修正 4 removes the reason instead. openRawViaGutter() now asks
+    // §3.3's membership question through resolveGutterOperands() — which
+    // brings the contiguity, emptiness and no-source-line gates with it — and
+    // opens the editor on the WHOLE span's line range, committing it with one
+    // commitRangeEdit(). The item now does what it appears to do over a set,
+    // so withholding it would be withholding a working operation. Phase 2 is
+    // therefore INVERTED, not deleted.
+    //
+    // ANTI-VACUITY is unchanged and still load-bearing: every phase asserts
+    // the WHOLE item list with its per-item hidden flag and in §3.7's order,
+    // so a menu that never opened, an item renamed, a selector typo or a
+    // wholesale `hidden = true` all fail here. What the four phases now pin
+    // together is that the item is offered in EVERY selection state — none,
+    // a set of two containing the grip, a set of exactly one, and a set
+    // standing elsewhere — so any future re-narrowing on `blockSelection`
+    // turns one of them red.
     {
       const T9_MENU = '# Doc\n\nalpha\n\nbravo\n\ncharlie\n';
       // The items of the OPEN menu belonging to `sel`, each with its own hidden
@@ -18925,8 +19048,8 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 });
       };
 
-      await s3Scenario('§3.7: the ⠿ menu withholds MD 原始碼 only while a multi-block '
-        + 'set stands', T9_MENU, async (page) => {
+      await s3Scenario('§3.7 (v3.1.0 修正 4): the ⠿ menu offers MD 原始碼 in every '
+        + 'selection state', T9_MENU, async (page) => {
         const blockSelFor = (line) => page.evaluate((ln) => {
           const b = window.__edTestBlocks().find((x) => x.startLine === ln);
           return b ? '.ed-block[data-block-id="' + b.id + '"]' : null;
@@ -18948,7 +19071,7 @@ async function gutterGeometry(page, sel) {
           + 'rather than the selection condition');
         await t9CloseMenu(page);
 
-        // ── Phase 2: a set of TWO — that one item, and only it, is withheld ─
+        // ── Phase 2: a set of TWO — the item is OFFERED (was: withheld) ──
         await page.evaluate(() => window.__edTestSetSelection(3, 5));
         const two = await page.evaluate(() => window.__edTestGetSelection());
         assert.deepStrictEqual(two && two.memberLines, [[3, 3], [5, 5]],
@@ -18960,11 +19083,12 @@ async function gutterGeometry(page, sel) {
           + '8) — the pair is what catches the two drifting apart. Got '
           + JSON.stringify(two.domSelectedLines));
         await openGutterMenu(page, p3);
-        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(true),
-          '§3.7 「多選時不顯示 `MD 原始碼`」: with a set of two standing and the ⠿ pressed '
-          + 'on a MEMBER of it, MD 原始碼 is withheld and the other three items stay '
-          + 'offered. A raw commit rewrites the GRIP block\'s lines only, so over a set '
-          + 'the item answers for one member and silently ignores the rest');
+        assert.deepStrictEqual(await t9Items(page, p3), t9Menu(false),
+          'v3.1.0 修正 4: with a set of two standing and the ⠿ pressed on a MEMBER of it, '
+          + 'MD 原始碼 is OFFERED along with the other three. It used to be withheld '
+          + 'because a raw commit rewrote the GRIP block\'s lines only; it now opens on '
+          + 'the whole span\'s line range via resolveGutterOperands(), so it answers for '
+          + 'the set it appears to act on');
         await t9CloseMenu(page);
 
         // ── Phase 3: a set of exactly ONE is not a multi-selection ───────
