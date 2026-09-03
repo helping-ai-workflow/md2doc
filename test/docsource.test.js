@@ -27,7 +27,11 @@ for (const start of ds.MODES) {
 // Defensive: an unrecognized mode does not throw, and lands on a real mode.
 eq(ds.MODES.includes(ds.next('bogus')), true, 'an unknown mode falls back to a real mode, not a throw');
 
-// --- toSource / fromSource: round trip is byte-identical, changed === false -
+// --- toSource / fromSource: round trip is byte-identical -------------------
+// (changed === false only in the 3-arg form, where there is a prevLines
+// reference to diff against; changed === true unconditionally in the 2-arg
+// form -- see the fixture loop below and the module's fromSource contract
+// comment for why.)
 
 // Fixture set drawn straight from the brief: plain LF, CRLF, trailing blank
 // lines, and a fenced code block whose body contains a literal '---' (must
@@ -54,12 +58,27 @@ const fixtures = [
 
 for (const f of fixtures) {
   const src = ds.toSource(f.lines, f.eol);
-  const result = ds.fromSource(src, f.eol);
-  eq(result.lines, f.lines, 'round trip byte-identical lines[]: ' + f.name);
-  eq(result.changed, false, 'round trip changed === false: ' + f.name);
+
+  // The 3-arg form -- fromSource(text, eol, prevLines) -- is invariant 1's
+  // real load-bearing check: a no-op round trip through the source view
+  // must give byte-identical lines[] AND changed === false, so the caller
+  // knows not to write. This is the form the integration task must call.
+  const result3 = ds.fromSource(src, f.eol, f.lines);
+  eq(result3.lines, f.lines, 'round trip byte-identical lines[] (3-arg): ' + f.name);
+  eq(result3.changed, false, 'round trip changed === false (3-arg, prevLines given): ' + f.name);
   // toSource(fromSource(...).lines, eol) must reproduce the exact same string
   // -- the other half of "byte-identical."
-  eq(ds.toSource(result.lines, f.eol), src, 'the string itself round-trips: ' + f.name);
+  eq(ds.toSource(result3.lines, f.eol), src, 'the string itself round-trips: ' + f.name);
+
+  // The 2-arg form -- no prevLines -- still parses `lines` correctly (the
+  // parse itself never depends on prevLines), but per the plan-owner
+  // ruling `changed` is unconditionally true here: with nothing to diff
+  // against, "unknown" must fail toward "assume edited," never toward
+  // "assume unchanged," because the caller's contract for changed:false is
+  // "do not write the file."
+  const result2 = ds.fromSource(src, f.eol);
+  eq(result2.lines, f.lines, 'round trip byte-identical lines[] (2-arg): ' + f.name);
+  eq(result2.changed, true, 'no prevLines => changed === true even on a true no-op (2-arg): ' + f.name);
 }
 
 // --- fromSource: a real edit is detected, and only that line differs -------
@@ -68,12 +87,10 @@ for (const f of fixtures) {
 // edited this" apart from "this text happens to already be the canonical
 // join of some lines[]" when the edit does not touch any line break --
 // splitting-then-rejoining reproduces the edited string just as exactly as
-// it reproduces the untouched one, so the two-arg round-trip check alone
-// is provably unable to distinguish them. That's why fromSource accepts an
-// OPTIONAL third argument, `prevLines`: the lines[] the source view was
-// seeded from. A real caller (client.js, a later track) always has this on
-// hand -- it's the very state the textarea was opened from -- so this is
-// the shape a real "did anything change" check takes.
+// it reproduces the untouched one. Only the 3-arg form -- fromSource(text,
+// eol, prevLines) -- can tell them apart, by diffing against the lines[]
+// the source view was seeded from. That is why this is the ONLY form the
+// integration task (client.js) is allowed to rely on for `changed`.
 {
   const original = ['# Title', 'first paragraph', 'second paragraph', ''];
   const eol = '\n';
@@ -92,38 +109,45 @@ for (const f of fixtures) {
   }
   eq(diffCount, 1, 'exactly one line differs from the original');
 
-  // The unedited round trip, by contrast, reports changed === false even
-  // when a prevLines reference is supplied and matches.
+  // The unedited round trip, by contrast, reports changed === false when a
+  // prevLines reference is supplied and matches -- this is the only case
+  // in the whole module where changed can legitimately be false.
   const unchanged = ds.fromSource(src, eol, original);
   eq(unchanged.changed, false, 'no edit + matching prevLines => changed === false');
   eq(unchanged.lines, original, 'no edit => lines are byte-identical to the original');
 
-  // Same edit, but the caller supplies no prevLines at all: the two-arg
-  // form falls back to round-trip fidelity, which the edited text still
-  // satisfies (no line break was touched), so changed === false here. This
-  // is the documented, correct two-arg behavior -- not a bug -- and pins
-  // the exact case the paragraph above explains.
-  const twoArg = ds.fromSource(editedSrc, eol);
-  eq(twoArg.changed, false,
-    'two-arg fallback: an in-place edit that touches no line break is indistinguishable from untouched');
+  // Plan-owner ruling, fix round 1: the 2-arg form (no prevLines) must
+  // default changed to true UNCONDITIONALLY -- not "true only for edits
+  // that happen to break round-trip fidelity." Pin both directions with
+  // the SAME source text here: edited or not, omitting prevLines always
+  // reads as "assume edited."
+  const twoArgEdited = ds.fromSource(editedSrc, eol);
+  eq(twoArgEdited.changed, true, '2-arg, edited text: changed === true');
+  const twoArgUnedited = ds.fromSource(src, eol);
+  eq(twoArgUnedited.changed, true,
+    '2-arg, UNEDITED text (would round-trip cleanly): changed === true anyway -- ' +
+    'this is the fail-safe default, not a fidelity check');
 }
 
-// --- fromSource: the two-arg fallback still catches real fidelity loss -----
+// --- fromSource: 2-arg parsing is still correct on mixed-EOL text ----------
 //
-// Text whose line breaks are NOT uniformly `eol` -- e.g. a stray '\n' inside
-// a file whose canonical eol is '\r\n' -- fails the round-trip check even
-// with no prevLines given, because rejoining the parsed lines with the
-// declared `eol` no longer reproduces the original string.
+// The `lines` result never depends on prevLines or on the declared `eol`
+// matching what's actually in `text` -- parsing is always the universal
+// three-way split. `changed` is still unconditionally true with no
+// prevLines, same as every other 2-arg case above; this fixture exists to
+// confirm the parse itself (not just `changed`) is unaffected by a
+// declared eol that doesn't match the text's actual line breaks.
 {
   const mixed = 'a\r\nb\nc\r\n'; // declared eol is '\r\n', but line 2's break is bare '\n'
   const result = ds.fromSource(mixed, '\r\n');
   eq(result.lines, ['a', 'b', 'c', ''], 'mixed-eol text still parses via the universal regex');
-  eq(result.changed, true, 'mixed-eol text fails the two-arg round-trip fidelity check');
+  eq(result.changed, true, '2-arg default holds here too');
 }
 
 // --- mutation-kill anchor -----------------------------------------------
 // (documented in task-D-report.md: forcing fromSource to always return
-// changed: true is caught by the very first round-trip fixture assertion
-// above -- `result.changed === false` -- which fails immediately.)
+// changed: true unconditionally -- collapsing the 3-arg content-diff
+// branch too -- is caught by the first 3-arg round-trip fixture assertion
+// above -- `result3.changed === false` -- which fails immediately.)
 
 console.log('docsource.test.js OK (' + checks + ' checks)');
