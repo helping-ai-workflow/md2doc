@@ -242,4 +242,30 @@ function baseCtx(overrides) {
   ok(!/\bnavigator\./.test(src), 'module source never references navigator.');
 }
 
+// v3.2.0: hasSelection 真的被讀取（v3.1.0 只收不讀）
+{
+  const base = { blockType: 'paragraph', indent: 0, headingDepth: 1,
+                 inList: false, listOrdered: false, mode: 'edit' };
+  const withSel = tm.deriveState(Object.assign({}, base, { hasSelection: true }));
+  const noSel = tm.deriveState(Object.assign({}, base, { hasSelection: false }));
+  for (const id of ['bold', 'italic', 'strike', 'inline-code', 'link']) {
+    assert.strictEqual(withSel[id].disabled, false, id + ' 有選取時 enabled');
+    assert.strictEqual(noSel[id].disabled, true, id + ' 沒選取時 disabled');
+  }
+  // 非行內格式鈕不受 hasSelection 影響
+  assert.strictEqual(withSel.quote.disabled, noSel.quote.disabled,
+    'quote 不隨 hasSelection 改變');
+}
+
+// v3.2.0: toggle 欄位存在，且恰好標在 deriveState 會設 active 的那些鈕上
+{
+  const toggles = tm.BUTTONS.filter((b) => b.toggle).map((b) => b.id).sort();
+  assert.deepStrictEqual(
+    toggles,
+    ['code', 'headings', 'list', 'ordered-list', 'preview', 'quote'],
+    'toggle 欄位必須與 deriveState 會設 active 的集合一致');
+  assert.strictEqual(tm.BUTTONS.every((b) => typeof b.toggle === 'boolean'), true,
+    '每顆按鈕都要有 toggle 欄位（不得 undefined）');
+}
+
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');
