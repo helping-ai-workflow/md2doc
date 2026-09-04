@@ -94,8 +94,22 @@ function req(port, method, p, body) {
       { fileId: 0, content: 'just text\n' });
     assert.strictEqual(rr.status, 200);
     const rj = JSON.parse(rr.body);
-    assert.ok(rj.bodyHtml.includes('data-block-id="0"'));
+    // v3.2.0: bodyHtml is gone from the wire — reconstitute it the same way
+    // the client does (parts.join('\n')) to keep this assertion's coverage.
+    assert.ok(rj.parts.join('\n').includes('data-block-id="0"'));
     assert.strictEqual(rj.blocks.length, 1);
+
+    // v3.2.0: /api/render 回 { parts, blocks }，不再回 bodyHtml
+    {
+      const res = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: '# H\n\n- a\n- b\n' });
+      assert.strictEqual(res.status, 200, '/api/render 應為 200');
+      const body = JSON.parse(res.body);
+      assert.strictEqual(Array.isArray(body.parts), true, '/api/render 必須回 parts');
+      assert.strictEqual(body.parts.length, body.blocks.length,
+        '/api/render 的 parts 與 blocks 必須 1:1');
+      assert.strictEqual('bodyHtml' in body, false,
+        '/api/render 不再回 bodyHtml——client 端以 parts.join(\'\\n\') 還原');
+    }
 
     // save happy path — byte identity
     const mtime0 = fs.statSync(mdPath).mtimeMs;

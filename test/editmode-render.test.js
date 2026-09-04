@@ -232,5 +232,37 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     assert.ok(/<ul>/.test(bodyHtml) && /<li>/.test(bodyHtml), 'reader mode still nests');
   }
 
+  // ── v3.2.0 final review item 3: the .ed-toolbar-status rule ────────────
+  // Two consecutive commits on this branch were fixes to this ONE rule and
+  // neither left a test behind:
+  //   * `margin-left: auto` on the slot broke .ed-toolbar's
+  //     `justify-content: center` and snapped the 22-button row flush left;
+  //   * without `pointer-events: none`, the `position: fixed` 7rem box
+  //     physically covers the image / outline / preview buttons at 420px
+  //     (measured: elementFromPoint resolves to the span, and a real click
+  //     never reaches the button's listener).
+  // Both are invisible to every other assertion in the suite, so they are
+  // pinned here, at the source of the stylesheet, rather than through a
+  // browser. The CSS comment above the rule in lib/md2doc.js explains what
+  // whoever wires two-way sync has to do INSTEAD of just deleting the line.
+  {
+    const full = await renderMarkdown('# T\n', fake, { editMode: true });
+    const m = full.html.match(/\n\s*\.ed-toolbar-status \{[^}]*\}/);
+    assert.ok(m, 'edit-mode stylesheet must carry a .ed-toolbar-status rule');
+    const rule = m[0];
+    assert.ok(/pointer-events:\s*none/.test(rule),
+      '.ed-toolbar-status must keep `pointer-events: none` — without it the ' +
+      'empty fixed slot swallows real clicks on image/outline/preview at ' +
+      'narrow widths. Rule was:\n' + rule);
+    assert.ok(!/margin-left:\s*auto/.test(rule),
+      '.ed-toolbar-status must NOT use `margin-left: auto` — it defeats ' +
+      '.ed-toolbar\'s justify-content: center and snaps the button row flush ' +
+      'left. Rule was:\n' + rule);
+    // The rule is only meaningful while the bar itself is centred; if that
+    // ever changes, the margin-left assertion above stops describing anything.
+    assert.ok(/\.ed-toolbar \{[^}]*justify-content:\s*center/.test(full.html),
+      '.ed-toolbar is expected to still centre its row');
+  }
+
   console.log('editmode-render.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });

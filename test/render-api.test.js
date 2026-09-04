@@ -42,5 +42,24 @@ const { renderMarkdown } = require('../lib/md2doc.js');
   assert.strictEqual(countAfterThird, countAfterSecond,
     'marked inline extension registry must not grow between renders');
 
+  // v3.2.0: parts 與 blocks 1:1，且每個 part 都已烘焙
+  {
+    const md = '# H\n\npara\n\n- a\n- b\n\n```dot\ndigraph { a -> b; }\n```\n\ntail\n';
+    const { bodyHtml, parts, blocks } = await renderMarkdown(md, path.join(dir, 'x.md'), { editMode: true });
+    assert.strictEqual(Array.isArray(parts), true, 'renderMarkdown 必須回傳 parts');
+    assert.strictEqual(parts.length, blocks.length,
+      'parts.length === blocks.length，got ' + parts.length + ' vs ' + blocks.length);
+    parts.forEach((p, i) => {
+      const ids = p.match(/data-block-id="(\d+)"/g) || [];
+      assert.strictEqual(ids.length, 1, 'part ' + i + ' 必須恰含一個 data-block-id，got ' + ids.length);
+      assert.strictEqual(ids[0], 'data-block-id="' + blocks[i].id + '"',
+        'part ' + i + ' 的 id 必須等於 blocks[' + i + '].id');
+    });
+    assert.strictEqual(parts.join('\n'), bodyHtml,
+      'parts.join(\'\\n\') 必須逐位元組等於 bodyHtml（兩者都在烘焙之後）');
+    assert.strictEqual(/data-graphviz-src=/.test(parts.join('')), false,
+      '每個 part 都必須已烘焙——未烘焙的 part 插進 DOM 會是一個空的 <div class="graphviz">');
+  }
+
   console.log('render-api.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });
