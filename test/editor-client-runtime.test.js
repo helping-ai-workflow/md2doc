@@ -23161,6 +23161,405 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.2.0 Task I: end-to-end cover for the incremental render (patch vs.
+    // fallback). Every scenario below PRIMES lastParts with an unrelated
+    // commit FIRST — the first commit after a page load always falls back
+    // (the bootstrap payload carries no parts), so asserting on THAT commit
+    // would silently test the fallback instead of the patch. Which branch
+    // each scenario's asserted commit actually took is confirmed from the
+    // page's own state (a spy on window.md2docPatchmap.patchmap, or — for
+    // Case 1 — the very fact that a fallback destroys every node, so a
+    // preserved object identity is itself proof). ──────────────────────────
+
+    // ── Case 1: the caret on an UNEDITED block does not move. Focus
+    //    paragraph A (no edit), then commit an edit to a DIFFERENT paragraph
+    //    C via a gutter action (⠿ 建立副本) — mousedown on ⠿ preventDefault()s,
+    //    so A's focus is never disturbed by the click itself (Finding 5a).
+    //    Node IDENTITY, not a selector re-match, is the point. ─────────────
+    {
+      const { srv, url } = await setupTableDoc([
+        'Case1 Para A text here.', '',
+        'Case1 Para B text here.', '',
+        'Case1 Para C text here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        // PRIME: consume the always-falls-back first commit on a block this
+        // scenario otherwise ignores.
+        const bSel = await paragraphSelByText(page, 'Case1 Para B');
+        await openWysiwyg(page, bSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PRIMED');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+
+        const aSel = await paragraphSelByText(page, 'Case1 Para A');
+        await openWysiwyg(page, aSel);
+        await page.keyboard.press('End');
+        const preFocusOffset = await page.evaluate((s) => {
+          window.__caseOneProbeA = document.activeElement;
+          return window.getSelection().focusOffset;
+        }, aSel);
+
+        // Spy on patchmap so the branch this commit takes is read from page
+        // state, not assumed.
+        await page.evaluate(() => {
+          window.__caseOnePlans = [];
+          const orig = window.md2docPatchmap.patchmap;
+          window.md2docPatchmap.patchmap = function (input) {
+            const r = orig(input);
+            window.__caseOnePlans.push(r);
+            return r;
+          };
+        });
+
+        const cSel = await paragraphSelByText(page, 'Case1 Para C');
+        await clickGutterMenuItem(page, cSel, '建立副本');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 4,
+          { timeout: 5000 });
+        await settleEditor(page);
+
+        const post = await page.evaluate(() => ({
+          activeIsProbe: document.activeElement === window.__caseOneProbeA,
+          focusOffset: window.getSelection().focusOffset,
+          plans: window.__caseOnePlans,
+        }));
+
+        assert.strictEqual(post.plans.length, 1, 'exactly one patchmap call for the duplicate commit');
+        assert.ok(post.plans[0],
+          'the duplicate commit must take the PATCH path — confirms this is not silently testing the fallback');
+        assert.strictEqual(post.activeIsProbe, true,
+          'A\'s DOM node must be the SAME OBJECT after a commit elsewhere — a fallback destroys every node');
+        assert.strictEqual(post.focusOffset, preFocusOffset,
+          'the caret offset on the untouched block A must not move');
+
+        await page.close();
+        console.log('v3.2.0 incremental render: caret on an unedited block does not move — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── Case 2: mermaid is not redrawn. A redraw necessarily changes the
+    //    <svg>'s id (mermaid stamps it with a per-render counter/timestamp),
+    //    so comparing the id across a commit that touches a DIFFERENT block
+    //    is the assertion — presence alone would not catch a silent redraw
+    //    that happens to look identical. ─────────────────────────────────
+    {
+      const { srv, url } = await setupTableDoc([
+        '# Doc', '',
+        'Case2 mermaid anchor paragraph.', '',
+        '```mermaid', 'graph TD;', 'A-->B;', '```', '',
+        'Case2 target paragraph text here.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.waitForFunction(
+          () => !!document.querySelector('.content .mermaid svg'), { timeout: 10000 });
+
+        // PRIME: the first commit falls back and therefore ALSO redraws the
+        // mermaid svg once (expected) — capture the id AFTER this settles,
+        // never before.
+        const anchorSel = await paragraphSelByText(page, 'Case2 mermaid anchor');
+        await openWysiwyg(page, anchorSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PRIMED');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+        await page.waitForFunction(
+          () => !!document.querySelector('.content .mermaid svg'), { timeout: 10000 });
+
+        const svgIdBefore = await page.evaluate(() => document.querySelector('.content .mermaid svg').id);
+        assert.ok(svgIdBefore, 'sanity: the mermaid svg must carry an id');
+
+        await page.evaluate(() => {
+          window.__caseTwoPlans = [];
+          const orig = window.md2docPatchmap.patchmap;
+          window.md2docPatchmap.patchmap = function (input) {
+            const r = orig(input);
+            window.__caseTwoPlans.push(r);
+            return r;
+          };
+        });
+
+        const targetSel = await paragraphSelByText(page, 'Case2 target paragraph');
+        await openWysiwyg(page, targetSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' EDITED');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+
+        const svgIdAfter = await page.evaluate(() => {
+          const svg = document.querySelector('.content .mermaid svg');
+          return svg ? svg.id : null;
+        });
+        const plans = await page.evaluate(() => window.__caseTwoPlans);
+
+        assert.strictEqual(plans.length, 1, 'exactly one patchmap call for the target commit');
+        assert.ok(plans[0], 'the target commit must take the PATCH path');
+        assert.strictEqual(svgIdAfter, svgIdBefore,
+          'the mermaid svg id must be UNCHANGED — a redraw would mint a new (timestamped) id');
+
+        await page.close();
+        console.log('v3.2.0 incremental render: mermaid diagram is not redrawn by an unrelated commit — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── Case 3: the id identity holds after ANY commit. Block ids are
+    //    positional ordinals (blockmap.js), so after a patch that changes
+    //    the block count, every `.ed-block` in document order must carry
+    //    data-block-id === its own index — the join key 24 getAttribute
+    //    reads and 10 querySelector('[data-block-id=…]') lookups depend on.
+    //    D's DOM node identity is also checked: applyPatch() REWRITES the
+    //    attribute on a kept suffix node in place, it never recreates it. ──
+    {
+      const { srv, url } = await setupTableDoc([
+        'Id3 para A.', '',
+        'Id3 para B.', '',
+        'Id3 para C.', '',
+        'Id3 para D.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const aSel = await paragraphSelByText(page, 'Id3 para A');
+        await openWysiwyg(page, aSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PRIMED');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+
+        await page.evaluate(() => {
+          const kids = Array.prototype.slice.call(document.querySelectorAll('.ed-block'));
+          window.__caseThreeProbeD = kids[kids.length - 1];
+          window.__caseThreePlans = [];
+          const orig = window.md2docPatchmap.patchmap;
+          window.md2docPatchmap.patchmap = function (input) {
+            const r = orig(input);
+            window.__caseThreePlans.push(r);
+            return r;
+          };
+        });
+
+        const bSel = await paragraphSelByText(page, 'Id3 para B');
+        await clickGutterMenuItem(page, bSel, '建立副本');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 5,
+          { timeout: 5000 });
+        await settleEditor(page);
+
+        const result = await page.evaluate(() => {
+          const kids = Array.prototype.slice.call(document.querySelectorAll('.ed-block'));
+          return {
+            ids: kids.map((k) => k.getAttribute('data-block-id')),
+            dSame: kids[kids.length - 1] === window.__caseThreeProbeD,
+            plans: window.__caseThreePlans,
+          };
+        });
+
+        assert.strictEqual(result.plans.length, 1, 'exactly one patchmap call for the duplicate commit');
+        assert.ok(result.plans[0], 'the duplicate commit must take the PATCH path');
+        result.ids.forEach((id, i) => {
+          assert.strictEqual(id, String(i),
+            'data-block-id at document-order index ' + i + ' must equal ' + i + ', got ' + id);
+        });
+        assert.strictEqual(result.dSame, true,
+          'D\'s DOM node must be the SAME OBJECT — its id is REWRITTEN in place by the patch, never recreated');
+
+        await page.close();
+        console.log('v3.2.0 incremental render: data-block-id stays a positional identity after a patch — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── Case 4: a block PATCHED IN is still alive — contenteditable="true"
+    //    and EXACTLY ONE :scope > .ed-handle. Exactly one matters:
+    //    armEditables() is not idempotent, and a double-arm would leave two
+    //    handles on the same block. ───────────────────────────────────────
+    {
+      const { srv, url } = await setupTableDoc([
+        'Case4 para A.', '',
+        'Case4 para B.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const aSel = await paragraphSelByText(page, 'Case4 para A');
+        await openWysiwyg(page, aSel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PRIMED');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+
+        await page.evaluate(() => {
+          window.__caseFourPlans = [];
+          const orig = window.md2docPatchmap.patchmap;
+          window.md2docPatchmap.patchmap = function (input) {
+            const r = orig(input);
+            window.__caseFourPlans.push(r);
+            return r;
+          };
+        });
+
+        const bSel = await paragraphSelByText(page, 'Case4 para B');
+        await clickGutterMenuItem(page, bSel, '建立副本');
+        await page.waitForFunction(
+          () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 3,
+          { timeout: 5000 });
+        await settleEditor(page);
+
+        const result = await page.evaluate(() => {
+          const kids = Array.prototype.slice.call(
+            document.querySelectorAll('.ed-block[data-block-type="paragraph"]'));
+          const patchedIn = kids[kids.length - 1]; // the duplicate, freshly built by applyPatch()'s <template>
+          return {
+            contentEditable: patchedIn.querySelector(':scope > *').getAttribute('contenteditable'),
+            handleCount: patchedIn.querySelectorAll(':scope > .ed-handle').length,
+            plans: window.__caseFourPlans,
+          };
+        });
+
+        assert.strictEqual(result.plans.length, 1, 'exactly one patchmap call for the duplicate commit');
+        assert.ok(result.plans[0], 'the duplicate commit must take the PATCH path');
+        assert.strictEqual(result.contentEditable, 'true',
+          'the patched-in block must be contenteditable="true"');
+        assert.strictEqual(result.handleCount, 1,
+          'the patched-in block must carry EXACTLY one .ed-handle — armEditables() must not double-arm');
+
+        await page.close();
+        console.log('v3.2.0 incremental render: a block patched in by applyPatch() is fully armed — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── Case 5: a SURVIVING burst leaves __selCount at 1. The two existing
+    //    assertions above (§ "sel-toolbar regression": back to 0 after a
+    //    render, exactly 1 for a new session) are both for a block that was
+    //    REPLACED — untouched by this task. burstSurvived === true is not
+    //    reachable through any ordinary gesture today: every commit-
+    //    triggering path resolves the currently-open burst via
+    //    switchAwayFrom() FIRST, and a self-commit always puts the burst's
+    //    own block inside the replaceSpan (Task G's own report reached the
+    //    same conclusion). The one shape that reaches it without touching
+    //    production code: freeze one /api/render response's `parts` to the
+    //    PREVIOUS render's, so patchmap finds every part equal and returns a
+    //    zero-width replaceSpan — the burst's own surface is then never
+    //    removed. Same technique Task G's own scratchpad smoke used to prove
+    //    burstSurvived is live code, not dead code. ─────────────────────────
+    {
+      const { srv, url } = await setupTableDoc([
+        'Case5 freeze target paragraph text.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.evaluateOnNewDocument(() => {
+          window.__selCount = 0;
+          const origAdd = document.addEventListener.bind(document);
+          const origRemove = document.removeEventListener.bind(document);
+          document.addEventListener = function (type, listener, opts) {
+            if (type === 'selectionchange') window.__selCount++;
+            return origAdd(type, listener, opts);
+          };
+          document.removeEventListener = function (type, listener, opts) {
+            if (type === 'selectionchange') window.__selCount--;
+            return origRemove(type, listener, opts);
+          };
+        });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Case5 freeze target');
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PRIMED');
+        await page.keyboard.press('Enter'); // first commit -> always falls back
+        await settleEditor(page);
+
+        // Test-only fetch harness: freeze the NEXT /api/render response's
+        // parts to the previous render's when armed. Production code is
+        // never touched — this wraps window.fetch from the page side.
+        await page.evaluate(() => {
+          window.__lastParts = null;
+          window.__freezeNext = false;
+          window.__caseFivePlans = [];
+          const origPatchmap = window.md2docPatchmap.patchmap;
+          window.md2docPatchmap.patchmap = function (input) {
+            const r = origPatchmap(input);
+            window.__caseFivePlans.push(r);
+            return r;
+          };
+          const origFetch = window.fetch;
+          window.fetch = function (input, init) {
+            const u = String(typeof input === 'string' ? input : (input && input.url) || '');
+            const pr = origFetch.call(this, input, init);
+            if (!/\/api\/render\b/.test(u)) return pr;
+            return pr.then((res) => res.clone().json().then((j) => {
+              const freeze = window.__freezeNext;
+              window.__freezeNext = false;
+              const parts = (freeze && window.__lastParts) ? window.__lastParts : j.parts;
+              window.__lastParts = parts;
+              j.parts = parts;
+              return new Response(JSON.stringify(j), {
+                status: 200, headers: { 'content-type': 'application/json' },
+              });
+            }));
+          };
+        });
+
+        // One un-frozen render to prime __lastParts to the CURRENT content.
+        const sel2 = await paragraphSelByText(page, 'Case5 freeze target');
+        await openWysiwyg(page, sel2);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' P1');
+        await page.keyboard.press('Enter');
+        await settleEditor(page);
+
+        const sel3 = await paragraphSelByText(page, 'Case5 freeze target');
+        await openWysiwyg(page, sel3);
+        await page.keyboard.press('End');
+        const preSelCount = await page.evaluate((s) => {
+          window.__caseFiveProbe = document.activeElement;
+          return window.__selCount;
+        }, sel3);
+        assert.strictEqual(preSelCount, 1, 'sanity: a clean burst has exactly one selectionchange listener');
+
+        await page.evaluate(() => { window.__freezeNext = true; window.__caseFivePlans.length = 0; });
+        await page.keyboard.type(' FROZEN');
+        await page.keyboard.press('Enter'); // self-commit, but the response is frozen to the OLD parts
+        await settleEditor(page);
+
+        const post = await page.evaluate(() => ({
+          selCount: window.__selCount,
+          probeConnected: window.__caseFiveProbe.isConnected,
+          plans: window.__caseFivePlans,
+        }));
+
+        assert.strictEqual(post.plans.length, 1, 'exactly one patchmap call for the frozen commit');
+        assert.ok(post.plans[0], 'the frozen commit must take the PATCH path');
+        assert.ok(post.plans[0].replaceSpan.oldEnd < post.plans[0].replaceSpan.oldStart,
+          'the frozen response must yield a ZERO-WIDTH replaceSpan, got ' + JSON.stringify(post.plans[0]));
+        assert.strictEqual(post.probeConnected, true,
+          'the burst\'s own surface must have SURVIVED the patch (never detached, never recreated)');
+        assert.strictEqual(post.selCount, 1,
+          'CASE 5: a SURVIVING burst must leave __selCount at 1 — resetSelToolbarState() must be SKIPPED');
+
+        await page.close();
+        console.log('v3.2.0 incremental render: a surviving burst leaves __selCount at 1 — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
