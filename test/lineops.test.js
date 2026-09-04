@@ -70,4 +70,26 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
   assert.strictEqual(dst.discardTop(d.lines), null, 'discardTop on an empty stack is a no-op, same contract as undo()/redo()');
 }
 
+// v3.2.0: undo/discardTop 套用時反轉 op，回傳的卻是正向 op。
+// 增量 render 的 editRange 必須用「套用後的 span」，不是 op 自己的。
+{
+  const stack = new UndoStack();
+  const before = ['para one'];
+  const after = ['a', '', 'b'];
+  const op = { startLine: 3, endLine: 3, before, after };
+  stack.push(op);
+  const lines = ['# H', '', 'a', '', 'b', '', 'tail'];
+  const r = stack.undo(lines);
+  // 套用後真正被換掉的是 3..5（3 行 -> 1 行），delta -2
+  const applied = {
+    startLine: r.op.startLine,
+    endLine: r.op.startLine + r.op.after.length - 1,
+    delta: r.op.before.length - r.op.after.length,
+  };
+  assert.deepStrictEqual(applied, { startLine: 3, endLine: 5, delta: -2 },
+    'undo 的 editRange 必須由 op.after 的長度推導，不是 op.endLine');
+  assert.strictEqual(r.op.endLine, 3,
+    '回傳的 op 本身仍是正向的——直接拿它當 editRange 會算出相反的方向');
+}
+
 console.log('lineops.test.js OK');
