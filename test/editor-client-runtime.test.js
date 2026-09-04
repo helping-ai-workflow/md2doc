@@ -23465,14 +23465,21 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.evaluateOnNewDocument(() => {
           window.__selCount = 0;
+          // Final review item 10: the NET count alone cannot tell "the burst
+          // survived, so its listener was never touched" apart from "the burst
+          // was torn down and a fresh one re-attached" — both land on 1. The
+          // two CUMULATIVE counters below can: a torn-down burst must show at
+          // least one extra removeEventListener, whatever happens afterwards.
+          window.__selAdds = 0;
+          window.__selRemoves = 0;
           const origAdd = document.addEventListener.bind(document);
           const origRemove = document.removeEventListener.bind(document);
           document.addEventListener = function (type, listener, opts) {
-            if (type === 'selectionchange') window.__selCount++;
+            if (type === 'selectionchange') { window.__selCount++; window.__selAdds++; }
             return origAdd(type, listener, opts);
           };
           document.removeEventListener = function (type, listener, opts) {
-            if (type === 'selectionchange') window.__selCount--;
+            if (type === 'selectionchange') { window.__selCount--; window.__selRemoves++; }
             return origRemove(type, listener, opts);
           };
         });
@@ -23527,11 +23534,11 @@ async function gutterGeometry(page, sel) {
         const sel3 = await paragraphSelByText(page, 'Case5 freeze target');
         await openWysiwyg(page, sel3);
         await page.keyboard.press('End');
-        const preSelCount = await page.evaluate((s) => {
+        const pre = await page.evaluate((s) => {
           window.__caseFiveProbe = document.activeElement;
-          return window.__selCount;
+          return { selCount: window.__selCount, adds: window.__selAdds, removes: window.__selRemoves };
         }, sel3);
-        assert.strictEqual(preSelCount, 1, 'sanity: a clean burst has exactly one selectionchange listener');
+        assert.strictEqual(pre.selCount, 1, 'sanity: a clean burst has exactly one selectionchange listener');
 
         await page.evaluate(() => { window.__freezeNext = true; window.__caseFivePlans.length = 0; });
         await page.keyboard.type(' FROZEN');
@@ -23540,6 +23547,8 @@ async function gutterGeometry(page, sel) {
 
         const post = await page.evaluate(() => ({
           selCount: window.__selCount,
+          adds: window.__selAdds,
+          removes: window.__selRemoves,
           probeConnected: window.__caseFiveProbe.isConnected,
           plans: window.__caseFivePlans,
         }));
@@ -23552,6 +23561,31 @@ async function gutterGeometry(page, sel) {
           'the burst\'s own surface must have SURVIVED the patch (never detached, never recreated)');
         assert.strictEqual(post.selCount, 1,
           'CASE 5: a SURVIVING burst must leave __selCount at 1 — resetSelToolbarState() must be SKIPPED');
+        // Final review item 10: `selCount === 1` on its own is not
+        // discriminating enough to claim what this case is named after. It
+        // asserts "some burst exists", and a burst that was torn down can be
+        // put back — resetSelToolbarState() drops the count to 0 and
+        // applyPatch()'s own tail then startBurst()s on the still-focused
+        // surviving surface, landing back on 1. What the case is actually
+        // about is that the teardown was SKIPPED: `burstSurvived` is computed
+        // ONCE and gates all three exceptions, `history.dispose()` included,
+        // so proving the listener was never removed proves dispose() never ran
+        // on this session's history either.
+        //
+        // MEASURED both ways on this exact scenario (scratchpad
+        // item10-case5-probe.js): as shipped, adds and removes are BOTH
+        // unchanged across the frozen commit; with `burstSurvived` forced to
+        // false, removes goes 2 -> 3.
+        assert.strictEqual(post.removes, pre.removes,
+          'CASE 5: the surviving burst\'s selectionchange listener must never be ' +
+          'REMOVED — a removal means the burst was torn down (history.dispose() ' +
+          'ran) and something re-attached afterwards. removes went ' +
+          pre.removes + ' -> ' + post.removes);
+        assert.strictEqual(post.adds, pre.adds,
+          'CASE 5: no NEW burst may be started either — an extra ' +
+          'addEventListener means startBurst() re-ran on the surviving surface ' +
+          'instead of the original session continuing. adds went ' +
+          pre.adds + ' -> ' + post.adds);
 
         await page.close();
         console.log('v3.2.0 incremental render: a surviving burst leaves __selCount at 1 — OK');

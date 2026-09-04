@@ -257,13 +257,49 @@ function baseCtx(overrides) {
     'quote 不隨 hasSelection 改變');
 }
 
-// v3.2.0: toggle 欄位存在，且恰好標在 deriveState 會設 active 的那些鈕上
+// v3.2.0: toggle 欄位存在，且恰好標在 deriveState 會設 active 的那些鈕上。
+//
+// Final review item 11: 這條原本把答案硬寫成
+// ['code','headings','list','ordered-list','preview','quote'] ——那正好是這次
+// 改動想要停止手抄的那份清單。硬寫的版本對「deriveState 新增第七顆會設
+// active 的鈕、但 BUTTONS 那邊忘了標 toggle: true」完全無感：兩邊都還是六，
+// 測試照樣綠。改成掃一組 ctx 矩陣、把**實際**出現過 active: true 的 id 收集
+// 起來，再跟 BUTTONS 上的 toggle 旗標比對；兩邊一漂就紅。
 {
-  const toggles = tm.BUTTONS.filter((b) => b.toggle).map((b) => b.id).sort();
+  const MODES = ['edit', 'source', 'preview'];
+  const BLOCK_TYPES = [null, undefined, 'paragraph', 'heading', 'blockquote',
+    'code', 'li', 'table', 'image', 'html', 'hr'];
+  const observedActive = new Set();
+  let combos = 0;
+  for (const mode of MODES) {
+    for (const blockType of BLOCK_TYPES) {
+      for (const inList of [false, true]) {
+        for (const listOrdered of [false, true]) {
+          for (const indent of [0, 1, 2]) {
+            for (const headingDepth of [1, 2, 3, 4, 5, 6]) {
+              for (const hasSelection of [false, true]) {
+                combos++;
+                const st = tm.deriveState({ blockType, indent, headingDepth,
+                  inList, listOrdered, hasSelection, mode });
+                // 不在這裡逐鈕 ok()：那會把 checks 灌到十萬級而毫無資訊量，
+                // 型別本身上面「deriveState entry exists」那段已經釘住了。
+                for (const id of ids) if (st[id].active) observedActive.add(id);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  ok(combos > 1000, 'the ctx sweep is actually broad (' + combos + ' combinations)');
+  const declaredToggles = tm.BUTTONS.filter((b) => b.toggle).map((b) => b.id).sort();
   assert.deepStrictEqual(
-    toggles,
-    ['code', 'headings', 'list', 'ordered-list', 'preview', 'quote'],
-    'toggle 欄位必須與 deriveState 會設 active 的集合一致');
+    Array.from(observedActive).sort(),
+    declaredToggles,
+    'every button deriveState can set active:true must carry toggle:true, and ' +
+    'no other button may — observed active: ' +
+    JSON.stringify(Array.from(observedActive).sort()) +
+    ', declared toggle: ' + JSON.stringify(declaredToggles));
   assert.strictEqual(tm.BUTTONS.every((b) => typeof b.toggle === 'boolean'), true,
     '每顆按鈕都要有 toggle 欄位（不得 undefined）');
 }
