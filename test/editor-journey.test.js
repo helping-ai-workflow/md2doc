@@ -34,14 +34,33 @@ async function newPage(mdText) {
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e)));
-  // v3.2.1 fix round 1: `pageerror` covers a SYNCHRONOUS throw only. Several
-  // handlers in client.js are async and several call sites drop the promise —
-  // buildSelToolbar()'s 🔗 button calls applyLinkToggle() without awaiting or
-  // catching it, for one — so a throw inside one surfaces as an unhandled
-  // rejection, which this harness could not see: every
-  // `assert.strictEqual(ctx.errs.length, 0, …)` in this file would have stayed
-  // green straight through it. Fixed HERE rather than at that one call site so
-  // it covers every async call site this file ever drives.
+  // v3.2.1 fix round 2, item 1 — this replaces a comment that claimed the
+  // harness was BLIND to unhandled rejections. That claim was false and is
+  // retracted. What is true, and what this listener is actually for:
+  //
+  // Several handlers in client.js are async and several call sites drop the
+  // promise — buildSelToolbar()'s 🔗 button calls applyLinkToggle() without
+  // awaiting or catching it — so a throw inside one becomes an unhandled
+  // rejection rather than a synchronous throw. MEASURED on this repo's
+  // puppeteer (24.42.0), by injecting a throw into applyLinkToggle() and
+  // firing it through that very button:
+  //
+  //   listener REMOVED  errs = ["pageerror: Error: PROBE_INJECTED_THROW"]
+  //   listener PRESENT  errs = ["unhandledrejection: Error: PROBE_INJECTED_THROW",
+  //                             "pageerror: Error: PROBE_INJECTED_THROW"]
+  //
+  // So `page.on('pageerror')` ALREADY delivers it: puppeteer feeds that event
+  // from CDP `Runtime.exceptionThrown`, which reports unhandled promise
+  // rejections too — it is not `window.onerror`. The existing
+  // `assert.strictEqual(ctx.errs.length, 0, …)` assertions were never blind to
+  // this class.
+  //
+  // What the listener buys is therefore narrower than "coverage": it is an
+  // explicit, LABELLED net owned by this file. The `unhandledrejection:` prefix
+  // names the mechanism in the failure message, and the net does not depend on
+  // the CDP client's exception mapping staying as it is across a puppeteer
+  // upgrade. Cost: the same throw is now reported twice — irrelevant to an
+  // `=== 0` assertion, visible in its message.
   //
   // The binding pushes into the SAME `errs` array `pageerror` feeds, so no
   // scenario needs changing. It arrives over CDP, i.e. asynchronously — a
