@@ -85,6 +85,37 @@ async function main() {
     console.log('journey: R1 Escape discards, never commits — OK');
   }
 
+  // ── openRawViaGutter: ⠿ → MD 原始碼 on a TABLE burst must discard ─────
+  {
+    const ctx = await newPage('# Doc\n\nAnchor para.\n\n| A | B |\n| --- | --- |\n| one | two |\n\nTail para.\n');
+    await ctx.page.click('.ed-block[data-block-type="table"] .ed-wys-cell');
+    await ctx.page.keyboard.type('ZZZ');
+    const tsel = '.ed-block[data-block-type="table"]';
+    await ctx.page.hover(tsel);
+    await ctx.page.click(tsel + ' .ed-handle');
+    await ctx.page.waitForSelector('.ed-handle-menu-btn');
+    await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+        .find((x) => x.textContent.indexOf('原始碼') !== -1);
+      if (!b) throw new Error('MD 原始碼 item not found');
+      b.click();
+    });
+    await new Promise((r) => setTimeout(r, 400));
+
+    const raw = await ctx.page.evaluate(() => {
+      const ta = document.querySelector('textarea.ed-raw');
+      return ta ? ta.value : null;
+    });
+    assert.strictEqual(raw && raw.indexOf('ZZZ'), -1,
+      'openRawViaGutter: raw editor 不得顯示被丟棄的編輯，got: ' + JSON.stringify(raw));
+
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('ZZZ'), -1,
+      'openRawViaGutter: 被丟棄的編輯不得進入磁碟，got:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: ⠿ → MD 原始碼 discards a table burst — OK');
+  }
+
   await browser.close();
 }
 
