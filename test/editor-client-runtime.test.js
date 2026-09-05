@@ -23260,7 +23260,7 @@ async function gutterGeometry(page, sel) {
           'that caret must be on a real edit surface, got class=' + post.activeClass);
 
         await page.close();
-        console.log('v3.2.0 incremental render: caret on an unedited block does not move — OK');
+        console.log('v3.2.0 incremental render: an unedited block\'s nodes survive a commit elsewhere (identity), and 建立副本 lands its caret on the duplicated block — OK');
       } finally {
         srv.close();
       }

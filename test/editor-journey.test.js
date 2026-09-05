@@ -336,6 +336,21 @@ async function main() {
     assert.strictEqual(s2.mode, 'edit', '第二次按【必須】回到 edit，preview 已移除');
     assert.ok(s1.status.length > 0 && s2.status.length > 0,
       '狀態槽位必須顯示當前模式');
+    // v3.2.1 final wave, M6: `length > 0` alone passes for a bug that always
+    // prints 「編輯」. 兩態的字必須【不同】才算真的在講當前模式。
+    // （這一條讀的是 .textContent；上面那條 notStrictEqual 讀的是按鈕的 .title，
+    //   兩者是不同的槽位。）
+    assert.notStrictEqual(s1.status, s2.status,
+      '狀態槽位必須隨模式改變 —— 兩態印一樣的字等於沒有在講當前模式，got ' +
+      JSON.stringify([s1.status, s2.status]));
+    // s0 是 mountToolbar() 之後、任何 setDocMode() 之前的值。這是
+    // paintModeStatus() 掛載時那一發唯一會被測到的地方 —— 少了它，掛載時漏叫
+    // paintModeStatus() 只會讓槽位空到第一次切換為止，沒有任何斷言會紅。
+    assert.strictEqual(s0.status, s2.status,
+      '掛載時的狀態槽位必須已經是 edit 模式的字（＝再切回 edit 時的同一個字），got ' +
+      JSON.stringify([s0.status, s2.status]));
+    assert.ok(s0.status.length > 0,
+      '掛載時狀態槽位不得是空的 —— mountToolbar() 之後必須已經 paintModeStatus() 過');
     assert.notStrictEqual(s1.label, s2.label,
       '按鈕標示必須講【下一個】狀態，兩態下不應相同');
     await ctx.page.close(); ctx.srv.close();
@@ -571,6 +586,24 @@ async function main() {
       document.activeElement.closest('.ed-block').getAttribute('data-block-id') === '0');
     assert.ok(stillOnParagraph,
       '測試前提失敗：開選單的手勢偷走了段落的焦點，這個場景就沒測到 burst-elsewhere 路徑');
+    // v3.2.1 final wave, D8 —— 上面那一條問的是【焦點】，不是【burst 狀態】，
+    // 而 client.js 的 resolveBurst() 註解自己就說得很清楚：它把 currentBurst
+    // 設回 null 的時候【不會】blur 任何東西。也就是說焦點還在段落上，並不
+    // 蘊含「還有一個未結算的 burst 站在那裡」；哪天有人讓某個中途步驟提前
+    // 結算掉它，這個場景就會安靜地不再測到 burst-elsewhere 那條路，而上面那
+    // 一條前提仍然是綠的。
+    //
+    // currentBurst 是 client.js 的閉包變數，頁面外讀不到。可以觀察、而且
+    // 蘊含「burst 還開著且是髒的」的東西是：DOM 上那個段落已經帶著
+    // 'EDITED '，而磁碟上還沒有 —— 一次未提交的編輯正站在那裡。它一旦被
+    // 結算（提交或丟棄），兩邊就會一致，這一條就紅。
+    const uncommitted = await page.evaluate(() =>
+      (document.querySelector('.ed-block[data-block-id="0"]').textContent || '').indexOf('EDITED ') !== -1);
+    assert.ok(uncommitted,
+      '測試前提失敗：段落的 DOM 裡沒有那段沒提交的文字，burst 根本沒開起來');
+    assert.strictEqual(fs.readFileSync(b.mdPath, 'utf8').indexOf('EDITED '), -1,
+      '測試前提失敗：那段文字已經進了磁碟 —— burst 已經被結算掉了，' +
+      '這個場景就不再測到 burst-elsewhere 路徑（見 resolveBurst()：它不 blur）');
 
     await page.click('.ed-te-menu-align');
     await new Promise((r) => setTimeout(r, 300));
@@ -702,7 +735,17 @@ async function main() {
       if (st.mode !== 'edit') return shown + '（必需答案 bar-only：不該離開 edit 模式）';
       // 證明「工具列還瞄著」不是計數好看而已：再按一次「在下方插入區塊」，
       // 游標必須真的落在新段落上。
-      await ctx.page.click('[data-ed-tb="insert-after"]').catch(() => {});
+      //
+      // v3.2.1 final wave, M8: 這一發【不再】吞掉失敗。原本的 `.catch(() => {})`
+      // 讓「按鈕點不到」（被別的東西蓋住、被 detach、disabled）與「按到了但游標
+      // 沒回來」共用同一個失敗訊息，而前者其實是更嚴重的那一個 —— 而且如果
+      // 後續狀態剛好healthy，它會直接變成綠的。
+      try {
+        await ctx.page.click('[data-ed-tb="insert-after"]');
+      } catch (e) {
+        return shown + '（必需答案 bar-only：後續驗證按不到「在下方插入區塊」' +
+          '這顆按鈕本身 —— ' + String(e && e.message || e) + '）';
+      }
       await new Promise((r) => setTimeout(r, 500));
       const after = await readLeverage(ctx.page);
       if (after.active === 'BODY') {
@@ -1117,6 +1160,153 @@ async function main() {
     console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
   }
 
+  // ── V2g: 標題到頂／到底時按 Tab —— 夾住的那一步不得把你踢出區塊 ──────────
+  //
+  // v3.2.1 final wave, I1。changeHeadingDepth() 的 `newDepth === curDepth`
+  // 早退出點【在】switchAwayFrom()（提交髒 burst ＋ 重繪）之下、【在】原本那個
+  // 還原之上，所以 H1 上按 Shift+Tab 與 H6 上按 Tab 這兩個再普通不過的手勢，
+  // 走的是「什麼都沒改，但你的著力點沒了」。handleBurstKeydown() 傳的是原始的
+  // ±1（沒有 delta === 0 的過濾，與 applyHeadingLevel() 不同），所以夾住的那
+  // 一步是真的可達的。
+  //
+  // 修之前實測（ddac6ce，三次）：H1 + Shift+Tab 與 H6 + Tab 都是
+  //   {active:'H1'/'H6', cls:'… ed-wys-armed', enabled:15}
+  //     → {active:'BODY', cls:'', enabled:4}
+  // 而未被夾住的對照組 H2 + Tab 是乾淨的（→ H3 / 15 顆）。修之後三者都保住
+  // ed-wys-armed / 15 顆。
+  //
+  // ⚠ 必須先打字。乾淨的 burst 走 endBurstWithoutResolve()，不提交也不重繪，
+  // 著力點本來就不會掉 —— 少了這一步這個場景會空跑成綠的。
+  {
+    const HEAD_ROWS = [
+      ['H1 + Shift+Tab', '# Title\n\nAlpha para.\n',      true,  'H1'],
+      ['H6 + Tab',       '###### Title\n\nAlpha para.\n', false, 'H6'],
+      ['H2 + Tab (未夾住的對照組)', '## Title\n\nAlpha para.\n', false, 'H3'],
+    ];
+    for (const [name, md, shift, wantTag] of HEAD_ROWS) {
+      const ctx = await newPage(md);
+      const sel = '.ed-block[data-block-id="0"] .ed-wys-armed';
+      await ctx.page.click(sel);
+      await new Promise((r) => setTimeout(r, 250));
+      await ctx.page.keyboard.type('X');          // 髒 burst：switchAwayFrom() 會提交＋重繪
+      await new Promise((r) => setTimeout(r, 250));
+      const before = await readLeverage(ctx.page);
+      assert.strictEqual(before.enabled, 15,
+        'V2g(' + name + ') 前提：打字後工具列應是 15 顆，got ' + JSON.stringify(before));
+      if (shift) await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('Tab');
+      if (shift) await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await readLeverage(ctx.page);
+      assert.strictEqual(st.active, wantTag,
+        'V2g(' + name + ')：游標必須留在（或落到）' + wantTag + '，got ' + JSON.stringify(st));
+      assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
+        'V2g(' + name + ')：而且必須是一個真的編輯面，got ' + JSON.stringify(st));
+      assert.strictEqual(st.enabled, 15,
+        'V2g(' + name + ')：工具列不得塌成 4 顆，got ' + JSON.stringify(st));
+      // 夾住的那兩列必須是真的 no-op：磁碟上的 # 數量不能變。
+      const disk = await saveAndRead(ctx);
+      const hashes = (disk.split('\n')[0].match(/^#+/) || [''])[0].length;
+      // 兩列夾住的 → 層級不動（H1 / H6）；對照組 → H2 真的變成 H3。
+      // `wantTag` 已經是「按完之後該是什麼」，兩種情形共用同一個數字。
+      assert.strictEqual(hashes, Number(wantTag.slice(1)),
+        'V2g(' + name + ')：標題層級必須是 ' + wantTag + '，got #×' + hashes + ' —— \n' + disk);
+      assert.strictEqual(ctx.errs.length, 0,
+        'V2g(' + name + ')：不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V2g a clamped Tab on a heading keeps the caret — OK');
+  }
+
+  // ── V2h: 被拒絕的 ⠿ 操作 —— 拒絕不得順手拿走你的著力點 ──────────────────
+  //
+  // v3.2.1 final wave, I2。三個 v3.2.1 wrapper 的 finally 【有】被跑到，但
+  // `focusLine` 在拒絕路徑上是 null，於是 focusBlockAtLine() 被跳過、
+  // reaimToolbarBlockAtLine(null) 第一行就 return —— 而 resolveGutterOperands()
+  // 裡的 switchAwayFrom() 早就提交並重繪過了。使用者看到的是：按了一個【亮著的】
+  // 選單項目，得到一條橫幅告訴他不行，同時失去游標與整條工具列。
+  //
+  // 修之前實測（ddac6ce，硬換行的 li 上按 轉換成 → 引用，該項目 disabled === false）：
+  //   {active:'DIV', cls:'ed-li-text ed-wys-armed', enabled:16}
+  //     → {active:'BODY', cls:'', enabled:4}，橫幅「此清單含不支援的格式，無法調整結構」
+  // 修之後 activeElement 回到那個 .ed-li-text、工具列 16 顆，橫幅照舊。
+  //
+  // 三個 wrapper 各測一條：轉換成（convertBlockViaMenu）、建立副本
+  // （duplicateBlockViaMenu）、刪除（deleteBlockViaGutter）。硬換行的 li 是
+  // §4.1 對這三者共同的拒絕條件，所以同一個 fixture 能同時打到三條路。
+  {
+    const HARD_WRAPPED = '# H\n\n- alpha item that is\n  hard wrapped here\n- bravo item\n\nTail.\n';
+    const ROWS = [
+      ['轉換成 → 引用', '引用', true],
+      ['建立副本',      '建立副本', false],
+      ['刪除',          '刪除', false],
+    ];
+    for (const [name, label, viaConvert] of ROWS) {
+      const ctx = await newPage(HARD_WRAPPED);
+      const id = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id'));
+      const sel = '.ed-block[data-block-id="' + id + '"]';
+      const before0 = fs.readFileSync(ctx.mdPath, 'utf8');
+      await ctx.page.click(sel + ' .ed-li-text');
+      await new Promise((r) => setTimeout(r, 250));
+      await ctx.page.keyboard.type('X');        // 髒 burst → switchAwayFrom() 提交＋重繪
+      await new Promise((r) => setTimeout(r, 250));
+      const before = await readLeverage(ctx.page);
+      assert.ok(/\bed-wys-armed\b/.test(before.activeClass),
+        'V2h(' + name + ') 前提：游標必須在 li 的編輯面上，got ' + JSON.stringify(before));
+      await ctx.page.hover(sel);
+      await ctx.page.click(sel + ' .ed-handle');
+      await ctx.page.waitForSelector('.ed-handle-menu-btn');
+      if (viaConvert) {
+        await ctx.page.evaluate(() => {
+          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((x) => x.textContent.indexOf('轉換成') !== -1).click();
+        });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      // 前提：這一項必須是【亮著的】。灰掉的項目點不下去，這個場景就沒測到東西。
+      const dis = await ctx.page.evaluate((L) => {
+        const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === L);
+        return h.length ? h[h.length - 1].disabled : 'MISSING';
+      }, label);
+      assert.strictEqual(dis, false,
+        'V2h(' + name + ') 前提：這個選單項目必須是 enabled，否則整列是空跑的綠燈，got ' +
+        JSON.stringify(dis));
+      await ctx.page.evaluate((L) => {
+        const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === L);
+        h[h.length - 1].click();
+      }, label);
+      await new Promise((r) => setTimeout(r, 800));
+      const st = await ctx.page.evaluate(() => ({
+        active: document.activeElement ? document.activeElement.tagName : null,
+        activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
+        enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+        banner: (document.querySelector('.ed-conflict') || {}).textContent || '',
+      }));
+      // 前提之二：這真的是一次【拒絕】，不是一次成功。橫幅必須是 §4.1 那一條。
+      assert.ok(st.banner.indexOf('無法調整結構') !== -1,
+        'V2h(' + name + ') 前提：必須真的被 §4.1 拒絕（橫幅），否則測到的是成功路徑，got ' +
+        JSON.stringify(st));
+      assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
+        'V2h(' + name + ')：被拒絕之後游標必須留在原來那個編輯面上，got ' + JSON.stringify(st));
+      assert.ok(st.enabled > 4,
+        'V2h(' + name + ')：被拒絕之後工具列不得塌成 4 顆，got ' + JSON.stringify(st));
+      // 拒絕 ＝ 檔案只該帶著剛剛那次打字，不該有任何結構改動。
+      const disk = await saveAndRead(ctx);
+      // 拒絕之後磁碟與原檔的唯一差別，必須是剛剛打進去的那些 X —— 把 X 拿掉之後
+      // 必須逐位元組相同。這比「行數沒變」強：它連硬換行的第二行、清單標記、
+      // 項目數都一起釘住了。
+      assert.strictEqual(disk.replace(/X/g, ''), before0,
+        'V2h(' + name + ')：拒絕不得改動結構，去掉剛打的 X 之後必須與原檔相同，got:\n' + disk);
+      assert.strictEqual(ctx.errs.length, 0,
+        'V2h(' + name + ')：不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V2h a refused ⠿ operation keeps the caret and the bar — OK');
+  }
+
   // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
   // lib/md2doc.js 有十四個 `position: fixed` 宣告（另有 9 處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
@@ -1464,6 +1654,73 @@ async function main() {
     assert.ok(isGone(after), '.ed-toolbar-menu 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-toolbar-menu vanishes on scroll — OK');
+  }
+
+  // ── V3b: onAnyScroll 的 `capture: true` ─────────────────────────────
+  //
+  // v3.2.1 final wave, D16。上面每一列捲的都是【文件】，而文件層的 scroll
+  // 事件在 capture 與 bubble 兩個階段都會經過 document 上的監聽器 —— 所以把
+  // client.js 那一行的 `capture: true` 改掉，上面十一列一列都不會紅。
+  //
+  // 真正只有 capture 期才收得到的是【內層可捲元素】的 scroll：scroll 事件從
+  // 元素上派發時【不冒泡】（只有 document / window 的那一發會）。閱讀側邊欄
+  // 的 .toc-list 就是這樣一個元素，而它在編輯模式下是可以被使用者捲的。
+  //
+  // 這一列因此捲 .toc-list（不動 window.scrollY，並且斷言它真的沒動），然後
+  // 問一個 onAnyScroll() 才會做的事有沒有發生。用 H▾ 下拉當觀測點而不是表格
+  // grip：兩者都在 onAnyScroll() 的同一個函式體裡（hideTableGrips /
+  // hideTableInsertBubbles / hideTableEdgeMenu / closeToolbarMenu 四件事一起
+  // 跑），但下拉不需要把滑鼠停在表格上、也不受抽屜遮擋影響，前提比較好立。
+  //
+  // 實測：把 `capture: true` 改成 `capture: false` 之後這一列會紅
+  //（.ed-toolbar-menu 捲完仍然 live）；上面十一列全綠。
+  {
+    const headings = Array.from({ length: 30 }, (_, i) => '## Section ' + i + '\n\nBody ' + i + '.\n').join('\n');
+    const ctx = await newPage('# H\n\n' + headings);
+    await ctx.page.setViewport({ width: 800, height: 700 });
+    await new Promise((r) => setTimeout(r, 300));
+    // 讓工具列瞄準一個 block，H▾ 才會是 enabled。用 focus() 而不是滑鼠點擊：
+    // 800px 下 .ed-toolbar 蓋著文件頂端，滑鼠點擊會打到工具列自己。
+    await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="0"] .ed-wys-armed').focus());
+    await new Promise((r) => setTimeout(r, 250));
+    // 抽屜：.sidebar-toggle 被 .ed-toolbar 蓋住（見上面那一列的註解），用 DOM click。
+    await ctx.page.evaluate(() => document.querySelector('.sidebar-toggle').click());
+    await new Promise((r) => setTimeout(r, 450));
+    const pre = await ctx.page.evaluate(() => {
+      const l = document.querySelector('.toc-list');
+      return l ? { found: true, scrollH: l.scrollHeight, clientH: l.clientHeight } : { found: false };
+    });
+    assert.ok(pre.found, 'V3b 前提失敗：抽屜裡找不到 .toc-list');
+    assert.ok(pre.scrollH > pre.clientH + 20,
+      'V3b 前提失敗：.toc-list 根本捲不動，這一列就沒測到內層捲動，got ' + JSON.stringify(pre));
+    const hDisabled = await ctx.page.evaluate(() =>
+      document.querySelector('[data-ed-tb="headings"]').disabled);
+    assert.strictEqual(hDisabled, false, 'V3b 前提失敗：H▾ 是 disabled，下拉開不起來');
+    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="headings"]').click());
+    await ctx.page.waitForSelector('.ed-toolbar-menu', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-toolbar-menu');
+    assertRaised(before, '.ed-toolbar-menu (V3b)');
+    const moved = await ctx.page.evaluate(() => {
+      const l = document.querySelector('.toc-list');
+      const y0 = window.scrollY, t0 = l.scrollTop;
+      l.scrollTop = 120;
+      return { y0: y0, t0: t0, t1: l.scrollTop };
+    });
+    assert.notStrictEqual(moved.t1, moved.t0,
+      'V3b 前提失敗：.toc-list 的 scrollTop 沒有真的移動，got ' + JSON.stringify(moved));
+    await new Promise((r) => setTimeout(r, 450));
+    const y1 = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(y1, moved.y0,
+      'V3b 前提失敗：這一捲把【文件】也捲了，那就退回成上面十一列已經涵蓋的形狀，got ' +
+      y1 + ' was ' + moved.y0);
+    const after = await overlayState(ctx.page, '.ed-toolbar-menu');
+    assert.ok(isGone(after),
+      'V3b: .toc-list 這種內層捲動也必須關掉浮層 —— scroll 事件不冒泡，只有 ' +
+      'document 上 capture 期的監聽器收得到它。這一條紅了，通常表示 onAnyScroll ' +
+      '的 `capture: true` 被拿掉了。got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3b an inner .toc-list scroll still closes the overlays (capture phase) — OK');
   }
 
   // ── reposition-or-gone：.ed-seltb ───────────────────────────────────
