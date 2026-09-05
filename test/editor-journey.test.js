@@ -301,6 +301,46 @@ async function main() {
     console.log('journey: the mode button is a truthful two-state toggle — OK');
   }
 
+  // ── 捲動：滯留的浮動選取列不得還能改到文件 ──────────────────────────
+  {
+    const filler = Array.from({ length: 60 }, (_, i) => 'Filler line ' + i + '.').join('\n\n');
+    const ctx = await newPage('# Doc\n\nAlpha target paragraph.\n\n' + filler + '\n');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    // Fixture note: read the file directly here, NOT via saveAndRead(). Ctrl+S
+    // runs switchAwayFrom() first, which resolves the burst this test just
+    // opened by focusing the paragraph above — and since nothing was actually
+    // edited, that resolution calls resetSelToolbarState() and removes
+    // .ed-seltb from the DOM for a reason that has nothing to do with
+    // scrolling. Doing a save here would make the "toolbar gone after scroll"
+    // assertion below pass even without the scroll-listener fix (verified:
+    // it does — the toolbar is confirmed gone by save, before any scroll).
+    const before = fs.readFileSync(ctx.mdPath, 'utf8');
+    await ctx.page.evaluate(() => window.scrollTo(0, 4000));
+    await new Promise((r) => setTimeout(r, 400));
+    const visible = await ctx.page.evaluate(() => {
+      const tb = document.querySelector('.ed-seltb');
+      if (!tb || !tb.parentNode) return null;
+      const r = tb.getBoundingClientRect();
+      return { top: r.top, clickable: document.elementFromPoint(
+        r.left + r.width / 2, r.top + r.height / 2) === tb ||
+        tb.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) };
+    });
+    assert.strictEqual(visible, null,
+      '選取捲出視窗後，浮動選取列必須消失，got: ' + JSON.stringify(visible));
+    const after = await saveAndRead(ctx);
+    assert.strictEqual(after, before, '捲動不得改變磁碟內容');
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the floating format bar cannot act on off-screen text — OK');
+  }
+
   await browser.close();
 }
 
