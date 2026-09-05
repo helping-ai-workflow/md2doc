@@ -189,6 +189,34 @@ async function main() {
     console.log('journey: conversion with a selection leaves the selection intact — OK');
   }
 
+  // ── H▾ on a block that is ALREADY a heading（走 changeHeadingDepth()，
+  //    不是 convertBlockViaMenu()）也不得掉焦點 ──────────────────────────
+  {
+    const ctx = await newPage('## Alpha heading\n\nbravo two\n');
+    // 無選取：純點擊進標題本身
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await ctx.page.click('[data-ed-tb="headings"]');
+    await ctx.page.waitForSelector('.ed-toolbar-menu-btn');
+    await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-toolbar-menu-btn'))
+        .find((x) => x.textContent.indexOf('標題 4') !== -1);
+      if (!b) throw new Error('標題 4 item not found');
+      b.click();
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    const h = await ctx.page.evaluate(() => ({
+      active: document.activeElement ? document.activeElement.tagName : null,
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+    }));
+    assert.notStrictEqual(h.active, 'BODY', 'H▾ 改既有標題層級後焦點不得掉到 BODY');
+    assert.ok(h.enabled > 4, 'H▾ 改既有標題層級後工具列不得塌成 4 顆，got ' + h.enabled);
+    const disk = await saveAndRead(ctx);
+    assert.notStrictEqual(disk.indexOf('#### Alpha heading'), -1,
+      'H▾ 標題 4 必須真的改寫層級，got:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: H▾ on an existing heading keeps the caret — OK');
+  }
+
   await browser.close();
 }
 
