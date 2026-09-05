@@ -341,6 +341,44 @@ async function main() {
     console.log('journey: the floating format bar cannot act on off-screen text — OK');
   }
 
+  // ── 粗體：選取含尾隨空格時，標記不得把空格包進去 ────────────────────
+  {
+    const ctx = await newPage('# Doc\n\nAlpha bold text here.\n');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const t = el.firstChild;
+      const s = el.textContent.indexOf('bold');
+      const r = document.createRange();
+      r.setStart(t, s);
+      r.setEnd(t, s + 5);            // 'bold ' —— 含尾隨空格
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.click('[data-ed-tb="bold"]');
+    await new Promise((r) => setTimeout(r, 250));
+    // Fixture note: the brief's original sequence pressed Escape here before
+    // clicking away. Measured: with a WYS-armed paragraph burst open, Escape
+    // reaches handleBurstKeydown() -> revertBurstAndEnd() and DISCARDS the
+    // bold mark just applied, back to the pristine "Alpha bold text here."
+    // — the RED run then failed for the wrong reason (no strong element at
+    // all, not the predicted `**bold **`), and would still fail after the
+    // real fix (a discarded edit stays discarded regardless of what the mark
+    // boundary was). Escape here is not "dismiss the selection popup"; it is
+    // "abandon this edit". Dropped — clicking a different block's armed
+    // surface already ends the burst (via focusout) and commits normally.
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('**bold**') !== -1,
+      '標記必須包住修剪後的選取，got:\n' + disk);
+    assert.strictEqual(disk.indexOf('\\*'), -1,
+      '不得出現跳脫的星號，got:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: bolding a selection with a trailing space — OK');
+  }
+
   await browser.close();
 }
 
