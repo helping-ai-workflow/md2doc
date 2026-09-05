@@ -571,8 +571,11 @@ async function main() {
   //
   // 每一列的「必需答案」是量測出來的，不是猜的（量測腳本見 task-11 報告）：
   //
-  //   caret     按完之後游標落在一個真的編輯面上（activeElement 不是 BODY），
-  //             而且工具列沒有塌回「沒有瞄準任何 block」的 4 顆。
+  //   caret     按完之後游標落在一個【真的編輯面】上 —— 不只是「不是 BODY」，
+  //             而是 activeElement 的 class 必須含 ed-wys-armed（段落／標題／
+  //             清單項）、ed-wys-cell（表格儲存格）或 ed-raw（MD 原始碼
+  //             textarea）三者之一；而且工具列沒有塌回「沒有瞄準任何 block」
+  //             的 4 顆。
   //   bar-only  目標型別【依設計】沒有可聚焦的編輯面 —— client.js 的
   //             convertBlockViaMenu() 自己就寫著「降級目標（quote / code）
   //             沒有可聚焦編輯面，focusBlockAtLine 會安靜 no-op；把
@@ -640,6 +643,11 @@ async function main() {
     const shown = name + ' → ' + JSON.stringify(st);
     if (answer === 'caret') {
       if (st.active === 'BODY') return shown + '（必需答案 caret：游標不得掉到 BODY）';
+      // 「不是 BODY」還不夠 —— 焦點停在某顆按鈕或某個 wrapper 上一樣打不了字。
+      if (!/\bed-wys-armed\b|\bed-wys-cell\b|\bed-raw\b/.test(st.activeClass)) {
+        return shown + '（必需答案 caret：游標必須落在真的編輯面上' +
+          '（ed-wys-armed / ed-wys-cell / ed-raw），不是只要不是 BODY 就好）';
+      }
       if (st.enabled <= 4) return shown + '（必需答案 caret：工具列塌成 ' + st.enabled + ' 顆）';
       if (st.mode !== 'edit') return shown + '（必需答案 caret：不該離開 edit 模式）';
       return null;
@@ -841,13 +849,23 @@ async function main() {
   //   reposition-or-gone .ed-seltb 沒有能把它重新升起來的驅動（捲動不觸發
   //                      selectionchange），純隱藏會讓它永遠回不來；所以選取
   //                      還在視窗內時要跟著移動，整個捲出視窗才消失。
-  //   gone-on-drag-end   兩個 drop indicator。onAnyScroll() 開頭就是
-  //                      `if (tePointer && tePointer.dragging) return;`，所以
-  //                      拖曳【進行中】的捲動刻意不動它們 —— 實測確實原地不
-  //                      動。這裡把「原地不動可以被接受」的兩個前提也一起釘
-  //                      住：(1) pointer-events 是 none，所以過期的線畫錯位置
-  //                      也點不到、不會動到資料；(2) 拖曳結束後必須收乾淨，
-  //                      而且此後的捲動不得讓它復活。
+  //   gone-on-drag-end   兩個 drop indicator。兩者在拖曳中的捲動都原地不動
+  //                      （實測），但【理由不同，不要混為一談】：
+  //                      ．表格列拖曳 —— onAnyScroll() 開頭就是
+  //                        `if (tePointer && tePointer.dragging) return;`，
+  //                        整個函式體被跳過，是刻意放行。
+  //                      ．區塊拖曳 —— 區塊拖曳用的是 `blockDragState`
+  //                        （client.js:9108/9136），不是 `tePointer`
+  //                        （只在 client.js:9920 由表格 grip 設定），所以那道
+  //                        early-return 對它不成立：onAnyScroll() 會整個跑完，
+  //                        只是它做的四件事（hideTableGrips /
+  //                        hideTableInsertBubbles / hideTableEdgeMenu /
+  //                        closeToolbarMenu）與那個 rAF 都【沒有碰到】
+  //                        blockDropIndicator。這是比「刻意放行」更弱的前提。
+  //                      三個前提都寫成斷言：(1) 捲動後 top 不變（原本這件事
+  //                      只活在註解裡）；(2) pointer-events 是 none，所以過期
+  //                      的線畫錯位置也點不到、不會動到資料；(3) 拖曳結束後
+  //                      必須收乾淨，而且此後的捲動不得讓它復活。
   //
   // 覆蓋率守衛：直接從 lib/md2doc.js 掃出所有 `position: fixed` 宣告並比對
   // 下表的 selector 集合。有人加第十五個浮層時這裡會紅，逼他決定它的必需
@@ -869,24 +887,39 @@ async function main() {
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
   ];
   {
-    const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8').split('\n');
-    // 宣告 vs 散文：宣告一定是 `position: fixed;`（分號結尾），可能前面同一行
-    // 帶著自己的 selector（`.ed-toolbar-status { position: fixed; …`）。註解裡
-    // 的提及全都不是分號結尾（`position: fixed matches …` / `position:fixed,
-    // NOT sticky:` …），所以這個 regex 把 9 處散文全部排除。
-    const declRe = /^(?:([^{};]*?)\s*\{\s*)?position:\s*fixed\s*;/;
+    // 宣告 vs 散文：先把註解整個抹掉，再找 `position: fixed`。
+    //
+    // 【不要】改回「行首必須是 position: 且必須以分號結尾」那種寫法。那個寫法
+    // 只認得一種書寫風格，實測有三種乾淨插入的規則會讓它靜默漏掉（三種都試過，
+    // 舊寫法一律仍回報 14）：
+    //   (1) 宣告不在行首   `.x { z-index: 5; position: fixed; }`
+    //   (2) 帶 !important  `.x { position: fixed !important; }`  ← `\s*;` 不匹配
+    //   (3) 收尾沒有分號   `.x { top: 0; position: fixed }`
+    // 也就是說它只在「一顆浮層剛好照著現有 14 個的排版寫」時才紅，而註解卻
+    // 宣稱第十五個浮層一定會紅 —— 正是這個分支反覆出過的假註解。
+    //
+    // 抹註解的方式：`/* … */` 整段（CSS 註解與 JS 區塊註解都在內，含
+    // `.sidebar-scrim (position:fixed; inset:0; …)` 這種【帶分號】的散文提及），
+    // 加上【整行】以 // 起頭的 JS 行註解。刻意不抹行中的 // ，否則 `https://`
+    // 之類的字串會被截斷、把後面的大括號一起吃掉。
+    const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8');
+    const stripped = cssSrc
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .split('\n').map((l) => (/^\s*\/\//.test(l) ? '' : l)).join('\n');
     const found = [];
-    for (let i = 0; i < cssSrc.length; i++) {
-      const m = declRe.exec(cssSrc[i].trim());
-      if (!m) continue;
-      let selector = m[1];
-      if (!selector) {                       // selector 在前面幾行，往回找
-        for (let j = i - 1; j >= 0 && j > i - 8; j--) {
-          const s = /^([^{};/*]+?)\s*\{$/.exec(cssSrc[j].trim());
-          if (s) { selector = s[1]; break; }
-        }
+    const declRe = /position\s*:\s*fixed\b/g;
+    let m;
+    while ((m = declRe.exec(stripped))) {
+      // selector = 這條宣告所屬規則的 `{` 前面那一段，邊界取最近的
+      // } / { / ; / 反引號（template literal 起頭）。
+      const open = stripped.lastIndexOf('{', m.index);
+      if (open === -1) { found.push(null); continue; }
+      let from = 0;
+      for (const ch of ['}', '{', ';', '`']) {
+        const i = stripped.lastIndexOf(ch, open - 1);
+        if (i > from) from = i;
       }
-      found.push(selector);
+      found.push(stripped.slice(from + 1, open).replace(/\s+/g, ' ').trim());
     }
     assert.deepStrictEqual(found.slice().sort(), OVERLAY_RULES.map((r) => r.sel).slice().sort(),
       'V3 表必須恰好覆蓋 lib/md2doc.js 裡每一個 position:fixed 浮層，got ' + JSON.stringify(found));
@@ -982,8 +1015,13 @@ async function main() {
 
   // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時）──────────
   // 實測：抽屜打開時 body 仍然可以捲（overflow 是 `clip visible`，scrollY
-  // 真的從 0 走到 1938），而這兩個浮層四個邊都定死在視窗上，所以捲動之後
-  // 位置一格都沒動。它們必須留著 —— scrim 是關掉抽屜的唯一點擊目標。
+  // 真的從 0 走到 1938），而兩者被捲動會動到的那個軸都定死在視窗上，所以
+  // 捲動之後位置一格都沒動：
+  //   .sidebar-scrim   `inset: 0` —— 四個邊都定死。
+  //   .reader-sidebar  只定死 top / left / bottom 三個邊（lib/md2doc.js
+  //                    :2104），寬度是 `width: 85%; max-width: 360px`。
+  //                    垂直軸兩端都釘住，所以垂直捲動一樣動不到它。
+  // 它們必須留著 —— scrim 是關掉抽屜的唯一點擊目標。
   {
     const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
     await ctx.page.setViewport({ width: 800, height: 800 });
@@ -1011,9 +1049,17 @@ async function main() {
 
   // ── live：.lightbox ─────────────────────────────────────────────────
   // lightbox 開著時 lib/md2doc.js 的 `body[data-lightbox-open] { overflow:
-  // hidden; }` 讓文件根本捲不動；會捲的是它自己的 .lightbox-stage
-  // （overflow: auto），而 onAnyScroll 是 capture 階段掛的，收得到那個容器的
-  // scroll 事件。所以這一列問的是「stage 捲動不得把 lightbox 自己拆掉」。
+  // hidden; }` 只作用在 <body> 上 —— 捲動的捲動容器是 documentElement，它的
+  // overflow 仍是 `clip visible`，所以【文件照樣捲得動】：實測開著 lightbox
+  // 時 window.scrollBy(0, 1500) 讓 scrollY 從 0 走到 1048，capture 階段收到
+  // 一個 scroll 事件。這一列問的就是「這個捲動不得把 lightbox 拆掉」。
+  //
+  // ⚠ 不要改回「捲它自己的 .lightbox-stage」：實測 stage 在 zoom 1 下被縮到
+  // 剛好容納整張圖（1×1 與 1600×1200 兩種圖都量過：scrollHeight ===
+  // clientHeight === 744、scrollWidth === clientWidth === 1400），s.scrollTop
+  // = 40 會被夾回 0 且【一個 scroll 事件都不發】。stage 要真的能捲必須先驅動
+  // 縮放控制，那是 test/lightbox.test.js 的地盤（它已經斷言縮放後
+  // stage.scrollWidth > stage.clientWidth）。
   {
     // boot() (not newPage()) so the png exists BEFORE the first render:
     // md2doc inlines local image srcs at render time and prints
@@ -1030,19 +1076,13 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500));
     const before = await overlayState(ctx.page, '.lightbox');
     assertRaised(before, '.lightbox');
-    const bodyOverflow = await ctx.page.evaluate(() => getComputedStyle(document.body).overflow);
-    assert.strictEqual(bodyOverflow, 'hidden',
-      'lightbox 開著時 body 必須是 overflow:hidden（這一列改成「捲 stage」就是因為它），got ' + bodyOverflow);
-    await ctx.page.evaluate(() => {
-      const s = document.querySelector('.lightbox-stage');
-      if (s) { s.scrollTop = 40; s.scrollLeft = 40; }
-      window.scrollBy(0, 1500);
-    });
-    await new Promise((r) => setTimeout(r, 450));
+    // 和其他每一列一樣走共用的 scrollBy()，它會斷言 scrollY 真的變了 ——
+    // 少了這道前提，一個根本沒發生的捲動會讓下面的斷言永遠是綠的。
+    await scrollBy(ctx.page, 1500);
     const after = await overlayState(ctx.page, '.lightbox');
     assert.ok(isLive(after), '.lightbox 捲動後必須仍然可見，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: V3 .lightbox survives a scroll of its own stage — OK');
+    console.log('journey: V3 .lightbox survives a document scroll — OK');
   }
 
   // ── live：.ed-conflict ──────────────────────────────────────────────
@@ -1142,9 +1182,13 @@ async function main() {
   }
 
   // ── reposition-or-gone：.ed-seltb ───────────────────────────────────
-  // 資料完整性那一條（捲動後點擊滯留的 .ed-seltb 位置，磁碟不得改變）已經
-  // 由上面「the floating format bar cannot act on off-screen text」那個
-  // 案例守著；這裡列進表是為了它不會在後續整理中被當成重複而拆掉。
+  // 兩件事：位置行為（捲一點跟著走、整個捲出視窗才消失）＋【資料完整性】
+  // （捲動後在那個滯留位置按下去，磁碟不得改變）。
+  //
+  // 資料完整性那一條上面「the floating format bar cannot act on off-screen
+  // text」也在守，但那是【那一個場景】自己的斷言 —— 它哪天被整理掉，這張表
+  // 就什麼都不剩了。brief 要求它「列進表以免被拆掉」，所以這裡自己做一次真的
+  // 點擊與比對，而不是用註解指向別人。
   {
     for (const dy of [60, 3000]) {
       const ctx = await newPage(V3_TABLE_MD);
@@ -1171,6 +1215,19 @@ async function main() {
       } else {
         assert.ok(isGone(after),
           '.ed-seltb 選取整個捲出視窗後必須消失，got ' + JSON.stringify(after));
+        // 資料完整性：在浮動列【原本】的位置真的按一下，磁碟不得改變。
+        // 磁碟基準直接讀檔、不走 saveAndRead()：Ctrl+S 會先跑
+        // switchAwayFrom()，那本身就會收掉這次 burst，基準就不再是「捲動前」
+        // 的狀態（同上面那個既有場景的 fixture note）。
+        assert.ok(before.top > 60,
+          'V3 前提失敗：.ed-seltb 原本的位置落在工具列高度內（top=' + before.top +
+          '），等一下那一下會按到工具列而不是滯留的浮動列');
+        const diskBefore = fs.readFileSync(ctx.mdPath, 'utf8');
+        await ctx.page.mouse.click(before.left + before.w / 2, before.top + before.h / 2);
+        await new Promise((r) => setTimeout(r, 300));
+        const diskAfter = await saveAndRead(ctx);
+        assert.strictEqual(diskAfter, diskBefore,
+          '在滯留的 .ed-seltb 位置按下去不得改到文件，got:\n' + diskAfter);
       }
       await ctx.page.close(); ctx.srv.close();
     }
@@ -1182,6 +1239,7 @@ async function main() {
     const drags = [
       {
         sel: '.ed-te-drop-indicator',
+        why: 'onAnyScroll() 被 tePointer.dragging 的 early-return 整個跳過',
         // 表格列拖曳：從列 grip 起手。
         raise: async (page) => {
           const ts = await centreTable(page);
@@ -1199,6 +1257,7 @@ async function main() {
       },
       {
         sel: '.ed-block-drop-indicator',
+        why: 'onAnyScroll() 整個跑完，但它做的事都沒有碰到 blockDropIndicator',
         // 區塊拖曳：從 ⠿ 起手。
         raise: async (page) => {
           await page.evaluate(() =>
@@ -1223,20 +1282,27 @@ async function main() {
       await new Promise((r) => setTimeout(r, 250));
       const dragging = await overlayState(ctx.page, d.sel);
       assertRaised(dragging, d.sel);
-      // 前提 1：拖曳中的捲動【刻意】不動它（onAnyScroll 開頭的
-      // `if (tePointer && tePointer.dragging) return;`）。原地不動可以被接受
-      // 的唯一理由是它點不到 —— 把那個理由釘住。
+      // 前提 1：原地不動可以被接受的唯一理由是它點不到 —— 把那個理由釘住。
       assert.strictEqual(dragging.pointerEvents, 'none',
         d.sel + ' 必須是 pointer-events:none —— 捲動中它會留在過期座標上，' +
         '能被點到就代表過期的線可以動到資料，got ' + JSON.stringify(dragging));
+      // 前提 2：拖曳中的捲動確實不動它（理由見上面表格註解，兩個 indicator
+      // 不同）。這件事原本只寫在註解裡、沒有任何斷言看著。
       await scrollBy(ctx.page, 200);
-      // 前提 2：放開之後必須收乾淨。
+      const midDrag = await overlayState(ctx.page, d.sel);
+      assert.ok(isLive(midDrag),
+        d.sel + ' 拖曳中的捲動不得讓它消失（它要等放開才收），got ' + JSON.stringify(midDrag));
+      assert.strictEqual(midDrag.top, dragging.top,
+        d.sel + ' 拖曳中的捲動實測不會移動它（' + d.why + '）—— ' +
+        'top 變了代表 onAnyScroll 的行為與這一列的前提不再相符，got top=' +
+        midDrag.top + ' was ' + dragging.top);
+      // 前提 3：放開之後必須收乾淨。
       await ctx.page.mouse.up();
       await new Promise((r) => setTimeout(r, 600));
       const dropped = await overlayState(ctx.page, d.sel);
       assert.ok(isGone(dropped),
         d.sel + ' 拖曳結束後必須收乾淨，got ' + JSON.stringify(dropped));
-      // 前提 3：此後的捲動不得讓它復活。
+      // 前提 4：此後的捲動不得讓它復活。
       await scrollBy(ctx.page, 200);
       const afterScroll = await overlayState(ctx.page, d.sel);
       assert.ok(isGone(afterScroll),
@@ -1351,21 +1417,30 @@ async function main() {
       const trimmed = V4_TEXT.slice(c.a, c.b).trim();
       const label = '[' + c.a + ',' + c.b + ') ' + JSON.stringify(V4_TEXT.slice(c.a, c.b));
       const r = await v4Apply(ctx, c.a, c.b, c.viaItalic);
-      // 重新解析：提交會把 markdown 重新渲染回 DOM，所以提交後的 DOM 就是
-      // 「序列化 → 重新解析」的結果。
+      // 序列化：提交把這次 burst 寫回磁碟。
+      const disk = await v4Commit(ctx);
+      // 重新解析：提交會把 markdown 重新渲染回 DOM，所以【提交之後】的 DOM
+      // 才是「序列化 → 重新解析」的結果。這一讀必須在 v4Commit() 之後 ——
+      // 提交【之前】讀到的是 applyMarkToggle() 剛剛改過的同一個編輯中節點
+      // （用 data-probe 印記量過：提交前印記還在，提交後才變 null，也就是
+      // 元素真的被重建了），那個讀法問的是「我剛剛改的 DOM 長什麼樣」，
+      // 而磁碟又正是從那個 DOM 序列化出來的 —— 兩者互相蘊含，斷言等於死碼。
       const dom = await ctx.page.evaluate(() => {
         const el = document.querySelector('.ed-block[data-block-id="1"]');
-        return Array.from(el.querySelectorAll('strong')).map((s) => s.textContent);
+        return el ? Array.from(el.querySelectorAll('strong')).map((s) => s.textContent) : null;
       });
-      const disk = await v4Commit(ctx);
       const marker = c.viaItalic ? '***' : '**';
       const want = marker + trimmed + marker;
+      // 三條各自獨立（不是 else if）：磁碟那條沒過的時候，重新解析那條仍然
+      // 要有機會自己說話，否則它永遠躲在前一條後面、永遠不會被觀察到。
       if (disk.indexOf(want) === -1) {
         bad.push(label + ' (' + r.boundarySource + ') 序列化缺少 ' + JSON.stringify(want) + '，disk:\n' + disk);
-      } else if (dom.indexOf(trimmed) === -1) {
+      }
+      if (!dom || dom.indexOf(trimmed) === -1) {
         bad.push(label + ' (' + r.boundarySource + ') 重新解析後沒有涵蓋修剪後選取的 <strong>，got ' +
           JSON.stringify(dom));
-      } else if (disk.indexOf('\\*') !== -1) {
+      }
+      if (disk.indexOf('\\*') !== -1) {
         bad.push(label + ' (' + r.boundarySource + ') 出現跳脫的星號，disk:\n' + disk);
       }
       await ctx.page.close(); ctx.srv.close();
@@ -1407,8 +1482,15 @@ async function main() {
     const disabled = await ctx.page.evaluate(() =>
       document.querySelector('[data-ed-tb="bold"]').disabled);
     assert.strictEqual(disabled, true, 'collapsed 選取下粗體按鈕必須是 disabled');
-    // 按鈕停用只是第一道；applyMarkToggle() 自己也有 `if (range.collapsed)
-    // return;`。用 DOM click 繞過停用狀態，直接考那一道。
+    // 上面那條「按鈕必須是 disabled」是【獨立可紅】的一道：把
+    // hasFormattableSelection() 的 collapsed 判斷拿掉，它就會紅。
+    //
+    // 下面用 DOM click 繞過停用狀態，考的是「即使有人硬按下去也不能長出標記」
+    // 這個【行為】，而不是任何一道特定的閘門 —— 實測 applyMarkToggle() 裡的
+    // `if (range.collapsed) return;` 和它下面的 `if (!trimRangeToText(range))
+    // return;` 兩道各自都足以擋下來（把前者拿掉，collapsed 的 range 產不出
+    // 任何 parts，trimRangeToText() 回 false，結果一模一樣、仍然沒有
+    // <strong>）。所以這段不宣稱它在考前者。
     await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="bold"]').click());
     await new Promise((r) => setTimeout(r, 300));
     const html = await ctx.page.evaluate(() =>
