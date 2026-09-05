@@ -246,6 +246,35 @@ async function main() {
     console.log('journey: undo keeps a usable caret in the rewritten block — OK');
   }
 
+  // ── 圖片：髒 block 上插入，必須落在該段落之後而非檔尾 ────────────────
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n\nTail paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' DIRTY');
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64');
+    const imgPath = path.join(path.dirname(ctx.mdPath), 'one.png');
+    fs.writeFileSync(imgPath, png);
+    const [chooser] = await Promise.all([
+      ctx.page.waitForFileChooser(),
+      ctx.page.click('[data-ed-tb="image"]'),
+    ]);
+    await chooser.accept([imgPath]);
+    await new Promise((r) => setTimeout(r, 900));
+
+    const disk = await saveAndRead(ctx);
+    const lines = disk.split('\n');
+    const imgIdx = lines.findIndex((l) => l.indexOf('![') !== -1);
+    const alphaIdx = lines.findIndex((l) => l.indexOf('Alpha paragraph.') !== -1);
+    const bravoIdx = lines.findIndex((l) => l.indexOf('Bravo paragraph.') !== -1);
+    assert.ok(imgIdx > alphaIdx && imgIdx < bravoIdx,
+      '圖片必須落在 Alpha 之後、Bravo 之前，got img@' + imgIdx +
+      ' alpha@' + alphaIdx + ' bravo@' + bravoIdx + ':\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: an image lands after the current block — OK');
+  }
+
   await browser.close();
 }
 
