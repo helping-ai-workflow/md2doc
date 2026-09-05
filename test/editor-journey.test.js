@@ -217,6 +217,35 @@ async function main() {
     console.log('journey: H▾ on an existing heading keeps the caret — OK');
   }
 
+  // ── undo：游標在被改寫區塊【內】時必須還原，區塊外則不得被動到 ────────
+  {
+    const ctx = await newPage('# Title\n\nAlpha paragraph.\n\nBravo paragraph.\n\nGolf paragraph.\n');
+    // 在 Bravo 打字並提交（產生一個可 undo 的 op）
+    await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' TWO');
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    // 把游標放回 Bravo（即將被 undo 改寫的那個 block）
+    await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 500));
+    const st = await ctx.page.evaluate(() => ({
+      active: document.activeElement ? document.activeElement.tagName : null,
+    }));
+    assert.notStrictEqual(st.active, 'BODY',
+      'undo：游標落在被改寫區塊內時，焦點不得掉到 BODY');
+    // 打字必須真的進得去
+    await ctx.page.keyboard.type('QQ');
+    await new Promise((r) => setTimeout(r, 200));
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('QQ') !== -1,
+      'undo 之後打的字必須進得了檔案，got:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: undo keeps a usable caret in the rewritten block — OK');
+  }
+
   await browser.close();
 }
 
