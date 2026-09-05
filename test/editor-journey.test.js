@@ -564,6 +564,900 @@ async function main() {
     console.log('journey: an unrelated burst resolving mid-align closes the menu cleanly, no zombie — OK');
   }
 
+  // ══ V2: 工具列 + ⠿ 選單全矩陣 ═════════════════════════════════════════
+  // 族群級的網：Task 3 只修了 convertBlockViaMenu() 一條路徑，這一段逐一
+  // 真實點擊 22 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
+  // 按完之後還有著力點」。
+  //
+  // 每一列的「必需答案」是量測出來的，不是猜的（量測腳本見 task-11 報告）：
+  //
+  //   caret     按完之後游標落在一個真的編輯面上（activeElement 不是 BODY），
+  //             而且工具列沒有塌回「沒有瞄準任何 block」的 4 顆。
+  //   bar-only  目標型別【依設計】沒有可聚焦的編輯面 —— client.js 的
+  //             convertBlockViaMenu() 自己就寫著「降級目標（quote / code）
+  //             沒有可聚焦編輯面，focusBlockAtLine 會安靜 no-op；把
+  //             toolbarBlockEl 指回轉換後的 block，工具列才不會塌成 4 顆」。
+  //             所以 BODY 是合法答案，但工具列必須還瞄著那個 block —— 這裡
+  //             不只數按鈕數，還真的再按一次「在下方插入區塊」並確認游標落
+  //             在新段落上，證明那個「還瞄著」是真的能用而不只是計數好看。
+  //   source    離開 edit 模式；游標必須在 .ed-source textarea 裡，工具列
+  //             此時合法地只剩模式切換一顆，所以改為斷言再按一次能回到
+  //             edit 且工具列復原。
+  //   BROKEN    今天實測就是壞的（見下方每一列自己的註解）。Task 11 是
+  //             test-only，不能改 lib/，所以這裡把【當下的壞值】釘住：
+  //             修好的那天這一列會變紅，逼人把它搬回 caret / bar-only。
+  //
+  // 「按鈕在該狀態下必須是 enabled」本身也是斷言：少了它，一個被誤停用的
+  // 按鈕會讓整列變成點不到任何東西的空跑，而空跑永遠是綠的。
+  //
+  // 兩種起始狀態，讓每一顆按鈕都在它真的 enabled 的狀態下被按：
+  //   sel   段落內一段非空選取（bold 家族在這裡才 enabled）
+  //   nest  巢狀清單項目內的游標（outdent / indent 只在這裡 enabled）
+  const V2_SEL_MD = '# H\n\nAlpha bravo charlie delta.\n\nBravo paragraph.\n';
+  const V2_NEST_MD = '# H\n\n- one item\n- two item\n  - nested item\n- three item\n\nTail para.\n';
+
+  async function v2Boot(state) {
+    const ctx = await newPage(state === 'nest' ? V2_NEST_MD : V2_SEL_MD);
+    // window.prompt() blocks the page until something answers it, and
+    // applyLinkToggle() opens one — measured: without this handler the
+    // 'link' row hangs until puppeteer's protocolTimeout kills the run.
+    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
+    if (state === 'nest') {
+      await ctx.page.evaluate(() => {
+        const els = document.querySelectorAll('.ed-li-text');
+        els[2].focus();                       // 'nested item' — depth 1
+        const r = document.createRange();
+        r.selectNodeContents(els[2]); r.collapse(false);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+    } else {
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+      await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+        const t = el.firstChild;
+        const r = document.createRange();
+        r.setStart(t, 0); r.setEnd(t, 5);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        el.focus();
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    return ctx;
+  }
+
+  const readLeverage = (page) => page.evaluate(() => ({
+    active: document.activeElement ? document.activeElement.tagName : null,
+    activeClass: document.activeElement ? String(document.activeElement.className) : '',
+    enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+    mode: document.body.getAttribute('data-ed-mode'),
+  }));
+
+  // 每一列共用的「必需答案」判定。回傳失敗訊息，或 null 表示通過。
+  async function checkLeverage(ctx, name, answer) {
+    const st = await readLeverage(ctx.page);
+    const shown = name + ' → ' + JSON.stringify(st);
+    if (answer === 'caret') {
+      if (st.active === 'BODY') return shown + '（必需答案 caret：游標不得掉到 BODY）';
+      if (st.enabled <= 4) return shown + '（必需答案 caret：工具列塌成 ' + st.enabled + ' 顆）';
+      if (st.mode !== 'edit') return shown + '（必需答案 caret：不該離開 edit 模式）';
+      return null;
+    }
+    if (answer === 'bar-only') {
+      if (st.enabled <= 4) return shown + '（必需答案 bar-only：工具列塌成 ' + st.enabled + ' 顆）';
+      if (st.mode !== 'edit') return shown + '（必需答案 bar-only：不該離開 edit 模式）';
+      // 證明「工具列還瞄著」不是計數好看而已：再按一次「在下方插入區塊」，
+      // 游標必須真的落在新段落上。
+      await ctx.page.click('[data-ed-tb="insert-after"]').catch(() => {});
+      await new Promise((r) => setTimeout(r, 500));
+      const after = await readLeverage(ctx.page);
+      if (after.active === 'BODY') {
+        return shown + '（必需答案 bar-only：工具列數字說還瞄著，但「在下方插入區塊」' +
+          '按下去游標仍落在 BODY —— 那個「還瞄著」是假的，got ' + JSON.stringify(after) + '）';
+      }
+      return null;
+    }
+    if (answer === 'source') {
+      if (st.mode !== 'source') return shown + '（必需答案 source：必須進入 source 模式）';
+      if (st.activeClass.indexOf('ed-source') === -1) {
+        return shown + '（必需答案 source：游標必須在 .ed-source textarea 裡）';
+      }
+      await ctx.page.click('[data-ed-tb="preview"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const back = await readLeverage(ctx.page);
+      if (back.mode !== 'edit' || back.enabled <= 4) {
+        return shown + '（必需答案 source：再按一次必須回到 edit 且工具列復原，got ' +
+          JSON.stringify(back) + '）';
+      }
+      return null;
+    }
+    // BROKEN —— 釘住今天量到的壞值。
+    if (st.active !== 'BODY' || st.enabled !== 4) {
+      return shown + '（這一列被釘成「今天已知是壞的」：BODY + 工具列 4 顆。' +
+        '現在量到的不是那個值 —— 如果是修好了，把它從 BROKEN 搬到 caret / bar-only；' +
+        '如果是壞成別的樣子，那是新缺陷）';
+    }
+    return null;
+  }
+
+  {
+    const ids = await (async () => {
+      const ctx = await newPage(V2_SEL_MD);
+      const r = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+          .map((b) => b.getAttribute('data-ed-tb')).filter(Boolean));
+      await ctx.page.close(); ctx.srv.close();
+      return r;
+    })();
+    assert.strictEqual(ids.length, 22, '工具列應為 22 顆，got ' + ids.length);
+
+    const TB_ROWS = [
+      { id: 'undo',         state: 'sel',  answer: 'caret' },
+      { id: 'redo',         state: 'sel',  answer: 'caret' },
+      { id: 'headings',     state: 'sel',  answer: 'caret' },   // 只開 H▾ 選單，不轉換
+      { id: 'quote',        state: 'sel',  answer: 'bar-only' },
+      { id: 'code',         state: 'sel',  answer: 'bar-only' },
+      { id: 'list',         state: 'sel',  answer: 'caret' },
+      { id: 'ordered-list', state: 'sel',  answer: 'caret' },
+      { id: 'check',        state: 'sel',  answer: 'caret' },
+      { id: 'bold',         state: 'sel',  answer: 'caret' },
+      { id: 'italic',       state: 'sel',  answer: 'caret' },
+      { id: 'strike',       state: 'sel',  answer: 'caret' },
+      { id: 'inline-code',  state: 'sel',  answer: 'caret' },
+      // BROKEN：applyLinkToggle() 走 window.prompt()，那是一個原生 modal，
+      // 開啟時瀏覽器會把焦點從 contenteditable 收走 → focusout → burst 收尾
+      // → resetToolbarBlock()。convertBlockViaMenu() 在 finally 裡有
+      // reaimToolbarBlockAtLine() 補回來，applyLinkToggle() 沒有。實測：連結
+      // 本身正確寫進磁碟（[Alpha](https://example.com/)），但游標到 BODY、
+      // 工具列剩 undo/redo/outline/preview 四顆；使用者要重新點回文字才能繼續。
+      { id: 'link',         state: 'sel',  answer: 'BROKEN' },
+      { id: 'outdent',      state: 'nest', answer: 'caret' },
+      { id: 'indent',       state: 'nest', answer: 'caret' },
+      { id: 'table',        state: 'sel',  answer: 'caret' },
+      { id: 'insert-before', state: 'sel', answer: 'caret' },
+      { id: 'insert-after', state: 'sel',  answer: 'caret' },
+      { id: 'line',         state: 'sel',  answer: 'bar-only' },
+      { id: 'image',        state: 'sel',  answer: 'caret' },
+      { id: 'outline',      state: 'sel',  answer: 'caret' },
+      { id: 'preview',      state: 'sel',  answer: 'source' },
+    ];
+    assert.deepStrictEqual(TB_ROWS.map((r) => r.id).slice().sort(), ids.slice().sort(),
+      'V2 表必須恰好覆蓋工具列上的每一顆按鈕 —— 新增按鈕時必須同時決定它的必需答案');
+
+    const bad = [];
+    for (const row of TB_ROWS) {
+      const ctx = await v2Boot(row.state);
+      const dis = await ctx.page.evaluate((i) =>
+        document.querySelector('[data-ed-tb="' + i + '"]').disabled, row.id);
+      if (dis) {
+        bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
+        await ctx.page.close(); ctx.srv.close();
+        continue;
+      }
+      await ctx.page.click('[data-ed-tb="' + row.id + '"]');
+      await new Promise((r) => setTimeout(r, 450));
+      const fail = await checkLeverage(ctx, row.id, row.answer);
+      if (fail) bad.push(fail);
+      await ctx.page.close(); ctx.srv.close();
+    }
+    assert.deepStrictEqual(bad, [], '這些工具列按鈕的必需答案沒有成立:\n' + bad.join('\n'));
+    console.log('journey: V2 toolbar matrix — OK (' + TB_ROWS.length + ' buttons)');
+  }
+
+  // ── V2b: ⠿ 選單的每一個葉節點 ────────────────────────────────────────
+  {
+    const GUTTER_ROWS = [
+      // BROKEN：duplicateBlockViaMenu() / deleteBlockViaGutter() 都沒有
+      // convertBlockViaMenu() finally 區塊裡的 reaimToolbarBlockAtLine()。
+      // 實測：兩者做完之後 activeElement 是 BODY 且工具列剩 4 顆 —— 也就是
+      // v3.2.1 CHANGELOG 宣稱已修的「工具列塌成 4 顆」，在這兩條路徑上還在。
+      { label: '建立副本',     answer: 'BROKEN' },
+      { label: '刪除',        answer: 'BROKEN' },
+      { label: 'MD 原始碼',    answer: 'caret' },
+      { label: '文字',        answer: 'caret',    convert: true },
+      { label: '標題 1',      answer: 'caret',    convert: true },
+      { label: '標題 2',      answer: 'caret',    convert: true },
+      { label: '標題 3',      answer: 'caret',    convert: true },
+      { label: '標題 4',      answer: 'caret',    convert: true },
+      { label: '標題 5',      answer: 'caret',    convert: true },
+      { label: '標題 6',      answer: 'caret',    convert: true },
+      { label: '項目符號列表',  answer: 'caret',    convert: true },
+      { label: '編號列表',     answer: 'caret',    convert: true },
+      { label: '待辦清單',     answer: 'caret',    convert: true },
+      { label: '程式碼',       answer: 'bar-only', convert: true },
+      { label: '引用',        answer: 'bar-only', convert: true },
+    ];
+    // 覆蓋率守衛：⠿ 的葉節點集合必須恰好等於上表。多一項少一項都要有人決定
+    // 它的必需答案，而不是安靜地不被測到。
+    {
+      const ctx = await newPage(V2_SEL_MD);
+      await ctx.page.hover('.ed-block[data-block-id="1"]');
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-handle');
+      await ctx.page.waitForSelector('.ed-handle-menu-btn');
+      const top = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-handle-menu-btn')).map((x) => x.textContent.trim()));
+      await ctx.page.evaluate(() => {
+        Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((x) => x.textContent.indexOf('轉換成') !== -1).click();
+      });
+      await new Promise((r) => setTimeout(r, 350));
+      const all = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-handle-menu-btn')).map((x) => x.textContent.trim()));
+      // 展開子選單後兩張面板同時在 DOM 裡，所以 `all` 是「頂層 + 子選單」的
+      // 串接；葉節點 = all 去掉「轉換成 ›」這個開關本身。
+      const leaves = all.filter((t) => t.indexOf('轉換成') === -1);
+      await ctx.page.close(); ctx.srv.close();
+      assert.ok(top.indexOf('轉換成 ›') !== -1, '⠿ 頂層應有「轉換成 ›」，got ' + JSON.stringify(top));
+      assert.deepStrictEqual(leaves.slice().sort(), GUTTER_ROWS.map((r) => r.label).slice().sort(),
+        'V2b 表必須恰好覆蓋 ⠿ 的每一個葉節點，got ' + JSON.stringify(leaves));
+    }
+
+    const bad = [];
+    for (const row of GUTTER_ROWS) {
+      const ctx = await newPage(V2_SEL_MD);
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.hover('.ed-block[data-block-id="1"]');
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-handle');
+      await ctx.page.waitForSelector('.ed-handle-menu-btn');
+      if (row.convert) {
+        await ctx.page.evaluate(() => {
+          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((x) => x.textContent.indexOf('轉換成') !== -1).click();
+        });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      // 子選單展開後頂層仍在 DOM 裡，標籤可能重複；取最後一個 = 子選單那顆。
+      await ctx.page.evaluate((L) => {
+        const hits = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === L);
+        if (!hits.length) throw new Error('⠿ item not found: ' + L);
+        hits[hits.length - 1].click();
+      }, row.label);
+      await new Promise((r) => setTimeout(r, 550));
+      const fail = await checkLeverage(ctx, '⠿ ' + row.label, row.answer);
+      if (fail) bad.push(fail);
+      await ctx.page.close(); ctx.srv.close();
+    }
+    assert.deepStrictEqual(bad, [], '這些 ⠿ 選單項目的必需答案沒有成立:\n' + bad.join('\n'));
+    console.log('journey: V2 gutter-menu matrix — OK (' + GUTTER_ROWS.length + ' items)');
+  }
+
+  // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十四個 `position: fixed` 宣告（另有 9 處是註解裡的散文
+  // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
+  // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
+  //
+  // 必需答案三種：
+  //   live               捲動後仍在、仍可見。這些浮層的幾何是【捲動不變】的
+  //                      （top/left/right/inset 定死在視窗邊緣），捲動根本
+  //                      不可能把它們留在過期座標上；而且每一個都是使用者
+  //                      當下必須還能操作的東西。
+  //   gone               捲動後必須消失。這些浮層的座標是從
+  //                      getBoundingClientRect() 算出來的視窗座標，捲動之後
+  //                      就指向錯的東西 —— 其中 .ed-te-menu 會真的刪掉整欄
+  //                      整列資料。
+  //   reposition-or-gone .ed-seltb 沒有能把它重新升起來的驅動（捲動不觸發
+  //                      selectionchange），純隱藏會讓它永遠回不來；所以選取
+  //                      還在視窗內時要跟著移動，整個捲出視窗才消失。
+  //   gone-on-drag-end   兩個 drop indicator。onAnyScroll() 開頭就是
+  //                      `if (tePointer && tePointer.dragging) return;`，所以
+  //                      拖曳【進行中】的捲動刻意不動它們 —— 實測確實原地不
+  //                      動。這裡把「原地不動可以被接受」的兩個前提也一起釘
+  //                      住：(1) pointer-events 是 none，所以過期的線畫錯位置
+  //                      也點不到、不會動到資料；(2) 拖曳結束後必須收乾淨，
+  //                      而且此後的捲動不得讓它復活。
+  //
+  // 覆蓋率守衛：直接從 lib/md2doc.js 掃出所有 `position: fixed` 宣告並比對
+  // 下表的 selector 集合。有人加第十五個浮層時這裡會紅，逼他決定它的必需
+  // 答案，而不是安靜地多一個沒人測過的浮層。
+  const OVERLAY_RULES = [
+    { sel: '.ed-toolbar',              after: 'live' },
+    { sel: '.ed-toolbar-status',       after: 'live' },
+    { sel: '.sidebar-toggle',          after: 'live' },
+    { sel: '.lightbox',                after: 'live' },
+    { sel: '.sidebar-scrim',           after: 'live' },
+    { sel: '.reader-sidebar',          after: 'live' },
+    { sel: '.ed-conflict',             after: 'live' },
+    { sel: '.ed-te-grip',              after: 'gone' },
+    { sel: '.ed-te-menu',              after: 'gone' },
+    { sel: '.ed-tb-insert',            after: 'gone' },
+    { sel: '.ed-toolbar-menu',         after: 'gone' },
+    { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
+    { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
+    { sel: '.ed-seltb',                after: 'reposition-or-gone' },
+  ];
+  {
+    const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8').split('\n');
+    // 宣告 vs 散文：宣告一定是 `position: fixed;`（分號結尾），可能前面同一行
+    // 帶著自己的 selector（`.ed-toolbar-status { position: fixed; …`）。註解裡
+    // 的提及全都不是分號結尾（`position: fixed matches …` / `position:fixed,
+    // NOT sticky:` …），所以這個 regex 把 9 處散文全部排除。
+    const declRe = /^(?:([^{};]*?)\s*\{\s*)?position:\s*fixed\s*;/;
+    const found = [];
+    for (let i = 0; i < cssSrc.length; i++) {
+      const m = declRe.exec(cssSrc[i].trim());
+      if (!m) continue;
+      let selector = m[1];
+      if (!selector) {                       // selector 在前面幾行，往回找
+        for (let j = i - 1; j >= 0 && j > i - 8; j--) {
+          const s = /^([^{};/*]+?)\s*\{$/.exec(cssSrc[j].trim());
+          if (s) { selector = s[1]; break; }
+        }
+      }
+      found.push(selector);
+    }
+    assert.deepStrictEqual(found.slice().sort(), OVERLAY_RULES.map((r) => r.sel).slice().sort(),
+      'V3 表必須恰好覆蓋 lib/md2doc.js 裡每一個 position:fixed 浮層，got ' + JSON.stringify(found));
+  }
+
+  const V3_FILL = Array.from({ length: 40 }, (_, i) => 'Filler line ' + i + '.').join('\n\n');
+  const V3_TABLE_MD = V3_FILL + '\n\n' +
+    ['| Alpha | Bravo |', '|---|---|', '| one | two |', '| three | four |', ''].join('\n') +
+    '\n\n' + V3_FILL + '\n';
+  // 一個浮層的可見狀態。`dom:false` = 已從 DOM 移除；`hidden`/`display:none`
+  // = 還在 DOM 裡但不畫出來。兩者都算 gone。
+  const OVERLAY_STATE = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { dom: false };
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return {
+      dom: true, hidden: !!el.hidden, display: cs.display, pointerEvents: cs.pointerEvents,
+      top: Math.round(r.top), left: Math.round(r.left),
+      w: Math.round(r.width), h: Math.round(r.height),
+    };
+  };
+  const overlayState = (page, sel) => page.evaluate(OVERLAY_STATE, sel);
+  const isGone = (s) => !s.dom || s.hidden || s.display === 'none' || (s.w === 0 && s.h === 0);
+  const isLive = (s) => s.dom && !s.hidden && s.display !== 'none' && s.w > 0 && s.h > 0;
+  // 每一列共用的「升起來了嗎」前提檢查。少了它，一個根本沒升起來的浮層在
+  // 「捲動後必須消失」的斷言下永遠是綠的 —— 那正是空跑的綠燈。
+  const assertRaised = (s, sel) => assert.ok(isLive(s),
+    'V3 前提失敗：' + sel + ' 根本沒有升起來，捲動後的斷言就沒測到東西，got ' + JSON.stringify(s));
+
+  async function centreTable(page) {
+    const ts = await page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-type="table"]');
+      el.scrollIntoView({ block: 'center' });
+      return '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]';
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    return ts;
+  }
+  // 捲動必須真的移動了東西，否則後面每一條斷言都是在測「沒捲動」那條路徑。
+  async function scrollBy(page, dy) {
+    const before = await page.evaluate(() => window.scrollY);
+    await page.evaluate((d) => window.scrollBy(0, d), dy);
+    await new Promise((r) => setTimeout(r, 420));
+    const after = await page.evaluate(() => window.scrollY);
+    assert.notStrictEqual(after, before,
+      'V3 前提失敗：捲動沒有真的移動任何東西（scrollY 前後都是 ' + before + '）');
+    return after;
+  }
+
+  // ── live × 3：.ed-toolbar / .ed-toolbar-status（寬視窗）─────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    for (const sel of ['.ed-toolbar', '.ed-toolbar-status']) {
+      const before = await overlayState(ctx.page, sel);
+      assertRaised(before, sel);
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await scrollBy(ctx.page, 2000);
+      const after = await overlayState(ctx.page, sel);
+      assert.ok(isLive(after), sel + ' 捲動後必須仍然可見，got ' + JSON.stringify(after));
+      assert.strictEqual(after.top, before.top,
+        sel + ' 捲動後必須留在同一個視窗座標，got top=' + after.top + ' was ' + before.top);
+    }
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-toolbar / .ed-toolbar-status stay live across a scroll — OK');
+  }
+
+  // ── live：.sidebar-toggle ───────────────────────────────────────────
+  // 它在 lib/md2doc.js 是 `display: none`，只有 @media (max-width: 1080px)
+  // 才變 inline-flex —— 所以視窗寬度在這裡是斷言的一部分，不能沿用預設值。
+  {
+    const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 800, height: 800 });
+    await new Promise((r) => setTimeout(r, 250));
+    const before = await overlayState(ctx.page, '.sidebar-toggle');
+    assertRaised(before, '.sidebar-toggle');
+    await scrollBy(ctx.page, 2000);
+    const after = await overlayState(ctx.page, '.sidebar-toggle');
+    assert.ok(isLive(after), '.sidebar-toggle 捲動後必須仍然可見，got ' + JSON.stringify(after));
+    assert.strictEqual(after.top, before.top, '.sidebar-toggle 捲動後必須留在同一個視窗座標');
+    // 同一頁順帶量寬視窗：這一列依賴視窗寬度，所以把那個依賴也釘住 ——
+    // 有人把 @media 斷點改掉時，上面那個 800px 的前提會靜默失效。
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await new Promise((r) => setTimeout(r, 250));
+    const wide = await overlayState(ctx.page, '.sidebar-toggle');
+    assert.ok(isGone(wide),
+      '.sidebar-toggle 在 1080px 以上必須是 display:none（這一列的 800px 前提靠它成立），got ' +
+      JSON.stringify(wide));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .sidebar-toggle stays live across a scroll (≤1080px only) — OK');
+  }
+
+  // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時）──────────
+  // 實測：抽屜打開時 body 仍然可以捲（overflow 是 `clip visible`，scrollY
+  // 真的從 0 走到 1938），而這兩個浮層四個邊都定死在視窗上，所以捲動之後
+  // 位置一格都沒動。它們必須留著 —— scrim 是關掉抽屜的唯一點擊目標。
+  {
+    const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 800, height: 800 });
+    await new Promise((r) => setTimeout(r, 250));
+    // .sidebar-toggle 在 edit 模式下被 .ed-toolbar（z-index 101 > 100）蓋住，
+    // 滑鼠點不到它 —— 實測 elementFromPoint 回的是 .ed-toolbar-btn。這裡要測
+    // 的是抽屜打開之後的捲動行為，不是那個遮擋，所以用 DOM click 繞過。
+    await ctx.page.evaluate(() => document.querySelector('.sidebar-toggle').click());
+    await new Promise((r) => setTimeout(r, 450));
+    const open = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
+    assert.notStrictEqual(open, null, 'V3 前提失敗：抽屜沒有打開，scrim/sidebar 就沒升起來');
+    for (const sel of ['.sidebar-scrim', '.reader-sidebar']) {
+      const before = await overlayState(ctx.page, sel);
+      assertRaised(before, sel);
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await scrollBy(ctx.page, 1500);
+      const after = await overlayState(ctx.page, sel);
+      assert.ok(isLive(after), sel + ' 捲動後必須仍然可見，got ' + JSON.stringify(after));
+      assert.strictEqual(after.top + '/' + after.left, before.top + '/' + before.left,
+        sel + ' 捲動後必須留在同一個視窗座標，got ' + JSON.stringify(after));
+    }
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .sidebar-scrim / .reader-sidebar stay live across a scroll — OK');
+  }
+
+  // ── live：.lightbox ─────────────────────────────────────────────────
+  // lightbox 開著時 lib/md2doc.js 的 `body[data-lightbox-open] { overflow:
+  // hidden; }` 讓文件根本捲不動；會捲的是它自己的 .lightbox-stage
+  // （overflow: auto），而 onAnyScroll 是 capture 階段掛的，收得到那個容器的
+  // scroll 事件。所以這一列問的是「stage 捲動不得把 lightbox 自己拆掉」。
+  {
+    // boot() (not newPage()) so the png exists BEFORE the first render:
+    // md2doc inlines local image srcs at render time and prints
+    // "[WARN] image not found, left as-is" when the file is missing yet.
+    const b = await boot('# H\n\n![x](one.png)\n\n' + V3_FILL + '\n');
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64');
+    fs.writeFileSync(path.join(path.dirname(b.mdPath), 'one.png'), png);
+    const ctx = Object.assign({ page: await browser.newPage() }, b);
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await ctx.page.goto(b.url, { waitUntil: 'networkidle0' });
+    await ctx.page.click('.content img');
+    await new Promise((r) => setTimeout(r, 500));
+    const before = await overlayState(ctx.page, '.lightbox');
+    assertRaised(before, '.lightbox');
+    const bodyOverflow = await ctx.page.evaluate(() => getComputedStyle(document.body).overflow);
+    assert.strictEqual(bodyOverflow, 'hidden',
+      'lightbox 開著時 body 必須是 overflow:hidden（這一列改成「捲 stage」就是因為它），got ' + bodyOverflow);
+    await ctx.page.evaluate(() => {
+      const s = document.querySelector('.lightbox-stage');
+      if (s) { s.scrollTop = 40; s.scrollLeft = 40; }
+      window.scrollBy(0, 1500);
+    });
+    await new Promise((r) => setTimeout(r, 450));
+    const after = await overlayState(ctx.page, '.lightbox');
+    assert.ok(isLive(after), '.lightbox 捲動後必須仍然可見，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .lightbox survives a scroll of its own stage — OK');
+  }
+
+  // ── live：.ed-conflict ──────────────────────────────────────────────
+  // 存檔／render 失敗的橫幅是 z-index 999（全檔最高），而且是使用者唯一能
+  // 知道「剛剛那次編輯沒有套用」的東西。幾何是 top/left/right 定死，捲動不
+  // 可能讓它過期。升起方式：把 server 關掉再逼一次 render。
+  {
+    const ctx = await newPage('# H\n\nAlpha paragraph.\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' X');
+    ctx.srv.close();
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.waitForSelector('.ed-conflict', { timeout: 8000 });
+    const before = await overlayState(ctx.page, '.ed-conflict');
+    assertRaised(before, '.ed-conflict');
+    await scrollBy(ctx.page, 1200);
+    const after = await overlayState(ctx.page, '.ed-conflict');
+    assert.ok(isLive(after), '.ed-conflict 捲動後必須仍然可見，got ' + JSON.stringify(after));
+    assert.strictEqual(after.top, before.top, '.ed-conflict 捲動後必須留在同一個視窗座標');
+    await ctx.page.close();
+    console.log('journey: V3 .ed-conflict stays live across a scroll — OK');
+  }
+
+  // ── gone × 3：.ed-te-grip / .ed-te-menu / .ed-tb-insert ─────────────
+  {
+    // grip：把游標移到表頭儲存格中央。
+    const ctx = await newPage(V3_TABLE_MD);
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    const ts = await centreTable(ctx.page);
+    const cell = await ctx.page.evaluate((t) => {
+      const r = document.querySelector(t + ' table').tHead.rows[0].cells[1].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, ts);
+    await ctx.page.mouse.move(cell.x, cell.y);
+    await ctx.page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 4000 });
+    const gripBefore = await overlayState(ctx.page, '.ed-te-grip-col');
+    assertRaised(gripBefore, '.ed-te-grip');
+    // menu：點那顆 grip。
+    const g = await ctx.page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(g.x, g.y);
+    await ctx.page.mouse.down(); await ctx.page.mouse.up();
+    await ctx.page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 4000 });
+    const menuBefore = await overlayState(ctx.page, '.ed-te-menu');
+    assertRaised(menuBefore, '.ed-te-menu');
+    await scrollBy(ctx.page, 200);
+    const gripAfter = await overlayState(ctx.page, '.ed-te-grip-col');
+    const menuAfter = await overlayState(ctx.page, '.ed-te-menu');
+    assert.ok(isGone(gripAfter), '.ed-te-grip 捲動後必須消失，got ' + JSON.stringify(gripAfter));
+    assert.ok(isGone(menuAfter),
+      '.ed-te-menu 捲動後必須消失（它是唯一會真的刪掉整欄整列的浮層），got ' + JSON.stringify(menuAfter));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-te-grip / .ed-te-menu vanish on scroll — OK');
+  }
+  {
+    // ＋ 泡泡：只在距離表格邊界 TB_EDGE_PX(10) 內才升起 —— 欄泡泡在表格
+    // 【上緣】、對齊某個表頭儲存格的【右緣】。移到儲存格中央是升不起來的。
+    const ctx = await newPage(V3_TABLE_MD);
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    const ts = await centreTable(ctx.page);
+    const p = await ctx.page.evaluate((t) => {
+      const tb = document.querySelector(t + ' table');
+      const tr = tb.getBoundingClientRect();
+      const cr = tb.tHead.rows[0].cells[0].getBoundingClientRect();
+      return { x: cr.right, y: tr.top + 3 };
+    }, ts);
+    await ctx.page.mouse.move(p.x - 60, p.y);
+    await ctx.page.mouse.move(p.x, p.y);
+    await new Promise((r) => setTimeout(r, 400));
+    const before = await overlayState(ctx.page, '.ed-tb-insert-col');
+    assertRaised(before, '.ed-tb-insert');
+    await scrollBy(ctx.page, 200);
+    const after = await overlayState(ctx.page, '.ed-tb-insert-col');
+    assert.ok(isGone(after), '.ed-tb-insert 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-tb-insert vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-toolbar-menu（H▾ 下拉）────────────────────────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await ctx.page.click('[data-ed-tb="headings"]');
+    await ctx.page.waitForSelector('.ed-toolbar-menu', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-toolbar-menu');
+    assertRaised(before, '.ed-toolbar-menu');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-toolbar-menu');
+    assert.ok(isGone(after), '.ed-toolbar-menu 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-toolbar-menu vanishes on scroll — OK');
+  }
+
+  // ── reposition-or-gone：.ed-seltb ───────────────────────────────────
+  // 資料完整性那一條（捲動後點擊滯留的 .ed-seltb 位置，磁碟不得改變）已經
+  // 由上面「the floating format bar cannot act on off-screen text」那個
+  // 案例守著；這裡列進表是為了它不會在後續整理中被當成重複而拆掉。
+  {
+    for (const dy of [60, 3000]) {
+      const ctx = await newPage(V3_TABLE_MD);
+      await ctx.page.setViewport({ width: 1400, height: 800 });
+      await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-block[data-block-id="5"] .ed-wys-armed');
+        el.scrollIntoView({ block: 'center' });
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        el.focus();
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      await new Promise((r) => setTimeout(r, 350));
+      const before = await overlayState(ctx.page, '.ed-seltb');
+      assertRaised(before, '.ed-seltb');
+      await scrollBy(ctx.page, dy);
+      const after = await overlayState(ctx.page, '.ed-seltb');
+      if (dy === 60) {
+        assert.ok(isLive(after),
+          '.ed-seltb 選取仍在視窗內時必須留著（純隱藏會讓它永遠回不來），got ' + JSON.stringify(after));
+        assert.strictEqual(after.top, before.top - dy,
+          '.ed-seltb 必須跟著選取一起移動 ' + dy + 'px，got top=' + after.top + ' was ' + before.top);
+      } else {
+        assert.ok(isGone(after),
+          '.ed-seltb 選取整個捲出視窗後必須消失，got ' + JSON.stringify(after));
+      }
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V3 .ed-seltb repositions with its selection, then goes — OK');
+  }
+
+  // ── gone-on-drag-end × 2：兩個 drop indicator ───────────────────────
+  {
+    const drags = [
+      {
+        sel: '.ed-te-drop-indicator',
+        // 表格列拖曳：從列 grip 起手。
+        raise: async (page) => {
+          const ts = await centreTable(page);
+          const cell = await page.evaluate((t) => {
+            const r = document.querySelector(t + ' table').tBodies[0].rows[0].cells[0].getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          }, ts);
+          await page.mouse.move(cell.x, cell.y);
+          await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 4000 });
+          return page.evaluate(() => {
+            const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          });
+        },
+      },
+      {
+        sel: '.ed-block-drop-indicator',
+        // 區塊拖曳：從 ⠿ 起手。
+        raise: async (page) => {
+          await page.evaluate(() =>
+            document.querySelector('.ed-block[data-block-id="5"]').scrollIntoView({ block: 'center' }));
+          await new Promise((r) => setTimeout(r, 150));
+          await page.hover('.ed-block[data-block-id="5"]');
+          return page.evaluate(() => {
+            const r = document.querySelector('.ed-block[data-block-id="5"] .ed-handle').getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          });
+        },
+      },
+    ];
+    for (const d of drags) {
+      const ctx = await newPage(V3_TABLE_MD);
+      await ctx.page.setViewport({ width: 1400, height: 800 });
+      const start = await d.raise(ctx.page);
+      await ctx.page.mouse.move(start.x, start.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.move(start.x, start.y + 40);
+      await ctx.page.mouse.move(start.x, start.y + 80);
+      await new Promise((r) => setTimeout(r, 250));
+      const dragging = await overlayState(ctx.page, d.sel);
+      assertRaised(dragging, d.sel);
+      // 前提 1：拖曳中的捲動【刻意】不動它（onAnyScroll 開頭的
+      // `if (tePointer && tePointer.dragging) return;`）。原地不動可以被接受
+      // 的唯一理由是它點不到 —— 把那個理由釘住。
+      assert.strictEqual(dragging.pointerEvents, 'none',
+        d.sel + ' 必須是 pointer-events:none —— 捲動中它會留在過期座標上，' +
+        '能被點到就代表過期的線可以動到資料，got ' + JSON.stringify(dragging));
+      await scrollBy(ctx.page, 200);
+      // 前提 2：放開之後必須收乾淨。
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 600));
+      const dropped = await overlayState(ctx.page, d.sel);
+      assert.ok(isGone(dropped),
+        d.sel + ' 拖曳結束後必須收乾淨，got ' + JSON.stringify(dropped));
+      // 前提 3：此後的捲動不得讓它復活。
+      await scrollBy(ctx.page, 200);
+      const afterScroll = await overlayState(ctx.page, d.sel);
+      assert.ok(isGone(afterScroll),
+        d.sel + ' 拖曳結束後的捲動不得讓它復活，got ' + JSON.stringify(afterScroll));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V3 both drop indicators are inert while stale and gone after the drop — OK');
+  }
+
+  // ══ V4: 行內標記的性質測試 ═══════════════════════════════════════════
+  // 陳述必須是程式碼【真正擁有】的性質。applyMarkToggle() 是切換不是套用：
+  // 選取落在同 tag 既有標記【內】會解包（wholeSelectionMark → unwrapElement），
+  // 跨越同 tag 既有標記會擴張並移除（overlappingMarks → extendRangeOverMarks）。
+  // 所以性質只對「端點既不在、也不跨越同 tag 既有標記」的選取成立：
+  //
+  //   套用 → 序列化 → 重新解析，必須產生涵蓋【修剪後】選取的該標記。
+  //
+  // 推論是另外三個案例，不是這條性質的一部分：全空白 no-op、collapsed
+  // no-op、重疊選取移除標記。
+  //
+  // 生成器涵蓋兩種邊界來源，因為 trimRangeToText() 的字元步進在兩者下走的是
+  // 不同的分支（它自己的註解就寫著「實測人類拖曳選取 105 次都不會產生元素
+  // 邊界，但編輯器自己的 reselectAndReposition() 會」）：
+  //   text     人類拖曳留下的選取 —— startContainer/endContainer 都是 text node
+  //   element  reselectAndReposition() 留下的選取 —— 先套斜體，
+  //            wrapRangeIn() 回傳的 selectNodeContents(<em>) 讓兩個邊界容器
+  //            都變成【元素】。此時端點在 <em> 內、但不在任何 <strong> 內，
+  //            所以對 STRONG 而言性質仍然成立。
+  //
+  // 種子固定，所以失敗永遠可重現；換種子＝換一批案例。
+  const V4_SEED = 20261026;
+  const v4Rand = (() => {
+    let s = V4_SEED;
+    return () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  })();
+  // 只用字母與空白：這條性質測的是【邊界修剪】，不是 markdown 跳脫規則，
+  // 而含有 * _ ` [ 的字面文字會讓序列化加上跳脫、把失敗訊息變成另一個題目。
+  const V4_TEXT = 'Alpha bravo charlie delta echo foxtrot golf hotel india.';
+  const V4_MD = '# H\n\n' + V4_TEXT + '\n\nTail paragraph here.\n';
+
+  async function v4Apply(ctx, start, end, viaItalic) {
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const picked = await ctx.page.evaluate((a, z) => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const t = el.firstChild;
+      const r = document.createRange();
+      r.setStart(t, a); r.setEnd(t, z);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+      return { text: r.toString(), startType: r.startContainer.nodeType };
+    }, start, end);
+    await new Promise((r) => setTimeout(r, 250));
+    assert.strictEqual(picked.startType, 3,
+      'V4 前提失敗：人類拖曳來源的選取起點必須是 text node，got nodeType ' + picked.startType);
+    let boundarySource = 'text';
+    if (viaItalic) {
+      await ctx.page.click('[data-ed-tb="italic"]');
+      await new Promise((r) => setTimeout(r, 350));
+      const b = await ctx.page.evaluate(() => {
+        const r = window.getSelection().getRangeAt(0);
+        return { s: r.startContainer.nodeType, e: r.endContainer.nodeType, text: r.toString() };
+      });
+      // 這正是這一半案例存在的理由：斷言它真的變成元素邊界。如果哪天
+      // reselectAndReposition() 改成留下 text 邊界，這一半就退化成上一半的
+      // 重複，而不是安靜地繼續綠著。
+      assert.strictEqual(b.s + '/' + b.e, '1/1',
+        'V4 前提失敗：套斜體後的選取應是元素邊界（reselectAndReposition），got ' + JSON.stringify(b));
+      boundarySource = 'element';
+    }
+    await ctx.page.click('[data-ed-tb="bold"]');
+    await new Promise((r) => setTimeout(r, 350));
+    return { picked: picked.text, boundarySource };
+  }
+
+  async function v4Commit(ctx) {
+    // 點另一個 block 的編輯面就會結束並提交這次 burst（focusout 路徑），
+    // 這也是上面「粗體：選取含尾隨空格」案例用的收尾方式。
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 450));
+    return saveAndRead(ctx);
+  }
+
+  {
+    const cases = [];
+    for (let i = 0; i < 18; i++) {
+      let a, b;
+      do {
+        a = Math.floor(v4Rand() * V4_TEXT.length);
+        b = Math.floor(v4Rand() * V4_TEXT.length);
+        if (a > b) { const t = a; a = b; b = t; }
+      } while (V4_TEXT.slice(a, b).trim().length === 0);
+      cases.push({ a: a, b: b, viaItalic: i >= 12 });
+    }
+    // 隨機挑出來的切片有沒有真的踩到「前導空白」「尾隨空白」「兩端都有」
+    // 「兩端都沒有」四種形狀，是【運氣】—— 第一個試過的種子 (20260905) 的
+    // 12 個 text 邊界案例裡一個前導空白都沒有，等於整批都沒考到修剪的那一半。
+    // 所以把「四種形狀 × 兩種邊界來源共 8 格都要有人」寫成斷言：換種子的人
+    // 會被擋下來，而不是安靜地生出一批不涵蓋修剪的案例。
+    const shapeOf = (raw) => ((/^\s/.test(raw) ? 'L' : '') + (/\s$/.test(raw) ? 'T' : '')) || 'N';
+    for (const src of [false, true]) {
+      const shapes = new Set(cases.filter((c) => c.viaItalic === src)
+        .map((c) => shapeOf(V4_TEXT.slice(c.a, c.b))));
+      assert.deepStrictEqual(Array.from(shapes).sort(), ['L', 'LT', 'N', 'T'],
+        'V4 生成器在 ' + (src ? 'element' : 'text') + ' 邊界來源下必須涵蓋四種空白形狀，got ' +
+        JSON.stringify(Array.from(shapes)));
+    }
+    const bad = [];
+    for (const c of cases) {
+      const ctx = await newPage(V4_MD);
+      const trimmed = V4_TEXT.slice(c.a, c.b).trim();
+      const label = '[' + c.a + ',' + c.b + ') ' + JSON.stringify(V4_TEXT.slice(c.a, c.b));
+      const r = await v4Apply(ctx, c.a, c.b, c.viaItalic);
+      // 重新解析：提交會把 markdown 重新渲染回 DOM，所以提交後的 DOM 就是
+      // 「序列化 → 重新解析」的結果。
+      const dom = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-block[data-block-id="1"]');
+        return Array.from(el.querySelectorAll('strong')).map((s) => s.textContent);
+      });
+      const disk = await v4Commit(ctx);
+      const marker = c.viaItalic ? '***' : '**';
+      const want = marker + trimmed + marker;
+      if (disk.indexOf(want) === -1) {
+        bad.push(label + ' (' + r.boundarySource + ') 序列化缺少 ' + JSON.stringify(want) + '，disk:\n' + disk);
+      } else if (dom.indexOf(trimmed) === -1) {
+        bad.push(label + ' (' + r.boundarySource + ') 重新解析後沒有涵蓋修剪後選取的 <strong>，got ' +
+          JSON.stringify(dom));
+      } else if (disk.indexOf('\\*') !== -1) {
+        bad.push(label + ' (' + r.boundarySource + ') 出現跳脫的星號，disk:\n' + disk);
+      }
+      await ctx.page.close(); ctx.srv.close();
+    }
+    assert.deepStrictEqual(bad, [], 'V4 性質不成立的選取:\n' + bad.join('\n'));
+    console.log('journey: V4 mark property holds over ' + cases.length +
+      ' generated selections (12 text-boundary, 6 element-boundary) — OK');
+  }
+
+  // ── V4 推論 1：全空白選取是 no-op ───────────────────────────────────
+  {
+    const ctx = await newPage(V4_MD);
+    const ws = V4_TEXT.indexOf(' ');
+    const r = await v4Apply(ctx, ws, ws + 1, false);
+    assert.strictEqual(r.picked, ' ', 'V4 前提失敗：這個案例的選取必須恰好是一個空白');
+    const html = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.strictEqual(html.indexOf('<strong>'), -1,
+      '全空白選取必須是 no-op（trimRangeToText 回 false），got ' + html);
+    const disk = await v4Commit(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1, '全空白選取不得寫出任何標記，disk:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V4 corollary — an all-whitespace selection is a no-op — OK');
+  }
+
+  // ── V4 推論 2：collapsed 選取是 no-op ───────────────────────────────
+  {
+    const ctx = await newPage(V4_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.firstChild, 5); r.collapse(true);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const disabled = await ctx.page.evaluate(() =>
+      document.querySelector('[data-ed-tb="bold"]').disabled);
+    assert.strictEqual(disabled, true, 'collapsed 選取下粗體按鈕必須是 disabled');
+    // 按鈕停用只是第一道；applyMarkToggle() 自己也有 `if (range.collapsed)
+    // return;`。用 DOM click 繞過停用狀態，直接考那一道。
+    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="bold"]').click());
+    await new Promise((r) => setTimeout(r, 300));
+    const html = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.strictEqual(html.indexOf('<strong>'), -1,
+      'collapsed 選取必須是 no-op，got ' + html);
+    const disk = await v4Commit(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1, 'collapsed 選取不得寫出任何標記，disk:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V4 corollary — a collapsed selection is a no-op — OK');
+  }
+
+  // ── V4 推論 3：重疊選取【移除】標記 ─────────────────────────────────
+  {
+    const ctx = await newPage(V4_MD);
+    const start = V4_TEXT.indexOf('bravo');
+    await v4Apply(ctx, start, start + 5, false);
+    const marked = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.ok(marked.indexOf('<strong>bravo</strong>') !== -1,
+      'V4 前提失敗：重疊案例需要先有一個 <strong>bravo</strong>，got ' + marked);
+    // 從 <strong> 內部延伸到它【外面】—— 端點跨越既有同 tag 標記，正是性質
+    // 明確排除、而推論要求「移除」的那一類。
+    const overlapped = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const st = el.querySelector('strong');
+      const r = document.createRange();
+      r.setStart(st.firstChild, 2);
+      r.setEnd(st.nextSibling, 6);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+      return r.toString();
+    });
+    assert.ok(overlapped.indexOf('avo') === 0,
+      'V4 前提失敗：重疊選取必須真的從 <strong> 內部起頭，got ' + JSON.stringify(overlapped));
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.click('[data-ed-tb="bold"]');
+    await new Promise((r) => setTimeout(r, 350));
+    const after = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.strictEqual(after.indexOf('<strong>'), -1,
+      '重疊選取必須把整個既有標記移除（extendRangeOverMarks → unwrapElement），got ' + after);
+    const disk = await v4Commit(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1,
+      '重疊選取之後磁碟上不得留下任何 <strong>，disk:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V4 corollary — an overlapping selection removes the mark — OK');
+  }
+
   await browser.close();
 }
 
