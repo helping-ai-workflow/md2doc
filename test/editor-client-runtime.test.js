@@ -23199,9 +23199,10 @@ async function gutterGeometry(page, sel) {
         const aSel = await paragraphSelByText(page, 'Case1 Para A');
         await openWysiwyg(page, aSel);
         await page.keyboard.press('End');
-        const preFocusOffset = await page.evaluate((s) => {
-          window.__caseOneProbeA = document.activeElement;
-          return window.getSelection().focusOffset;
+        const preA = await page.evaluate((s) => {
+          window.__caseOneProbeA = document.activeElement;      // A's edit surface
+          window.__caseOneProbeABlock = document.querySelector(s); // A's .ed-block box
+          return { html: document.querySelector(s).innerHTML };
         }, aSel);
 
         // Spy on patchmap so the branch this commit takes is read from page
@@ -23223,19 +23224,40 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 });
         await settleEditor(page);
 
-        const post = await page.evaluate(() => ({
-          activeIsProbe: document.activeElement === window.__caseOneProbeA,
-          focusOffset: window.getSelection().focusOffset,
+        const post = await page.evaluate((a, c) => ({
+          // Node IDENTITY, asked of the DOM directly. v3.2.1 Task 11b migrated
+          // these two off `document.activeElement === window.__caseOneProbeA`
+          // and off a caret-offset comparison: ⠿ 建立副本 now deliberately puts
+          // the caret back on the block it duplicated (C), so focus is no
+          // longer a usable PROXY for "A's nodes survived". Asking for object
+          // identity is what the invariant was always about and is strictly
+          // stronger — it holds no matter where focus ends up.
+          aBlockSameObject: document.querySelector(a) === window.__caseOneProbeABlock,
+          aSurfaceSameObject: document.querySelector(a + ' > *') === window.__caseOneProbeA,
+          aHtml: document.querySelector(a).innerHTML,
           plans: window.__caseOnePlans,
-        }));
+          // Where the caret DID go. Asserted so the two migrations above cannot
+          // be satisfied by a run in which the duplicate silently stopped
+          // restoring anything.
+          activeInC: !!(document.activeElement && document.activeElement.closest &&
+            document.activeElement.closest(c)),
+          activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
+        }), aSel, cSel);
 
         assert.strictEqual(post.plans.length, 1, 'exactly one patchmap call for the duplicate commit');
         assert.ok(post.plans[0],
           'the duplicate commit must take the PATCH path — confirms this is not silently testing the fallback');
-        assert.strictEqual(post.activeIsProbe, true,
-          'A\'s DOM node must be the SAME OBJECT after a commit elsewhere — a fallback destroys every node');
-        assert.strictEqual(post.focusOffset, preFocusOffset,
-          'the caret offset on the untouched block A must not move');
+        assert.strictEqual(post.aBlockSameObject, true,
+          'A\'s .ed-block must be the SAME OBJECT after a commit elsewhere — a fallback destroys every node');
+        assert.strictEqual(post.aSurfaceSameObject, true,
+          'A\'s edit surface must be the SAME OBJECT too — a fallback rebuilds it from the render payload');
+        assert.strictEqual(post.aHtml, preA.html,
+          'the untouched block A\'s content must be byte-identical across a commit elsewhere');
+        assert.strictEqual(post.activeInC, true,
+          'v3.2.1 Task 11b: 建立副本 must leave the caret on the block it duplicated — ' +
+          'if this is false the two identity assertions above are passing on a no-op');
+        assert.ok(/\bed-wys-armed\b/.test(post.activeClass),
+          'that caret must be on a real edit surface, got class=' + post.activeClass);
 
         await page.close();
         console.log('v3.2.0 incremental render: caret on an unedited block does not move — OK');

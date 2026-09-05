@@ -34,6 +34,28 @@ async function newPage(mdText) {
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e)));
+  // v3.2.1 fix round 1: `pageerror` covers a SYNCHRONOUS throw only. Several
+  // handlers in client.js are async and several call sites drop the promise —
+  // buildSelToolbar()'s 🔗 button calls applyLinkToggle() without awaiting or
+  // catching it, for one — so a throw inside one surfaces as an unhandled
+  // rejection, which this harness could not see: every
+  // `assert.strictEqual(ctx.errs.length, 0, …)` in this file would have stayed
+  // green straight through it. Fixed HERE rather than at that one call site so
+  // it covers every async call site this file ever drives.
+  //
+  // The binding pushes into the SAME `errs` array `pageerror` feeds, so no
+  // scenario needs changing. It arrives over CDP, i.e. asynchronously — a
+  // rejection thrown in the same tick as an assertion can miss it. Every
+  // scenario here already waits after its gesture, so in practice it lands;
+  // this is a net, not a barrier.
+  await page.exposeFunction('__journeyRejection', (msg) => { errs.push(msg); });
+  await page.evaluateOnNewDocument(() => {
+    window.addEventListener('unhandledrejection', (e) => {
+      const r = e && e.reason;
+      const msg = 'unhandledrejection: ' + String((r && (r.stack || r.message)) || r);
+      if (window.__journeyRejection) window.__journeyRejection(msg);
+    });
+  });
   await page.goto(b.url, { waitUntil: 'networkidle0' });
   return Object.assign({ page, errs }, b);
 }
@@ -684,6 +706,11 @@ async function main() {
       }
       return null;
     }
+    // v3.2.1 fix round 1: BROKEN is the LAST branch, so it is also the branch a
+    // misspelt answer silently falls into — and it demands BREAKAGE, so a row
+    // that meant to demand health would go green while asserting the opposite.
+    // Nothing below this line may be reached by accident.
+    if (answer !== 'BROKEN') throw new Error('unknown 必需答案: ' + JSON.stringify(answer));
     // BROKEN —— 釘住今天量到的壞值。
     if (st.active !== 'BODY' || st.enabled !== 4) {
       return shown + '（這一列被釘成「今天已知是壞的」：BODY + 工具列 4 顆。' +
@@ -846,31 +873,26 @@ async function main() {
     console.log('journey: V2 gutter-menu matrix — OK (' + GUTTER_ROWS.length + ' items)');
   }
 
-  // ── V2c: 停用的工具列按鈕 —— 已知缺陷，v3.2.1 刻意不修，這裡把行為釘住 ──
+  // ── V2c: 停用的工具列按鈕 —— v3.2.1 fix round 1 修好，這裡釘住修好的值 ──
   //
-  // 使用者感知到的症狀與上面三列一樣（按了工具列一下就掉焦點），但成因完全
-  // 不同，而且候選修法「在 .ed-toolbar 容器上加一發 mousedown preventDefault()」
-  // 【不會生效】。實測（Chromium）：點在一顆 disabled 的 <button> 上時，瀏覽器
-  // 對整條傳播路徑都不派發滑鼠事件 —— 掛在 document 上的 capture 期 mousedown
-  // 監聽器收到 0 次，所以容器層的 handler 根本不會執行。把那一行真的加進
-  // buildToolbar() 之後再量一次，四個數字逐字相同（task-11b 報告有兩次輸出）。
-  // 焦點還是掉，因為瀏覽器仍然執行了 mousedown 的預設動作（把焦點從
-  // contenteditable 收走），而那個動作沒有任何事件可以取消。
+  // 使用者感知到的症狀與上面三列一樣（按了工具列一下就掉焦點），但成因不同，
+  // 而且兩件事必須分開講，因為第一版的結論在這裡犯過錯：
   //
-  // 今天量到的行為分兩態，兩態都釘在這裡：
-  //   * burst 沒有被編輯過：那一發 focusout 走 resolveBurst() 的
-  //     burstBaselineHtml === burst.original 分支，endBurstWithoutResolve()
-  //     不 commit、不 render —— 所以工具列【沒有】塌，只有 activeElement 掉到
-  //     BODY。
-  //   * burst 已經打過字：同一發 focusout 走完整的 commit → rerenderAll()，
-  //     工具列塌成 4 顆。
+  //   * `mousedown` 與 `click` 對一顆 disabled 的 <button> 【完全不派發】——
+  //     掛在 document 上的 capture 期監聽器各收到 0 次，整條傳播路徑都沒有。
+  //     所以按鈕自己那一發 mousedown preventDefault() 跑不到，掛在
+  //     `.ed-toolbar` 容器上的一發同樣跑不到。這一段的 seen === 0 就是這件事，
+  //     它仍然是真的，也仍然被釘著。
+  //   * 但 `pointerdown` 【有】派發（同一個監聽器收到 1 次）而且可取消，取消
+  //     它會一併壓掉相容性的 mousedown 與它的預設動作 —— 也就是把焦點從
+  //     contenteditable 收走那一步。修法因此是 buildToolbar() 裡 capture 期的
+  //     四行 pointerdown handler，不需要 pointer-events: none、不需要動 click
+  //     delegator、也不會弄丟 disabled 按鈕的 title tooltip。
   //
-  // 真的要修需要三處協同：disabled 按鈕加 pointer-events: none（事件才落得到
-  // 容器上）、容器 mousedown preventDefault()、以及文件層 click delegator 把
-  // .ed-toolbar 排除在「按在任何 block 之外 → switchAwayFrom()」之外。而
-  // pointer-events: none 會一併關掉 title tooltip，使用者就再也看不到按鈕為
-  // 什麼是灰的 —— 那是一個要單獨決定的取捨，不是這一版的範圍。
-  // 這一段紅掉 = 有人動了它：把量到的新值搬進來，別把斷言放寬。
+  // 兩態都必須healthy，因為它們的失敗長得不一樣：burst 沒被編輯過時那一發
+  // focusout 走 endBurstWithoutResolve()（不 commit、不 render，工具列不塌，
+  // 只掉游標）；打過字時走完整的 commit → rerenderAll()，工具列會塌成 4 顆。
+  // 修好之前實測是 BODY/15 與 BODY/4，修好之後兩態都是 P.ed-wys-armed/15。
   {
     for (const dirty of [false, true]) {
       const ctx = await newPage(V2_SEL_MD);
@@ -885,25 +907,155 @@ async function main() {
       assert.strictEqual(isDisabled, true,
         'V2c: 游標收合（沒有選取）時 bold 必須是 disabled，否則這個情境什麼都沒點到');
       await ctx.page.evaluate(() => {
-        window.__v2cMousedowns = 0;
-        document.addEventListener('mousedown', () => { window.__v2cMousedowns++; }, true);
+        window.__v2c = { pointerdown: 0, mousedown: 0, click: 0 };
+        ['pointerdown', 'mousedown', 'click'].forEach((n) =>
+          document.addEventListener(n, () => { window.__v2c[n]++; }, true));
       });
       await ctx.page.click('[data-ed-tb="bold"]');
       await new Promise((r) => setTimeout(r, 700));
       const st = await readLeverage(ctx.page);
-      const seen = await ctx.page.evaluate(() => window.__v2cMousedowns);
-      assert.strictEqual(seen, 0,
-        'V2c(dirty=' + dirty + '): 點在 disabled 按鈕上時 document 不該收到任何 ' +
-        'mousedown —— 這正是「在 .ed-toolbar 上加一發 preventDefault()」不可能' +
-        '生效的原因。got ' + seen);
-      assert.strictEqual(st.active, 'BODY',
-        'V2c(dirty=' + dirty + '): 已知缺陷 —— 焦點掉到 BODY。修好了就把這一段' +
-        '改成斷言游標還在，got ' + JSON.stringify(st));
-      assert.strictEqual(st.enabled, dirty ? 4 : 15,
-        'V2c(dirty=' + dirty + '): 工具列顆數與今天量到的不同，got ' + JSON.stringify(st));
+      const counts = await ctx.page.evaluate(() => window.__v2c);
+      assert.strictEqual(counts.mousedown, 0,
+        'V2c(dirty=' + dirty + '): disabled 按鈕【不】派發 mousedown —— 這是為什麼修法' +
+        '不能是「在 .ed-toolbar 上加一發 mousedown preventDefault()」。got ' + JSON.stringify(counts));
+      assert.strictEqual(counts.click, 0,
+        'V2c(dirty=' + dirty + '): disabled 按鈕也不派發 click，got ' + JSON.stringify(counts));
+      assert.strictEqual(counts.pointerdown, 1,
+        'V2c(dirty=' + dirty + '): pointerdown 【有】派發，而且正是修法掛的那一發 —— ' +
+        '這個數字掉到 0 表示修法失去了立足點，got ' + JSON.stringify(counts));
+      assert.notStrictEqual(st.active, 'BODY',
+        'V2c(dirty=' + dirty + '): 按到一顆停用的按鈕不得帶走游標，got ' + JSON.stringify(st));
+      assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
+        'V2c(dirty=' + dirty + '): 游標必須還在原來那個編輯面上，got ' + JSON.stringify(st));
+      assert.strictEqual(st.enabled, 15,
+        'V2c(dirty=' + dirty + '): 工具列不得改變 —— 沒有 commit、沒有 render，' +
+        'got ' + JSON.stringify(st));
+      assert.strictEqual(ctx.errs.length, 0, 'V2c: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
     }
-    console.log('journey: V2c disabled-button caret loss — pinned (known, unfixed)');
+    console.log('journey: V2c a disabled toolbar button keeps the caret — OK');
+  }
+
+  // ── V2e: 🔗 開了對話框又取消 —— 手上握著的選取必須原封不動 ──────────────
+  //
+  // fix round 1 item 1。willPrompt 只保證 modal 會【開】，不保證使用者按了確定；
+  // Esc 取消時 body 不做任何 DOM 手術、burst 走 endBurstWithoutResolve()、沒有
+  // commit 也沒有 render，焦點自己回到那個面。第一版的 wrapper 仍然無條件
+  // focusBlockAtLine(line, true)，把使用者的選取塌成 block 結尾的一個游標 ——
+  // 修之前實測 sel=""/collapsed=true/20→15 顆，修之後 sel="Alpha"/collapsed=false。
+  // 這一段就是當初缺的那個斷言：取消是最常見的手勢，而它比接受更不該有代價。
+  {
+    const ctx = await newPage(V2_SEL_MD);
+    ctx.page.on('dialog', async (d) => { try { await d.dismiss(); } catch (e) { /* already gone */ } });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const t = el.firstChild;
+      const r = document.createRange(); r.setStart(t, 0); r.setEnd(t, 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus(); document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.click('[data-ed-tb="link"]');
+    await new Promise((r) => setTimeout(r, 900));
+    const held = await ctx.page.evaluate(() => {
+      const s = window.getSelection();
+      return {
+        text: s && s.rangeCount ? String(s.toString()) : '',
+        collapsed: s ? s.isCollapsed : null,
+        activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
+      };
+    });
+    assert.strictEqual(held.text, 'Alpha',
+      'V2e: 取消連結對話框不得動到使用者的選取，got ' + JSON.stringify(held));
+    assert.strictEqual(held.collapsed, false,
+      'V2e: 選取必須仍是非收合的，got ' + JSON.stringify(held));
+    assert.ok(/\bed-wys-armed\b/.test(held.activeClass),
+      'V2e: 焦點必須仍在那個編輯面上，got ' + JSON.stringify(held));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('https://example.com') , -1,
+      'V2e: 取消不得寫任何連結進磁碟，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'V2e: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V2e cancelling the 🔗 dialog keeps the selection — OK');
+  }
+
+  // ── V2f: ⠿ 刪除 的落點，在「下一個 block 緊接著沒有空行」的四種形狀上 ────
+  //
+  // fix round 1 item 2。commitRangeRemoval() 在「範圍後面那一行不是空白」時
+  // 改吸收上面那一行空白，於是洞【以下】的每一個 block 也往上搬，其中第一個
+  // 剛好落在 holeLine - 1 —— 也就是說「洞座標以下取最大 startLine」這個舊規則
+  // 會【必然】選中洞下面那一個而不是上面那一個。四種都是合法 markdown（ATX
+  // 標題／清單／圍欄程式碼／分隔線都能在沒有空行的情況下中斷一個段落），修之前
+  // 實測分別落在 H2／li／BODY／BODY，修之後四種都落在洞上面的 'Alpha para.'。
+  // 落點因此改成由 body 在 commit 之前捕捉並攜帶，不再從洞的座標反推。
+  {
+    const TAILS = [
+      ['ATX heading', '# H\n\nAlpha para.\n\nBravo para.\n# H2 below\n'],
+      ['list',        '# H\n\nAlpha para.\n\nBravo para.\n- item one\n- item two\n'],
+      ['fenced code', '# H\n\nAlpha para.\n\nBravo para.\n```\ncode here\n```\n'],
+      ['hr',          '# H\n\nAlpha para.\n\nBravo para.\n***\n'],
+      ['blank (control)', '# H\n\nAlpha para.\n\nBravo para.\n\nTail para.\n'],
+    ];
+    for (const [name, md] of TAILS) {
+      const ctx = await newPage(md);
+      const id = await ctx.page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block'))
+          .find((b) => b.textContent.trim().startsWith('Bravo para.'));
+        return el ? el.getAttribute('data-block-id') : null;
+      });
+      assert.ok(id !== null, 'V2f(' + name + '): fixture block not found');
+      const sel = '.ed-block[data-block-id="' + id + '"]';
+      await ctx.page.hover(sel);
+      await ctx.page.click(sel + ' .ed-handle');
+      await ctx.page.waitForSelector('.ed-handle-menu-btn');
+      await ctx.page.evaluate(() => {
+        const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === '刪除');
+        h[h.length - 1].click();
+      });
+      await new Promise((r) => setTimeout(r, 800));
+      const landed = await ctx.page.evaluate(() => {
+        const a = document.activeElement;
+        const b = a && a.closest ? a.closest('.ed-block') : null;
+        return {
+          text: b ? (b.textContent || '').replace(/[＋⠿]/g, '').trim() : null,
+          activeClass: a ? String(a.className || '') : '',
+        };
+      });
+      assert.strictEqual(landed.text, 'Alpha para.',
+        'V2f(' + name + '): 刪除之後游標必須落在洞【上面】那一個 block，got ' +
+        JSON.stringify(landed));
+      assert.ok(/\bed-wys-armed\b/.test(landed.activeClass),
+        'V2f(' + name + '): 而且必須落在真的編輯面上，got ' + JSON.stringify(landed));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // 刪掉文件第一個 block：上面沒有東西，落點是移上來的那一個。
+    {
+      const ctx = await newPage('# H\n\nAlpha para.\n\nBravo para.\n');
+      await ctx.page.hover('.ed-block[data-block-id="0"]');
+      await ctx.page.click('.ed-block[data-block-id="0"] .ed-handle');
+      await ctx.page.waitForSelector('.ed-handle-menu-btn');
+      await ctx.page.evaluate(() => {
+        const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === '刪除');
+        h[h.length - 1].click();
+      });
+      await new Promise((r) => setTimeout(r, 800));
+      const landed = await ctx.page.evaluate(() => {
+        const a = document.activeElement;
+        const b = a && a.closest ? a.closest('.ed-block') : null;
+        return { text: b ? (b.textContent || '').replace(/[＋⠿]/g, '').trim() : null,
+          activeClass: a ? String(a.className || '') : '' };
+      });
+      assert.strictEqual(landed.text, 'Alpha para.',
+        'V2f(first block): 刪掉文件第一個 block 之後，落點是移上來的那一個，got ' +
+        JSON.stringify(landed));
+      assert.ok(/\bed-wys-armed\b/.test(landed.activeClass),
+        'V2f(first block): 必須落在真的編輯面上，got ' + JSON.stringify(landed));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V2f ⠿ 刪除 lands above the hole on every interrupt shape — OK');
   }
 
   // ── V2d: 🔗 在一個 TABLE 儲存格裡 —— Task 11b 那一修的另一個形狀 ────────
