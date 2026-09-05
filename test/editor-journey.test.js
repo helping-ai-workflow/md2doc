@@ -586,9 +586,13 @@ async function main() {
   //   source    離開 edit 模式；游標必須在 .ed-source textarea 裡，工具列
   //             此時合法地只剩模式切換一顆，所以改為斷言再按一次能回到
   //             edit 且工具列復原。
-  //   BROKEN    今天實測就是壞的（見下方每一列自己的註解）。Task 11 是
-  //             test-only，不能改 lib/，所以這裡把【當下的壞值】釘住：
+  //   BROKEN    今天實測就是壞的：把【當下的壞值】（BODY + 工具列 4 顆）釘住，
   //             修好的那天這一列會變紅，逼人把它搬回 caret / bar-only。
+  //             ⚠ v3.2.1 Task 11b 之後【沒有任何一列】用這個答案 —— Task 11
+  //             量到的三個壞掉的入口（🔗 link / ⠿ 建立副本 / ⠿ 刪除）都修好
+  //             並搬成 caret 了。checkLeverage() 末尾那一支因此暫時沒有呼叫
+  //             者；留著是因為它是「下一個量到壞掉的入口」該有的形狀，不是
+  //             因為現在有人在用它。
   //
   // 「按鈕在該狀態下必須是 enabled」本身也是斷言：少了它，一個被誤停用的
   // 按鈕會讓整列變成點不到任何東西的空跑，而空跑永遠是綠的。
@@ -713,13 +717,16 @@ async function main() {
       { id: 'italic',       state: 'sel',  answer: 'caret' },
       { id: 'strike',       state: 'sel',  answer: 'caret' },
       { id: 'inline-code',  state: 'sel',  answer: 'caret' },
-      // BROKEN：applyLinkToggle() 走 window.prompt()，那是一個原生 modal，
-      // 開啟時瀏覽器會把焦點從 contenteditable 收走 → focusout → burst 收尾
-      // → resetToolbarBlock()。convertBlockViaMenu() 在 finally 裡有
-      // reaimToolbarBlockAtLine() 補回來，applyLinkToggle() 沒有。實測：連結
-      // 本身正確寫進磁碟（[Alpha](https://example.com/)），但游標到 BODY、
-      // 工具列剩 undo/redo/outline/preview 四顆；使用者要重新點回文字才能繼續。
-      { id: 'link',         state: 'sel',  answer: 'BROKEN' },
+      // v3.2.1 Task 11b：BROKEN → caret。成因量測（見報告的時間軸）是
+      // window.prompt() 關閉【之後】瀏覽器補的那一發 focusout —— 焦點其實立刻
+      // 回到那個面（t=31ms 的 focusin），真正拆掉著力點的是文件層 delegator
+      // 把那一發讀成「使用者離開了」而跑掉的 commit → rerenderAll()（實測走
+      // applyFullRender，整個 .content 被換掉）。applyLinkToggle() 現在是一層
+      // async thin wrapper，等那次 render 落地之後才把游標放回【同一個 block】
+      // （連結是 block 內的 inline 編輯，block 本身活著）。實測：連結照樣寫進
+      // 磁碟（[Alpha](https://example.com/)），activeElement 回到
+      // P.ed-wys-armed、工具列 15 顆。
+      { id: 'link',         state: 'sel',  answer: 'caret' },
       { id: 'outdent',      state: 'nest', answer: 'caret' },
       { id: 'indent',       state: 'nest', answer: 'caret' },
       { id: 'table',        state: 'sel',  answer: 'caret' },
@@ -756,12 +763,19 @@ async function main() {
   // ── V2b: ⠿ 選單的每一個葉節點 ────────────────────────────────────────
   {
     const GUTTER_ROWS = [
-      // BROKEN：duplicateBlockViaMenu() / deleteBlockViaGutter() 都沒有
-      // convertBlockViaMenu() finally 區塊裡的 reaimToolbarBlockAtLine()。
-      // 實測：兩者做完之後 activeElement 是 BODY 且工具列剩 4 顆 —— 也就是
-      // v3.2.1 CHANGELOG 宣稱已修的「工具列塌成 4 顆」，在這兩條路徑上還在。
-      { label: '建立副本',     answer: 'BROKEN' },
-      { label: '刪除',        answer: 'BROKEN' },
+      // v3.2.1 Task 11b：兩列都從 BROKEN 搬到 caret —— 兩條路徑都補上了
+      // convertBlockViaMenu() 那個 finally 形狀的 thin wrapper，但落點各自不同。
+      //
+      // 建立副本 → 落在【原件】上（副本插在它下面）。實測本列：activeElement
+      //   回到 block 1 的 P.ed-wys-armed、工具列 15 顆；li 版本落在原件自己的
+      //   .ed-li-text 上。為什麼是原件而不是副本，見 duplicateBlockViaMenu()
+      //   的註解（一個手勢只能有一個答案 / 副本的行號不可定址 / 畫面不動）。
+      // 刪除 → 被刪的 block 不存在了，落點是【洞上面那一個】的結尾（Notion 的
+      //   答案，也是 Backspace 併行的落點）；刪掉的是文件第一個 block 時落到
+      //   移上來的那一個。實測本列（V2_SEL_MD 刪 block 1）：游標落在標題上，
+      //   activeElement 是 H1.heading-with-anchor ed-wys-armed、工具列 15 顆。
+      { label: '建立副本',     answer: 'caret' },
+      { label: '刪除',        answer: 'caret' },
       { label: 'MD 原始碼',    answer: 'caret' },
       { label: '文字',        answer: 'caret',    convert: true },
       { label: '標題 1',      answer: 'caret',    convert: true },
@@ -830,6 +844,106 @@ async function main() {
     }
     assert.deepStrictEqual(bad, [], '這些 ⠿ 選單項目的必需答案沒有成立:\n' + bad.join('\n'));
     console.log('journey: V2 gutter-menu matrix — OK (' + GUTTER_ROWS.length + ' items)');
+  }
+
+  // ── V2c: 停用的工具列按鈕 —— 已知缺陷，v3.2.1 刻意不修，這裡把行為釘住 ──
+  //
+  // 使用者感知到的症狀與上面三列一樣（按了工具列一下就掉焦點），但成因完全
+  // 不同，而且候選修法「在 .ed-toolbar 容器上加一發 mousedown preventDefault()」
+  // 【不會生效】。實測（Chromium）：點在一顆 disabled 的 <button> 上時，瀏覽器
+  // 對整條傳播路徑都不派發滑鼠事件 —— 掛在 document 上的 capture 期 mousedown
+  // 監聽器收到 0 次，所以容器層的 handler 根本不會執行。把那一行真的加進
+  // buildToolbar() 之後再量一次，四個數字逐字相同（task-11b 報告有兩次輸出）。
+  // 焦點還是掉，因為瀏覽器仍然執行了 mousedown 的預設動作（把焦點從
+  // contenteditable 收走），而那個動作沒有任何事件可以取消。
+  //
+  // 今天量到的行為分兩態，兩態都釘在這裡：
+  //   * burst 沒有被編輯過：那一發 focusout 走 resolveBurst() 的
+  //     burstBaselineHtml === burst.original 分支，endBurstWithoutResolve()
+  //     不 commit、不 render —— 所以工具列【沒有】塌，只有 activeElement 掉到
+  //     BODY。
+  //   * burst 已經打過字：同一發 focusout 走完整的 commit → rerenderAll()，
+  //     工具列塌成 4 顆。
+  //
+  // 真的要修需要三處協同：disabled 按鈕加 pointer-events: none（事件才落得到
+  // 容器上）、容器 mousedown preventDefault()、以及文件層 click delegator 把
+  // .ed-toolbar 排除在「按在任何 block 之外 → switchAwayFrom()」之外。而
+  // pointer-events: none 會一併關掉 title tooltip，使用者就再也看不到按鈕為
+  // 什麼是灰的 —— 那是一個要單獨決定的取捨，不是這一版的範圍。
+  // 這一段紅掉 = 有人動了它：把量到的新值搬進來，別把斷言放寬。
+  {
+    for (const dirty of [false, true]) {
+      const ctx = await newPage(V2_SEL_MD);
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 250));
+      if (dirty) {
+        await ctx.page.keyboard.type('XY');
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      const isDisabled = await ctx.page.evaluate(() =>
+        document.querySelector('[data-ed-tb="bold"]').disabled);
+      assert.strictEqual(isDisabled, true,
+        'V2c: 游標收合（沒有選取）時 bold 必須是 disabled，否則這個情境什麼都沒點到');
+      await ctx.page.evaluate(() => {
+        window.__v2cMousedowns = 0;
+        document.addEventListener('mousedown', () => { window.__v2cMousedowns++; }, true);
+      });
+      await ctx.page.click('[data-ed-tb="bold"]');
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await readLeverage(ctx.page);
+      const seen = await ctx.page.evaluate(() => window.__v2cMousedowns);
+      assert.strictEqual(seen, 0,
+        'V2c(dirty=' + dirty + '): 點在 disabled 按鈕上時 document 不該收到任何 ' +
+        'mousedown —— 這正是「在 .ed-toolbar 上加一發 preventDefault()」不可能' +
+        '生效的原因。got ' + seen);
+      assert.strictEqual(st.active, 'BODY',
+        'V2c(dirty=' + dirty + '): 已知缺陷 —— 焦點掉到 BODY。修好了就把這一段' +
+        '改成斷言游標還在，got ' + JSON.stringify(st));
+      assert.strictEqual(st.enabled, dirty ? 4 : 15,
+        'V2c(dirty=' + dirty + '): 工具列顆數與今天量到的不同，got ' + JSON.stringify(st));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: V2c disabled-button caret loss — pinned (known, unfixed)');
+  }
+
+  // ── V2d: 🔗 在一個 TABLE 儲存格裡 —— Task 11b 那一修的另一個形狀 ────────
+  //
+  // V2 的 link 那一列走的是段落。同一顆按鈕在表格儲存格上會走到 caret 還原
+  // 不回來的那一支，而那不是遺漏、是量出來的邊界：selToolbarEditEl 是 CELL，
+  // 但還原只有「block 的起始行」可用，而 blockContentEl() 對一個 table block
+  // 回傳 firstElementChild ＝ <table> 本身，它沒有 tabindex、focus() 是 no-op。
+  // 所以必需答案是 bar-only：連結要正確寫進磁碟、工具列要還瞄著那張表（而且
+  // bar-only 的判定會真的再按一次「在下方插入區塊」證明那個「還瞄著」能用）。
+  // 修好之前這裡量到的是工具列塌成 4 顆，也就是連 bar-only 都不成立。
+  {
+    const ctx = await newPage('# H\n\n| A | B |\n| --- | --- |\n| alpha | bravo |\n\nTail.\n');
+    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
+    await ctx.page.click('.ed-wys-cell');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      const el = cells[cells.length - 1];   // 'bravo'
+      el.focus();
+      const t = el.firstChild;
+      const r = document.createRange(); r.setStart(t, 0); r.setEnd(t, 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    const linkDisabled = await ctx.page.evaluate(() =>
+      document.querySelector('[data-ed-tb="link"]').disabled);
+    assert.strictEqual(linkDisabled, false,
+      'V2d: 儲存格裡有非空選取時 🔗 必須是 enabled，否則這個情境什麼都沒點到');
+    await ctx.page.click('[data-ed-tb="link"]');
+    await new Promise((r) => setTimeout(r, 900));
+    const fail = await checkLeverage(ctx, '🔗 in a table cell', 'bar-only');
+    assert.strictEqual(fail, null, 'V2d: ' + fail);
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('[bravo](https://example.com/)') !== -1,
+      'V2d: 連結必須真的寫進磁碟，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'V2d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
   }
 
   // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
