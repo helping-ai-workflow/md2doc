@@ -275,6 +275,32 @@ async function main() {
     console.log('journey: an image lands after the current block — OK');
   }
 
+  // ── 模式：兩態循環，preview 不可達，按鈕講下一個狀態 ────────────────
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const read = () => ctx.page.evaluate(() => ({
+      mode: document.body.getAttribute('data-ed-mode'),
+      status: (document.querySelector('.ed-toolbar-status') || {}).textContent || '',
+      label: (document.querySelector('[data-ed-tb="preview"]') || {}).title || '',
+    }));
+    const s0 = await read();
+    assert.strictEqual(s0.mode, 'edit', '初始必須是 edit');
+    await ctx.page.click('[data-ed-tb="preview"]');
+    await new Promise((r) => setTimeout(r, 300));
+    const s1 = await read();
+    assert.strictEqual(s1.mode, 'source', '第一次按進 source');
+    await ctx.page.click('[data-ed-tb="preview"]');
+    await new Promise((r) => setTimeout(r, 300));
+    const s2 = await read();
+    assert.strictEqual(s2.mode, 'edit', '第二次按【必須】回到 edit，preview 已移除');
+    assert.ok(s1.status.length > 0 && s2.status.length > 0,
+      '狀態槽位必須顯示當前模式');
+    assert.notStrictEqual(s1.label, s2.label,
+      '按鈕標示必須講【下一個】狀態，兩態下不應相同');
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the mode button is a truthful two-state toggle — OK');
+  }
+
   await browser.close();
 }
 

@@ -128,33 +128,51 @@ function baseCtx(overrides) {
   const state = tm.deriveState(baseCtx({ mode: 'source', blockType: 'heading', headingDepth: 3 }));
   for (const id of ids) {
     if (id === 'preview') {
-      eq(state.preview.disabled, false, 'preview stays enabled in source mode');
+      eq(state.preview.disabled, false,
+        'the mode button (id preview) stays enabled in source mode — it is the only way out');
     } else {
       eq(state[id].disabled, true, id + ' is disabled in source mode');
     }
   }
 }
 
-// --- preview.active tracks mode (tri-state edit/source/preview) -------------
-// Fix round 1, Important: the module threads `mode` into ctx precisely so it
-// can answer "which of the three modes is current" for its own button,
-// instead of making the integration task re-derive this outside the module.
-// Ruling: active is true whenever mode !== 'edit'.
+// --- the mode button names the NEXT state (two-state edit <-> source) -------
+// v3.2.1 migration. This block used to pin `preview.active === (mode !==
+// 'edit')` across the three modes. That flag was the DEFECT: with three
+// states it made one aria-pressed=true stand for two different modes, and
+// the button's own text never moved at all. The guarantee those assertions
+// were reaching for — "the module, not the integration, answers which mode
+// is current for this button" — is now carried by the derived label/title,
+// which is a strictly stronger claim because it is what the user reads.
+// The module threads `mode` into ctx for exactly this, same as before.
 
 {
   const state = tm.deriveState(baseCtx({ mode: 'edit' }));
-  eq(state.preview.active, false, "mode 'edit': preview.active is false");
-}
-{
-  const state = tm.deriveState(baseCtx({ mode: 'preview' }));
-  eq(state.preview.active, true, "mode 'preview': preview.active is true");
+  eq(state.preview.label, 'M↓', "mode 'edit': the button points at source");
+  eq(state.preview.title, '切換到原始碼模式', "mode 'edit': title names the NEXT state");
+  eq(state.preview.active, false, "mode 'edit': the mode button is never 'pressed' any more");
 }
 {
   const state = tm.deriveState(baseCtx({ mode: 'source' }));
-  eq(state.preview.active, true, "mode 'source': preview.active is true");
-  // The pre-existing source-mode rule must not regress: preview stays
-  // enabled even though it's now also active.
-  eq(state.preview.disabled, false, "mode 'source': preview still stays enabled");
+  eq(state.preview.label, '✎', "mode 'source': the button points back at edit");
+  eq(state.preview.title, '切換到編輯模式', "mode 'source': title names the NEXT state");
+  eq(state.preview.active, false, "mode 'source': the mode button is never 'pressed' any more");
+  // The pre-existing source-mode rule must not regress: the mode button
+  // stays enabled while every other button is blanket-disabled.
+  eq(state.preview.disabled, false, "mode 'source': the mode button still stays enabled");
+}
+// The two states must not read the same — a button whose text does not move
+// is precisely the interface that made a user think the editor was stuck.
+{
+  const e = tm.deriveState(baseCtx({ mode: 'edit' })).preview;
+  const src = tm.deriveState(baseCtx({ mode: 'source' })).preview;
+  ok(e.label !== src.label, 'the mode button label differs between the two modes');
+  ok(e.title !== src.title, 'the mode button title differs between the two modes');
+}
+// The removed state deserves an assertion as much as its presence did.
+{
+  const ds = require('../lib/editor/docsource.js');
+  eq(ds.MODES.indexOf('preview'), -1, "'preview' is not a mode any more");
 }
 
 // --- fix round 1, Minor: bold/italic tooltips must not promise keybindings --
@@ -266,7 +284,10 @@ function baseCtx(overrides) {
 // 測試照樣綠。改成掃一組 ctx 矩陣、把**實際**出現過 active: true 的 id 收集
 // 起來，再跟 BUTTONS 上的 toggle 旗標比對；兩邊一漂就紅。
 {
-  const MODES = ['edit', 'source', 'preview'];
+  // v3.2.1: two modes, not three. The sweep must enumerate the REAL mode
+  // roster — pulling it from docsource.js rather than re-typing it is what
+  // keeps this from silently sweeping a state the app cannot enter.
+  const MODES = require('../lib/editor/docsource.js').MODES;
   const BLOCK_TYPES = [null, undefined, 'paragraph', 'heading', 'blockquote',
     'code', 'li', 'table', 'image', 'html', 'hr'];
   const observedActive = new Set();

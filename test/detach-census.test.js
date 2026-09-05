@@ -59,8 +59,8 @@ const CENSUS = [
     why: '`ta` 本身就是聚焦的 .ed-source；T33 測到 focusout，但 handler 沒有 `.ed-source` 分支可以匹配，目前無害純屬巧合' },
   { fn: 'enterSourceMode()', needle: 'contentEl.hidden = true;', disposition: 'none',
     why: 'T33：對聚焦的 .ed-wys-armed 造成的 focusout 沒有任何處置' },
-  { fn: 'applyPreviewEditability()', needle: "surfaces[i].setAttribute('contenteditable', editable ? 'true' : 'false');", disposition: 'none',
-    why: 'T34：focusout -> REENTRY branch3（synthetic focus）；在出貨的模式循環裡不會與存活的 burst 同時發生，故未觀察到有害後果' },
+  // v3.2.1 Task 8：applyPreviewEditability() 那一列（disposition 'none'，T34）
+  // 已刪除 —— preview 模式連同該函式一併移除，站點不存在了，不是漏掉。
   // ── (c) 先移開焦點 ─────────────────────────────────────────────────────
   { fn: 'revertBurstAndEnd()', needle: 'editEl.blur();', disposition: 'a+c',
     why: 'T5：`currentBurst = null` 在它之前的同一個函式裡已先執行，所以 blur() 觸發的 focusout 帶 burst=null、無重入；檔案自己的鄰近註解也記載這是 (a)+(c) 組合站點' },
