@@ -147,6 +147,48 @@ async function main() {
     console.log('journey: raw-editor commit that spawns a block commits once — OK');
   }
 
+  // ── 轉換：B 態（無選取）必須還原焦點；A 態（有選取）必須不動 ──────────
+  {
+    const ctx = await newPage('alpha one\n\nbravo two\n\ncharlie three\n');
+    // B 態：純點擊進 block，再按「清單」
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.click('[data-ed-tb="list"]');
+    await new Promise((r) => setTimeout(r, 400));
+    const b = await ctx.page.evaluate(() => ({
+      active: document.activeElement ? document.activeElement.tagName : null,
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+    }));
+    assert.notStrictEqual(b.active, 'BODY', 'B 態轉換後焦點不得掉到 BODY');
+    assert.ok(b.enabled > 4, 'B 態轉換後工具列不得塌成 4 顆，got ' + b.enabled);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: conversion without a selection restores the caret — OK');
+  }
+  {
+    const ctx = await newPage('alpha one\n\nbravo two\n\ncharlie three\n');
+    // A 態：Shift+Click 立一個單塊選取，再按「清單」
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.click('.ed-block[data-block-id="1"]');
+    await ctx.page.keyboard.up('Shift');
+    await ctx.page.click('[data-ed-tb="list"]');
+    await new Promise((r) => setTimeout(r, 400));
+    const a = await ctx.page.evaluate(() => ({
+      activeIsWrapper: !!(document.activeElement &&
+        document.activeElement.classList.contains('ed-block')),
+      selected: document.querySelectorAll('.ed-selected').length,
+    }));
+    assert.strictEqual(a.activeIsWrapper, true,
+      'A 態轉換後焦點必須留在 .ed-block wrapper（roving focus），不得被搬進編輯面');
+    assert.strictEqual(a.selected, 1, 'A 態轉換後選取底色必須還在');
+    // Delete 必須仍然刪整個 block，而不是死鍵
+    await ctx.page.keyboard.press('Delete');
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('bravo two'), -1,
+      'A 態轉換後 Delete 必須刪掉整個 block，got:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: conversion with a selection leaves the selection intact — OK');
+  }
+
   await browser.close();
 }
 
