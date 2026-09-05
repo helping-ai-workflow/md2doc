@@ -79,6 +79,90 @@ async function newPage(mdText) {
   return Object.assign({ page, errs }, b);
 }
 
+// ── v3.2.1 second wave (N2): the primed/unprimed axis ──────────────────────
+//
+// `lastParts` is null until the first render lands, so the FIRST commit after a
+// page load always takes the FALLBACK route and every commit after it takes the
+// PATCH route. The two routes restore focus and tear the toolbar down in a
+// DIFFERENT ORDER, so a scenario that only ever measures the first commit is
+// measuring the route a real session almost never uses.
+//
+// This is not a new lesson: test/editor-client-runtime.test.js Case 1 already
+// writes it down —「the first commit after a page load always falls back …
+// asserting on THAT commit would silently test the fallback」— and the first fix
+// wave's V2g / V2h / V2d were built without it. C1 (a refusal keeping its caret
+// but losing the whole toolbar) is invisible on the fallback route and ordinary
+// on the patch route, and it shipped past both the fix and its own new tests.
+//
+// Every scenario below that measures a post-commit landing therefore runs TWICE.
+// `primeOneCommit()` spends the fallback commit on a paragraph the scenario does
+// not touch; `installPatchSpy()` + `patchRoutes()` then PROVE the gesture under
+// test really took the patch route, so a primed variant that silently degrades
+// back to the fallback fails instead of going quietly green.
+async function primeOneCommit(ctx) {
+  const t = await ctx.page.evaluate(() => {
+    const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+      .find((b) => (b.textContent || '').indexOf('Tail para two') !== -1);
+    if (!el) throw new Error('primeOneCommit: fixture has no 「Tail para two」 paragraph to commit');
+    return '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]';
+  });
+  await ctx.page.click(t + ' .ed-wys-armed');
+  await new Promise((r) => setTimeout(r, 200));
+  await ctx.page.keyboard.type(' PRIMED');
+  await new Promise((r) => setTimeout(r, 200));
+  await ctx.page.keyboard.press('Enter');   // blur → commit → render
+  await new Promise((r) => setTimeout(r, 900));
+}
+// Two counters, because "did this render patch?" needs both halves:
+//   * `renders`  — every POST to /api/render. A render that FELL BACK never
+//                  calls patchmap at all (applyRenderResult() short-circuits on
+//                  `lastParts`/`domMatchesLastRender()` first), so it is
+//                  invisible to the patchmap spy and only shows up here.
+//   * `plans`    — one entry per patchmap call, true when it produced a plan.
+// Install AFTER priming, so only the gesture under test is recorded.
+async function installPatchSpy(ctx) {
+  await ctx.page.evaluate(() => {
+    window.__plans = [];
+    window.__renders = 0;
+    const origPm = window.md2docPatchmap.patchmap;
+    window.md2docPatchmap.patchmap = function (input) {
+      const r = origPm(input);
+      window.__plans.push(!!r);
+      return r;
+    };
+    const origFetch = window.fetch;
+    window.fetch = function (url, opts) {
+      if (String(url).indexOf('/api/render') !== -1) window.__renders++;
+      return origFetch.apply(this, arguments);
+    };
+  });
+}
+const patchRoutes = (ctx) => ctx.page.evaluate(() =>
+  ({ plans: (window.__plans || []).slice(), renders: window.__renders || 0 }));
+// A gesture can issue MORE THAN ONE render (⠿ / Tab first resolve the open
+// burst through switchAwayFrom(), which commits and renders, and only then run
+// their own commit) — measured: an unprimed H2 + Tab issues two, the first a
+// fallback and the second already a patch. So the assertions are about what the
+// run CONTAINS, not about a single route:
+//   primed    at least one render actually patched — otherwise the primed
+//             variant has silently degraded into a second copy of the unprimed
+//             one and C1's whole class is untested again.
+//   unprimed  at least one render did NOT consult patchmap, i.e. fell back.
+//             That is the route this file measured exclusively before N2, and
+//             keeping a row on it is what makes the pair a PAIR.
+const assertRoute = (r, primed, where) => {
+  if (primed) {
+    assert.ok(r.plans.some(Boolean),
+      where + '(primed) 前提失敗：這次手勢的 render 沒有任何一發走 patch 路徑 —— ' +
+      'primed 變體因此退化成 unprimed，C1 那一類缺陷就測不到了，got ' + JSON.stringify(r));
+  } else {
+    assert.ok(r.renders > r.plans.length,
+      where + '(unprimed) 前提失敗：每一發 render 都問過 patchmap，' +
+      '也就是沒有任何一發走 fallback —— 這一列就不再是 fallback 路徑的覆蓋，got ' +
+      JSON.stringify(r));
+  }
+};
+
 async function saveAndRead(ctx) {
   await ctx.page.keyboard.down('Control');
   await ctx.page.keyboard.press('KeyS');
@@ -1129,8 +1213,12 @@ async function main() {
   // 所以必需答案是 bar-only：連結要正確寫進磁碟、工具列要還瞄著那張表（而且
   // bar-only 的判定會真的再按一次「在下方插入區塊」證明那個「還瞄著」能用）。
   // 修好之前這裡量到的是工具列塌成 4 顆，也就是連 bar-only 都不成立。
-  {
-    const ctx = await newPage('# H\n\n| A | B |\n| --- | --- |\n| alpha | bravo |\n\nTail.\n');
+  // N2：primed 與 unprimed 都要跑 —— 這一列的必需答案就是 bar-only，也就是
+  // 「工具列還瞄著」是它唯一交付的東西，而 C1 拿掉的正好就是那個東西。
+  for (const primed of [false, true]) {
+    const ctx = await newPage('# H\n\n| A | B |\n| --- | --- |\n| alpha | bravo |\n\nTail para two.\n');
+    if (primed) await primeOneCommit(ctx);
+    await installPatchSpy(ctx);
     ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
     await ctx.page.click('.ed-wys-cell');
     await new Promise((r) => setTimeout(r, 250));
@@ -1150,15 +1238,16 @@ async function main() {
       'V2d: 儲存格裡有非空選取時 🔗 必須是 enabled，否則這個情境什麼都沒點到');
     await ctx.page.click('[data-ed-tb="link"]');
     await new Promise((r) => setTimeout(r, 900));
-    const fail = await checkLeverage(ctx, '🔗 in a table cell', 'bar-only');
-    assert.strictEqual(fail, null, 'V2d: ' + fail);
+    assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
+    const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'bar-only');
+    assert.strictEqual(fail, null, 'V2d(primed=' + primed + '): ' + fail);
     const disk = await saveAndRead(ctx);
     assert.ok(disk.indexOf('[bravo](https://example.com/)') !== -1,
-      'V2d: 連結必須真的寫進磁碟，got:\n' + disk);
+      'V2d(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0, 'V2d: 不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
   }
+  console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
 
   // ── V2g: 標題到頂／到底時按 Tab —— 夾住的那一步不得把你踢出區塊 ──────────
   //
@@ -1179,12 +1268,18 @@ async function main() {
   // 著力點本來就不會掉 —— 少了這一步這個場景會空跑成綠的。
   {
     const HEAD_ROWS = [
-      ['H1 + Shift+Tab', '# Title\n\nAlpha para.\n',      true,  'H1'],
-      ['H6 + Tab',       '###### Title\n\nAlpha para.\n', false, 'H6'],
-      ['H2 + Tab (未夾住的對照組)', '## Title\n\nAlpha para.\n', false, 'H3'],
+      ['H1 + Shift+Tab', '# Title\n\nAlpha para.\n\nTail para two.\n',      true,  'H1'],
+      ['H6 + Tab',       '###### Title\n\nAlpha para.\n\nTail para two.\n', false, 'H6'],
+      ['H2 + Tab (未夾住的對照組)', '## Title\n\nAlpha para.\n\nTail para two.\n', false, 'H3'],
     ];
-    for (const [name, md, shift, wantTag] of HEAD_ROWS) {
+    // N2：primed 與 unprimed 都要跑。unprimed 走 fallback、primed 走 patch，而
+    // C1 只在 patch 上發作 —— 第一波的這個場景只測了 unprimed，所以它自己也漏掉了。
+    for (const primed of [false, true]) {
+    for (const [name0, md, shift, wantTag] of HEAD_ROWS) {
+      const name = name0 + ' primed=' + primed;
       const ctx = await newPage(md);
+      if (primed) await primeOneCommit(ctx);
+      await installPatchSpy(ctx);
       const sel = '.ed-block[data-block-id="0"] .ed-wys-armed';
       await ctx.page.click(sel);
       await new Promise((r) => setTimeout(r, 250));
@@ -1198,12 +1293,15 @@ async function main() {
       if (shift) await ctx.page.keyboard.up('Shift');
       await new Promise((r) => setTimeout(r, 700));
       const st = await readLeverage(ctx.page);
+      assertRoute(await patchRoutes(ctx), primed, 'V2g(' + name + ')');
       assert.strictEqual(st.active, wantTag,
         'V2g(' + name + ')：游標必須留在（或落到）' + wantTag + '，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2g(' + name + ')：而且必須是一個真的編輯面，got ' + JSON.stringify(st));
       assert.strictEqual(st.enabled, 15,
-        'V2g(' + name + ')：工具列不得塌成 4 顆，got ' + JSON.stringify(st));
+        'V2g(' + name + ')：工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
+        '游標還在但整條工具列已經被 applyPatch() 的 resetToolbarBlock() 收掉了，got ' +
+        JSON.stringify(st));
       // 夾住的那兩列必須是真的 no-op：磁碟上的 # 數量不能變。
       const disk = await saveAndRead(ctx);
       const hashes = (disk.split('\n')[0].match(/^#+/) || [''])[0].length;
@@ -1214,6 +1312,7 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0,
         'V2g(' + name + ')：不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
+    }
     }
     console.log('journey: V2g a clamped Tab on a heading keeps the caret — OK');
   }
@@ -1235,14 +1334,20 @@ async function main() {
   // （duplicateBlockViaMenu）、刪除（deleteBlockViaGutter）。硬換行的 li 是
   // §4.1 對這三者共同的拒絕條件，所以同一個 fixture 能同時打到三條路。
   {
-    const HARD_WRAPPED = '# H\n\n- alpha item that is\n  hard wrapped here\n- bravo item\n\nTail.\n';
+    const HARD_WRAPPED = '# H\n\n- alpha item that is\n  hard wrapped here\n- bravo item\n\nTail para two.\n';
     const ROWS = [
       ['轉換成 → 引用', '引用', true],
       ['建立副本',      '建立副本', false],
       ['刪除',          '刪除', false],
     ];
-    for (const [name, label, viaConvert] of ROWS) {
+    // N2：primed 與 unprimed 都要跑 —— 見 primeOneCommit() 的註解。C1 的三個
+    // 受害者就是這三條路徑，而它們在 unprimed（fallback）上全都是綠的。
+    for (const primed of [false, true]) {
+    for (const [name0, label, viaConvert] of ROWS) {
+      const name = name0 + ' primed=' + primed;
       const ctx = await newPage(HARD_WRAPPED);
+      if (primed) await primeOneCommit(ctx);
+      await installPatchSpy(ctx);
       const id = await ctx.page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + id + '"]';
@@ -1285,6 +1390,7 @@ async function main() {
         enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
         banner: (document.querySelector('.ed-conflict') || {}).textContent || '',
       }));
+      assertRoute(await patchRoutes(ctx), primed, 'V2h(' + name + ')');
       // 前提之二：這真的是一次【拒絕】，不是一次成功。橫幅必須是 §4.1 那一條。
       assert.ok(st.banner.indexOf('無法調整結構') !== -1,
         'V2h(' + name + ') 前提：必須真的被 §4.1 拒絕（橫幅），否則測到的是成功路徑，got ' +
@@ -1292,20 +1398,77 @@ async function main() {
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2h(' + name + ')：被拒絕之後游標必須留在原來那個編輯面上，got ' + JSON.stringify(st));
       assert.ok(st.enabled > 4,
-        'V2h(' + name + ')：被拒絕之後工具列不得塌成 4 顆，got ' + JSON.stringify(st));
+        'V2h(' + name + ')：被拒絕之後工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
+        '游標還在（上一條是綠的）但整條工具列已經被 applyPatch() 的 ' +
+        'resetToolbarBlock() 收掉了，got ' + JSON.stringify(st));
       // 拒絕 ＝ 檔案只該帶著剛剛那次打字，不該有任何結構改動。
       const disk = await saveAndRead(ctx);
-      // 拒絕之後磁碟與原檔的唯一差別，必須是剛剛打進去的那些 X —— 把 X 拿掉之後
-      // 必須逐位元組相同。這比「行數沒變」強：它連硬換行的第二行、清單標記、
-      // 項目數都一起釘住了。
-      assert.strictEqual(disk.replace(/X/g, ''), before0,
-        'V2h(' + name + ')：拒絕不得改動結構，去掉剛打的 X 之後必須與原檔相同，got:\n' + disk);
+      // 拒絕之後磁碟與原檔的唯一差別，必須是剛剛打進去的那些 X（primed 時再加上
+      // 那次無關提交寫的 ' PRIMED'）—— 兩者都拿掉之後必須逐位元組相同。這比
+      // 「行數沒變」強：它連硬換行的第二行、清單標記、項目數都一起釘住了。
+      assert.strictEqual(disk.replace(/X/g, '').replace(/ PRIMED/g, ''), before0,
+        'V2h(' + name + ')：拒絕不得改動結構，去掉剛打的 X / PRIMED 之後必須與原檔相同，got:\n' + disk);
       assert.strictEqual(ctx.errs.length, 0,
         'V2h(' + name + ')：不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
     }
+    }
     console.log('journey: V2h a refused ⠿ operation keeps the caret and the bar — OK');
   }
+
+  // ── V2i: 🔗 套用在【段落】上 —— C1 的第二個發生點 ────────────────────────
+  //
+  // 第二波 C1。applyLinkToggle() 的 `stillHeld` 閘門原本把
+  // reaimToolbarBlockAtLine(line) 一起包在裡面，所以「著力點還在」時什麼都不
+  // 還原 —— 而在 patch 路徑上 applyPatch() 先把焦點交還給新的面、之後才跑
+  // resetToolbarBlock()，「焦點還在」與「工具列塌成 4 顆」因此是【同時成立】的
+  // 常態，不是矛盾。
+  //
+  // ⚠ V2d（同一顆按鈕、表格儲存格）測不到這一個：那裡 blockContentEl() 對
+  //   table 回傳不可聚焦的 <table>，所以還原之後 activeElement 是 BODY，
+  //   `stillHeld` 為 false，舊碼本來就會走到 reaim 那一支。實測 477fa1b 上
+  //   V2d 的 primed 變體是【綠的】。段落才是那個會保住焦點的形狀。
+  //
+  // 實測 477fa1b：unprimed P.ed-wys-armed / 15 顆（綠），primed
+  // P.ed-wys-armed / 4 顆（紅）。修好之後兩者都是 15 顆。
+  for (const primed of [false, true]) {
+    const ctx = await newPage('# H\n\nAlpha bravo charlie.\n\nTail para two.\n');
+    if (primed) await primeOneCommit(ctx);
+    await installPatchSpy(ctx);
+    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
+    const pid = await ctx.page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+        .find((b) => (b.textContent || '').indexOf('Alpha bravo') !== -1);
+      return el.getAttribute('data-block-id');
+    });
+    const one = '.ed-block[data-block-id="' + pid + '"] .ed-wys-armed';
+    await ctx.page.click(one);
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.evaluate((sl) => {
+      const el = document.querySelector(sl);
+      const t = el.firstChild;
+      const r = document.createRange(); r.setStart(t, 0); r.setEnd(t, 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus(); document.dispatchEvent(new Event('selectionchange'));
+    }, one);
+    await new Promise((r) => setTimeout(r, 300));
+    const dis = await ctx.page.evaluate(() =>
+      document.querySelector('[data-ed-tb="link"]').disabled);
+    assert.strictEqual(dis, false,
+      'V2i(primed=' + primed + ') 前提：有非空選取時 🔗 必須是 enabled，否則這一列什麼都沒點到');
+    await ctx.page.click('[data-ed-tb="link"]');
+    await new Promise((r) => setTimeout(r, 1100));
+    assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
+    const fail = await checkLeverage(ctx, '🔗 on a paragraph (primed=' + primed + ')', 'caret');
+    assert.strictEqual(fail, null, 'V2i(primed=' + primed + '): ' + fail);
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('[Alpha](https://example.com/)') !== -1,
+      'V2i(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0,
+      'V2i: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
   // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
   // lib/md2doc.js 有十四個 `position: fixed` 宣告（另有 9 處是註解裡的散文
