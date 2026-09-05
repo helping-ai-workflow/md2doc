@@ -116,6 +116,37 @@ async function main() {
     console.log('journey: ⠿ → MD 原始碼 discards a table burst — OK');
   }
 
+  // ── R2: a raw-editor commit that spawns a new block must commit ONCE ──
+  {
+    const ctx = await newPage('# Doc\n\n```\ncode one\n```\n\nBravo paragraph.\n');
+    const sel = '.ed-block[data-block-type="code"]';
+    await ctx.page.hover(sel);
+    await ctx.page.click(sel + ' .ed-handle');
+    await ctx.page.waitForSelector('.ed-handle-menu-btn');
+    await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+        .find((x) => x.textContent.indexOf('原始碼') !== -1);
+      b.click();
+    });
+    await ctx.page.waitForSelector('textarea.ed-raw');
+    await ctx.page.evaluate(() => {
+      const ta = document.querySelector('textarea.ed-raw');
+      ta.value = '```\ncode one\n```\n\nSPAWNED tail.';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 600));
+
+    const disk = await saveAndRead(ctx);
+    const hits = disk.split('SPAWNED tail.').length - 1;
+    assert.strictEqual(hits, 1,
+      'R2: 衍生新 block 的提交只能發生一次，出現 ' + hits + ' 次:\n' + disk);
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: raw-editor commit that spawns a block commits once — OK');
+  }
+
   await browser.close();
 }
 
