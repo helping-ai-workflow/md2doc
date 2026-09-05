@@ -379,6 +379,191 @@ async function main() {
     console.log('journey: bolding a selection with a trailing space — OK');
   }
 
+  // ── 表格「對齊」選單：捲動中斷了開啟流程，選單仍要能用 ────────────────
+  // v3.2.1 fix round 1 gave runCycleAlign() a scroll-survival fix
+  // (suppressEdgeMenuAutoHide + a requestAnimationFrame reposition) for
+  // ensureTableBurstOpen()'s cell.focus(), which can scroll the page for
+  // real before any table burst exists yet on this table. This locks that
+  // fix in: forcing every td/th focus() to also scroll (deterministic
+  // stand-in for the real, but timing-fragile, focus-triggered scroll;
+  // real off-screen table geometry cannot be engineered reliably from
+  // outside the page) with real scroll room on both sides of the table
+  // (a doc with filler only BEFORE the table already caused a false pass
+  // once — scrollIntoView({block:'center'}) landed exactly at max scroll,
+  // making the forced scrollBy() a silent no-op).
+  {
+    const filler = Array.from({ length: 60 }, (_, i) => 'Filler line ' + i + '.').join('\n\n');
+    const b = await boot(filler + '\n\n' + ['| A | B |', '|---|---|', '| 1 | 2 |', ''].join('\n') +
+      '\n\n' + filler + '\n');
+    const page = await browser.newPage();
+    await page.evaluateOnNewDocument(() => {
+      const orig = HTMLElement.prototype.focus;
+      HTMLElement.prototype.focus = function (...args) {
+        if (this.tagName === 'TD' || this.tagName === 'TH') window.scrollBy(0, 40);
+        return orig.apply(this, args);
+      };
+    });
+    await page.goto(b.url, { waitUntil: 'networkidle0' });
+    const table0 = await page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-type="table"]');
+      el.scrollIntoView({ block: 'center' });
+      return '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]';
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const colB = await page.evaluate((ts) => {
+      const table = document.querySelector(ts + ' table');
+      const r = table.tHead.rows[0].cells[1].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, table0);
+    await page.mouse.move(colB.x, colB.y);
+    await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
+    const grip = await page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.mouse.move(grip.x, grip.y);
+    await page.mouse.down(); await page.mouse.up();
+    await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+
+    // 1) the forced scroll must have actually moved something — the
+    //    vacuous-green trap: a table already sitting at max scroll makes
+    //    scrollBy() silently do nothing, and every assertion below would
+    //    then be exercising the NO-scroll path instead of the fix.
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+    await page.click('.ed-te-menu-align');
+    await new Promise((r) => setTimeout(r, 300));
+    const scrollAfter = await page.evaluate(() => window.scrollY);
+    assert.notStrictEqual(scrollAfter, scrollBefore,
+      '測試前提失敗：強制捲動沒有真的移動任何東西（scrollY 前後相同），' +
+      '後面的斷言就測不到修好的東西，got before=' + scrollBefore + ' after=' + scrollAfter);
+
+    const state1 = await page.evaluate((ts) => {
+      const menu = document.querySelector('.ed-te-menu');
+      const th = document.querySelector(ts + ' thead th:nth-child(2)');
+      return {
+        menuHidden: menu.hidden,
+        style: th.getAttribute('style'),
+        hlCount: document.querySelectorAll('.ed-te-hl').length,
+      };
+    }, table0);
+    // 2) the menu itself must still be showing.
+    assert.strictEqual(state1.menuHidden, false,
+      '捲動中斷了開啟流程後，對齊選單必須仍然顯示，got: ' + JSON.stringify(state1));
+    // 3) highlighted, not just visible — this is what tells a live menu
+    //    apart from an inert one sitting on top of the document with no
+    //    highlight and no working buttons (see the next scenario below).
+    assert.ok(state1.hlCount > 0,
+      '選單顯示但沒有欄位高亮，是殭屍選單而非活的選單，got hlCount=' + state1.hlCount);
+    assert.ok(/left/.test(state1.style || ''),
+      '第一次點擊必須套用 left 對齊，got style=' + state1.style);
+
+    // 4) a second click must actually cycle — not silently no-op on a
+    //    detached teMenuColIndex/teMenuKind.
+    await page.click('.ed-te-menu-align');
+    await new Promise((r) => setTimeout(r, 300));
+    const style2 = await page.evaluate((ts) =>
+      document.querySelector(ts + ' thead th:nth-child(2)').getAttribute('style'), table0);
+    assert.ok(/center/.test(style2 || ''),
+      '第二次點擊必須把對齊循環到 center，got style=' + style2);
+
+    await page.close(); b.srv.close();
+    console.log('journey: the align menu survives a scroll that interrupts its own opening — OK');
+  }
+
+  // ── 表格「對齊」選單：無關 burst 在中途收尾時，選單必須乾淨關閉 ───────
+  // v3.2.1 fix round 2 (re-review finding): round 1's requestAnimationFrame
+  // reposition above had no guard against a DIFFERENT reason the menu could
+  // have closed during the same await — ensureTableBurstOpen()'s
+  // switchAwayFrom() resolves whatever OTHER burst is open (here: a
+  // paragraph edited but never blurred, since the grip/menu buttons'
+  // mousedown preventDefault() never steals focus away from it), and
+  // resolveBurst() unconditionally calls hideTableEdgeMenu() as part of its
+  // "any burst resolution invalidates whatever the hover overlay was
+  // tracking" cleanup — regardless of which block that burst belonged to.
+  // Without a guard, the reposition step resurrected the menu anyway:
+  // visible, but with zero highlight and a teMenuKind/teMenuColIndex that
+  // had already been nulled — a click on it did nothing (verified against a
+  // stashed 66727fc build: menu ends hidden:false, hlCount:0, and a second
+  // 對齊 click left the alignment at 'left', unchanged). The fix must leave
+  // it CLOSED here, matching how it already behaved before round 1 ever
+  // touched this function — round 1's own scenario above is unaffected
+  // because there resolveBurst() is never reached at all (no other burst is
+  // open, so switchAwayFrom() no-ops before ever calling it).
+  {
+    const b = await boot(['Alpha paragraph text.', '', '| A | B |', '|---|---|', '| 1 | 2 |', ''].join('\n'));
+    const page = await browser.newPage();
+    await page.goto(b.url, { waitUntil: 'networkidle0' });
+
+    // Leave an uncommitted, unblurred burst open on the PARAGRAPH block —
+    // this is the "burst elsewhere" state resolveBurst() will resolve.
+    await page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="0"] .ed-wys-armed');
+      el.focus();
+      document.execCommand('insertText', false, 'EDITED ');
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const table0 = await page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-type="table"]');
+      return '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]';
+    });
+    const colB = await page.evaluate((ts) => {
+      const table = document.querySelector(ts + ' table');
+      const r = table.tHead.rows[0].cells[1].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, table0);
+    await page.mouse.move(colB.x, colB.y);
+    await page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 3000 });
+    const grip = await page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.mouse.move(grip.x, grip.y);
+    await page.mouse.down(); await page.mouse.up();
+    await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+
+    // The paragraph is STILL focused here (mousedown preventDefault on the
+    // grip/menu never stole it) — clicking 對齊 is what first forces
+    // ensureTableBurstOpen()'s switchAwayFrom() to resolve it.
+    const stillOnParagraph = await page.evaluate(() =>
+      document.activeElement && document.activeElement.classList.contains('ed-wys-armed') &&
+      document.activeElement.closest('.ed-block').getAttribute('data-block-id') === '0');
+    assert.ok(stillOnParagraph,
+      '測試前提失敗：開選單的手勢偷走了段落的焦點，這個場景就沒測到 burst-elsewhere 路徑');
+
+    await page.click('.ed-te-menu-align');
+    await new Promise((r) => setTimeout(r, 300));
+    // Settle past the guarded requestAnimationFrame tick.
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+
+    const state = await page.evaluate((ts) => {
+      const menu = document.querySelector('.ed-te-menu');
+      const th = document.querySelector(ts + ' thead th:nth-child(2)');
+      return {
+        menuHidden: menu.hidden,
+        hlCount: document.querySelectorAll('.ed-te-hl').length,
+        style: th ? th.getAttribute('style') : null,
+      };
+    }, table0);
+    // The align itself still applies (runCycleAlign() captured tableEl/
+    // colIndex as locals before the await, same defence
+    // runDeleteColumn()/runDeleteRow() already use) — only the MENU's
+    // resurrection is what round 2 must prevent.
+    assert.ok(/left/.test(state.style || ''),
+      '對齊本身必須仍然套用（用呼叫當下捕捉的區域變數），got style=' + state.style);
+    assert.strictEqual(state.menuHidden, true,
+      '無關的 burst 收尾合法關閉選單後，選單不可被復活成殭屍，got: ' + JSON.stringify(state));
+    assert.strictEqual(state.hlCount, 0,
+      '選單關閉時不該留著高亮，got hlCount=' + state.hlCount);
+    // Never both hidden:false AND hlCount:0 — that exact combination is the
+    // zombie the re-reviewer measured on 66727fc.
+    assert.ok(!(state.menuHidden === false && state.hlCount === 0),
+      '殭屍選單：可見但沒有高亮、也不再回應點擊，got: ' + JSON.stringify(state));
+
+    await page.close(); b.srv.close();
+    console.log('journey: an unrelated burst resolving mid-align closes the menu cleanly, no zombie — OK');
+  }
+
   await browser.close();
 }
 
