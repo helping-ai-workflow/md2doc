@@ -225,7 +225,7 @@ async function main() {
 
     // open the raw editor via the ⠿ menu's MD 原始碼 item
     await ctx.page.hover(one);
-    await ctx.page.click(one + ' .ed-handle');
+    await pressClick(ctx.page, one + ' .ed-handle', 80);
     await ctx.page.waitForSelector('.ed-handle-menu-btn');
     await ctx.page.evaluate(() => {
       const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -258,7 +258,7 @@ async function main() {
     await ctx.page.keyboard.type('ZZZ');
     const tsel = '.ed-block[data-block-type="table"]';
     await ctx.page.hover(tsel);
-    await ctx.page.click(tsel + ' .ed-handle');
+    await pressClick(ctx.page, tsel + ' .ed-handle', 80);
     await ctx.page.waitForSelector('.ed-handle-menu-btn');
     await ctx.page.evaluate(() => {
       const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -287,7 +287,7 @@ async function main() {
     const ctx = await newPage('# Doc\n\n```\ncode one\n```\n\nBravo paragraph.\n');
     const sel = '.ed-block[data-block-type="code"]';
     await ctx.page.hover(sel);
-    await ctx.page.click(sel + ' .ed-handle');
+    await pressClick(ctx.page, sel + ' .ed-handle', 80);
     await ctx.page.waitForSelector('.ed-handle-menu-btn');
     await ctx.page.evaluate(() => {
       const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -318,7 +318,7 @@ async function main() {
     const ctx = await newPage('alpha one\n\nbravo two\n\ncharlie three\n');
     // B 態：純點擊進 block，再按「清單」
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
-    await ctx.page.click('[data-ed-tb="list"]');
+    await pressClick(ctx.page, '[data-ed-tb="list"]', 80);
     await new Promise((r) => setTimeout(r, 400));
     const b = await ctx.page.evaluate(() => ({
       active: document.activeElement ? document.activeElement.tagName : null,
@@ -335,7 +335,7 @@ async function main() {
     await ctx.page.keyboard.down('Shift');
     await ctx.page.click('.ed-block[data-block-id="1"]');
     await ctx.page.keyboard.up('Shift');
-    await ctx.page.click('[data-ed-tb="list"]');
+    await pressClick(ctx.page, '[data-ed-tb="list"]', 80);
     await new Promise((r) => setTimeout(r, 400));
     const a = await ctx.page.evaluate(() => ({
       activeIsWrapper: !!(document.activeElement &&
@@ -361,7 +361,7 @@ async function main() {
     const ctx = await newPage('## Alpha heading\n\nbravo two\n');
     // 無選取：純點擊進標題本身
     await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
-    await ctx.page.click('[data-ed-tb="headings"]');
+    await pressClick(ctx.page, '[data-ed-tb="headings"]', 80);
     await ctx.page.waitForSelector('.ed-toolbar-menu-btn');
     await ctx.page.evaluate(() => {
       const b = Array.from(document.querySelectorAll('.ed-toolbar-menu-btn'))
@@ -424,7 +424,7 @@ async function main() {
     fs.writeFileSync(imgPath, png);
     const [chooser] = await Promise.all([
       ctx.page.waitForFileChooser(),
-      ctx.page.click('[data-ed-tb="image"]'),
+      pressClick(ctx.page, '[data-ed-tb="image"]', 80),
     ]);
     await chooser.accept([imgPath]);
     await new Promise((r) => setTimeout(r, 900));
@@ -451,11 +451,11 @@ async function main() {
     }));
     const s0 = await read();
     assert.strictEqual(s0.mode, 'edit', '初始必須是 edit');
-    await ctx.page.click('[data-ed-tb="preview"]');
+    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
     await new Promise((r) => setTimeout(r, 300));
     const s1 = await read();
     assert.strictEqual(s1.mode, 'source', '第一次按進 source');
-    await ctx.page.click('[data-ed-tb="preview"]');
+    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
     await new Promise((r) => setTimeout(r, 300));
     const s2 = await read();
     assert.strictEqual(s2.mode, 'edit', '第二次按【必須】回到 edit，preview 已移除');
@@ -537,7 +537,7 @@ async function main() {
       document.dispatchEvent(new Event('selectionchange'));
     });
     await new Promise((r) => setTimeout(r, 250));
-    await ctx.page.click('[data-ed-tb="bold"]');
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
     await new Promise((r) => setTimeout(r, 250));
     // Fixture note: the brief's original sequence pressed Escape here before
     // clicking away. Measured: with a WYS-armed paragraph burst open, Escape
@@ -866,7 +866,7 @@ async function main() {
       // 沒回來」共用同一個失敗訊息，而前者其實是更嚴重的那一個 —— 而且如果
       // 後續狀態剛好healthy，它會直接變成綠的。
       try {
-        await ctx.page.click('[data-ed-tb="insert-after"]');
+        await pressClick(ctx.page, '[data-ed-tb="insert-after"]', 80);
       } catch (e) {
         return shown + '（必需答案 bar-only：後續驗證按不到「在下方插入區塊」' +
           '這顆按鈕本身 —— ' + String(e && e.message || e) + '）';
@@ -884,7 +884,7 @@ async function main() {
       if (st.activeClass.indexOf('ed-source') === -1) {
         return shown + '（必需答案 source：游標必須在 .ed-source textarea 裡）';
       }
-      await ctx.page.click('[data-ed-tb="preview"]');
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
       await new Promise((r) => setTimeout(r, 400));
       const back = await readLeverage(ctx.page);
       if (back.mode !== 'edit' || back.enabled <= 4) {
@@ -964,7 +964,25 @@ async function main() {
         await ctx.page.close(); ctx.srv.close();
         continue;
       }
-      await ctx.page.click('[data-ed-tb="' + row.id + '"]');
+      // v3.3.0 Task 2 finding (out of scope here, see task-2-report.md): at this
+      // 800×600 default viewport, .ed-toolbar's `justify-content: center` +
+      // `overflow-x: auto` overflows by ~32px split across both edges, and
+      // Chromium's flexbox-overflow quirk leaves the START-side overflow
+      // permanently unreachable by scroll (`scrollLeft` cannot go negative to
+      // reveal it) — MEASURED: 'undo' sits at centre x ≈ -5, and
+      // `scrollIntoViewIfNeeded()` cannot recover it. `pressClick()`'s
+      // off-viewport guard (correctly) throws here; a real mouse could never
+      // reach this button either. `page.click()` "succeeds" only because CDP
+      // dispatches the synthetic event at that off-screen coordinate anyway,
+      // which is not something a physical mouse can do. This is a distinct,
+      // pre-existing layout defect, not the ⠿/＋ detachment family Task 1/2
+      // are about — kept on the old driver here so the rest of the matrix can
+      // still run under a real press.
+      if (row.id === 'undo') {
+        await ctx.page.click('[data-ed-tb="' + row.id + '"]');
+      } else {
+        await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
+      }
       await new Promise((r) => setTimeout(r, 450));
       const fail = await checkLeverage(ctx, row.id, row.answer);
       if (fail) bad.push(fail);
@@ -1009,7 +1027,7 @@ async function main() {
     {
       const ctx = await newPage(V2_SEL_MD);
       await ctx.page.hover('.ed-block[data-block-id="1"]');
-      await ctx.page.click('.ed-block[data-block-id="1"] .ed-handle');
+      await pressClick(ctx.page, '.ed-block[data-block-id="1"] .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       const top = await ctx.page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-handle-menu-btn')).map((x) => x.textContent.trim()));
@@ -1035,7 +1053,7 @@ async function main() {
       await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.hover('.ed-block[data-block-id="1"]');
-      await ctx.page.click('.ed-block[data-block-id="1"] .ed-handle');
+      await pressClick(ctx.page, '.ed-block[data-block-id="1"] .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       if (row.convert) {
         await ctx.page.evaluate(() => {
@@ -1098,7 +1116,7 @@ async function main() {
         ['pointerdown', 'mousedown', 'click'].forEach((n) =>
           document.addEventListener(n, () => { window.__v2c[n]++; }, true));
       });
-      await ctx.page.click('[data-ed-tb="bold"]');
+      await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
       await new Promise((r) => setTimeout(r, 700));
       const st = await readLeverage(ctx.page);
       const counts = await ctx.page.evaluate(() => window.__v2c);
@@ -1143,7 +1161,7 @@ async function main() {
       el.focus(); document.dispatchEvent(new Event('selectionchange'));
     });
     await new Promise((r) => setTimeout(r, 300));
-    await ctx.page.click('[data-ed-tb="link"]');
+    await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
     await new Promise((r) => setTimeout(r, 900));
     const held = await ctx.page.evaluate(() => {
       const s = window.getSelection();
@@ -1194,7 +1212,7 @@ async function main() {
       assert.ok(id !== null, 'V2f(' + name + '): fixture block not found');
       const sel = '.ed-block[data-block-id="' + id + '"]';
       await ctx.page.hover(sel);
-      await ctx.page.click(sel + ' .ed-handle');
+      await pressClick(ctx.page, sel + ' .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       await ctx.page.evaluate(() => {
         const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -1221,7 +1239,7 @@ async function main() {
     {
       const ctx = await newPage('# H\n\nAlpha para.\n\nBravo para.\n');
       await ctx.page.hover('.ed-block[data-block-id="0"]');
-      await ctx.page.click('.ed-block[data-block-id="0"] .ed-handle');
+      await pressClick(ctx.page, '.ed-block[data-block-id="0"] .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       await ctx.page.evaluate(() => {
         const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
@@ -1277,7 +1295,7 @@ async function main() {
       document.querySelector('[data-ed-tb="link"]').disabled);
     assert.strictEqual(linkDisabled, false,
       'V2d: 儲存格裡有非空選取時 🔗 必須是 enabled，否則這個情境什麼都沒點到');
-    await ctx.page.click('[data-ed-tb="link"]');
+    await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
     await new Promise((r) => setTimeout(r, 900));
     assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
     const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'bar-only');
@@ -1401,7 +1419,7 @@ async function main() {
       assert.ok(/\bed-wys-armed\b/.test(before.activeClass),
         'V2h(' + name + ') 前提：游標必須在 li 的編輯面上，got ' + JSON.stringify(before));
       await ctx.page.hover(sel);
-      await ctx.page.click(sel + ' .ed-handle');
+      await pressClick(ctx.page, sel + ' .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       if (viaConvert) {
         await ctx.page.evaluate(() => {
@@ -1497,7 +1515,7 @@ async function main() {
       document.querySelector('[data-ed-tb="link"]').disabled);
     assert.strictEqual(dis, false,
       'V2i(primed=' + primed + ') 前提：有非空選取時 🔗 必須是 enabled，否則這一列什麼都沒點到');
-    await ctx.page.click('[data-ed-tb="link"]');
+    await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
     await new Promise((r) => setTimeout(r, 1100));
     assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
     const fail = await checkLeverage(ctx, '🔗 on a paragraph (primed=' + primed + ')', 'caret');
@@ -1849,7 +1867,7 @@ async function main() {
     const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
     await ctx.page.setViewport({ width: 1400, height: 800 });
     await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
-    await ctx.page.click('[data-ed-tb="headings"]');
+    await pressClick(ctx.page, '[data-ed-tb="headings"]', 80);
     await ctx.page.waitForSelector('.ed-toolbar-menu', { timeout: 4000 });
     const before = await overlayState(ctx.page, '.ed-toolbar-menu');
     assertRaised(before, '.ed-toolbar-menu');
@@ -2107,7 +2125,7 @@ async function main() {
       'V4 前提失敗：人類拖曳來源的選取起點必須是 text node，got nodeType ' + picked.startType);
     let boundarySource = 'text';
     if (viaItalic) {
-      await ctx.page.click('[data-ed-tb="italic"]');
+      await pressClick(ctx.page, '[data-ed-tb="italic"]', 80);
       await new Promise((r) => setTimeout(r, 350));
       const b = await ctx.page.evaluate(() => {
         const r = window.getSelection().getRangeAt(0);
@@ -2120,7 +2138,7 @@ async function main() {
         'V4 前提失敗：套斜體後的選取應是元素邊界（reselectAndReposition），got ' + JSON.stringify(b));
       boundarySource = 'element';
     }
-    await ctx.page.click('[data-ed-tb="bold"]');
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
     await new Promise((r) => setTimeout(r, 350));
     return { picked: picked.text, boundarySource };
   }
@@ -2273,7 +2291,7 @@ async function main() {
     assert.ok(overlapped.indexOf('avo') === 0,
       'V4 前提失敗：重疊選取必須真的從 <strong> 內部起頭，got ' + JSON.stringify(overlapped));
     await new Promise((r) => setTimeout(r, 300));
-    await ctx.page.click('[data-ed-tb="bold"]');
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
     await new Promise((r) => setTimeout(r, 350));
     const after = await ctx.page.evaluate(() =>
       document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
@@ -2397,7 +2415,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 150));
       await ctx.page.hover(blockSel);
       await new Promise((r) => setTimeout(r, 120));
-      await ctx.page.click(blockSel + ' .ed-handle');
+      await pressClick(ctx.page, blockSel + ' .ed-handle', 80);
       await ctx.page.waitForSelector(blockSel + ' .ed-handle-menu-btn');
       await ctx.page.evaluate(() => {
         const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
