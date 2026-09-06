@@ -175,18 +175,41 @@ async function saveAndRead(ctx) {
 // —— 真人按滑鼠有按壓時間，合成點擊沒有。實測（見 task-1 report 的量測表）
 // ⠿ / ＋ 選單項在 dirty burst ＋ 按壓 80 ms 時 clickFired = 0。
 // 所有 ⠿ / ＋ / 工具列的案例都必須用這支。
+//
+// 回傳 { heldMs } —— 【實測】的 down→up 間隔，不是要求的 holdMs。呼叫端拿它
+// 跟這台機器自己的 commit round trip 比對，把「這一列到底有沒有能力紅」變成
+// 案例自己的前提斷言（見下面階段 0 案例的 __renderApplyMs）。刻意在發出
+// mouse.up() 【之前】取時間，所以它是真實間隔的【下界】—— 前提斷言因此偏嚴，
+// 不會因為 CDP 往返把自己算得比實際寬鬆。
 async function pressClick(page, selector, holdMs) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
     if (!el) return null;
+    if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded();
     const r = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2,
+             w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight };
   }, selector);
   assert.ok(box, 'pressClick: 找不到 ' + selector);
+  // 元素【存在但按不到】時 puppeteer 不會抱怨，會安靜地按在別的東西上。
+  // 實測 puppeteer 24.x / 800×400：`display:none` 的元素與
+  // `position:absolute; top:3000px` 的元素，down / up / click 三個事件的
+  // target 全部是 <body>。零矩形讓中心點變成 (0,0)，那是個 truthy 物件，
+  // 所以只檢查「有沒有拿到 box」擋不住 —— 案例會按到空氣然後照樣綠，
+  // 正是本 repo 已經產出過三次的空綠形狀。
+  assert.ok(box.w > 0 && box.h > 0,
+    'pressClick: ' + selector + ' 的矩形是 ' + box.w + '×' + box.h +
+    '，按壓會落在別的元素上（元素存在但按不到）');
+  assert.ok(box.x >= 0 && box.y >= 0 && box.x <= box.vw && box.y <= box.vh,
+    'pressClick: ' + selector + ' 的中心點 (' + Math.round(box.x) + ',' + Math.round(box.y) +
+    ') 落在 ' + box.vw + '×' + box.vh + ' 視窗之外，按壓不會打在它上面');
   await page.mouse.move(box.x, box.y);
   await page.mouse.down();
+  const t0 = Date.now();
   if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
+  const heldMs = Date.now() - t0;
   await page.mouse.up();
+  return { heldMs };
 }
 
 async function main() {
@@ -2292,17 +2315,51 @@ async function main() {
         document.addEventListener('click', (e) => {
           if (e.target && e.target.closest && e.target.closest(s)) window.__itemClicks++;
         }, true);
+        // 這台機器把一次 commit 從「發出 /api/render」走到「.content 的
+        // childList 真的被改掉」要多久。缺陷要現形的條件就是這段時間【短於】
+        // 按壓時間；下面的前提斷言拿它跟實測的 heldMs 比，讓「這一列有沒有
+        // 能力紅」由機器自己回答，而不是賭 80 這個常數夠大。
+        window.__renderApplyMs = [];
+        const contentEl = document.querySelector('.content');
+        let started = null;
+        const origFetch = window.fetch;
+        window.fetch = function (u) {
+          if (String(u).indexOf('/api/render') !== -1 && started === null) started = performance.now();
+          return origFetch.apply(this, arguments);
+        };
+        new MutationObserver(() => {
+          if (started === null) return;
+          window.__renderApplyMs.push(performance.now() - started);
+          started = null;
+        }).observe(contentEl, { childList: true });
         const it = Array.from(document.querySelectorAll(s))
           .find((e) => e.textContent.trim() === t);
         if (!it) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
         it.setAttribute('data-journey-target', '1');
       }, itemSel, itemText);
-      await pressClick(ctx.page, '[data-journey-target="1"]', hold);
+      const press = await pressClick(ctx.page, '[data-journey-target="1"]', hold);
       await new Promise((r) => setTimeout(r, 500));
       const clicked = await ctx.page.evaluate(() =>
         (window.__itemClicks > 0 ? 'ok' : 'menu-gone'));
       const after = await ctx.page.evaluate(() =>
         document.querySelectorAll('.ed-block').length);
+      const applyMs = await ctx.page.evaluate(() => window.__renderApplyMs.slice());
+      // 前提：這一列必須【有能力】抓到缺陷。缺陷的形狀是「commit 的 render
+      // 在 mouseup 之前就把 block 換掉」，所以按壓必須比這台機器的
+      // fetch→DOM 換好還久。在 round trip 超過按壓時間的機器上，未修版本
+      // 的這一列會【前後都綠】—— 網子靜靜失去偵測力而沒有任何人被告知。
+      // 這條斷言把那個情境變成一次響亮的失敗（訊息直接說要調大 hold）。
+      if (hold > 0) {
+        assert.ok(applyMs.length > 0,
+          label + '（hold=' + hold + 'ms）前提失敗：整個手勢一發 /api/render 都沒有，' +
+          '量不到這台機器的 commit round trip');
+        const worst = Math.max.apply(null, applyMs);
+        assert.ok(press.heldMs > worst,
+          label + '（hold=' + hold + 'ms）前提失敗：實測按壓 ' + press.heldMs +
+          'ms，但這台機器把一次 commit 的 /api/render 套用到 DOM 要 ' + Math.round(worst) +
+          'ms —— 按壓沒有超過 round trip，這一列在【未修版本上也會綠】，' +
+          '偵測力是 0。請把 hold 調到明顯大於 ' + Math.round(worst) + 'ms。');
+      }
       assert.strictEqual(clicked, 'ok',
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
@@ -2322,6 +2379,10 @@ async function main() {
   // （磁碟拿到那些字；表格連沒碰過的分隔列都被重新序列化成 `|---|`），
   // 按壓 80 ms 時整個手勢死掉、raw 編輯器根本沒開。修好委派清單之後三個
   // 按壓時間走的是同一條丟棄分支，所以這裡三個都測。
+  //
+  // 這一族的偵測力【不】綁在按壓時間上：hold=0 那一列在未修版本上就已經紅
+  // （raw 顯示 "Alpha paragraph.zz"），所以不需要上面那條 round-trip 前提
+  // 斷言 —— 換一台機器頂多讓 80ms 那列變得跟 0ms 那列同義，紅的還是紅的。
   for (const [md, blockSel, surfaceSel, typed, label] of [
     ['# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n',
      '.ed-block[data-block-id="1"]', '.ed-wys-armed', 'zz', '段落'],
