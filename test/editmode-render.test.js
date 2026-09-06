@@ -241,6 +241,11 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   //     physically covers the image / outline / preview buttons at 420px
   //     (measured: elementFromPoint resolves to the span, and a real click
   //     never reaches the button's listener).
+  // v3.2.1 final wave, M5: the slot is no longer EMPTY — paintModeStatus()
+  // writes 「編輯」/「原始碼」 into it at mount and on every mode switch — so
+  // the assertion messages below say "fixed slot", not "empty fixed slot".
+  // Nothing about the rule itself changed: the box is the same 7rem
+  // `position: fixed` box whether or not it has text in it.
   // Both are invisible to every other assertion in the suite, so they are
   // pinned here, at the source of the stylesheet, rather than through a
   // browser. The CSS comment above the rule in lib/md2doc.js explains what
@@ -252,7 +257,7 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     const rule = m[0];
     assert.ok(/pointer-events:\s*none/.test(rule),
       '.ed-toolbar-status must keep `pointer-events: none` — without it the ' +
-      'empty fixed slot swallows real clicks on image/outline/preview at ' +
+      'fixed slot swallows real clicks on image/outline/preview at ' +
       'narrow widths. Rule was:\n' + rule);
     assert.ok(!/margin-left:\s*auto/.test(rule),
       '.ed-toolbar-status must NOT use `margin-left: auto` — it defeats ' +

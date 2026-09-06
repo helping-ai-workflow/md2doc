@@ -9,19 +9,29 @@ function eq(actual, expected, msg) {
   checks += 1;
 }
 
-// --- MODES / next(): the three-state cycle ----------------------------------
+// --- MODES / next(): the two-state cycle ------------------------------------
+// v3.2.1: was a three-state cycle edit -> source -> preview -> edit. Preview
+// is removed, so these assertions are migrated, not dropped: each one still
+// pins the same property (roster, each edge of the cycle, the cycle closing)
+// against the two-state machine.
 
-eq(ds.MODES, ['edit', 'source', 'preview'], 'MODES is the exact order the plan specifies');
+eq(ds.MODES, ['edit', 'source'], 'MODES is the exact order the plan specifies');
 
 eq(ds.next('edit'), 'source', 'edit -> source');
-eq(ds.next('source'), 'preview', 'source -> preview');
-eq(ds.next('preview'), 'edit', 'preview -> edit: the cycle closes');
+eq(ds.next('source'), 'edit', 'source -> edit: the cycle closes (was -> preview)');
+
+// The removed state deserves an assertion as much as its presence did: the
+// user-visible defect was that pressing the mode button twice landed in a
+// third state with no grips, so 'preview' being unreachable is the fix.
+eq(ds.MODES.indexOf('preview'), -1, "'preview' is gone from MODES");
+eq(ds.next('preview'), 'edit',
+  "a stale 'preview' is unrecognized now and falls back to the first state");
 
 // Walking the full cycle from any starting point returns to that same start.
 for (const start of ds.MODES) {
   let m = start;
   for (let i = 0; i < ds.MODES.length; i += 1) m = ds.next(m);
-  eq(m, start, 'three next() calls from ' + start + ' return to ' + start);
+  eq(m, start, ds.MODES.length + ' next() calls from ' + start + ' return to ' + start);
 }
 
 // Defensive: an unrecognized mode does not throw, and lands on a real mode.
