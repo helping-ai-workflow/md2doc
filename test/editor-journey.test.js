@@ -171,6 +171,24 @@ async function saveAndRead(ctx) {
   return fs.readFileSync(ctx.mdPath, 'utf8');
 }
 
+// v3.3.0 階段 0: 合成 .click() 對「dirty burst + 真人按壓時間」那一族缺陷是盲的
+// —— 真人按滑鼠有按壓時間，合成點擊沒有。實測（見 task-1 report 的量測表）
+// ⠿ / ＋ 選單項在 dirty burst ＋ 按壓 80 ms 時 clickFired = 0。
+// 所有 ⠿ / ＋ / 工具列的案例都必須用這支。
+async function pressClick(page, selector, holdMs) {
+  const box = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, selector);
+  assert.ok(box, 'pressClick: 找不到 ' + selector);
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.down();
+  if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
+  await page.mouse.up();
+}
+
 async function main() {
   browser = await puppeteer.launch({ args: ['--no-sandbox'] });
 
@@ -2243,6 +2261,110 @@ async function main() {
       '重疊選取之後磁碟上不得留下任何 <strong>，disk:\n' + disk);
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V4 corollary — an overlapping selection removes the mark — OK');
+  }
+
+  // ── 階段 0: dirty burst ＋ 真人按壓時間下，⠿ 與 ＋ 的選單項必須真的動作 ──
+  //
+  // 缺陷在【選單項】的那一下按壓上，不在開選單的那一下：`.ed-handle` /
+  // `.ed-insert` 早就在 wireBlockSelection() 的委派 preventDefault 清單裡，
+  // `.ed-handle-menu-btn` / `.ed-insert-menu-btn`（＝選單項本身的 class）不在。
+  // 所以開選單用 page.click() 即可，被測的那一下才用 pressClick()。
+  // `clicked` 是【真的抵達選單項的 click 事件數】——按壓期間被 detach 的
+  // 按鈕收不到 click，這正是要測的量，不是事後再補一發合成點擊。
+  for (const [openBtn, itemSel, itemText, label] of [
+    ['.ed-handle', '.ed-handle-menu-btn', '建立副本', '⠿ 建立副本'],
+    ['.ed-insert', '.ed-insert-menu-btn', '段落', '＋ 段落'],
+  ]) {
+    for (const hold of [0, 80]) {
+      const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      const one = '.ed-block[data-block-id="1"]';
+      const before = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      await ctx.page.click(one + ' .ed-wys-armed');
+      await ctx.page.keyboard.type('zz');          // 讓 burst 變 dirty
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.hover(one);
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.click(one + ' ' + openBtn);
+      await ctx.page.waitForSelector(one + ' ' + itemSel);
+      await ctx.page.evaluate((s, t) => {
+        window.__itemClicks = 0;
+        document.addEventListener('click', (e) => {
+          if (e.target && e.target.closest && e.target.closest(s)) window.__itemClicks++;
+        }, true);
+        const it = Array.from(document.querySelectorAll(s))
+          .find((e) => e.textContent.trim() === t);
+        if (!it) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
+        it.setAttribute('data-journey-target', '1');
+      }, itemSel, itemText);
+      await pressClick(ctx.page, '[data-journey-target="1"]', hold);
+      await new Promise((r) => setTimeout(r, 500));
+      const clicked = await ctx.page.evaluate(() =>
+        (window.__itemClicks > 0 ? 'ok' : 'menu-gone'));
+      const after = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      assert.strictEqual(clicked, 'ok',
+        label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
+      assert.ok(after > before,
+        label + '（hold=' + hold + 'ms）：block 數應增加，got ' + before + ' → ' + after);
+      assert.strictEqual(ctx.errs.length, 0,
+        label + '（hold=' + hold + 'ms）：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: ' + label + ' survives a real mouse press — OK');
+  }
+
+  // ── 階段 0 的開放決定裁定 (a)：⠿ → MD 原始碼 維持【丟棄】語意 ──────────
+  //
+  // 量測表與裁定理由寫在 .superpowers/sdd/2026-09-07-md2doc-v3.3.0/
+  // task-1-report.md。這一條把裁定釘在磁碟位元組上，理由是「丟棄」在 HEAD
+  // 上【真人永遠碰不到】：實測按壓 0 / 5 ms 時 mousedown 的 blur 搶先提交
+  // （磁碟拿到那些字；表格連沒碰過的分隔列都被重新序列化成 `|---|`），
+  // 按壓 80 ms 時整個手勢死掉、raw 編輯器根本沒開。修好委派清單之後三個
+  // 按壓時間走的是同一條丟棄分支，所以這裡三個都測。
+  for (const [md, blockSel, surfaceSel, typed, label] of [
+    ['# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n',
+     '.ed-block[data-block-id="1"]', '.ed-wys-armed', 'zz', '段落'],
+    ['# Doc\n\nAnchor para.\n\n| A | B |\n| --- | --- |\n| one | two |\n\nTail para.\n',
+     '.ed-block[data-block-type="table"]', '.ed-wys-cell', 'ZZZ', '表格'],
+  ]) {
+    for (const hold of [0, 5, 80]) {
+      const where = '⠿ → MD 原始碼 / ' + label + '（hold=' + hold + 'ms）';
+      const ctx = await newPage(md);
+      await ctx.page.click(blockSel + ' ' + surfaceSel);
+      await ctx.page.keyboard.type(typed);
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.hover(blockSel);
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.click(blockSel + ' .ed-handle');
+      await ctx.page.waitForSelector(blockSel + ' .ed-handle-menu-btn');
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('前提失敗：⠿ 選單裡沒有 MD 原始碼');
+        it.setAttribute('data-journey-target', '1');
+      });
+      await pressClick(ctx.page, '[data-journey-target="1"]', hold);
+      await new Promise((r) => setTimeout(r, 600));
+      const seen = await ctx.page.evaluate(() => {
+        const ta = document.querySelector('textarea.ed-raw');
+        return { raw: ta ? ta.value : null, title: document.title };
+      });
+      assert.notStrictEqual(seen.raw, null,
+        where + '：raw 編輯器必須真的開起來（HEAD 上 hold=80 時整個手勢死掉）');
+      assert.strictEqual(seen.raw.indexOf(typed), -1,
+        where + '：raw 編輯器不得顯示被丟棄的打字，got ' + JSON.stringify(seen.raw));
+      assert.strictEqual(seen.title.indexOf('●'), -1,
+        where + '：丟棄之後分頁標題不得有未存檔標記，got ' + JSON.stringify(seen.title));
+      const disk = await saveAndRead(ctx);
+      assert.strictEqual(disk, md,
+        where + '：丟棄語意要求磁碟逐位元組不變，got:\n' + disk);
+      assert.strictEqual(ctx.errs.length, 0,
+        where + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: ⠿ → MD 原始碼 discards a dirty ' + label +
+      ' burst under a real mouse press — OK');
   }
 
   await browser.close();
