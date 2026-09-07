@@ -2556,6 +2556,92 @@ async function main() {
       ' burst under a real mouse press — OK');
   }
 
+  // ── 地基 B: undo 一個標記不得連同剛打的整句一起丟掉 ──────────────────
+  //
+  // 缺陷形狀（量測，見 task-3-report.md）：`noteTyping()` 沒有 timer，一段
+  // 打字自己永遠不會 checkpoint；而 mark toggle 在【改完 DOM 之後】才 snap，
+  // 於是那一筆 snapshot 同時裝著「打的字」與「粗體」。一次 undo 把兩者一起
+  // 退掉，段落回到全新狀態。
+  //
+  // 這幾列【不】用 armDetachProbe()/assertDetachCapable() 的前提斷言。那對
+  // helper 量的是 `/api/render` → `.content` childList 的 commit round trip，
+  // 而這個手勢一發 `/api/render` 都沒有：包住 window.fetch 實測，從開頁到
+  // 手勢做完為止 `/api/render` 的呼叫數是 0（工具列與原生 Ctrl+B 兩條都是），
+  // 所以 assertDetachCapable() 會直接卡在它自己的「一發都沒有」前提上。
+  // 這幾列測的是 undo 粒度，不是按壓跟 commit 賽跑 —— 缺陷在 mouseup 之後
+  // 才由 Ctrl+Z 顯現，按壓長短改變不了它。hold 仍用 80ms 以符合本檔案的
+  // 真實滑鼠按壓慣例。
+  //
+  // `markRe` 是每一列自己的前提：實測這幾條路徑產出的標籤【不同】（工具列
+  // 走 wrapRangeIn() 給 <strong>，原生 execCommand 給 <b>／<i>／<u>），
+  // 用一條寬鬆到全部都收的 regex 會讓「按了但什麼都沒發生」也算過。
+  const nativeKey = (code) => async (page) => {
+    await page.keyboard.down('Control');
+    await page.keyboard.press(code);
+    await page.keyboard.up('Control');
+  };
+  for (const [label, applyMark, markRe] of [
+    ['工具列', async (page) => { await pressClick(page, '[data-ed-tb="bold"]', 80); },
+     /<strong>typed<\/strong>/],
+    // 原生 Ctrl+B／I／U：md2doc 沒有這三個綁定 —— handleBurstKeydown() 只對
+    // Tab／Enter／Escape／Ctrl+Z／Ctrl+Y 有分支，其餘按鍵直接落到瀏覽器自己
+    // 的 execCommand。實測（Chromium / puppeteer 24.42.0，就是下面這個手勢）
+    // 三者各派 `beforeinput`/`input` 一次，inputType 依序是 formatBold／
+    // formatItalic／formatUnderline，且 beforeinput 當下 innerHTML 還沒有那顆
+    // 標籤 —— 這條路徑一個 snapBurstIfActive() 呼叫端都不經過。Ctrl+B 是
+    // brief 列的驗收條件；Ctrl+I／Ctrl+U 是同機制的順帶，一起釘在這裡而不是
+    // 只寫在註解裡宣稱。
+    ['原生 Ctrl+B', nativeKey('KeyB'), /<b>typed<\/b>/],
+    ['原生 Ctrl+I', nativeKey('KeyI'), /<i>typed<\/i>/],
+    ['原生 Ctrl+U', nativeKey('KeyU'), /<u>typed<\/u>/],
+  ]) {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type(' typed sentence');
+    await new Promise((r) => setTimeout(r, 500));   // 超過 400ms 的 noteTyping 門檻
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const t = el.firstChild;
+      const i = el.textContent.indexOf('typed');
+      const r = document.createRange();
+      r.setStart(t, i); r.setEnd(t, i + 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await applyMark(ctx.page);
+    await new Promise((r) => setTimeout(r, 250));
+    // 前提：標記真的套上去了。少了這一發，一個「按了但什麼都沒發生」的
+    // 手勢會讓底下兩條斷言【原封不動地綠】—— 字還在、也沒有標記標籤，
+    // 正是本 repo 已經產出過三次的空綠形狀。
+    const marked = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.ok(markRe.test(marked),
+      label + ' 前提失敗：' + markRe + ' 沒套上去，這一列量不到 undo 粒度，got: ' +
+      JSON.stringify(marked));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 250));
+    const text = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').textContent);
+    assert.ok(text.indexOf('typed sentence') !== -1,
+      label + '：undo 只該退掉粗體，不該退掉打的字，got: ' + JSON.stringify(text));
+    assert.strictEqual(text.indexOf('<strong>'), -1, label + '：標記應已退掉');
+    // 上面那條是 brief 的原文，量的是 textContent —— textContent 永遠不含
+    // 標籤，所以它恆真、抓不到任何東西。這一條才是真的在問「粗體退掉了沒」。
+    const html = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
+    assert.ok(!/<(strong|b|em|i|u)\b/.test(html),
+      label + '：undo 之後不得留著標記標籤，got: ' + JSON.stringify(html));
+    assert.strictEqual(ctx.errs.length, 0,
+      label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: undo of a mark (' + label +
+      ') keeps the sentence you just typed — OK');
+  }
+
   await browser.close();
 }
 
