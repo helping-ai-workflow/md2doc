@@ -2908,6 +2908,121 @@ async function main() {
   }
   console.log('journey: a trailing space in a nested list no longer eats the item above — OK');
 
+  // ── N4: a document that is ALREADY degraded when it opens ─────────────────
+  //
+  // blockmap.js empties the whole subtree and flags it `unlocatable` when it
+  // cannot locate an item's nested list. Nothing in the corpus reaches that
+  // branch — no markdown found so far makes the search fail — so the path had
+  // no end-to-end exercise at all, and the refusal wording it routes to had
+  // never been RENDERED by anything.
+  //
+  // This row renders it. `lib/editor/blockmap.js` looks `marked.lexer` up at
+  // call time and the harness runs the editor server IN THIS PROCESS, so
+  // wrapping the lexer for the duration of the row makes the server serve a
+  // genuinely degraded document — the open-time case, which is the one a
+  // /api/render-only signal would miss. The wrapper prefixes every nested list
+  // token's `raw` with text that appears nowhere in the parent's `item.text`,
+  // which is exactly the condition the widened search cannot recover from; the
+  // production code is untouched.
+  //
+  // Restore matters more here than in test/blockmap.test.js: `npm test` forks a
+  // process per file, but every row in THIS file shares one process, so a leaked
+  // wrapper would degrade every nested list served after it. Hence the
+  // `finally`, and hence the two checks after it — one on buildBlockMap
+  // directly, one on a freshly served page.
+  {
+    const { marked } = require('marked');
+    const { buildBlockMap } = require('../lib/editor/blockmap.js');
+    const realLexer = marked.lexer;
+    const MD = '# H\n\n- alpha\n  - beta\n    - deep\n- gamma\n';
+    try {
+      marked.lexer = function () {
+        const toks = realLexer.apply(this, arguments);
+        const walk = (lt) => {
+          for (const it of lt.items || []) {
+            for (const tk of it.tokens || []) {
+              if (tk.type === 'list') { tk.raw = ' UNFINDABLE\n' + tk.raw; walk(tk); }
+            }
+          }
+        };
+        for (const t of toks) if (t.type === 'list') walk(t);
+        return toks;
+      };
+      const ctx = await newPage(MD);
+      // 前提：伺服器真的送出了降級的文件。少了它，wrapper 沒生效時下面每一條
+      // 斷言都會用一份正常文件去測，然後安靜地綠。
+      const served = await ctx.page.evaluate(() => window.__ED__.blocks);
+      assert.deepStrictEqual(
+        served.filter((b) => b.unlocatable === true).map((b) => b.indent), [0, 1, 2],
+        'N4 open-time 前提失敗：GET /edit/:id 的 payload 沒有帶降級的整棵子樹，got ' +
+        JSON.stringify(served));
+      const target = await ctx.page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+          .find((x) => {
+            const r = window.__ED__.blocks.find((q) => q.id === Number(x.getAttribute('data-block-id')));
+            return r && r.unlocatable === true;
+          });
+        return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+      });
+      assert.ok(target, 'N4 open-time 前提失敗：畫面上找不到那個降級的 li');
+      await ctx.page.click(target + ' > .ed-li-text');
+      await new Promise((r) => setTimeout(r, 400));
+      const banner = await ctx.page.evaluate(() => {
+        const d = document.querySelector('.ed-conflict');
+        return d ? d.textContent.trim() : null;
+      });
+      // 這是本列的內容：降級子樹拿到的是【它自己那句】，不是同行巢狀那句。
+      assert.strictEqual(banner, '這段巢狀清單對不到自己的來源行，無法刪除或直接編輯' + '✕',
+        'N4：點進一個降級的清單項，必須出現降級專用的那句話 —— 不是 ' +
+        '「此項目沒有自己的來源行…」（那句屬於 - - a 那種同行巢狀，它真的沒有來源行），' +
+        'got ' + JSON.stringify(banner));
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0,
+        'N4：降級的區塊不得開出 raw textarea —— 反轉範圍會讓 commit 變成插入');
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), MD,
+        'N4：被拒絕的手勢必須讓檔案逐位元組不變');
+      // 血濺範圍：降級停在子樹，兄弟項照常可編輯。
+      await ctx.page.evaluate(() => {
+        const d = document.querySelector('.ed-conflict button');
+        if (d) d.click();
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      const gsel = await ctx.page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+          .find((x) => (x.textContent || '').indexOf('gamma') !== -1);
+        return '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]';
+      });
+      await ctx.page.click(gsel + ' > .ed-li-text');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(
+        await ctx.page.evaluate((sel) => !!document.querySelector(sel + ' .ed-wys-armed'), gsel),
+        true, 'N4：- gamma 沒有 unlocatable 的子項，必須照常可編輯');
+      assert.strictEqual(
+        await ctx.page.evaluate(() => !!document.querySelector('.ed-conflict')), false,
+        'N4：點 - gamma 不該出現任何拒絕橫幅');
+      assert.strictEqual(ctx.errs.length, 0,
+        'N4 open-time：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    } finally {
+      marked.lexer = realLexer;
+    }
+    // 還原檢查一：直接問 buildBlockMap。
+    const sane = buildBlockMap('- a\n  - b\n- c\n').blocks;
+    assert.strictEqual(sane.filter((b) => b.unlocatable).length, 0,
+      'N4：lexer wrapper 必須還原 —— 洩漏的話這個檔案後面每一列的巢狀清單都會被降級，got ' +
+      JSON.stringify(sane));
+    // 還原檢查二：真的再送一份文件出去。單元層綠而伺服器仍然壞掉是可能的
+    // （例如 wrapper 被別的模組實例接住），所以兩層都要問。
+    const fresh = await newPage('# H\n\n- one\n  - two\n- three\n');
+    assert.deepStrictEqual(
+      await fresh.page.evaluate(() =>
+        window.__ED__.blocks.filter((b) => b.type === 'li').map((b) => [b.startLine, b.endLine])),
+      [[3, 3], [4, 4], [5, 5]],
+      'N4：還原之後伺服器必須再度送出正常的行範圍');
+    await fresh.page.close(); fresh.srv.close();
+  }
+  console.log('journey: a document that opens already degraded refuses with its own wording — OK');
+
   await browser.close();
 }
 

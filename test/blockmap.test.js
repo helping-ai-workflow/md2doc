@@ -288,10 +288,10 @@ assert.deepStrictEqual(
 // item above it.
 //
 // Provenance of the three shapes, which is not uniform:
-//   * the first two are the markdown test/editor-journey.test.js drives — it
-//     presses Enter on one and Tab on the other, a difference this tier cannot
-//     express, which is why both strings are journey rows and only one of them
-//     earns a second row here;
+//   * the first two are the markdown test/editor-journey.test.js drives. It
+//     presses Enter on each of them and then Tab on the first one again — three
+//     rows over two strings, a split this tier cannot express, which is why the
+//     two strings earn only one entry apiece here;
 //   * the third is not a journey fixture at all. It came out of client.js's OWN
 //     serialiser: capturing every markdown string a full journey run handed
 //     buildBlockMap() turned up '# H\n\n- alpha\n  - beta\n    - \n- gamma\n'
@@ -322,7 +322,31 @@ assert.deepStrictEqual(
     // The check that bites: in each of these shapes every item owns exactly one
     // source line and the blocks come out in document order, so the k-th li
     // block must own the k-th MARKER LINE of the source, start and end.
+    //
+    // That is NOT a general rule about block maps, and the difference matters to
+    // whoever adds the fourth fixture. '- a\n  cont\n- b\n' breaks the endLine
+    // half — the item owns two lines — and a fenced block holding a lookalike
+    // '- fake' breaks the startLine half, because the marker scan below would
+    // count a line no li owns. Both are CORRECT block maps that this invariant
+    // would call wrong. So the fixture's shape is asserted first: fail here,
+    // with this message, rather than in the invariant with a confusing one that
+    // sends the next person into blockmap.js.
     const lines = md.split('\n');
+    const contentLines = lines.filter((ln) =>
+      ln !== '' && /^[ \t]/.test(ln) && !/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln));
+    assert.deepStrictEqual(contentLines, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — every indented line must itself be a list marker. An ' +
+      'indented line that is not one is item content (a continuation, or a line ' +
+      'inside a fence), which means some item owns more than one line and the ' +
+      'invariant no longer describes a correct map. Got ' +
+      JSON.stringify(contentLines));
+    const fences = lines.filter((ln) => /^\s*(?:```|~~~)/.test(ln));
+    assert.deepStrictEqual(fences, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no fenced block, at any indent. A fence can hold a line ' +
+      'that looks like a marker to the scan below but belongs to no li. Got ' +
+      JSON.stringify(fences));
     const markerLines = [];
     lines.forEach((ln, i) => {
       if (/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln)) markerLines.push(i + 1);
@@ -370,9 +394,9 @@ assert.deepStrictEqual(
 
 // ── N4: the degraded-subtree path, driven through the REAL search ──────────
 //
-// The seven `unlocatable === undefined` assertions above are all negative: they
-// would stay green forever if the field were renamed, or if it stopped being set
-// at all. This is their positive counterpart, and it does not stub the flag onto
+// Every `unlocatable === undefined` assertion above is negative: they would all
+// stay green forever if the field were renamed, or if it stopped being set at
+// all. This is their positive counterpart, and it does not stub the flag onto
 // a record — it makes the real childListStartOffsets() search genuinely fail, by
 // perturbing what marked hands it, and then asserts on what the real
 // pushListItemBlocks() does about that.
@@ -413,11 +437,17 @@ assert.deepStrictEqual(
     'the WHOLE subtree under the unlocatable child degrades — the parent whose ' +
     'search failed and every descendant built off its guessed offset, got ' +
     JSON.stringify(blocks));
-  blocks.filter((b) => b.unlocatable === true).forEach((b) => {
+  // Addressed by POSITION, not by filtering on the flag. Filtering meant the
+  // loop body ran zero times on a build that sets no flag — an assertion that
+  // asserts nothing on exactly the build it is meant to catch. The first three
+  // blocks ARE the subtree (C1 has just pinned the count at four, and the walk
+  // emits parent-then-descendants before the next sibling), so this runs
+  // everywhere and reds on a build that leaves them addressing real lines.
+  blocks.slice(0, 3).forEach((b) => {
     assert.ok(b.endLine < b.startLine,
-      'a degraded block must carry an EMPTY range, so client.js\'s ' +
-      'blockOwnsNoLine() refuses it at every arming and commit boundary, got [' +
-      b.startLine + '-' + b.endLine + ']');
+      'every block of the degraded subtree must carry an EMPTY range, so ' +
+      'client.js\'s blockOwnsNoLine() refuses it at every arming and commit ' +
+      'boundary, got [' + b.startLine + '-' + b.endLine + ']');
   });
   // The sibling is NOT collateral: its cursor advance comes from `item.raw`'s
   // newline count, which the failed search never touched.
