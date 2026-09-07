@@ -324,16 +324,29 @@ assert.deepStrictEqual(
     // block must own the k-th MARKER LINE of the source, start and end.
     //
     // That is NOT a general rule about block maps, and the difference matters to
-    // whoever adds the fourth fixture. '- a\n  cont\n- b\n' breaks the endLine
-    // half — the item owns two lines — and a fenced block holding a lookalike
-    // '- fake' breaks the startLine half, because the marker scan below would
-    // count a line no li owns. Both are CORRECT block maps that this invariant
-    // would call wrong. So the fixture's shape is asserted first: fail here,
-    // with this message, rather than in the invariant with a confusing one that
-    // sends the next person into blockmap.js.
+    // whoever adds the fourth fixture. Four shapes produce a CORRECT map that
+    // this invariant would call wrong, and each is checked for below:
+    //
+    //   '- a\n  cont\n- b\n'      indented continuation — the item owns two
+    //                             lines, so the endLine half breaks.
+    //   '- a\ncont\n- b\n'        lazy continuation, unindented — same, and it
+    //                             slips past an indent-based check.
+    //   a fence holding '- fake'  the marker scan below counts a line no li
+    //                             owns, so the startLine half breaks. At any
+    //                             indent: a top-level fence is not indented, so
+    //                             the fence check is the only one that sees it.
+    //   '- - a\n- b\n'            same-line nesting — TWO items begin on one
+    //                             marker line, so there are more li blocks than
+    //                             marker lines. Not hypothetical: this very file
+    //                             fixtures that shape a few assertions down.
+    //
+    // Asserting the fixture's shape first means a fourth fixture fails HERE,
+    // with a message naming the shape, instead of failing the invariant with a
+    // confusing one that sends the next person into blockmap.js.
     const lines = md.split('\n');
+    const isMarkerLine = (ln) => /^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln);
     const contentLines = lines.filter((ln) =>
-      ln !== '' && /^[ \t]/.test(ln) && !/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln));
+      ln !== '' && /^[ \t]/.test(ln) && !isMarkerLine(ln));
     assert.deepStrictEqual(contentLines, [],
       label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
       'invariant below — every indented line must itself be a list marker. An ' +
@@ -347,6 +360,28 @@ assert.deepStrictEqual(
       'invariant below — no fenced block, at any indent. A fence can hold a line ' +
       'that looks like a marker to the scan below but belongs to no li. Got ' +
       JSON.stringify(fences));
+    const sameLineNests = lines.filter((ln) =>
+      /^\s*(?:[-*+]|\d+[.)])\s+(?:[-*+]|\d+[.)])(\s|$)/.test(ln));
+    assert.deepStrictEqual(sameLineNests, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no same-line nesting. Two items beginning on one line ' +
+      'means more li blocks than marker lines, and the outer one owns no line at ' +
+      'all. Got ' + JSON.stringify(sameLineNests));
+    const lazyLines = [];
+    let inListLine = false;
+    lines.forEach((ln) => {
+      if (ln.trim() === '') { inListLine = false; return; }
+      if (isMarkerLine(ln)) { inListLine = true; return; }
+      // Unindented, non-blank, straight after a list line: CommonMark folds it
+      // into that item (lazy continuation), so the item owns two lines while
+      // staying invisible to the indent check above.
+      if (inListLine && !/^[ \t]/.test(ln)) { lazyLines.push(ln); return; }
+      inListLine = false;
+    });
+    assert.deepStrictEqual(lazyLines, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no lazy (unindented) continuation. Got ' +
+      JSON.stringify(lazyLines));
     const markerLines = [];
     lines.forEach((ln, i) => {
       if (/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln)) markerLines.push(i + 1);

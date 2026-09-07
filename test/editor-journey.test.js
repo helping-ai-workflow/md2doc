@@ -2938,6 +2938,19 @@ async function main() {
     try {
       marked.lexer = function () {
         const toks = realLexer.apply(this, arguments);
+        // Degrade THIS row's document and nothing else. Buys one thing: a row
+        // added later inside this block — between the wrapper and its
+        // `finally` — runs against a NORMAL editor instead of a silently
+        // degraded one. Does NOT buy a loud failure: such a row would still
+        // pass with the wrapper installed, it just would not be measuring what
+        // it thought. `marked.lexer(src)` takes the markdown as its first
+        // argument, and this fixture reaches it unchanged: md2doc.js's only
+        // transform between the file's bytes and the lex is the '[[...]]'
+        // citation rewrite that builds `mdPre`, and this string has no
+        // '[[...]]'. That is not left as reasoning either — if the guard
+        // rejected the fixture, the `served` precondition below would fail,
+        // because the served payload would then carry no degraded block.
+        if (arguments[0] !== MD) return toks;
         const walk = (lt) => {
           for (const it of lt.items || []) {
             for (const tk of it.tokens || []) {
