@@ -2864,6 +2864,50 @@ async function main() {
     console.log('journey: undo after Ctrl+B + more typing keeps the bold — OK');
   }
 
+  // ── N4: 巢狀清單的尾隨空白不得讓上一項的內容被覆蓋 ────────────────────
+  //
+  // marked 把巢狀 list token 的 `raw` 最後一行的尾隨空白剝掉，外層 `item.text`
+  // 卻留著，所以 blockmap.js 的 indexOf 找不到 → 整串後代的行號【上移一行】→
+  // 送出時 bystanderCarryOver() 拿 `lines.slice()` 重播的是【上一項】。
+  // 磁碟實測（修前）：
+  //   '- alpha\n  - beta\n  - \n'   --Enter-->  '- alpha\n  - alpha\n-\n'
+  //   '- alpha\n  - beta\n  - x \n' --Enter-->  '- alpha\n  - alpha\n  - x\n  -\n'
+  //   '- alpha\n  - beta\n  - \n'   --Tab-->    '- alpha\n  - alpha\n    - beta\n'
+  // 三發都把 beta 換成了 alpha。斷言看的就是磁碟：beta 必須還在，alpha 不得變兩份。
+  for (const [md, gesture, label] of [
+    ['# H\n\n- alpha\n  - beta\n  - \n- gamma\n', 'Enter', '空項 + Enter'],
+    ['# H\n\n- alpha\n  - beta\n  - x \n- gamma\n', 'Enter', '非空項 + Enter'],
+    ['# H\n\n- alpha\n  - beta\n  - \n- gamma\n', 'Tab',   '空項 + Tab'],
+  ]) {
+    const ctx = await newPage(md);
+    const before = fs.readFileSync(ctx.mdPath, 'utf8');
+    // 前提：3 號真的是那個【最後一個巢狀項】。少了它，fixture 一漂移這一列就
+    // 變成在點 beta，三條斷言會原封不動地綠 —— 偵測力歸零。
+    const clicked = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="3"]');
+      if (!el) return null;
+      return { indent: el.getAttribute('data-indent'),
+               type: el.getAttribute('data-block-type'),
+               text: (el.querySelector(':scope > .ed-li-text') || {}).textContent };
+    });
+    assert.deepStrictEqual(clicked,
+      { indent: '1', type: 'li', text: md.indexOf('- x ') !== -1 ? 'x' : '' },
+      label + ' 前提失敗：3 號不是那個尾隨空白的巢狀項，got ' + JSON.stringify(clicked));
+    await ctx.page.click('.ed-block[data-block-id="3"] .ed-li-text');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.keyboard.press(gesture);
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.split('\n').filter((l) => l.indexOf('beta') !== -1).length, 1,
+      label + '：beta 不得消失，before=' + JSON.stringify(before) + ' after=' + JSON.stringify(disk));
+    assert.strictEqual(disk.split('\n').filter((l) => l.trim() === '- alpha').length, 1,
+      label + '：alpha 不得被複製，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0,
+      label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a trailing space in a nested list no longer eats the item above — OK');
+
   await browser.close();
 }
 

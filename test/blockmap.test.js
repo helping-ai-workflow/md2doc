@@ -278,4 +278,66 @@ assert.deepStrictEqual(
   });
 }
 
+// ── N4: a trailing space on a nested list's last line ──────────────────────
+//
+// marked strips the trailing spaces off a nested list token's `raw` but keeps
+// them in the enclosing `item.text`, so childListStartOffsets()'s byte-for-byte
+// indexOf() missed and fell back to "the line the cursor is already on" — line
+// offset 0. That gave the parent an INVERTED range and shifted every descendant
+// UP one line, which is what let a commit against the empty item replay the
+// item above it. These three shapes are the ones the journey tier drives.
+{
+  [
+    ['# H\n\n- alpha\n  - beta\n  - \n- gamma\n', 'empty last item'],
+    ['# H\n\n- alpha\n  - beta\n  - x \n- gamma\n', 'non-empty last item'],
+    ['- alpha\n  - beta\n    - deep \n- gamma\n', 'three levels deep'],
+  ].forEach(([md, label]) => {
+    const bs = buildBlockMap(md).blocks;
+    bs.forEach((b) => {
+      assert.ok(b.endLine >= b.startLine,
+        label + ' ' + JSON.stringify(md) + ': block ' + b.id +
+        ' must have a well-formed range, got [' + b.startLine + '-' + b.endLine + ']');
+      assert.strictEqual(b.unlocatable, undefined,
+        label + ' ' + JSON.stringify(md) + ': block ' + b.id +
+        ' is locatable, so it must carry no unlocatable flag');
+    });
+    // Ranges must also be RIGHT, not merely well-formed: every li's startLine
+    // has to name the source line whose text it actually is.
+    const lines = md.split('\n');
+    bs.filter((b) => b.type === 'li').forEach((b) => {
+      assert.ok(/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(lines[b.startLine - 1]),
+        label + ' ' + JSON.stringify(md) + ': block ' + b.id + ' startLine ' +
+        b.startLine + ' must name a list-marker line, got ' +
+        JSON.stringify(lines[b.startLine - 1]));
+    });
+  });
+  // The specific corruption, spelled out: with the trailing space, 'beta' is on
+  // source line 4 and the empty item on line 5. Before the fix the map said 3
+  // and 4, so editing the empty item wrote over beta.
+  const bs = buildBlockMap('# H\n\n- alpha\n  - beta\n  - \n- gamma\n').blocks
+    .filter((b) => b.type === 'li').map((b) => [b.startLine, b.endLine]);
+  assert.deepStrictEqual(bs, [[3, 3], [4, 4], [5, 5], [6, 6]],
+    'the four items own lines 3/4/5/6 one apiece');
+}
+
+// ── N4: same-line nesting keeps its empty range and stays UNFLAGGED ─────────
+//
+// '- - a' produces endLine === startLine - 1 too, but for a completely
+// different reason: that item genuinely owns no line. It is a modelled shape,
+// not a degraded one, and client.js picks its refusal wording off this flag —
+// so flagging it would tell the user their document could not be located when
+// it could.
+{
+  ['- - a\n', '- 1. a\n', '* + b\n', '1. - c\n'].forEach((md) => {
+    const lis = buildBlockMap(md).blocks.filter((b) => b.type === 'li');
+    assert.strictEqual(lis[0].endLine, lis[0].startLine - 1,
+      JSON.stringify(md) + ': the outer item still has an empty range');
+    lis.forEach((b) => {
+      assert.strictEqual(b.unlocatable, undefined,
+        JSON.stringify(md) + ': block ' + b.id + ' must carry NO unlocatable flag — ' +
+        'an empty range is not by itself a degradation');
+    });
+  });
+}
+
 console.log('blockmap.test.js OK');
