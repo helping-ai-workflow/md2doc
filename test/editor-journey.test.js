@@ -181,11 +181,13 @@ async function saveAndRead(ctx) {
 // 案例自己的前提斷言（見下面階段 0 案例的 __renderApplyMs）。刻意在發出
 // mouse.up() 【之前】取時間，所以它是真實間隔的【下界】—— 前提斷言因此偏嚴，
 // 不會因為 CDP 往返把自己算得比實際寬鬆。
-// `opts.pressAtPointer` — `{x, y}`: the viewport point the CALLER has already
-// moved the mouse to. pressClick then presses THERE and skips its own
-// `mouse.move()`, after asserting that the point really falls inside the
-// element's visible rect (so this cannot quietly degrade into "press wherever
-// the mouse happened to be"). Every other assertion below runs unchanged.
+// `opts.pressAtPointer` — `{x, y}`: press at exactly this viewport point,
+// WITHOUT dispatching a mouse move first. Every assertion below runs unchanged
+// and one more is added: the point must fall inside the element's clipped
+// rect. The press and release are dispatched through CDP at that literal
+// point, so the asserted point IS the pressed point — the guard cannot be
+// satisfied by a coordinate the press then ignores, and it does not depend on
+// where puppeteer's own `page.mouse` believes the cursor is.
 //
 // Why it exists: `.ed-tb-insert` (the ＋ bubbles) is appended to
 // `document.body`, so `updateTableInsertBubbles()`'s
@@ -199,13 +201,16 @@ async function saveAndRead(ctx) {
 //                                        ["mousedown","click"], row inserted
 //
 // So the ONLY way to press this button with a real mouse is to arrive at it
-// with the move that raises it and then not move again. See the row-insert
-// journey row below, which also records what that implies about the product.
+// with the move that raises it and then not move again. The bubble's
+// hide-on-hover is Task 14 / F7, already diagnosed with the same mechanism;
+// this helper only has to be able to express the gesture that works.
 async function pressClick(page, selector, holdMs, opts) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
     if (!el) return null;
+    const sx0 = window.scrollX, sy0 = window.scrollY;
     if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded();
+    const scrolled = window.scrollX !== sx0 || window.scrollY !== sy0;
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth, vh = window.innerHeight;
     // Fix round 1, ruling T2-2: press the point INSIDE the viewport, not the
@@ -221,7 +226,8 @@ async function pressClick(page, selector, holdMs, opts) {
     const cw = Math.max(0, cRight - cLeft), ch = Math.max(0, cBottom - cTop);
     return { x: cLeft + cw / 2, y: cTop + ch / 2,
              w: r.width, h: r.height, cw: cw, ch: ch, vw: vw, vh: vh,
-             cLeft: cLeft, cTop: cTop, cRight: cRight, cBottom: cBottom };
+             cLeft: cLeft, cTop: cTop, cRight: cRight, cBottom: cBottom,
+             scrolled: scrolled };
   }, selector);
   assert.ok(box, 'pressClick: 找不到 ' + selector);
   // 元素【存在但按不到】時 puppeteer 不會抱怨，會安靜地按在別的東西上。
@@ -240,20 +246,41 @@ async function pressClick(page, selector, holdMs, opts) {
     'pressClick: ' + selector + ' 在 ' + box.vw + '×' + box.vh + ' 視窗內沒有任何可見交集' +
     '（矩形 ' + box.w + '×' + box.h + '，scrollIntoViewIfNeeded() 之後仍然按不到）');
   const pressAt = opts && opts.pressAtPointer;
-  if (pressAt) {
-    assert.ok(pressAt.x >= box.cLeft && pressAt.x <= box.cRight &&
-              pressAt.y >= box.cTop && pressAt.y <= box.cBottom,
-      'pressClick: pressAtPointer (' + pressAt.x + ',' + pressAt.y + ') 不在 ' +
-      selector + ' 的可見矩形 [' + box.cLeft + ',' + box.cRight + ']×[' +
-      box.cTop + ',' + box.cBottom + '] 內 —— 按壓會落在別的元素上');
-  } else {
+  if (!pressAt) {
     await page.mouse.move(box.x, box.y);
+    await page.mouse.down();
+    const t0 = Date.now();
+    if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
+    const heldMs = Date.now() - t0;
+    await page.mouse.up();
+    return { heldMs };
   }
-  await page.mouse.down();
+  // `box.c*` was measured AFTER scrollIntoViewIfNeeded() inside the same
+  // evaluate; `pressAt` is the caller's coordinate from before that call. If
+  // the two frames differ the comparison below is meaningless, so say so
+  // instead of comparing across them.
+  assert.strictEqual(box.scrolled, false,
+    'pressClick: scrollIntoViewIfNeeded() 捲動了頁面，' + selector +
+    ' 的矩形與呼叫端算 pressAtPointer 時的座標系已經不同，這個比較無意義');
+  assert.ok(pressAt.x >= box.cLeft && pressAt.x <= box.cRight &&
+            pressAt.y >= box.cTop && pressAt.y <= box.cBottom,
+    'pressClick: pressAtPointer (' + pressAt.x + ',' + pressAt.y + ') 不在 ' +
+    selector + ' 的可見矩形 [' + box.cLeft + ',' + box.cRight + ']×[' +
+    box.cTop + ',' + box.cBottom + '] 內 —— 按壓會落在別的元素上');
+  // Dispatched through CDP rather than page.mouse so the press lands on the
+  // asserted coordinate itself and NOT wherever puppeteer's Mouse currently
+  // thinks it is — and so no `mouseMoved` is emitted, which is the whole
+  // point (see this function's own comment). Press and release are both sent
+  // this way, so puppeteer's own button bookkeeping is never left half-open.
+  const cdp = await page.createCDPSession();
+  const ev = { x: pressAt.x, y: pressAt.y, button: 'left', buttons: 1, clickCount: 1 };
+  await cdp.send('Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed' }, ev));
   const t0 = Date.now();
   if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
   const heldMs = Date.now() - t0;
-  await page.mouse.up();
+  await cdp.send('Input.dispatchMouseEvent',
+    Object.assign({ type: 'mouseReleased' }, ev, { buttons: 0 }));
+  await cdp.detach();
   return { heldMs };
 }
 
@@ -2700,12 +2727,17 @@ async function main() {
     await ctx.page.mouse.move(bp.x, bp.y);
     await new Promise((r) => setTimeout(r, 400));
     // 前提一：泡泡真的升起來了，而且指的是我們以為的那條邊界。
+    // `afterRowIndex` 就是 onRowInsertBubbleClick() 讀來決定插在哪裡的那個
+    // dataset —— 我們瞄的是第一條 body 列的下緣，所以它必須是 '0'。少了這條
+    // 斷言，泡泡瞄在別條邊界上這一列照樣會綠。
     const bub = await ctx.page.evaluate(() => {
       const b = document.querySelector('.ed-tb-insert-row');
       return { hidden: b.hidden, after: b.dataset.afterRowIndex };
     });
     assert.strictEqual(bub.hidden, false,
       'C1 前提失敗：＋ 列泡泡沒升起來，got ' + JSON.stringify(bub));
+    assert.strictEqual(bub.after, '0',
+      'C1 前提失敗：＋ 列泡泡瞄的不是第一條 body 列的下緣，got ' + JSON.stringify(bub));
     // 這一發【不能】讓 pressClick 自己 move —— 見 pressClick() 的 opts 註解：
     // 游標一移到泡泡上，泡泡就自己隱藏，按壓會落到表格上。指標已經在
     // (bp.x, bp.y)（就是上面那一發把泡泡升起來的移動），pressClick 會斷言
@@ -2792,6 +2824,12 @@ async function main() {
       document.querySelector(sel).innerHTML, SEL);
     assert.ok(/<b>typed<\/b>/.test(undone),
       'I2：undo 只該退掉 Ctrl+B 之後打的字，粗體必須留著，got: ' +
+      JSON.stringify(undone));
+    // 上面那條【單獨】會被一次什麼都沒做的 Ctrl+Z 滿足 —— `after` 本來就
+    // 已經含著 <b>typed</b>。這條才是這一列真正的內容：Ctrl+B 之後打的
+    // 'XY' 必須被退掉。
+    assert.strictEqual(undone.indexOf('XY'), -1,
+      'I2：那一次 Ctrl+Z 必須真的退掉 Ctrl+B 之後打的字，got: ' +
       JSON.stringify(undone));
     assert.strictEqual(ctx.errs.length, 0,
       'I2：不得有 pageerror: ' + ctx.errs.join(' | '));
