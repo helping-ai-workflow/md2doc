@@ -171,6 +171,27 @@ async function saveAndRead(ctx) {
   return fs.readFileSync(ctx.mdPath, 'utf8');
 }
 
+// 螢幕上那條 banner 的文字，看不見時回 null。
+//
+// 【不要】改回 task-5 brief 寫的 `b.offsetParent !== null`：`.ed-conflict` 是
+// position: fixed（lib/md2doc.js 的 `.ed-conflict` 規則），而 offsetParent 對
+// fixed 元素永遠回 null。實測（本檔 F10 那一列，吞噬手勢跑完之後直接讀）：
+//   {"offsetParent":null,"display":"flex","vis":"visible","w":800,"h":69.5}
+// —— banner 明明佔了整條螢幕寬，offsetParent 判斷仍然說它看不見。用那個判斷
+// 寫的斷言對這條 banner 恆為「沒有 banner」：要求「有」的那一半永遠紅、要求
+// 「沒有」的那一半（本檔 F10 的控制組）永遠綠，兩邊都量不到東西。
+async function visibleBannerText(page) {
+  return page.evaluate(() => {
+    const b = document.querySelector('.ed-conflict');
+    if (!b) return null;
+    const cs = getComputedStyle(b);
+    const r = b.getBoundingClientRect();
+    if (cs.display === 'none' || cs.visibility === 'hidden') return null;
+    if (r.width === 0 || r.height === 0) return null;
+    return b.textContent;
+  });
+}
+
 // v3.3.0 階段 0: 合成 .click() 對「dirty burst + 真人按壓時間」那一族缺陷是盲的
 // —— 真人按滑鼠有按壓時間，合成點擊沒有。實測（見 task-1 report 的量測表）
 // ⠿ / ＋ 選單項在 dirty burst ＋ 按壓 80 ms 時 clickFired = 0。
@@ -3035,6 +3056,139 @@ async function main() {
     await fresh.page.close(); fresh.srv.close();
   }
   console.log('journey: a document that opens already degraded refuses with its own wording — OK');
+
+  // ── F9: 點 code block 開 raw 編輯器，caret 必須落在圍欄【裡面】 ──────────
+  //
+  // 缺陷：openRawEditor() 收尾一律把 caret 放到值的結尾。對 fenced code 那個
+  // 位置在【收尾 fence 之後】，所以使用者點進去打的第一個字直接落在收尾那一
+  // 行上，圍欄不再閉合、文件後半被吞進 code block —— 那正是下面 F10 那一列
+  // 要偵測的形狀，F9 是它的上游。
+  //
+  // T5-1：不能只斷言「caret 不在結尾」。差一個字元的 caret 仍然在收尾 fence
+  // 那一行上，一樣壞。所以這裡釘死【確切】的落點，再真的打一個字進去、把
+  // 「打的字進了程式碼本文、沒進圍欄」一路證到磁碟上 ——「caret 有比較好一
+  // 點」不是這個修法的承諾，「你打的字進得去程式碼」才是。
+  {
+    const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\nBravo.\n';
+    const ctx = await newPage(MD);
+    // 前提：點下去的真的是一個佔 5..7 行的 code block。fixture 一漂移（圍欄
+    // 被解析成段落、行號位移）這一列就變成在測段落的 caret 契約，而段落的
+    // 落點本來就是值的結尾 —— 下面每一條斷言都會原封不動地綠。
+    assert.deepStrictEqual(
+      await ctx.page.evaluate(() =>
+        window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+      ['heading[1,1]', 'paragraph[3,3]', 'code[5,7]', 'paragraph[9,9]'],
+      'F9 前提失敗：fixture 沒有給出一個佔 5..7 行的 code block');
+    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
+    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
+      { timeout: 5000 });
+    const sel = await ctx.page.evaluate(() => {
+      const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+      return { start: ta.selectionStart, end: ta.selectionEnd, len: ta.value.length, v: ta.value };
+    });
+    assert.strictEqual(sel.v, '```js\nconst a = 1;\n```',
+      'F9 前提失敗：textarea 的種子不是那三行原始碼，got ' + JSON.stringify(sel.v));
+    // 內容區的開頭 ＝ 開頭 fence 那一行的下一行行首 ＝ '```js\n'.length。
+    assert.deepStrictEqual({ start: sel.start, end: sel.end }, { start: 6, end: 6 },
+      'F9：caret 必須【正好】落在開頭 fence 的下一行行首（offset 6），不是值的' +
+      '結尾（' + sel.len + '），也不是任何「靠近結尾但還在收尾 fence 那一行上」' +
+      '的位置，got ' + JSON.stringify(sel));
+    await ctx.page.keyboard.type('Z');
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 600));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, '# Doc\n\nAlpha.\n\n```js\nZconst a = 1;\n```\n\nBravo.\n',
+      'F9：打進去的那個字必須落在程式碼本文，兩道圍欄與後面的段落都要逐位元組' +
+      '存活，got:\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, 'F9：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the raw editor opens INSIDE the fence, never past the closing one — OK');
+  }
+
+  // ── F10: 一次編輯吞掉文件後半時，必須給使用者可見的信號 ─────────────────
+  //
+  // T5-2：「畫面上有一條 .ed-conflict」不算通過。lib/editor/client.js 裡那個
+  // class 有好幾個互不相干的來源（磁碟衝突、render 失敗、save 失敗、手勢失去
+  // 目標、清單／表格的結構性拒絕、burst 降級成原始碼編輯），所以這
+  // 一列釘死那句【吞噬專用】的話，並且先跑一個控制組：同一份 fixture、同一個
+  // raw 編輯器、同一個提交手勢，只是這次的編輯沒有吞掉任何東西 —— 控制組要求
+  // 畫面上一條 banner 都不能有，這才證明信號是被【吞噬】點起來的，不是被
+  // 「提交發生了」點起來的。
+  {
+    const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\nBravo.\n';
+    const SWALLOW_MSG = '這次編輯之後區塊變少了，行數卻沒有變少 —— 後面的內容' +
+      '很可能被吞進前一個區塊（最常見的原因是 ``` 圍欄沒有閉合）。';
+    // 控制組：改動 code block 的【本文】，圍欄不動。
+    {
+      const ctx = await newPage(MD);
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 5,
+        'F10 控制組前提失敗：fixture 應該渲染出五個區塊');
+      await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
+      await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
+        { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+        ta.value = ta.value.replace('const a = 1;', 'const a = 2;');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await pressClick(ctx.page, '.ed-block[data-block-id="0"] .ed-wys-armed', 80);
+      await new Promise((r) => setTimeout(r, 700));
+      // 前提：這次提交真的落地了。少了它，一個什麼都沒提交的控制組會用
+      // 「沒有 banner」原封不動地綠。
+      const cDisk = await saveAndRead(ctx);
+      assert.strictEqual(cDisk, '# Doc\n\nAlpha.\n\n```js\nconst a = 2;\n```\n\n## Next\n\nBravo.\n',
+        'F10 控制組前提失敗：這次編輯必須真的提交到磁碟，got:\n' + JSON.stringify(cDisk));
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 5,
+        'F10 控制組前提失敗：沒有吞噬的編輯不得改變區塊數');
+      assert.strictEqual(
+        await visibleBannerText(ctx.page), null,
+        'F10 控制組：沒有吞掉任何東西的編輯不得升起任何 banner —— 升起來就代表' +
+        '這條信號是被「提交發生了」點起來的，對吞噬沒有偵測力');
+      assert.strictEqual(ctx.errs.length, 0,
+        'F10 控制組：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // 吞噬組：把收尾 fence 改成 ``` MID，圍欄不再閉合。
+    {
+      const ctx = await newPage(MD);
+      await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
+      await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
+        { timeout: 5000 });
+      const seeded = await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+        ta.value = ta.value.replace(/```$/m, '``` MID');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return ta.value;
+      });
+      assert.strictEqual(seeded, '```js\nconst a = 1;\n``` MID',
+        'F10 前提失敗：破壞收尾 fence 的那個 replace 沒有打中，got ' + JSON.stringify(seeded));
+      await pressClick(ctx.page, '.ed-block[data-block-id="0"] .ed-wys-armed', 80);
+      await new Promise((r) => setTimeout(r, 700));
+      // 前提：吞噬真的發生了。行數沒少而區塊少了 —— 這一列如果哪天 fixture
+      // 漂移到不再吞噬，這條會先紅，而不是讓 banner 斷言變成無主張。
+      const after = await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length);
+      assert.strictEqual(after, 3,
+        'F10 前提失敗：未閉合的圍欄應該把 ## Next / Bravo. 吞進 code block，' +
+        '區塊數應從 5 掉到 3，got ' + after);
+      const disk = await saveAndRead(ctx);
+      assert.strictEqual(disk.split('\n').length, MD.split('\n').length,
+        'F10 前提失敗：這一列的形狀是「區塊少了、行數沒少」，行數變了就不是它，got:\n' +
+        JSON.stringify(disk));
+      const banner = await visibleBannerText(ctx.page);
+      // showBanner() 的節點是「訊息 span ＋ 關閉鈕（✕）」，所以 textContent 帶尾巴。
+      assert.strictEqual(banner, SWALLOW_MSG + '✕',
+        'F10：吞噬必須升起【吞噬那一句】。任何其他 .ed-conflict（磁碟衝突／' +
+        'render 失敗／save 失敗／手勢失去目標／結構性拒絕／降級成原始碼編輯）' +
+        '都不算數，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, 'F10：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: an edit that swallows the tail raises its own visible signal — OK');
+  }
 
   await browser.close();
 }
