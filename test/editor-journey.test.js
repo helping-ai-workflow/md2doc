@@ -227,6 +227,87 @@ async function pressClick(page, selector, holdMs) {
   return { heldMs };
 }
 
+// Fix round 2, finding 1: pressClick()'s own doc comment requires the caller
+// to take `{ heldMs }` back, compare it against THIS machine's own
+// fetch→DOM commit round trip, and turn "can this row even fail" into the
+// row's own precondition — a press that does not outlast that round trip
+// goes green on a broken build for a reason that has nothing to do with
+// whatever the row claims to test. The stage-0 loop below was the only
+// caller doing this; every other press against a `.ed-handle-menu-btn` /
+// `.ed-insert-menu-btn` item needs the identical probe, so it is extracted
+// here instead of copied.
+//
+// `armDetachProbe(page, itemSel, itemLabel)` tags the LAST element under
+// `itemSel` whose trimmed textContent is exactly `itemLabel` with
+// `[data-journey-target="1"]` (last, not first, because a submenu toggle's
+// own label can appear twice once its panel is open — the top-level entry
+// and the panel's own leaf share the same class), and (re)arms two
+// page-global probes: a capture-phase click counter scoped to `itemSel`,
+// and a `/api/render` → `.content` childList MutationObserver timing probe.
+// Both are reset on every call so a second press on the same page (V2h
+// presses twice: the 轉換成 toggle, then the leaf) starts from a clean
+// slate; the underlying listener/fetch-wrap is installed at most once per
+// page to avoid stacking duplicate listeners across repeated arms.
+async function armDetachProbe(page, itemSel, itemLabel) {
+  await page.evaluate((s, t) => {
+    window.__itemClicks = 0;
+    window.__itemClickSel = s;
+    if (!window.__itemClickListenerArmed) {
+      window.__itemClickListenerArmed = true;
+      document.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && window.__itemClickSel &&
+            e.target.closest(window.__itemClickSel)) window.__itemClicks++;
+      }, true);
+    }
+    window.__renderApplyMs = [];
+    if (!window.__renderApplyMsArmed) {
+      window.__renderApplyMsArmed = true;
+      const contentEl = document.querySelector('.content');
+      let started = null;
+      const origFetch = window.fetch;
+      window.fetch = function (u) {
+        if (String(u).indexOf('/api/render') !== -1 && started === null) started = performance.now();
+        return origFetch.apply(this, arguments);
+      };
+      new MutationObserver(() => {
+        if (started === null) return;
+        window.__renderApplyMs.push(performance.now() - started);
+        started = null;
+      }).observe(contentEl, { childList: true });
+    }
+    // Clear any stale tag from a PRIOR arm on this same page (V2h arms twice:
+    // the 轉換成 toggle, then the leaf) before setting a fresh one — two
+    // elements answering `[data-journey-target="1"]` would make pressClick()'s
+    // `document.querySelector()` silently pick whichever is first in document
+    // order, which is not necessarily the one this call means to press.
+    document.querySelectorAll('[data-journey-target]')
+      .forEach((el) => el.removeAttribute('data-journey-target'));
+    const hits = Array.from(document.querySelectorAll(s)).filter((e) => e.textContent.trim() === t);
+    if (!hits.length) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
+    hits[hits.length - 1].setAttribute('data-journey-target', '1');
+  }, itemSel, itemLabel);
+}
+
+// The shared precondition itself: this press must have actually outlasted
+// this machine's commit round trip, or the row has zero detection power.
+async function assertDetachCapable(page, press, where) {
+  const applyMs = await page.evaluate(() => window.__renderApplyMs.slice());
+  assert.ok(applyMs.length > 0,
+    where + ' 前提失敗：整個手勢一發 /api/render 都沒有，量不到這台機器的 commit round trip');
+  const worst = Math.max.apply(null, applyMs);
+  assert.ok(press.heldMs > worst,
+    where + ' 前提失敗：實測按壓 ' + press.heldMs + 'ms，但這台機器把一次 commit 的 /api/render ' +
+    '套用到 DOM 要 ' + Math.round(worst) + 'ms —— 按壓沒有超過 round trip，這一列在【未修版本上也會綠】，' +
+    '偵測力是 0。請把 hold 調到明顯大於 ' + Math.round(worst) + 'ms。');
+}
+
+// `clicked` is the actual count of click events that reached the tagged
+// item — a button detached mid-press never receives one, which is exactly
+// the quantity under test, not something re-derived after the fact.
+function itemClickFired(page) {
+  return page.evaluate(() => (window.__itemClicks > 0 ? 'ok' : 'menu-gone'));
+}
+
 async function main() {
   browser = await puppeteer.launch({ args: ['--no-sandbox'] });
 
@@ -819,6 +900,11 @@ async function main() {
 
   async function v2Boot(state) {
     const ctx = await newPage(state === 'nest' ? V2_NEST_MD : V2_SEL_MD);
+    // Ruling T2-2: this matrix tests whether a toolbar button DOES something,
+    // not whether the viewport is wide enough to reach it — toolbar
+    // reachability is a layout question tracked separately, not an implicit
+    // precondition of this matrix. 1000px gives every button clear margin.
+    await ctx.page.setViewport({ width: 1000, height: 600 });
     // window.prompt() blocks the page until something answers it, and
     // applyLinkToggle() opens one — measured: without this handler the
     // 'link' row hangs until puppeteer's protocolTimeout kills the run.
@@ -1045,6 +1131,11 @@ async function main() {
     }
 
     const bad = [];
+    // Deliberately clean-burst: this loop places the cursor with a plain
+    // `.click()` on `.ed-wys-armed` and never types, so there is no dirty
+    // burst for a mousedown-triggered commit to race against — no detection
+    // power for the ⠿/＋ detach family, and correctly not a missed
+    // conversion of the in-page `.ed-handle-menu-btn` clicks below.
     for (const row of GUTTER_ROWS) {
       const ctx = await newPage(V2_SEL_MD);
       await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
@@ -1199,6 +1290,11 @@ async function main() {
       ['hr',          '# H\n\nAlpha para.\n\nBravo para.\n***\n'],
       ['blank (control)', '# H\n\nAlpha para.\n\nBravo para.\n\nTail para.\n'],
     ];
+    // Deliberately clean-burst: neither loop below types into the target
+    // block before opening ⠿ (only navigates/hovers), so there is no dirty
+    // burst for a mousedown-triggered commit to race against — no detection
+    // power for the ⠿/＋ detach family, and correctly not a missed
+    // conversion of the in-page `.ed-handle-menu-btn` clicks below.
     for (const [name, md] of TAILS) {
       const ctx = await newPage(md);
       const id = await ctx.page.evaluate(() => {
@@ -1419,23 +1515,33 @@ async function main() {
       await pressClick(ctx.page, sel + ' .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       if (viaConvert) {
-        // Same class (`.ed-handle-menu-btn`), same still-dirty burst as the
-        // label press below — the 轉換成 toggle is itself a menu item, not
-        // part of the panel chrome, so it is just as susceptible and gets the
-        // same real press. Tag-then-remove avoids colliding with the label's
-        // own `data-journey-target` tag right after.
-        await ctx.page.evaluate(() => {
-          const t = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
-            .find((x) => x.textContent.indexOf('轉換成') !== -1);
-          if (!t) throw new Error('⠿ 轉換成 toggle not found');
-          t.setAttribute('data-journey-target', '1');
-        });
+        // Fix round 1 (C1) + round 2 (finding 2): same class
+        // (`.ed-handle-menu-btn`), same still-dirty burst as the label press
+        // below — the 轉換成 toggle is itself a menu item, not panel chrome,
+        // so it is just as susceptible and gets the same real press, with its
+        // OWN pass/fail signal. Without a dedicated assertion here, a real
+        // detach at THIS press surfaces three steps downstream as the
+        // leaf-item-enabled precondition failing with "got MISSING" —
+        // reporting a real regression as a vacuous-green fixture problem
+        // instead of naming what happened.
+        //
+        // No assertDetachCapable() round-trip precondition here (unlike the
+        // leaf press below and stage 0): MEASURED — on the fixed build,
+        // opening the 轉換成 submenu fires zero `/api/render` calls
+        // (`window.__renderApplyMs` stays empty). It's a pure client-side UI
+        // toggle with no content mutation, so there is nothing asynchronous
+        // for a real press to race against on a healthy build; unlike the
+        // leaf press, whose own eventual action always commits+renders even
+        // when its mousedown is correctly protected. `itemClickFired()` alone
+        // is the right (and sufficient) signal here: on a healthy build the
+        // click is synchronous and always registers, so a `menu-gone` here
+        // means the earlier `.ed-handle` open itself already lost the race —
+        // a real regression, not a machine-speed false negative.
+        await armDetachProbe(ctx.page, '.ed-handle-menu-btn', '轉換成 ›');
         await pressClick(ctx.page, '[data-journey-target="1"]', 80);
-        await ctx.page.evaluate(() => {
-          const t = document.querySelector('[data-journey-target="1"]');
-          if (t) t.removeAttribute('data-journey-target');
-        });
         await new Promise((r) => setTimeout(r, 300));
+        assert.strictEqual(await itemClickFired(ctx.page), 'ok',
+          'V2h(' + name + ') 轉換成 toggle：選單在 mouseup 前就消失了');
       }
       // 前提：這一項必須是【亮著的】。灰掉的項目點不下去，這個場景就沒測到東西。
       const dis = await ctx.page.evaluate((L) => {
@@ -1453,15 +1559,15 @@ async function main() {
       // carries a dirty burst (typed 'X' above), so tag the real target and
       // drive it through a genuine press-hold-release instead of an in-page
       // synthetic .click() — a synthetic click cannot reproduce a detach that
-      // only happens between a real mousedown and mouseup.
-      await ctx.page.evaluate((L) => {
-        const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
-          .filter((x) => x.textContent.trim() === L);
-        if (!h.length) throw new Error('⠿ item not found: ' + L);
-        h[h.length - 1].setAttribute('data-journey-target', '1');
-      }, label);
-      await pressClick(ctx.page, '[data-journey-target="1"]', 80);
+      // only happens between a real mousedown and mouseup. Round 2, finding 1:
+      // the press's own round-trip precondition is checked below via
+      // assertDetachCapable(), same as the toggle above and stage 0.
+      await armDetachProbe(ctx.page, '.ed-handle-menu-btn', label);
+      const leafPress = await pressClick(ctx.page, '[data-journey-target="1"]', 80);
       await new Promise((r) => setTimeout(r, 800));
+      await assertDetachCapable(ctx.page, leafPress, 'V2h(' + name + ')');
+      assert.strictEqual(await itemClickFired(ctx.page), 'ok',
+        'V2h(' + name + ')：選單在 mouseup 前就消失了');
       const st = await ctx.page.evaluate(() => ({
         active: document.activeElement ? document.activeElement.tagName : null,
         activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
@@ -2347,56 +2453,18 @@ async function main() {
       await new Promise((r) => setTimeout(r, 120));
       await ctx.page.click(one + ' ' + openBtn);
       await ctx.page.waitForSelector(one + ' ' + itemSel);
-      await ctx.page.evaluate((s, t) => {
-        window.__itemClicks = 0;
-        document.addEventListener('click', (e) => {
-          if (e.target && e.target.closest && e.target.closest(s)) window.__itemClicks++;
-        }, true);
-        // 這台機器把一次 commit 從「發出 /api/render」走到「.content 的
-        // childList 真的被改掉」要多久。缺陷要現形的條件就是這段時間【短於】
-        // 按壓時間；下面的前提斷言拿它跟實測的 heldMs 比，讓「這一列有沒有
-        // 能力紅」由機器自己回答，而不是賭 80 這個常數夠大。
-        window.__renderApplyMs = [];
-        const contentEl = document.querySelector('.content');
-        let started = null;
-        const origFetch = window.fetch;
-        window.fetch = function (u) {
-          if (String(u).indexOf('/api/render') !== -1 && started === null) started = performance.now();
-          return origFetch.apply(this, arguments);
-        };
-        new MutationObserver(() => {
-          if (started === null) return;
-          window.__renderApplyMs.push(performance.now() - started);
-          started = null;
-        }).observe(contentEl, { childList: true });
-        const it = Array.from(document.querySelectorAll(s))
-          .find((e) => e.textContent.trim() === t);
-        if (!it) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
-        it.setAttribute('data-journey-target', '1');
-      }, itemSel, itemText);
+      await armDetachProbe(ctx.page, itemSel, itemText);
       const press = await pressClick(ctx.page, '[data-journey-target="1"]', hold);
       await new Promise((r) => setTimeout(r, 500));
-      const clicked = await ctx.page.evaluate(() =>
-        (window.__itemClicks > 0 ? 'ok' : 'menu-gone'));
+      const clicked = await itemClickFired(ctx.page);
       const after = await ctx.page.evaluate(() =>
         document.querySelectorAll('.ed-block').length);
-      const applyMs = await ctx.page.evaluate(() => window.__renderApplyMs.slice());
       // 前提：這一列必須【有能力】抓到缺陷。缺陷的形狀是「commit 的 render
       // 在 mouseup 之前就把 block 換掉」，所以按壓必須比這台機器的
       // fetch→DOM 換好還久。在 round trip 超過按壓時間的機器上，未修版本
       // 的這一列會【前後都綠】—— 網子靜靜失去偵測力而沒有任何人被告知。
       // 這條斷言把那個情境變成一次響亮的失敗（訊息直接說要調大 hold）。
-      if (hold > 0) {
-        assert.ok(applyMs.length > 0,
-          label + '（hold=' + hold + 'ms）前提失敗：整個手勢一發 /api/render 都沒有，' +
-          '量不到這台機器的 commit round trip');
-        const worst = Math.max.apply(null, applyMs);
-        assert.ok(press.heldMs > worst,
-          label + '（hold=' + hold + 'ms）前提失敗：實測按壓 ' + press.heldMs +
-          'ms，但這台機器把一次 commit 的 /api/render 套用到 DOM 要 ' + Math.round(worst) +
-          'ms —— 按壓沒有超過 round trip，這一列在【未修版本上也會綠】，' +
-          '偵測力是 0。請把 hold 調到明顯大於 ' + Math.round(worst) + 'ms。');
-      }
+      if (hold > 0) await assertDetachCapable(ctx.page, press, label + '（hold=' + hold + 'ms）');
       assert.strictEqual(clicked, 'ok',
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
