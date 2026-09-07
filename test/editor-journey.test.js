@@ -181,7 +181,27 @@ async function saveAndRead(ctx) {
 // 案例自己的前提斷言（見下面階段 0 案例的 __renderApplyMs）。刻意在發出
 // mouse.up() 【之前】取時間，所以它是真實間隔的【下界】—— 前提斷言因此偏嚴，
 // 不會因為 CDP 往返把自己算得比實際寬鬆。
-async function pressClick(page, selector, holdMs) {
+// `opts.pressAtPointer` — `{x, y}`: the viewport point the CALLER has already
+// moved the mouse to. pressClick then presses THERE and skips its own
+// `mouse.move()`, after asserting that the point really falls inside the
+// element's visible rect (so this cannot quietly degrade into "press wherever
+// the mouse happened to be"). Every other assertion below runs unchanged.
+//
+// Why it exists: `.ed-tb-insert` (the ＋ bubbles) is appended to
+// `document.body`, so `updateTableInsertBubbles()`'s
+// `target.closest('.ed-block[data-block-type="table"]')` is null for any
+// mousemove whose target is the bubble ITSELF, and that call hides it.
+// MEASURED on this repo's puppeteer, hovering the row boundary to raise the
+// bubble and then pressing it:
+//
+//   with pressClick's own mouse.move()   bubble.hidden = true,  events []
+//   pressing without moving              bubble.hidden = false, events
+//                                        ["mousedown","click"], row inserted
+//
+// So the ONLY way to press this button with a real mouse is to arrive at it
+// with the move that raises it and then not move again. See the row-insert
+// journey row below, which also records what that implies about the product.
+async function pressClick(page, selector, holdMs, opts) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
     if (!el) return null;
@@ -200,7 +220,8 @@ async function pressClick(page, selector, holdMs) {
     const cRight = Math.min(r.right, vw), cBottom = Math.min(r.bottom, vh);
     const cw = Math.max(0, cRight - cLeft), ch = Math.max(0, cBottom - cTop);
     return { x: cLeft + cw / 2, y: cTop + ch / 2,
-             w: r.width, h: r.height, cw: cw, ch: ch, vw: vw, vh: vh };
+             w: r.width, h: r.height, cw: cw, ch: ch, vw: vw, vh: vh,
+             cLeft: cLeft, cTop: cTop, cRight: cRight, cBottom: cBottom };
   }, selector);
   assert.ok(box, 'pressClick: 找不到 ' + selector);
   // 元素【存在但按不到】時 puppeteer 不會抱怨，會安靜地按在別的東西上。
@@ -218,7 +239,16 @@ async function pressClick(page, selector, holdMs) {
   assert.ok(box.cw > 0 && box.ch > 0,
     'pressClick: ' + selector + ' 在 ' + box.vw + '×' + box.vh + ' 視窗內沒有任何可見交集' +
     '（矩形 ' + box.w + '×' + box.h + '，scrollIntoViewIfNeeded() 之後仍然按不到）');
-  await page.mouse.move(box.x, box.y);
+  const pressAt = opts && opts.pressAtPointer;
+  if (pressAt) {
+    assert.ok(pressAt.x >= box.cLeft && pressAt.x <= box.cRight &&
+              pressAt.y >= box.cTop && pressAt.y <= box.cBottom,
+      'pressClick: pressAtPointer (' + pressAt.x + ',' + pressAt.y + ') 不在 ' +
+      selector + ' 的可見矩形 [' + box.cLeft + ',' + box.cRight + ']×[' +
+      box.cTop + ',' + box.cBottom + '] 內 —— 按壓會落在別的元素上');
+  } else {
+    await page.mouse.move(box.x, box.y);
+  }
   await page.mouse.down();
   const t0 = Date.now();
   if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
@@ -2628,9 +2658,6 @@ async function main() {
       document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').textContent);
     assert.ok(text.indexOf('typed sentence') !== -1,
       label + '：undo 只該退掉粗體，不該退掉打的字，got: ' + JSON.stringify(text));
-    assert.strictEqual(text.indexOf('<strong>'), -1, label + '：標記應已退掉');
-    // 上面那條是 brief 的原文，量的是 textContent —— textContent 永遠不含
-    // 標籤，所以它恆真、抓不到任何東西。這一條才是真的在問「粗體退掉了沒」。
     const html = await ctx.page.evaluate(() =>
       document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').innerHTML);
     assert.ok(!/<(strong|b|em|i|u)\b/.test(html),
@@ -2640,6 +2667,136 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: undo of a mark (' + label +
       ') keeps the sentence you just typed — OK');
+  }
+
+  // ── 地基 B / C1: 表格結構性變動也不得吃掉剛打進儲存格的字 ─────────────
+  //
+  // 那七個表格結構操作（insert/delete row+col、align、row+col drag）不走
+  // snapBurstIfActive()，而是直接 currentBurst.history.snap('<reason>')，所以
+  // 它們不在 brief 的 12 個呼叫端清單裡，修 12 個的時候整族被漏掉。缺陷形狀
+  // 一模一樣：往儲存格打字（打字自己永遠不 checkpoint）→ 插一列 → 一次
+  // Ctrl+Z，剛打的字跟著那一列一起不見。
+  //
+  // 這一列只驅動 insert-row 一個；ablation 實測它 red 的正是
+  // `insert-row-pre` 一個（單獨拿掉它 → FAIL；拿掉其餘六個、留著它 → PASS），
+  // 其餘六個由同一個成對形狀承擔，report 有記。
+  {
+    const ctx = await newPage('# Doc\n\nAnchor para.\n\n' +
+      '| A | B |\n| --- | --- |\n| a1 | b1 |\n| a2 | b2 |\n\nTail para.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    const TSEL = '.ed-block[data-block-type="table"]';
+    await ctx.page.click(TSEL + ' .ed-wys-cell');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type('TYPED');
+    await new Promise((r) => setTimeout(r, 500));   // 超過 400ms 的 noteTyping 門檻
+    // ＋ 列泡泡：只在距表格【左緣】TB_EDGE_PX(10) 內、且對齊某條列邊界時升起。
+    const bp = await ctx.page.evaluate((t) => {
+      const tb = document.querySelector(t + ' table');
+      const tr = tb.getBoundingClientRect();
+      const rr = tb.tBodies[0].rows[0].getBoundingClientRect();
+      return { x: tr.left, y: rr.bottom };
+    }, TSEL);
+    await ctx.page.mouse.move(bp.x - 60, bp.y);
+    await ctx.page.mouse.move(bp.x, bp.y);
+    await new Promise((r) => setTimeout(r, 400));
+    // 前提一：泡泡真的升起來了，而且指的是我們以為的那條邊界。
+    const bub = await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-tb-insert-row');
+      return { hidden: b.hidden, after: b.dataset.afterRowIndex };
+    });
+    assert.strictEqual(bub.hidden, false,
+      'C1 前提失敗：＋ 列泡泡沒升起來，got ' + JSON.stringify(bub));
+    // 這一發【不能】讓 pressClick 自己 move —— 見 pressClick() 的 opts 註解：
+    // 游標一移到泡泡上，泡泡就自己隱藏，按壓會落到表格上。指標已經在
+    // (bp.x, bp.y)（就是上面那一發把泡泡升起來的移動），pressClick 會斷言
+    // 那個點確實落在泡泡的可見矩形內，然後原地按下去。
+    await pressClick(ctx.page, '.ed-tb-insert-row', 80, { pressAtPointer: bp });
+    await new Promise((r) => setTimeout(r, 400));
+    const ins = await ctx.page.evaluate((t) => {
+      const tb = document.querySelector(t + ' table');
+      return { rows: tb.tBodies[0].rows.length,
+               text: tb.textContent.replace(/\s+/g, ' ') };
+    }, TSEL);
+    // 前提二：列真的插進去了。少了它，一個「按到空氣」的手勢會讓下面那條
+    // 斷言原封不動地綠 —— 字當然還在，因為根本沒有結構變動去吃掉它。
+    assert.strictEqual(ins.rows, 3,
+      'C1 前提失敗：插列沒發生（按到空氣），got ' + JSON.stringify(ins));
+    assert.ok(ins.text.indexOf('TYPED') !== -1,
+      'C1 前提失敗：插列之後打的字就已經不見了，got ' + JSON.stringify(ins));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 300));
+    const undone = await ctx.page.evaluate((t) => {
+      const tb = document.querySelector(t + ' table');
+      return { rows: tb.tBodies[0].rows.length,
+               text: tb.textContent.replace(/\s+/g, ' ') };
+    }, TSEL);
+    assert.ok(undone.text.indexOf('TYPED') !== -1,
+      'C1：undo 只該退掉插進去的那一列，不該退掉打進儲存格的字，got: ' +
+      JSON.stringify(undone));
+    assert.strictEqual(undone.rows, 2,
+      'C1：那一次 undo 必須真的把插進去的列退掉，got ' + JSON.stringify(undone));
+    assert.strictEqual(ctx.errs.length, 0,
+      'C1：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: undo of a table row insert keeps what you typed in a cell — OK');
+  }
+
+  // ── 地基 B / I2: 原生 Ctrl+B 後【400ms 內】繼續打字，undo 不得連粗體一起退 ──
+  //
+  // 上面那四列（套標記 → 停 250ms → Ctrl+Z）釘不住 `snap('native-format')`：
+  // 停了就沒有 pending capture 可以把粗體吞進去，那一發換成 noteTyping() 它們
+  // 照樣綠。會紅的是這個手勢 —— Ctrl+B 之後【不停】繼續打字，那一筆 pending
+  // capture 會在 undo 的 flushTyping() 裡連粗體一起帶走。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const SEL = '.ed-block[data-block-id="1"] .ed-wys-armed';
+    await ctx.page.click(SEL);
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type(' typed sentence');
+    await new Promise((r) => setTimeout(r, 500));
+    await ctx.page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      const t = el.firstChild;
+      const i = el.textContent.indexOf('typed');
+      const r = document.createRange();
+      r.setStart(t, i); r.setEnd(t, i + 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    }, SEL);
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyB');
+    await ctx.page.keyboard.up('Control');
+    // 這裡【刻意沒有 sleep】：整列的重點就是下一個按鍵落在 noteTyping() 的
+    // 400ms 窗口【裡面】。
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type('XY');
+    const gapMs = Date.now() - t0;
+    // 前提：那段間隔真的在窗口內。在慢到 ≥400ms 的機器上這一列會【修前也綠】，
+    // 偵測力歸零 —— 這條斷言把那個情境變成一次響亮的失敗。
+    assert.ok(gapMs < 400,
+      'I2 前提失敗：Ctrl+B 到最後一個按鍵之間量到 ' + gapMs + 'ms，已經超過 ' +
+      'noteTyping() 的 400ms 門檻，這一列在未修版本上也會綠，偵測力是 0');
+    const after = await ctx.page.evaluate((sel) =>
+      document.querySelector(sel).innerHTML, SEL);
+    assert.ok(/<b>typed<\/b>/.test(after) && after.indexOf('XY') !== -1,
+      'I2 前提失敗：粗體或後續打字沒生效，got ' + JSON.stringify(after));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 250));
+    const undone = await ctx.page.evaluate((sel) =>
+      document.querySelector(sel).innerHTML, SEL);
+    assert.ok(/<b>typed<\/b>/.test(undone),
+      'I2：undo 只該退掉 Ctrl+B 之後打的字，粗體必須留著，got: ' +
+      JSON.stringify(undone));
+    assert.strictEqual(ctx.errs.length, 0,
+      'I2：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: undo after Ctrl+B + more typing keeps the bold — OK');
   }
 
   await browser.close();
