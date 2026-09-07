@@ -3389,6 +3389,15 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
     }
     // R1：逐區塊的 raw 編輯器裡把一段清成空字串。
+    //
+    // ⚠ 這一列的提交必須是【真的按壓】（`pressClick`）。MEASURED（在
+    // applyRenderResult() 裡插一個計數器，同一個手勢跑兩次）：
+    //   pressClick 提交   renders=1
+    //   合成 el.click()   renders=0
+    // 也就是說改成合成 click 之後，在斷言執行的那個時間點【一次 render 都還
+    // 沒發生過】，「banner 不出現」會因為根本沒有東西可以升 banner 而成立 ——
+    // 這一列會安靜地變成一條沒有主張的斷言（磁碟仍然是對的，因為後面
+    // saveAndRead() 的 Ctrl+S 才把 blur → commit → render 這一串帶起來）。
     {
       const ctx = await newPage(DOC);
       await openRawViaGutter(ctx, '.ed-block[data-block-id="1"]');
@@ -3535,6 +3544,326 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
     }
     console.log('journey: the swallow signal retires when the fence is closed again — OK');
+  }
+
+  // ── F9 fix round 2 (K1): 巢狀圍欄不得被誤判成空圍欄 ──────────────────────
+  //
+  // 空圍欄那個分支會【改動 textarea 的種子】，所以它的判斷不能只看「下一行長得
+  // 像圍欄」：`~~~` 開頭、下一行是 ` ``` ` 的巢狀圍欄，那個 ` ``` ` 是【本文】，
+  // 不是收尾。588ae30 把它當成空圍欄、種進一行空白，而那一行在提交時真的寫到
+  // 磁碟（實測 `588ae30` 的種子是 '~~~\n\n```\nx\n```\n~~~'、磁碟拿到
+  // '~~~\nZ\n```\n…'）。收尾圍欄必須跟開頭圍欄同字元、不比它短 —— 見
+  // closesFence()。
+  {
+    const MD = '# Doc\n\nAlpha.\n\n~~~\n```\nx\n```\n~~~\n\nBravo.\n';
+    const ctx = await newPage(MD);
+    assert.deepStrictEqual(
+      await ctx.page.evaluate(() =>
+        window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+      ['heading[1,1]', 'paragraph[3,3]', 'code[5,9]', 'paragraph[11,11]'],
+      'K1 前提失敗：fixture 沒有給出一個佔 5..9 行的巢狀圍欄');
+    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
+    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
+      { timeout: 5000 });
+    const sel = await ctx.page.evaluate(() => {
+      const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+      return { v: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+    });
+    assert.strictEqual(sel.v, '~~~\n```\nx\n```\n~~~',
+      'K1：巢狀圍欄不是空圍欄，textarea 的種子必須跟原始碼逐位元組相同 —— ' +
+      '種進去的那一行會寫到使用者的檔案裡，got ' + JSON.stringify(sel.v));
+    assert.deepStrictEqual({ start: sel.start, end: sel.end }, { start: 4, end: 4 },
+      'K1：caret 落在開頭圍欄的下一行行首，也就是本文的第一行，got ' + JSON.stringify(sel));
+    await ctx.page.keyboard.type('Z');
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n~~~\nZ```\nx\n```\n~~~\n\nBravo.\n',
+      'K1：磁碟上不得多出任何一行 —— 588ae30 在這裡會多一行空白');
+    assert.strictEqual(ctx.errs.length, 0, 'K1：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a nested fence is not an empty fence, and nothing is injected — OK');
+
+  // ── F10 fix round 2 (K2): 使用者自己把尾巴刪掉，不是被吞噬 ───────────────
+  //
+  // 第二版的判別式是「形狀 ∧ 區塊少了」。往檔尾 trim 也滿足它：區塊 4~5 掉到
+  // 3、文件也真的以沒閉合的圍欄收尾 —— 但圍欄後面本來就沒東西了，是使用者自己
+  // 刪的。那時候那句話的兩個子句都是假的。判別式的效果那一半因此換成【歸屬】：
+  // 新的尾端圍欄本文裡，有沒有哪一行本來活在 code block 外面、現在不在外面了。
+  //
+  // 下面四列都先用磁碟位元組證明那次編輯真的落地，再斷言 banner 不出現。
+  // 拿 588ae30 的 client 跑同一批（CLIENT_OVERRIDE）：X4／P1／P7 在它上面是紅的
+  // （banner=YES），P2 在它上面就已經是綠的 —— P2 守的是「刪掉收尾圍欄，而它
+  // 後面本來就沒東西」這個更窄的形狀，兩版都靜默，它在這裡是防迴歸而不是紅轉綠。
+  {
+    const FDOC = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\nBravo.\n';
+    const CODE = '.ed-block[data-block-type="code"]';
+    const enterSource = async (ctx) => {
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
+    };
+    const leaveSource = async (ctx) => {
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await new Promise((r) => setTimeout(r, 900));
+    };
+    // X4 / P1 / P2：全文原始碼裡往檔尾 trim。
+    for (const [label, cut, expected] of [
+      ['X4 從收尾圍欄一路刪到檔尾', (v) => v.slice(0, v.indexOf('```\n\n## Next')),
+       '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n'],
+      ['P1 從 code 本文中間一路刪到檔尾',
+       (v) => v.slice(0, v.indexOf('const a = 1;')) + 'const a',
+       '# Doc\n\nAlpha.\n\n```js\nconst a'],
+    ]) {
+      const ctx = await newPage(FDOC);
+      await enterSource(ctx);
+      await ctx.page.evaluate((body) => {
+        const ta = document.querySelector('.ed-source');
+        // eslint-disable-next-line no-new-func
+        ta.value = new Function('v', 'return (' + body + ')(v);')(ta.value);
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, cut.toString());
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx), expected,
+        'K2 控制列 ' + label + ' 前提失敗：這次刪除必須真的落到磁碟上');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'K2 控制列 ' + label + '：圍欄後面本來就沒東西了，是使用者自己刪的 —— ' +
+        '「後面的內容全部被吃進去」與「補回收尾圍欄就會復原」兩句都是假的，不得升起 banner');
+      assert.strictEqual(ctx.errs.length, 0,
+        'K2 控制列 ' + label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // P2：刪掉收尾圍欄，而它後面本來就沒有東西。
+    {
+      const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n';
+      const ctx = await newPage(MD);
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace(/```\n$/, '');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n',
+        'K2 控制列 P2 前提失敗：收尾圍欄必須真的被刪掉');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'K2 控制列 P2：收尾圍欄後面本來就沒東西，不得升起 banner');
+      assert.strictEqual(ctx.errs.length, 0,
+        'K2 控制列 P2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // P7：⠿ 跨區塊 span，把「圍欄 ＋ 它後面的東西」整段換成只剩開頭圍欄與本文。
+    {
+      const ctx = await newPage(FDOC);
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.click(CODE);
+      await ctx.page.click('.ed-block[data-block-id="4"]');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-selected').length), 3,
+        'K2 控制列 P7 前提失敗：Shift+Click 沒有框出「圍欄到最後一段」那個 span');
+      await ctx.page.hover(CODE);
+      await new Promise((r) => setTimeout(r, 150));
+      await pressClick(ctx.page, CODE + ' .ed-handle', 80);
+      await ctx.page.waitForSelector('.ed-handle-menu-btn', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('K2 控制列 P7 前提失敗：⠿ 選單裡沒有 MD 原始碼');
+        it.setAttribute('data-journey-target', '1');
+      });
+      await pressClick(ctx.page, '[data-journey-target="1"]', 0);
+      await ctx.page.waitForSelector('textarea.ed-raw', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('textarea.ed-raw');
+        ta.value = '```js\nconst a = 1;';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.focus();
+      });
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('Enter');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n',
+        'K2 控制列 P7 前提失敗：那個 span 必須真的被換掉');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'K2 控制列 P7：使用者把圍欄後面的東西連同收尾一起換掉了，沒有東西被吃進去');
+      assert.strictEqual(ctx.errs.length, 0,
+        'K2 控制列 P7：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: trimming your own tail through the closing fence raises nothing — OK');
+
+    // ── 反面：歸屬測試不得把真吞噬也一起變安靜 ────────────────────────────
+    // TP3 是最常見的那一種（只刪掉收尾圍欄那一行），TP5 是 588ae30 漏掉的那一格
+    // （新圍欄正好吃掉一個區塊，區塊數因此不減）。
+    const SW = SWALLOW_MSG + '✕';
+    {
+      const ctx = await newPage(FDOC);
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('```\n\n## Next', '## Next');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx),
+        '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n## Next\n\nBravo.\n',
+        'TP3 前提失敗：只刪掉收尾圍欄那一行');
+      assert.strictEqual(await visibleBannerText(ctx.page), SW,
+        'TP3：只刪掉收尾圍欄那一行是最常見的真吞噬 —— ## Next 與 Bravo. 被吃進去了');
+      assert.strictEqual(ctx.errs.length, 0, 'TP3：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage('# Doc\n\nAlpha.\n\nBravo.\n\nCharlie.\n');
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('Charlie.', '```\nCharlie.');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\nBravo.\n\n```\nCharlie.\n',
+        'TP5 前提失敗：那道圍欄必須真的插進去');
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 4,
+        'TP5 前提失敗：這一格的重點正是【區塊數不變】（吃掉一個、生出一個），' +
+        '所以任何靠計數的判別式在這裡都是瞎的');
+      assert.strictEqual(await visibleBannerText(ctx.page), SW,
+        'TP5：Charlie. 被吃進新的圍欄裡了，即使區塊數沒變也必須說');
+      assert.strictEqual(ctx.errs.length, 0, 'TP5：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: a real swallow still speaks, even when the block count does not move — OK');
+
+    // ── F10 fix round 2 (K3): 收尾圍欄必須跟開頭圍欄配對 ──────────────────
+    //
+    // FENCE_BARE_RE 舊版不看字元也不看長度，兩個後果都驅動過：
+    //  FN1 —— 一份以光禿禿 '~~~' 結尾的文件裡，把 ``` 的收尾打壞（真吞噬）會被
+    //         當成「圍欄有收好」而【靜默】。
+    //  G7  —— 一份【開檔時就沒閉合】的文件（```js 開頭、尾巴那行 '~~~' 其實是
+    //         本文）在開檔時被誤判成「收好了」，於是之後一個無辜的手勢會被誣賴
+    //         成吞噬 —— 繞過了 C10 那一列。
+    {
+      const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\n~~~\ntilde\n~~~\n';
+      const ctx = await newPage(MD);
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('```\n\n## Next', '``` MID\n\n## Next');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx),
+        '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n``` MID\n\n## Next\n\n~~~\ntilde\n~~~\n',
+        'FN1 前提失敗：收尾圍欄必須真的被打壞');
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 3,
+        'FN1 前提失敗：吞噬必須真的發生（5 個區塊掉到 3 個）');
+      assert.strictEqual(await visibleBannerText(ctx.page), SW,
+        'FN1：文件尾端那行光禿禿的 ~~~ 收不掉一道 ``` 圍欄 —— 不得因此把真吞噬吞掉');
+      assert.strictEqual(ctx.errs.length, 0, 'FN1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const MD = '# Doc\n\nAlpha.\n\nBravo.\n\n```js\ncode\n~~~\n';
+      const ctx = await newPage(MD);
+      assert.deepStrictEqual(
+        await ctx.page.evaluate(() =>
+          window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+        ['heading[1,1]', 'paragraph[3,3]', 'paragraph[5,5]', 'code[7,9]'],
+        'G7 前提失敗：fixture 的那道 ```js 圍欄必須是【沒閉合】的，尾巴那行 ~~~ 是本文');
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('Bravo.\n\n', '').replace('~~~\n', '');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\ncode\n',
+        'G7 前提失敗：那兩行必須真的被刪掉（區塊也真的少了一個）');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'G7：這份文件【一開檔】就沒閉合，使用者這次只是刪東西 —— 不得誣賴它吞噬。' +
+        '588ae30 把開檔時那行光禿禿的 ~~~ 當成收尾，於是這一列在它上面會叫。');
+      assert.strictEqual(ctx.errs.length, 0, 'G7：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: a closing fence has to match the one it closes — OK');
+  }
+
+  // ── F10: 判別式那三個合取項各自被一列釘住 ──────────────────────────────
+  //
+  // 上面那些控制列釘的是 `nowUnclosed`（S1／S2／R1 那族）與歸屬那一項（K2 的
+  // X4／P1／P2／P7）。下面兩列補上剩下的兩個：
+  //  * 「上一次 render 之後不是這個形狀」—— 少了它，一份【一開檔就沒閉合】的
+  //    文件會在使用者把一段搬到圍欄後面時被喊吞噬。那次搬移是使用者自己做的，
+  //    而且那道圍欄不是這次編輯打開的，所以「補回收尾圍欄就會復原」講不通。
+  //  * 歸屬測試的後半「這一行【現在】已經不在 code block 外面了」—— 少了它，
+  //    使用者把最後一段換成一道沒閉合的圍欄、而圍欄本文剛好跟文件別處某一段
+  //    一字不差時，那一段明明還好端端在外面，卻會被算成被吃掉。
+  {
+    const openRawViaGutter = async (ctx, sel) => {
+      await ctx.page.hover(sel);
+      await new Promise((r) => setTimeout(r, 150));
+      await pressClick(ctx.page, sel + ' .ed-handle', 80);
+      await ctx.page.waitForSelector(sel + ' .ed-handle-menu-btn', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('⠿ 選單裡沒有 MD 原始碼');
+        it.setAttribute('data-journey-target', '1');
+      });
+      await pressClick(ctx.page, '[data-journey-target="1"]', 0);
+      await ctx.page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+    };
+    {
+      const MD = '# Doc\n\nAlpha.\n\n```js\ncode\n';
+      const ctx = await newPage(MD);
+      assert.deepStrictEqual(
+        await ctx.page.evaluate(() =>
+          window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+        ['heading[1,1]', 'paragraph[3,3]', 'code[5,6]'],
+        'PIN-prev 前提失敗：fixture 必須是一份【開檔時就沒閉合】的文件');
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('Alpha.\n\n', '').replace('code\n', 'code\nAlpha.\n');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\n```js\ncode\nAlpha.\n',
+        'PIN-prev 前提失敗：Alpha. 必須真的被搬到圍欄後面（因此進了 code block）');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'PIN-prev：這道圍欄不是這次編輯打開的（文件一開檔就沒閉合），使用者是自己' +
+        '把那一段搬進去的 —— 不得升起 banner');
+      assert.strictEqual(ctx.errs.length, 0, 'PIN-prev：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const MD = '# Doc\n\nAlpha.\n\nBravo.\n\nCharlie.\n';
+      const ctx = await newPage(MD);
+      await openRawViaGutter(ctx, '.ed-block[data-block-id="3"]');
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-block[data-block-id="3"] textarea.ed-raw');
+        ta.value = '```\nAlpha.';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await pressClick(ctx.page, '.ed-block[data-block-id="0"] .ed-wys-armed', 80);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\nBravo.\n\n```\nAlpha.\n',
+        'PIN-now 前提失敗：最後一段必須真的變成一道沒閉合的圍欄，本文是 Alpha.');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'PIN-now：圍欄本文那行 Alpha. 跟上面那一段一字不差，但上面那一段還好端端' +
+        '在 code block 外面 —— 沒有東西被吃掉，不得升起 banner');
+      assert.strictEqual(ctx.errs.length, 0, 'PIN-now：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: each half of the swallow discriminant has a row that pins it — OK');
   }
 
   await browser.close();
