@@ -178,16 +178,21 @@ async function saveAndRead(ctx) {
 //
 // 回傳 { heldMs } —— 【實測】的 down→up 間隔，不是要求的 holdMs。呼叫端拿它
 // 跟這台機器自己的 commit round trip 比對，把「這一列到底有沒有能力紅」變成
-// 案例自己的前提斷言（見下面階段 0 案例的 __renderApplyMs）。刻意在發出
-// mouse.up() 【之前】取時間，所以它是真實間隔的【下界】—— 前提斷言因此偏嚴，
-// 不會因為 CDP 往返把自己算得比實際寬鬆。
+// 案例自己的前提斷言（見下面階段 0 案例的 __renderApplyMs）。刻意在送出【放開】
+// 事件之前取時間（預設路徑是 `mouse.up()`，`pressAtPointer` 路徑是 CDP 的
+// `mouseReleased`），所以它是真實間隔的【下界】—— 前提斷言因此偏嚴，不會因為
+// CDP 往返把自己算得比實際寬鬆。
 // `opts.pressAtPointer` — `{x, y}`: press at exactly this viewport point,
-// WITHOUT dispatching a mouse move first. Every assertion below runs unchanged
-// and one more is added: the point must fall inside the element's clipped
-// rect. The press and release are dispatched through CDP at that literal
-// point, so the asserted point IS the pressed point — the guard cannot be
-// satisfied by a coordinate the press then ignores, and it does not depend on
-// where puppeteer's own `page.mouse` believes the cursor is.
+// WITHOUT dispatching a mouse move first. Every assertion below runs unchanged,
+// and this path adds its own: the element's rect must not have moved under
+// scrollIntoViewIfNeeded(), and the point must fall inside that rect.
+//
+// The press and release are dispatched through CDP at that literal point.
+// That is NOT a step away from real mouse input: puppeteer's own
+// `Mouse.down()`/`up()` send the identical `Input.dispatchMouseEvent`, at the
+// position it keeps internally. The only thing CDP buys here is that the
+// coordinate becomes an argument this function can assert about, instead of
+// state held inside puppeteer's `Mouse` that no assertion can reach.
 //
 // Why it exists: `.ed-tb-insert` (the ＋ bubbles) is appended to
 // `document.body`, so `updateTableInsertBubbles()`'s
@@ -208,10 +213,17 @@ async function pressClick(page, selector, holdMs, opts) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
     if (!el) return null;
-    const sx0 = window.scrollX, sy0 = window.scrollY;
+    // Watch the ELEMENT's own rect, not window.scrollX/Y: an ancestor
+    // scroller moves the element while the window stays put. MEASURED on a
+    // fixture whose button sits inside an `overflow:auto` container —
+    // winScrolled false, rectMoved true, containerScrollTop 1860, the rect's
+    // top going 2009 -> 149 with the document not scrollable at all
+    // (scrollHeight 600 = innerHeight 600). A window-only check is silent
+    // through all of that.
+    const r0 = el.getBoundingClientRect();
     if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded();
-    const scrolled = window.scrollX !== sx0 || window.scrollY !== sy0;
     const r = el.getBoundingClientRect();
+    const rectMoved = r.left !== r0.left || r.top !== r0.top;
     const vw = window.innerWidth, vh = window.innerHeight;
     // Fix round 1, ruling T2-2: press the point INSIDE the viewport, not the
     // full (possibly off-screen) rect's centre. 量測（puppeteer 24.42.0，
@@ -227,7 +239,7 @@ async function pressClick(page, selector, holdMs, opts) {
     return { x: cLeft + cw / 2, y: cTop + ch / 2,
              w: r.width, h: r.height, cw: cw, ch: ch, vw: vw, vh: vh,
              cLeft: cLeft, cTop: cTop, cRight: cRight, cBottom: cBottom,
-             scrolled: scrolled };
+             rectMoved: rectMoved };
   }, selector);
   assert.ok(box, 'pressClick: 找不到 ' + selector);
   // 元素【存在但按不到】時 puppeteer 不會抱怨，會安靜地按在別的東西上。
@@ -257,21 +269,28 @@ async function pressClick(page, selector, holdMs, opts) {
   }
   // `box.c*` was measured AFTER scrollIntoViewIfNeeded() inside the same
   // evaluate; `pressAt` is the caller's coordinate from before that call. If
-  // the two frames differ the comparison below is meaningless, so say so
-  // instead of comparing across them.
-  assert.strictEqual(box.scrolled, false,
-    'pressClick: scrollIntoViewIfNeeded() 捲動了頁面，' + selector +
-    ' 的矩形與呼叫端算 pressAtPointer 時的座標系已經不同，這個比較無意義');
+  // that call moved the element the comparison below is meaningless, so say so
+  // instead of comparing across two frames.
+  assert.strictEqual(box.rectMoved, false,
+    'pressClick: scrollIntoViewIfNeeded() 把 ' + selector +
+    ' 的矩形移動了，它已經不在呼叫端算 pressAtPointer 時的位置，這個比較無意義');
   assert.ok(pressAt.x >= box.cLeft && pressAt.x <= box.cRight &&
             pressAt.y >= box.cTop && pressAt.y <= box.cBottom,
     'pressClick: pressAtPointer (' + pressAt.x + ',' + pressAt.y + ') 不在 ' +
     selector + ' 的可見矩形 [' + box.cLeft + ',' + box.cRight + ']×[' +
     box.cTop + ',' + box.cBottom + '] 內 —— 按壓會落在別的元素上');
-  // Dispatched through CDP rather than page.mouse so the press lands on the
-  // asserted coordinate itself and NOT wherever puppeteer's Mouse currently
-  // thinks it is — and so no `mouseMoved` is emitted, which is the whole
-  // point (see this function's own comment). Press and release are both sent
-  // this way, so puppeteer's own button bookkeeping is never left half-open.
+  // Same wire message `page.mouse.down()`/`up()` would send, addressed to the
+  // asserted coordinate rather than to whatever position puppeteer's Mouse
+  // holds. Neither form emits a `mouseMoved`; skipping the move is the
+  // caller-visible contract above, not something this dispatch does.
+  //
+  // Two knowingly-unhandled gaps, neither reachable from any caller today:
+  // `modifiers` is not forwarded (no caller passes any), and puppeteer's own
+  // `Mouse` never learns about this press. Its button bookkeeping stays
+  // consistent because BOTH halves go through CDP, and its position is
+  // already correct because the caller is the one who moved it here. A future
+  // caller that needs modifiers, or that mixes `page.mouse` into the same
+  // gesture, has to close these first.
   const cdp = await page.createCDPSession();
   const ev = { x: pressAt.x, y: pressAt.y, button: 'left', buttons: 1, clickCount: 1 };
   await cdp.send('Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed' }, ev));
@@ -2777,10 +2796,18 @@ async function main() {
 
   // ── 地基 B / I2: 原生 Ctrl+B 後【400ms 內】繼續打字，undo 不得連粗體一起退 ──
   //
-  // 上面那四列（套標記 → 停 250ms → Ctrl+Z）釘不住 `snap('native-format')`：
-  // 停了就沒有 pending capture 可以把粗體吞進去，那一發換成 noteTyping() 它們
-  // 照樣綠。會紅的是這個手勢 —— Ctrl+B 之後【不停】繼續打字，那一筆 pending
-  // capture 會在 undo 的 flushTyping() 裡連粗體一起帶走。
+  // 上面那四列（套標記 → 停 250ms → Ctrl+Z）釘不住 `snap('native-format')`，
+  // 而理由【不是】那個停頓清掉了什麼：`noteTyping()` 尾端無條件
+  // `isPendingSnap = true`，全 `lib/editor/history.js` 只有 `snap()`／
+  // `start()`／`dispose()` 會把它指回 false，沒有 timer 會清它。把
+  // `createBurstHistory` 包起來實測（`nopost` build、停 250ms 之後）：
+  // `undo()` 那一發是 `size 2->2` —— 沒掉，也就是 undo 自己的 `flushTyping()`
+  // 推了一筆又 pop 掉一筆，pending capture 一直都在。
+  //
+  // 真正的理由是：指令之後【沒有再打字】時，被沖出來的那份 capture 跟
+  // post-snap 會推的那一筆【完全相同】，所以 undo 兩邊都退到同一格。
+  // 會紅的是這個手勢 —— Ctrl+B 之後【不停】繼續打字，被沖出來的那份變成
+  // 「粗體 + XY」，pop 之後就少退一格，粗體跟著被帶走。
   {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     const SEL = '.ed-block[data-block-id="1"] .ed-wys-armed';
