@@ -179,7 +179,8 @@ async function saveAndRead(ctx) {
 //   {"offsetParent":null,"display":"flex","vis":"visible","w":800,"h":69.5}
 // —— banner 明明佔了整條螢幕寬，offsetParent 判斷仍然說它看不見。用那個判斷
 // 寫的斷言對這條 banner 恆為「沒有 banner」：要求「有」的那一半永遠紅、要求
-// 「沒有」的那一半（本檔 F10 的控制組）永遠綠，兩邊都量不到東西。
+// 「沒有」的那一半（這個檔案裡 F10 的控制組）永遠綠 —— 不論要求有或要求沒有，
+// 都量不到東西。
 // F10 那一句【吞噬專用】的文字，逐字對上 lib/editor/client.js 的
 // `SWALLOW_MESSAGE`。showBanner() 的節點是「訊息 span ＋ 關閉鈕（✕）」，所以
 // 讀回來的 textContent 帶著那個 ✕ 尾巴。
@@ -3197,7 +3198,7 @@ async function main() {
   }
 
   // ── F9 fix round 1 (J2): 空的圍欄，以及「以收尾圍欄結尾但不是以開頭圍欄起頭」
-  //     的跨區塊 span —— 兩種形狀在第一版底下仍然會把圍欄打壞 ─────────────
+  //     的跨區塊 span —— 這些形狀在第一版底下仍然會把圍欄打壞 ───────────────
   //
   // 空圍欄（```js 緊接著 ```）的本文區【一行都沒有】，所以原始碼裡不存在任何
   // 安全的 offset：落在結尾會踩到收尾圍欄，落在「開頭圍欄的下一行行首」踩到的
@@ -3234,7 +3235,8 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'F9b：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  // 種進去那一行的代價：開起來看一眼就關掉，不得變髒、不得寫檔。兩條關法都測
+  // 種進去那一行的代價：開起來看一眼就關掉，不得變髒、不得寫檔。這裡測的是
+  // Escape 與「點到別的區塊」（不是所有的關法）
   // —— Escape 走 cancelAndMaybeDiscard()，點到別的區塊走 switchAwayFrom() 的
   // hasChanges() 判斷，而 hasChanges() 正是這個修法動到的東西。
   for (const [how, close] of [
@@ -3265,7 +3267,7 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'F9c：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  // 第二種形狀：⠿ 的「MD 原始碼」框出一段【跨區塊】的 span，它以一道光禿禿的
+  // 另一種形狀：⠿ 的「MD 原始碼」框出一段【跨區塊】的 span，它以一道光禿禿的
   // 收尾圍欄結尾、但不是以開頭圍欄起頭。結尾落點會落在那道收尾圍欄上。
   {
     const MD = '# Doc\n\nAlpha.\n\n```js\ncode\n```\n\nTail.\n';
@@ -3315,11 +3317,11 @@ async function main() {
 
   // ── F10 fix round 1 (J1): 這條信號不得在普通編輯上亂叫，而且必須能退場 ────
   //
-  // 出貨的第一版判別式是純計數（Δblocks < 0 且 Δlines >= 0），它在下面這四種
-  // 手勢上都會叫，而磁碟位元組完全正確。四種都是【控制列】：它們斷言 banner
+  // 出貨的第一版判別式是純計數（Δblocks < 0 且 Δlines >= 0），它在下面這些手勢
+  // 上都會叫，而磁碟位元組完全正確。它們都是【控制列】：它們斷言 banner
   // 不出現，所以任何回到計數式判別的改動都會讓它們紅。
   //
-  // 誤報住在兩個地方，所以兩個都掃：全文原始碼（M↓／`[data-ed-tb="preview"]`）
+  // 誤報住在全文原始碼（M↓／`[data-ed-tb="preview"]`）
   // 與逐區塊的 raw 編輯器（⠿ →「MD 原始碼」）。
   {
     const enterSource = async (ctx) => {
@@ -3462,7 +3464,7 @@ async function main() {
     console.log('journey: the swallow signal stays silent on ordinary edits — OK');
   }
 
-  // ── F10 fix round 1 (J1 第二半): banner 必須能退場 ──────────────────────
+  // ── F10 fix round 1 (J1 的後半): banner 必須能退場 ─────────────────────
   //
   // 它不是 refusal banner，dismissRefusalBanner() 碰不到它。退場的條件是【圍欄
   // 補回去了】，不是「後來有一次成功的編輯」—— 圍欄還開著的時候後面的內容就
@@ -3593,7 +3595,7 @@ async function main() {
   // 刪的。那時候那句話的每一個子句都是假的。判別式的效果那一半因此換成【歸屬】：
   // 新的尾端圍欄本文裡，有沒有哪一行本來活在 code block 外面、現在不在外面了。
   //
-  // 下面四列都先用磁碟位元組證明那次編輯真的落地，再斷言 banner 不出現。
+  // 下面每一列都先用磁碟位元組證明那次編輯真的落地，再斷言 banner 不出現。
   // 拿 588ae30 的 client 跑同一批（CLIENT_OVERRIDE）：X4／P1／P7 在它上面是紅的
   // （banner=YES），P2 在它上面就已經是綠的 —— P2 守的是「刪掉收尾圍欄，而它
   // 後面本來就沒東西」這個更窄的形狀，兩版都靜默，它在這裡是防迴歸而不是紅轉綠。
@@ -3609,29 +3611,42 @@ async function main() {
       await new Promise((r) => setTimeout(r, 900));
     };
     // X4 / P1 / P2：全文原始碼裡往檔尾 trim。
-    for (const [label, cut, expected] of [
-      ['X4 從收尾圍欄一路刪到檔尾', (v) => v.slice(0, v.indexOf('```\n\n## Next')),
-       '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n'],
-      ['P1 從 code 本文中間一路刪到檔尾',
-       (v) => v.slice(0, v.indexOf('const a = 1;')) + 'const a',
-       '# Doc\n\nAlpha.\n\n```js\nconst a'],
-    ]) {
+    // X4：從收尾圍欄一路刪到檔尾。
+    {
       const ctx = await newPage(FDOC);
       await enterSource(ctx);
-      await ctx.page.evaluate((body) => {
+      await ctx.page.evaluate(() => {
         const ta = document.querySelector('.ed-source');
-        // eslint-disable-next-line no-new-func
-        ta.value = new Function('v', 'return (' + body + ')(v);')(ta.value);
+        ta.value = ta.value.slice(0, ta.value.indexOf('```\n\n## Next'));
         ta.dispatchEvent(new Event('input', { bubbles: true }));
-      }, cut.toString());
+      });
       await leaveSource(ctx);
-      assert.strictEqual(await saveAndRead(ctx), expected,
-        'K2 控制列 ' + label + ' 前提失敗：這次刪除必須真的落到磁碟上');
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n',
+        'K2 控制列 X4 前提失敗：這次刪除必須真的落到磁碟上');
       assert.strictEqual(await visibleBannerText(ctx.page), null,
-        'K2 控制列 ' + label + '：圍欄後面本來就沒東西了，是使用者自己刪的 —— ' +
+        'K2 控制列 X4：圍欄後面本來就沒東西了，是使用者自己刪的 —— ' +
         '「後面的內容全部被吃進去」與「補回收尾圍欄就會復原」兩句都是假的，不得升起 banner');
       assert.strictEqual(ctx.errs.length, 0,
-        'K2 控制列 ' + label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+        'K2 控制列 X4：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // P1：從 code 本文中間一路刪到檔尾。
+    {
+      const ctx = await newPage(FDOC);
+      await enterSource(ctx);
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.slice(0, ta.value.indexOf('const a = 1;')) + 'const a';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await leaveSource(ctx);
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a',
+        'K2 控制列 P1 前提失敗：這次刪除必須真的落到磁碟上');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'K2 控制列 P1：圍欄後面本來就沒東西了，是使用者自己刪的 —— ' +
+        '「後面的內容全部被吃進去」與「補回收尾圍欄就會復原」兩句都是假的，不得升起 banner');
+      assert.strictEqual(ctx.errs.length, 0,
+        'K2 控制列 P1：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
     }
     // P2：刪掉收尾圍欄，而它後面本來就沒有東西。
@@ -3741,7 +3756,7 @@ async function main() {
 
     // ── F10 fix round 2 (K3): 收尾圍欄必須跟開頭圍欄配對 ──────────────────
     //
-    // FENCE_BARE_RE 舊版不看字元也不看長度，兩個後果都驅動過：
+    // FENCE_BARE_RE 舊版不看字元也不看長度，下面每一個後果都驅動過：
     //  FN1 —— 一份以光禿禿 '~~~' 結尾的文件裡，把 ``` 的收尾打壞（真吞噬）會被
     //         當成「圍欄有收好」而【靜默】。
     //  G7  —— 一份【開檔時就沒閉合】的文件（```js 開頭、尾巴那行 '~~~' 其實是
@@ -3782,7 +3797,9 @@ async function main() {
         // 把 Bravo. 搬到圍欄後面：它從 code block 外面跑進了裡面，所以【歸屬】
         // 那一項會說「被吃掉了」。讓這一列靜默的是「這道圍欄不是這次編輯打
         // 開的」，而那個判斷在開檔時就要靠 closesFence() 認出尾巴那行光禿禿的
-        // ~~~ 收不掉一道 ``` 圍欄。少了任一半，這一列就會叫。
+        // ~~~ 收不掉一道 ``` 圍欄。單獨拿掉「上一次 render 之後不是這個形狀」
+        // 那一項，這一列就叫；單獨拿掉 closesFence() 的字元檢查【不會】讓它叫
+        // （那一項是別的列在守），所以這裡不寫成「少了任一半都會叫」。
         ta.value = ta.value.replace('Bravo.\n\n', '').replace('~~~\n', '~~~\nBravo.\n');
         ta.dispatchEvent(new Event('input', { bubbles: true }));
       });
@@ -4060,7 +4077,7 @@ async function main() {
     console.log('journey: each half of the swallow discriminant has a row that pins it — OK');
   }
 
-  // ── F10 fix round 3 (L1): 歸屬要算【數量】，問「有沒有」兩個方向都會說謊 ──
+  // ── F10 fix round 3 (L1): 歸屬要算【數量】，問「有沒有」正反都會說謊 ──────
   //
   // 上一版問的是「這一行以前在 code block 外面，而現在不在外面了」。那個問法：
   //  * 往檔尾 trim 時，只要圍欄本文有一行【也】出現在被刪掉的尾巴裡就會叫 ——
@@ -4306,6 +4323,121 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'L3：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: a backtick in the info string is not a fence opener — OK');
+  }
+
+  // ── F10 fix round 4 (M1): 歸屬要【逐行】判，不是把前後半各自加總再比 ──────
+  //
+  // 上一版把 wasOut／nowOut 與 prevTotal／nowTotal 各自在尾端圍欄本文的所有行上
+  // 加總，再比一次。加總會讓不同行互相抵銷，不論哪個方向都出事：
+  //  * 真吞噬靜默：code block 裡有一行重複（`}` 是日常樣子），使用者一次編輯刪掉
+  //    其中一份【並且】刪掉收尾圍欄。被吃掉的 Bravo. 那一行自己前後半都成立，卻被
+  //    那個消失的 `}` 拉低了總數而被抵銷掉。
+  //  * 誤報回來：往檔尾 trim 的同一次編輯裡把本文某一行複製一份 —— 被 trim 掉的
+  //    那一行滿足前半、複製出來的那一行撐起後半，湊出一個沒有任何一行自己成立的
+  //    「真」。那正是 K2 那族誤報。
+  //
+  // 改成逐行、命中就 return true：一行要自己同時滿足前半與後半才算數。
+  {
+    const NL = '\n';
+    const SW = SWALLOW_MSG + '✕';
+    const CODE = '.ed-block[data-block-type="code"]';
+    // '}' 在 code block 裡重複出現；使用者刪掉後面那一份與收尾圍欄。
+    const DUPBRACE = '# Doc' + NL + NL + '```js' + NL + 'if (a) {' + NL + '}' + NL +
+                     'if (b) {' + NL + '}' + NL + '```' + NL + NL + 'Bravo.' + NL;
+    const EATEN = '# Doc\n\n```js\nif (a) {\n}\nif (b) {\n\nBravo.\n';
+    // FN-agg：全文原始碼。
+    {
+      const ctx = await newPage(DUPBRACE);
+      assert.deepStrictEqual(
+        await ctx.page.evaluate(() =>
+          window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+        ['heading[1,1]', 'code[3,8]', 'paragraph[10,10]'],
+        'FN-agg 前提失敗：fixture 沒有給出「重複 } 的 code block ＋ 後面一段」');
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('}\n```\n', '');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx), EATEN,
+        'FN-agg 前提失敗：那一份 } 與收尾圍欄必須真的被刪掉');
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 2,
+        'FN-agg 前提失敗：Bravo. 必須真的被吃進 code block');
+      assert.strictEqual(await visibleBannerText(ctx.page), SW,
+        'FN-agg：Bravo. 被吃掉了。它自己在圍欄外面的份數 1→0、整份文件的份數沒少，' +
+        '兩半都成立 —— 不得因為同一次編輯讓另一行的 } 少了一份就把它抵銷掉');
+      assert.strictEqual(ctx.errs.length, 0, 'FN-agg：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // FN-agg2：同一次編輯走逐區塊的 raw 編輯器。
+    {
+      const ctx = await newPage(DUPBRACE);
+      await pressClick(ctx.page, CODE, 80);
+      await ctx.page.waitForSelector(CODE + ' textarea.ed-raw', { timeout: 5000 });
+      await ctx.page.evaluate((s) => {
+        const ta = document.querySelector(s + ' textarea.ed-raw');
+        ta.value = '```js\nif (a) {\n}\nif (b) {';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }, CODE);
+      await pressClick(ctx.page, '.ed-block[data-block-id="0"] .ed-wys-armed', 80);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx), EATEN,
+        'FN-agg2 前提失敗：raw 編輯器那次提交必須落到磁碟上');
+      assert.strictEqual(await visibleBannerText(ctx.page), SW,
+        'FN-agg2：同一個吞噬走 ⠿／點擊那條路一樣要說');
+      assert.strictEqual(ctx.errs.length, 0, 'FN-agg2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // FP-agg：往檔尾 trim，同一次編輯把本文某一行複製一份。
+    {
+      const MD = '# Doc' + NL + NL + 'Run this:' + NL + NL + '```sh' + NL + 'setup' + NL +
+                 'npm test' + NL + '```' + NL + NL + 'npm test' + NL;
+      const ctx = await newPage(MD);
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.click(CODE);
+      await ctx.page.click('.ed-block[data-block-id="3"]');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-selected').length), 2,
+        'FP-agg 前提失敗：Shift+Click 沒有框出「圍欄 ＋ 它後面那一段」');
+      await ctx.page.hover(CODE);
+      await new Promise((r) => setTimeout(r, 150));
+      await pressClick(ctx.page, CODE + ' .ed-handle', 80);
+      await ctx.page.waitForSelector('.ed-handle-menu-btn', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('FP-agg 前提失敗：⠿ 選單裡沒有 MD 原始碼');
+        it.setAttribute('data-journey-target', '1');
+      });
+      await pressClick(ctx.page, '[data-journey-target="1"]', 0);
+      await ctx.page.waitForSelector('textarea.ed-raw', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('textarea.ed-raw');
+        ta.value = '```sh\nsetup\nsetup\nnpm test';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.focus();
+      });
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('Enter');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx),
+        '# Doc\n\nRun this:\n\n```sh\nsetup\nsetup\nnpm test\n',
+        'FP-agg 前提失敗：那個 span 必須真的被換掉');
+      assert.strictEqual(await visibleBannerText(ctx.page), null,
+        'FP-agg：圍欄後面什麼都沒有了，是使用者自己 trim 掉的 —— 被 trim 掉的 ' +
+        'npm test 滿足前半、被複製的 setup 撐起後半，那是兩行湊出來的「真」，' +
+        '沒有任何一行自己成立');
+      assert.strictEqual(ctx.errs.length, 0, 'FP-agg：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: absorption is judged per line, not by two sums that cancel — OK');
   }
 
   await browser.close();
