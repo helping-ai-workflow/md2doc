@@ -260,19 +260,32 @@ async function armDetachProbe(page, itemSel, itemLabel) {
       }, true);
     }
     window.__renderApplyMs = [];
+    // Fix round 3, finding 2: `started` must reset on every arm, not just
+    // once at install time. It used to live only in the fetch wrapper's
+    // closure, cleared solely by an actual `.content` childList mutation —
+    // so an `/api/render` that completes WITHOUT producing one (nothing
+    // reachable today, but not guaranteed never to happen in a future
+    // caller) would leave it set forever; the next mutation after a later
+    // re-arm would then be timed against that stale start, producing a huge
+    // bogus duration and a false RED in assertDetachCapable(). Putting it on
+    // `window` and resetting it in this same block — the one that already
+    // runs on every arm — closes that gap for every future caller of this
+    // helper, not just the two that exist today.
+    window.__renderStarted = null;
     if (!window.__renderApplyMsArmed) {
       window.__renderApplyMsArmed = true;
       const contentEl = document.querySelector('.content');
-      let started = null;
       const origFetch = window.fetch;
       window.fetch = function (u) {
-        if (String(u).indexOf('/api/render') !== -1 && started === null) started = performance.now();
+        if (String(u).indexOf('/api/render') !== -1 && window.__renderStarted === null) {
+          window.__renderStarted = performance.now();
+        }
         return origFetch.apply(this, arguments);
       };
       new MutationObserver(() => {
-        if (started === null) return;
-        window.__renderApplyMs.push(performance.now() - started);
-        started = null;
+        if (window.__renderStarted === null) return;
+        window.__renderApplyMs.push(performance.now() - window.__renderStarted);
+        window.__renderStarted = null;
       }).observe(contentEl, { childList: true });
     }
     // Clear any stale tag from a PRIOR arm on this same page (V2h arms twice:
@@ -1535,8 +1548,18 @@ async function main() {
         // when its mousedown is correctly protected. `itemClickFired()` alone
         // is the right (and sufficient) signal here: on a healthy build the
         // click is synchronous and always registers, so a `menu-gone` here
-        // means the earlier `.ed-handle` open itself already lost the race —
-        // a real regression, not a machine-speed false negative.
+        // means THIS press's own mousedown escaped the delegated
+        // preventDefault list (MEASURED: dropping only
+        // `.ed-handle-menu-btn`/`.ed-insert-menu-btn` from that list — with
+        // `.ed-handle` itself still in it, so opening the menu is unaffected
+        // — already reproduces `menu-gone` here); less likely, the earlier
+        // ⠿ open itself lost a race. Either way it is a real regression, not
+        // a machine-speed false negative: if this machine were ever slow
+        // enough to rob THIS press of detection power, the SAME row's leaf
+        // press three lines below carries its own `assertDetachCapable()`
+        // and would go loudly red there instead — that's the actual
+        // protection behind not giving the toggle a round-trip precondition
+        // of its own, not an assumption that this press can't lose a race.
         await armDetachProbe(ctx.page, '.ed-handle-menu-btn', '轉換成 ›');
         await pressClick(ctx.page, '[data-journey-target="1"]', 80);
         await new Promise((r) => setTimeout(r, 300));
