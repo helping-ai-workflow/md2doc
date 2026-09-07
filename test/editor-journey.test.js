@@ -187,8 +187,20 @@ async function pressClick(page, selector, holdMs) {
     if (!el) return null;
     if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded();
     const r = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2,
-             w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight };
+    const vw = window.innerWidth, vh = window.innerHeight;
+    // Fix round 1, ruling T2-2: press the point INSIDE the viewport, not the
+    // full (possibly off-screen) rect's centre. 量測（puppeteer 24.42.0，
+    // 800×600）：puppeteer 自己的 elementHandle.click() 也是把 clickable
+    // point 夾到「矩形 ∩ 視窗」的那一塊再送——一顆矩形中心在 (-5,22) 但仍
+    // 留著 9.4px 可見裂縫的按鈕，puppeteer 量到的落點是 x≈4.7（裂縫正中央），
+    // 不是矩形中心的 x≈-5；那道裂縫是真人滑鼠按得到的。舊版按「完整矩形中心」
+    // 比真人滑鼠更嚴格，這裡改成量「可見交集」的中心，只有 scrollIntoViewIfNeeded()
+    // 之後仍然【完全沒有交集】才算按不到。
+    const cLeft = Math.max(r.left, 0), cTop = Math.max(r.top, 0);
+    const cRight = Math.min(r.right, vw), cBottom = Math.min(r.bottom, vh);
+    const cw = Math.max(0, cRight - cLeft), ch = Math.max(0, cBottom - cTop);
+    return { x: cLeft + cw / 2, y: cTop + ch / 2,
+             w: r.width, h: r.height, cw: cw, ch: ch, vw: vw, vh: vh };
   }, selector);
   assert.ok(box, 'pressClick: 找不到 ' + selector);
   // 元素【存在但按不到】時 puppeteer 不會抱怨，會安靜地按在別的東西上。
@@ -200,9 +212,12 @@ async function pressClick(page, selector, holdMs) {
   assert.ok(box.w > 0 && box.h > 0,
     'pressClick: ' + selector + ' 的矩形是 ' + box.w + '×' + box.h +
     '，按壓會落在別的元素上（元素存在但按不到）');
-  assert.ok(box.x >= 0 && box.y >= 0 && box.x <= box.vw && box.y <= box.vh,
-    'pressClick: ' + selector + ' 的中心點 (' + Math.round(box.x) + ',' + Math.round(box.y) +
-    ') 落在 ' + box.vw + '×' + box.vh + ' 視窗之外，按壓不會打在它上面');
+  // T2-2：「按不到」現在的定義是「矩形跟視窗完全沒有交集」，不是「矩形中心
+  // 不在視窗內」——一顆只露出一條裂縫的元素，真人滑鼠按得到那道裂縫，這裡
+  // 也必須按得到，否則這支 helper 比真人更嚴格，會擋下真人按得到的手勢。
+  assert.ok(box.cw > 0 && box.ch > 0,
+    'pressClick: ' + selector + ' 在 ' + box.vw + '×' + box.vh + ' 視窗內沒有任何可見交集' +
+    '（矩形 ' + box.w + '×' + box.h + '，scrollIntoViewIfNeeded() 之後仍然按不到）');
   await page.mouse.move(box.x, box.y);
   await page.mouse.down();
   const t0 = Date.now();
@@ -964,25 +979,7 @@ async function main() {
         await ctx.page.close(); ctx.srv.close();
         continue;
       }
-      // v3.3.0 Task 2 finding (out of scope here, see task-2-report.md): at this
-      // 800×600 default viewport, .ed-toolbar's `justify-content: center` +
-      // `overflow-x: auto` overflows by ~32px split across both edges, and
-      // Chromium's flexbox-overflow quirk leaves the START-side overflow
-      // permanently unreachable by scroll (`scrollLeft` cannot go negative to
-      // reveal it) — MEASURED: 'undo' sits at centre x ≈ -5, and
-      // `scrollIntoViewIfNeeded()` cannot recover it. `pressClick()`'s
-      // off-viewport guard (correctly) throws here; a real mouse could never
-      // reach this button either. `page.click()` "succeeds" only because CDP
-      // dispatches the synthetic event at that off-screen coordinate anyway,
-      // which is not something a physical mouse can do. This is a distinct,
-      // pre-existing layout defect, not the ⠿/＋ detachment family Task 1/2
-      // are about — kept on the old driver here so the rest of the matrix can
-      // still run under a real press.
-      if (row.id === 'undo') {
-        await ctx.page.click('[data-ed-tb="' + row.id + '"]');
-      } else {
-        await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
-      }
+      await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
       const fail = await checkLeverage(ctx, row.id, row.answer);
       if (fail) bad.push(fail);
@@ -1422,9 +1419,21 @@ async function main() {
       await pressClick(ctx.page, sel + ' .ed-handle', 80);
       await ctx.page.waitForSelector('.ed-handle-menu-btn');
       if (viaConvert) {
+        // Same class (`.ed-handle-menu-btn`), same still-dirty burst as the
+        // label press below — the 轉換成 toggle is itself a menu item, not
+        // part of the panel chrome, so it is just as susceptible and gets the
+        // same real press. Tag-then-remove avoids colliding with the label's
+        // own `data-journey-target` tag right after.
         await ctx.page.evaluate(() => {
-          Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
-            .find((x) => x.textContent.indexOf('轉換成') !== -1).click();
+          const t = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+            .find((x) => x.textContent.indexOf('轉換成') !== -1);
+          if (!t) throw new Error('⠿ 轉換成 toggle not found');
+          t.setAttribute('data-journey-target', '1');
+        });
+        await pressClick(ctx.page, '[data-journey-target="1"]', 80);
+        await ctx.page.evaluate(() => {
+          const t = document.querySelector('[data-journey-target="1"]');
+          if (t) t.removeAttribute('data-journey-target');
         });
         await new Promise((r) => setTimeout(r, 300));
       }
@@ -1437,11 +1446,21 @@ async function main() {
       assert.strictEqual(dis, false,
         'V2h(' + name + ') 前提：這個選單項目必須是 enabled，否則整列是空跑的綠燈，got ' +
         JSON.stringify(dis));
+      // Fix round 1, C1: this is the actual susceptible press — the item
+      // itself (`.ed-handle-menu-btn`), not the ⠿ that opened the menu (that
+      // was already in wireBlockSelection()'s delegated preventDefault list
+      // before Task 1; only the item class was missing). This fixture already
+      // carries a dirty burst (typed 'X' above), so tag the real target and
+      // drive it through a genuine press-hold-release instead of an in-page
+      // synthetic .click() — a synthetic click cannot reproduce a detach that
+      // only happens between a real mousedown and mouseup.
       await ctx.page.evaluate((L) => {
         const h = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
           .filter((x) => x.textContent.trim() === L);
-        h[h.length - 1].click();
+        if (!h.length) throw new Error('⠿ item not found: ' + L);
+        h[h.length - 1].setAttribute('data-journey-target', '1');
       }, label);
+      await pressClick(ctx.page, '[data-journey-target="1"]', 80);
       await new Promise((r) => setTimeout(r, 800));
       const st = await ctx.page.evaluate(() => ({
         active: document.activeElement ? document.activeElement.tagName : null,
