@@ -5421,6 +5421,24 @@ async function main() {
     await new Promise((r) => setTimeout(r, 400));
     const menuUp = await ctx.page.evaluate(
       () => !!document.querySelector('.ed-toolbar-menu'));
+    // Enter 還是那顆按鈕自己的開關：再按一次要把選單收起來，而不是收了又開。
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    const readMenu = () => ctx.page.evaluate(() => ({
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+    }));
+    const menuToggled = await readMenu();
+    // Space 是另一顆按下去的鍵，開關的責任跟 Enter 一樣 —— 各自釘一次，
+    // 因為那道「路過就把選單收掉」的閘門是分別把兩顆排除在外的。
+    await ctx.page.keyboard.press('Space');
+    await new Promise((r) => setTimeout(r, 400));
+    const spaceOpened = await readMenu();
+    await ctx.page.keyboard.press('Space');
+    await new Promise((r) => setTimeout(r, 400));
+    const spaceToggled = await readMenu();
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
     await ctx.page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 250));
     const one = await ctx.page.evaluate(() => ({
@@ -5438,6 +5456,14 @@ async function main() {
     assert.strictEqual(atH.at, 'headings',
       'K6 前提失敗：Enter 之前游標必須在 H 上，got ' + JSON.stringify(atH));
     assert.strictEqual(menuUp, true, 'K6 前提失敗：Enter 必須真的把 H▾ 打開');
+    assert.deepStrictEqual(menuToggled, { menu: false, at: 'headings' },
+      '再按一次 Enter 必須把 H▾ 收起來、游標留在 H 上，got ' +
+      JSON.stringify(menuToggled));
+    assert.deepStrictEqual(spaceOpened, { menu: true, at: 'headings' },
+      'Space 也必須開得起 H▾，got ' + JSON.stringify(spaceOpened));
+    assert.deepStrictEqual(spaceToggled, { menu: false, at: 'headings' },
+      '再按一次 Space 必須把 H▾ 收起來，而不是收了又開，got ' +
+      JSON.stringify(spaceToggled));
     assert.deepStrictEqual(one, { menu: false, at: 'headings' },
       '第一發 Escape 只收選單，鍵盤模式要留著，got ' + JSON.stringify(one));
     assert.deepStrictEqual(two,
@@ -5463,6 +5489,8 @@ async function main() {
       { at: 'preview', who: 'TEXTAREA.ed-source' },
       '原始碼模式下也必須進得了工具列，而且插入點留在原始碼上，got ' +
       JSON.stringify(inSource));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K7 source：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
   {
@@ -5566,6 +5594,77 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: Enter refuses a button that is switched off under the cursor — OK');
+
+  // K9：選單升起來以後，游標提示與選單不得各說各話。修之前：交還鍵盤那一支
+  // 把游標提示收掉、H▾ 卻還立在畫面上，於是那個狀態下只有 Escape 有用。
+  // 兩條路各釘一列 —— 沒被指名的鍵（交還）與方向鍵（游標走開）。
+  for (const gesture of ['x', 'ArrowRight']) {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    const opened = await ctx.page.evaluate(() => ({
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+    }));
+    await ctx.page.keyboard.press(gesture);
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await ctx.page.evaluate(() => ({
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      cursors: Array.from(document.querySelectorAll('.ed-toolbar-btn[data-ed-tb-cursor]'))
+        .map((b) => b.getAttribute('data-ed-tb')),
+      text: document.querySelector('.ed-block[data-block-id="1"]')
+        .textContent.replace(/[＋⠿\n]/g, ''),
+    }));
+    assert.deepStrictEqual(opened, { menu: true, at: 'headings' },
+      'K9 前提失敗：Enter 必須把 H▾ 打開而且游標停在 H 上，got ' +
+      JSON.stringify(opened));
+    if (gesture === 'x') {
+      assert.deepStrictEqual(after,
+        { menu: false, at: null, cursors: [], text: 'Alpha paragraph.x' },
+        '沒被指名的鍵要把選單跟游標一起收掉，字照樣打進去，got ' +
+        JSON.stringify(after));
+    } else {
+      assert.deepStrictEqual(
+        { menu: after.menu, at: after.at, cursors: after.cursors, text: after.text },
+        { menu: false, at: 'quote', cursors: ['quote'], text: 'Alpha paragraph.' },
+        '游標往前走，選單就不該留在原來那顆底下，got ' + JSON.stringify(after));
+    }
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K9：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the H▾ menu and the keyboard cursor go down together — OK');
+
+  // K10：Shift 被排除在交還規則外，所以 Shift+方向鍵還是走工具列游標，
+  // 而不是掉下去變成區塊選取的延伸。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 250));
+    const after = await ctx.page.evaluate(() => ({
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      sel: window.__edTestGetSelection(),
+    }));
+    assert.deepStrictEqual(after, { at: 'redo', sel: null },
+      'Shift+方向鍵在模式裡走的是工具列游標，而且不得生出區塊選取，got ' +
+      JSON.stringify(after));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: Shift+arrow stays on the toolbar cursor — OK');
 
   await browser.close();
 }
