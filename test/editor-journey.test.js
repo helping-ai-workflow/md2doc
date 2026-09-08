@@ -773,6 +773,104 @@ async function main() {
     console.log('journey: bolding a selection with a trailing space — OK');
   }
 
+  // ── T9-4: 選取起點落在既有斜體內時，切分不得留下空標記 ────────────────
+  //
+  // 這裡的 range 起點是 <em> 第一個 text node 的 offset 0 —— 視覺上就是斜體
+  // 的第一個字元，也就是使用者一路往右拖曳時會落到的地方。
+  //
+  // 每一列都用整份文件做斷言，不是子字串，而理由是量出來的：連結那列若只找
+  // 子字串 `[*ital* bold]`，修前的磁碟
+  //   `# Doc\n\nAlpha **[*ital* bold](https://example.com) text here.\n`
+  // 照樣含有它。壞掉的是連結【前面】多出來的那對 `**`，只有整份比對抓得到。
+  // 粗體修前是
+  //   `# Doc\n\nAlpha *****ital* bold** text here.\n`
+  for (const [tb, expect, label] of [
+    ['bold', '# Doc\n\nAlpha ***ital* bold** text here.\n', '粗體'],
+    ['link', '# Doc\n\nAlpha [*ital* bold](https://example.com) text here.\n', '連結'],
+  ]) {
+    const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
+    // 註冊在按下【之前】：window.prompt() 會擋住頁面直到有人回答它，所以一個
+    // 晚註冊的 handler 換來的不是一句看得懂的斷言失敗，而是掛住＋逾時。跑完再
+    // 斷言它真的被叫過 —— 否則對話框從沒開過的情況下這一列仍然可以綠。
+    let dialogFired = false;
+    if (tb === 'link') {
+      ctx.page.once('dialog', async (d) => {
+        dialogFired = true;
+        try { await d.accept('https://example.com'); } catch (e) { /* already gone */ }
+      });
+    }
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      r.setStart(em.firstChild, 0);                       // 視覺上就是斜體第一個字元
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await pressClick(ctx.page, '[data-ed-tb="' + tb + '"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    if (tb === 'link') {
+      assert.strictEqual(dialogFired, true,
+        label + '：連結對話框從頭到尾沒有開過 —— 這一列什麼都沒量到，got:\n' + disk);
+    }
+    assert.strictEqual(disk.indexOf('\\*'), -1, label + '：不得出現跳脫的星號，got:\n' + disk);
+    assert.strictEqual(disk.indexOf('*****'), -1, label + '：不得出現空標記留下的星號堆，got:\n' + disk);
+    assert.strictEqual(disk, expect, label + '：整份文件必須就是這樣，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a mark starting inside an existing em leaves no empty leftover — OK');
+
+  // ── T9-4 判別式（「沒有子元素」∧「沒有文字」）的每個子句各一列 ──────────
+  //
+  // 這些列守的是【不要刪過頭】：留下來的標記只有在什麼都不剩時才該消失。
+  //
+  // keeps-text：選取起點落在斜體中間，斜體留下的是有字的前半截。少了「沒有
+  //   文字」那個子句，那截字會連著標記一起被刪掉。
+  // keeps-br：斜體裡剩下的是使用者打的硬斷行 <br> —— 它的 textContent 是空的，
+  //   但它不是空殼。少了「沒有子元素」那個子句，那個斷行會被刪掉。
+  //   ⚠ 這一列釘住的磁碟形狀【不會】原樣讀回來：實測 marked.parseInline() 把
+  //   `Alpha *\<換行>****ital* bold** text here.` 讀成
+  //   `Alpha *<br>*<strong><em>ital</em> bold</strong> text here.`，也就是那對
+  //   星號變成字面值。原因是「只裝著一個硬斷行的 <em>」在 markdown 裡沒有拼法
+  //   —— inline-md.js 的 EM 分支無條件在兩側輸出 `*`，所以任何送去序列化的
+  //   <em><br></em> 都會長成這樣，與本修無關。在「重新載入後斷行的斜體外衣掉
+  //   了」與「斷行直接消失」之間，這裡選前者：不掉內容。
+  for (const [name, md, expect] of [
+    ['keeps-text', '# Doc\n\nAlpha *ital* bold text here.\n',
+      '# Doc\n\nAlpha *it****al* bold** text here.\n'],
+    ['keeps-br', '# Doc\n\nAlpha *\\\nital* bold text here.\n',
+      '# Doc\n\nAlpha *\\\n****ital* bold** text here.\n'],
+  ]) {
+    const ctx = await newPage(md);
+    await ctx.page.evaluate((kind) => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      // keeps-br 的 <em> 是 [<br>, 'ital']，起點取 'ital' 的開頭 —— 斜體因此
+      // 留下那個 <br>；keeps-text 的起點落在 'ital' 中間，斜體留下 'it'。
+      if (kind === 'keeps-br') r.setStart(em.lastChild, 0);
+      else r.setStart(em.firstChild, 2);
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    }, name);
+    await new Promise((r) => setTimeout(r, 250));
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, expect,
+      name + '：留下來的標記還裝著東西，不得被刪掉，got:\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, name + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: an emptied mark goes, a mark that still holds something stays — OK');
+
   // ── 表格「對齊」選單：捲動中斷了開啟流程，選單仍要能用 ────────────────
   // v3.2.1 fix round 1 gave runCycleAlign() a scroll-survival fix
   // (suppressEdgeMenuAutoHide + a requestAnimationFrame reposition) for
