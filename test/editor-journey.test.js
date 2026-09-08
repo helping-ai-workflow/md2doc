@@ -5777,6 +5777,111 @@ async function main() {
   }
   console.log('journey: the convert submenu stays inside the viewport — OK');
 
+  // ── F5 (fix round 1, Ruling T9-5): H▾ 下拉在矮視窗下都必須可達 ──────────
+  // 量測基礎：見 task-9-fix1.md 附的表 —— 修前 700px 是 0/6，200px 變成 1/6。
+  // 這裡選 200px：低於此高度落進 .ed-toolbar-menu 的 max-height/overflow-y
+  // 保底（F1 的 flex-shrink 先於捲動），off 不必是 0；200px 這一格是 shift-to-fit
+  // 單獨就該打平的那一格。
+  {
+    const ctx = await newPage('## Alpha heading\n\nbravo two\n');
+    await ctx.page.setViewport({ width: 1400, height: 200 });
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 150));
+    await pressClick(ctx.page, '[data-ed-tb="headings"]', 80);
+    await ctx.page.waitForSelector('.ed-toolbar-menu-btn');
+    await new Promise((r) => setTimeout(r, 150));
+    const geo = await ctx.page.evaluate(() => {
+      const menu = document.querySelector('.ed-toolbar-menu');
+      if (!menu) return { childCount: 0, off: -1 };
+      const off = Array.from(menu.children).filter((c) => {
+        const r = c.getBoundingClientRect();
+        return r.bottom > window.innerHeight || r.top < 0;
+      }).length;
+      return { childCount: menu.children.length, off: off };
+    });
+    // Ruling T9-1：選單是空的話 off === 0 會白過，先斷選單真的有項目。
+    assert.ok(geo.childCount > 0,
+      'F5 前提失敗：H▾ 選單必須先有項目，斷言才有意義，got childCount=' + geo.childCount);
+    assert.strictEqual(geo.off, 0, 'H▾ 選單有 ' + geo.off + ' 項落在視窗外');
+    const found = await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-toolbar-menu-btn'))
+        .find((x) => x.textContent.indexOf('標題 6') !== -1);
+      if (!b) return false;
+      b.click();
+      return true;
+    });
+    // Ruling T9-2：找不到就先斷言，不要讓下面的 disk 讀取用一個空的點擊結果
+    // 假冒 product finding。
+    assert.ok(found, 'F5 前提失敗：找不到「標題 6」');
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.notStrictEqual(disk.indexOf('###### Alpha heading'), -1,
+      'F5：點「標題 6」必須真的改寫層級，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'F5：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the H▾ dropdown stays inside the viewport — OK');
+
+  // ── F6 (fix round 1, Ruling T9-5): 列 grip 選單在矮視窗下都必須可達 ──────
+  // 量測基礎：見 task-9-fix1.md —— row-edge 在 700/300/150px 都是 off 1/2，
+  // 條件是目標列的 top 落在視窗下緣 40px 內、grip 仍按得到。不點進任何 cell
+  // （不開 burst）：既有的 V3 drop-indicator 場景已經證實 hover + 等 grip
+  // 出現這個順序才是可靠的路徑，點進 cell 開 burst 會讓 burst 自己的
+  // resolve/blur 生命週期在稍後把 grip 收掉。
+  {
+    const teRows = Array.from({ length: 20 }, (_, i) => '| r' + i + 'a | r' + i + 'b |').join('\n');
+    const ctx = await newPage('# Doc\n\n| A | B |\n| --- | --- |\n' + teRows + '\n');
+    const H = 700;
+    await ctx.page.setViewport({ width: 1400, height: H });
+    const rowInfo = await ctx.page.evaluate((h) => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const trs = Array.from(table.querySelectorAll('tbody tr'));
+      for (const tr of trs) {
+        const before = tr.getBoundingClientRect().top + window.scrollY;
+        window.scrollTo(0, before - (h - 25));
+        const r = tr.getBoundingClientRect();
+        const td = tr.querySelector('td');
+        const cr = td.getBoundingClientRect();
+        if (r.top > 0 && r.top < h && (h - r.top) < 40) {
+          return { x: cr.left + cr.width / 2, y: Math.max(cr.top + 2, Math.min(cr.bottom - 2, h - 2)) };
+        }
+      }
+      return null;
+    }, H);
+    assert.ok(rowInfo, 'F6 前提失敗：fixture 應能找到一列 top 落在視窗下緣 40px 內的 row');
+    await ctx.page.mouse.move(rowInfo.x, rowInfo.y);
+    await ctx.page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 4000 });
+    const gripFound = await ctx.page.evaluate(() => {
+      const g = document.querySelector('.ed-te-grip-row');
+      return !!(g && !g.hidden);
+    });
+    // Ruling T9-2：grip 找不到／還是隱藏的話，先斷言，不要讓下面拿它的矩形
+    // 算出一組假座標再點下去。
+    assert.ok(gripFound, 'F6 前提失敗：列 grip 沒有升起來');
+    const gripBox = await ctx.page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.click(gripBox.x, gripBox.y);
+    await new Promise((r) => setTimeout(r, 200));
+    const result = await ctx.page.evaluate(() => {
+      const menu = document.querySelector('.ed-te-menu');
+      if (!menu || menu.hidden) return { childCount: 0, off: -1 };
+      const off = Array.from(menu.children).filter((c) => {
+        const r = c.getBoundingClientRect();
+        return r.bottom > window.innerHeight || r.top < 0;
+      }).length;
+      return { childCount: menu.children.length, off: off };
+    });
+    // Ruling T9-1：選單是空的話 off === 0 會白過，先斷選單真的有項目。
+    assert.ok(result.childCount > 0,
+      'F6 前提失敗：列選單必須先有項目，斷言才有意義，got childCount=' + result.childCount);
+    assert.strictEqual(result.off, 0, '列選單有 ' + result.off + ' 項落在視窗外');
+    assert.strictEqual(ctx.errs.length, 0, 'F6：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the row-edge menu stays inside the viewport — OK');
+
   await browser.close();
 }
 
