@@ -5163,6 +5163,410 @@ async function main() {
   }
   console.log('journey: a wider button label lights the scroll hint back up — OK');
 
+  // ══ F12：工具列的鍵盤入口 ═══════════════════════════════════════
+  //
+  // 游標是【虛擬】的：沒有任何按鈕拿到 DOM 焦點，插入點原地不動。所以這一組
+  // 每一列都同時斷「到得了那顆按鈕」與「編輯面沒有被動到」——後者是這個設計
+  // 存在的理由，不是附帶條件。
+  const F12_MD = '# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n';
+  const f12Enter = async (page) => {
+    await page.keyboard.down('Alt');
+    await page.keyboard.press('F10');
+    await page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 150));
+  };
+  const f12Snap = (page) => page.evaluate(() => {
+    const bar = document.querySelector('.ed-toolbar');
+    const cur = bar.querySelector('.ed-toolbar-btn[data-ed-tb-cursor]');
+    const slot = bar.querySelector('.ed-toolbar-status').getBoundingClientRect();
+    const r = cur ? cur.getBoundingClientRect() : null;
+    return {
+      at: bar.getAttribute('data-ed-tb-keynav'),
+      cursors: Array.from(bar.querySelectorAll('.ed-toolbar-btn[data-ed-tb-cursor]'))
+        .map((b) => b.getAttribute('data-ed-tb')),
+      who: document.activeElement
+        ? document.activeElement.tagName + '.' + (document.activeElement.className || '') : 'null',
+      onScreen: r ? (r.left >= 0 && r.right <= window.innerWidth) : null,
+      clearOfSlot: r ? (r.right <= slot.left + 0.5 || r.left >= slot.right - 0.5) : null,
+      scrolled: Math.round(bar.scrollLeft) > 0,
+    };
+  });
+
+  // K1：Step 8 的本體。打字 → 進工具列 → 走到 ❝（沒有任何鍵盤快捷鍵可以代勞
+  // 的一顆）→ 回編輯面 → 繼續打 → 存檔。整段期間磁碟必須一個位元組都沒動，
+  // 打的字必須還在。順帶釘住入口手勢的兩個合取項：少了 Alt 的 F10 不得進去，
+  // 帶了 Alt 但不是 F10 的鍵也不得進去。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.setViewport({ width: 420, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.type(' typed');
+    await new Promise((r) => setTimeout(r, 200));
+    const diskBefore = fs.readFileSync(ctx.mdPath, 'utf8');
+    await ctx.page.keyboard.press('F10');
+    await new Promise((r) => setTimeout(r, 150));
+    const bareF10 = await f12Snap(ctx.page);
+    await ctx.page.keyboard.down('Alt');
+    await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 150));
+    const altOther = await f12Snap(ctx.page);
+    await f12Enter(ctx.page);
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    const atQuote = await f12Snap(ctx.page);
+    // 游標必須真的畫得出來。斷 computed outline，而不是斷屬性 —— 只斷屬性的話
+    // 把樣式整條刪掉也還是綠。
+    const paint = await ctx.page.evaluate(() => {
+      const on = document.querySelector('.ed-toolbar-btn[data-ed-tb-cursor]');
+      const off = Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+        .find((b) => !b.hasAttribute('data-ed-tb-cursor'));
+      const read = (el) => {
+        if (!el) return 'no such button';
+        const cs = getComputedStyle(el);
+        return cs.outlineStyle + ' ' + cs.outlineWidth;
+      };
+      return { on: read(on), off: read(off) };
+    });
+    const diskDuring = fs.readFileSync(ctx.mdPath, 'utf8');
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 200));
+    const left = await f12Snap(ctx.page);
+    await ctx.page.keyboard.type(' more');
+    await new Promise((r) => setTimeout(r, 250));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(bareF10.at, null,
+      'F10 少了 Alt 不得成為入口手勢，got ' + JSON.stringify(bareF10));
+    assert.strictEqual(altOther.at, null,
+      '帶 Alt 但不是 F10 的鍵不得成為入口手勢，got ' + JSON.stringify(altOther));
+    assert.deepStrictEqual(
+      { at: atQuote.at, cursors: atQuote.cursors, who: atQuote.who,
+        onScreen: atQuote.onScreen, clearOfSlot: atQuote.clearOfSlot },
+      { at: 'quote', cursors: ['quote'], who: 'P.ed-wys-armed',
+        onScreen: true, clearOfSlot: true },
+      'Alt+F10 之後三下 ArrowRight 必須停在 ❝ 上、那顆必須真的看得到、而且插入點' +
+      '不得離開編輯面，got ' + JSON.stringify(atQuote));
+    assert.strictEqual(paint.on, 'solid 2px',
+      '游標所在的按鈕必須畫出外框，got ' + JSON.stringify(paint));
+    assert.notStrictEqual(paint.off, paint.on,
+      '沒有游標的按鈕不得跟有游標的長得一樣，got ' + JSON.stringify(paint));
+    assert.strictEqual(diskDuring, diskBefore,
+      '光是逛工具列不得寫磁碟，got ' + JSON.stringify(diskDuring));
+    assert.deepStrictEqual({ at: left.at, cursors: left.cursors },
+      { at: null, cursors: [] },
+      'Escape 必須把工具列的鍵盤游標收乾淨，got ' + JSON.stringify(left));
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph. typed more\n\nBravo paragraph.\n',
+      '逛完工具列回到編輯面，打的字必須還在、而且能繼續打，got ' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K1：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the toolbar is reachable from the keyboard and gives the caret back — OK');
+
+  // K2：走到列尾那顆。420 寬時 M↓ 在靜止位置根本不在畫面上 —— 這一列斷的是
+  // 游標每一站都被捲進「按鈕真正站得住」的那條帶子裡（畫面內，且不在模式槽
+  // 底下），而不只是「屬性寫對了」。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.setViewport({ width: 420, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    const stops = [];
+    for (let i = 0; i < 22; i++) {
+      const s = await f12Snap(ctx.page);
+      stops.push(s);
+      if (s.at === 'preview') break;
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    const last = stops[stops.length - 1];
+    // 再走回來。往左走有自己的邊界判斷，往右那一條蓋不到它：少了它，游標會
+    // 停在被切掉的左緣外面。
+    const backStops = [];
+    for (let i = 0; i < 22; i++) {
+      await ctx.page.keyboard.press('ArrowLeft');
+      await new Promise((r) => setTimeout(r, 90));
+      const s2 = await f12Snap(ctx.page);
+      backStops.push(s2);
+      if (s2.at === 'undo') break;
+    }
+    const bad = stops.concat(backStops).filter((s) => !s.onScreen || !s.clearOfSlot)
+      .map((s) => s.at);
+    assert.deepStrictEqual(bad, [],
+      '鍵盤游標停過的每一站都必須被捲到看得見、且不在模式槽底下，got ' +
+      JSON.stringify(bad));
+    assert.strictEqual(backStops[backStops.length - 1].at, 'undo',
+      '往左走必須走得回列首，got ' + JSON.stringify(backStops.map((x) => x.at)));
+    assert.deepStrictEqual(
+      { at: last.at, scrolled: last.scrolled, who: last.who },
+      { at: 'preview', scrolled: true, who: 'P.ed-wys-armed' },
+      '往右走必須真的走到列尾那顆，而且工具列必須為了它捲動過，got ' +
+      JSON.stringify(last));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K2：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the keyboard cursor scrolls the bar to the button it lands on — OK');
+
+  // K3：鍵盤按下去跟滑鼠按下去要是同一件事。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    const at = await f12Snap(ctx.page);
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 900));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(at.at, 'quote',
+      'K3 前提失敗：Enter 之前游標必須在 ❝ 上，got ' + JSON.stringify(at));
+    assert.strictEqual(disk, '# Doc\n\n> Alpha paragraph.\n\nBravo paragraph.\n',
+      '在游標上按 Enter 必須跟按那顆按鈕是同一件事，got ' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K3：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: Enter on the keyboard cursor does what pressing the button does — OK');
+
+  // K4：游標腳下那顆被 updateToolbar() 關掉時。真焦點在這裡會被瀏覽器丟回
+  // BODY，而從 BODY 按 Tab 又拿不回來；虛擬游標改成走到下一顆還開著的。
+  // 原始碼模式是這件事最極端的一格：整列只剩一顆是開著的。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    const before = await f12Snap(ctx.page);
+    await ctx.page.click('.ed-toolbar [data-ed-tb="preview"]');
+    await new Promise((r) => setTimeout(r, 900));
+    const after = await f12Snap(ctx.page);
+    const enabled = await ctx.page.evaluate(() => Array.from(
+      document.querySelectorAll('.ed-toolbar-btn')).filter((b) => !b.disabled)
+      .map((b) => b.getAttribute('data-ed-tb')));
+    assert.strictEqual(before.at, 'quote',
+      'K4 前提失敗：切模式之前游標必須在 ❝ 上，got ' + JSON.stringify(before));
+    assert.deepStrictEqual(enabled, ['preview'],
+      'K4 前提失敗：原始碼模式下必須只剩那一顆是開著的，got ' + JSON.stringify(enabled));
+    assert.deepStrictEqual({ at: after.at, cursors: after.cursors },
+      { at: 'preview', cursors: ['preview'] },
+      '腳下那顆被關掉時，游標必須自己走到還開著的那顆上，got ' + JSON.stringify(after));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K4：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the keyboard cursor steps off a button that just went dead — OK');
+
+  // K5：被排除的那個機制（把 .ed-toolbar 加進 focusout 豁免）就是死在這一段
+  // 上 —— 打字、移焦工具列、點進【第三個地方】、再打字，磁碟少了一個字。
+  // 虛擬游標沒有「離開工具列」這個焦點事件可言，所以走的還是原本那條路。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.type('A');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 120));
+    const inBar = await f12Snap(ctx.page);
+    await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 400));
+    const afterClick = await f12Snap(ctx.page);
+    await ctx.page.keyboard.type('B');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 700));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(inBar.at, 'redo',
+      'K5 前提失敗：點第三個地方之前，鍵盤游標必須真的在工具列上，got ' +
+      JSON.stringify(inBar));
+    assert.deepStrictEqual({ at: afterClick.at, cursors: afterClick.cursors },
+      { at: null, cursors: [] },
+      '點到別的地方就是交還鍵盤，游標必須收掉，got ' + JSON.stringify(afterClick));
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph.A\n\nBBravo paragraph.\n',
+      '逛過工具列再去第三個地方打字，兩邊的字都必須落到磁碟上，got ' +
+      JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K5：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: visiting the bar then typing somewhere else loses nothing — OK');
+
+  // K6：Escape 的名次。H▾ 是從工具列裡升起來的選單，所以它先退場，鍵盤模式
+  // 才退場；兩發 Escape 都不得走到「還原 burst」那一支 —— 沒提交的字必須還在。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.type(' kept');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 150));
+    const atH = await f12Snap(ctx.page);
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    const menuUp = await ctx.page.evaluate(
+      () => !!document.querySelector('.ed-toolbar-menu'));
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 250));
+    const one = await ctx.page.evaluate(() => ({
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+    }));
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 250));
+    const two = await ctx.page.evaluate(() => ({
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      text: document.querySelector('.ed-block[data-block-id="1"]')
+        .textContent.replace(/[＋⠿\n]/g, ''),
+    }));
+    assert.strictEqual(atH.at, 'headings',
+      'K6 前提失敗：Enter 之前游標必須在 H 上，got ' + JSON.stringify(atH));
+    assert.strictEqual(menuUp, true, 'K6 前提失敗：Enter 必須真的把 H▾ 打開');
+    assert.deepStrictEqual(one, { menu: false, at: 'headings' },
+      '第一發 Escape 只收選單，鍵盤模式要留著，got ' + JSON.stringify(one));
+    assert.deepStrictEqual(two,
+      { menu: false, at: null, text: 'Alpha paragraph. kept' },
+      '第二發 Escape 退出鍵盤模式，而且不得走到還原 burst，got ' + JSON.stringify(two));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K6：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: Escape takes the H▾ menu first and the keyboard mode second — OK');
+
+  // K7：三種狀態都到得了，而且進去不動任何東西。原始碼模式的插入點在整份
+  // 文件的 textarea 上；區塊選取模式下，選取在進工具列之後原封不動，Escape
+  // 的名次是「先退工具列、再清選取」。順帶釘住「打字就交還鍵盤」。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-toolbar [data-ed-tb="preview"]');
+    await new Promise((r) => setTimeout(r, 800));
+    await f12Enter(ctx.page);
+    const inSource = await f12Snap(ctx.page);
+    assert.deepStrictEqual(
+      { at: inSource.at, who: inSource.who },
+      { at: 'preview', who: 'TEXTAREA.ed-source' },
+      '原始碼模式下也必須進得了工具列，而且插入點留在原始碼上，got ' +
+      JSON.stringify(inSource));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.evaluate(() => window.__edTestSetSelection(3, 5));
+    await new Promise((r) => setTimeout(r, 200));
+    const selBefore = await ctx.page.evaluate(() => window.__edTestGetSelection());
+    await f12Enter(ctx.page);
+    const inSel = await f12Snap(ctx.page);
+    const selAfter = await ctx.page.evaluate(() => window.__edTestGetSelection());
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterOne = {
+      at: await ctx.page.evaluate(
+        () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav')),
+      sel: await ctx.page.evaluate(() => window.__edTestGetSelection()),
+    };
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterTwo = await ctx.page.evaluate(() => window.__edTestGetSelection());
+    assert.strictEqual(inSel.at, 'undo',
+      '區塊選取狀態下也必須進得了工具列，got ' + JSON.stringify(inSel));
+    assert.deepStrictEqual(selAfter, selBefore,
+      '進工具列不得動到區塊選取，got ' + JSON.stringify(selAfter));
+    assert.strictEqual(afterOne.at, null,
+      '第一發 Escape 退的是工具列，got ' + JSON.stringify(afterOne));
+    assert.deepStrictEqual(afterOne.sel, selBefore,
+      '第一發 Escape 不得順手清掉選取，got ' + JSON.stringify(afterOne.sel));
+    assert.strictEqual(afterTwo, null,
+      '第二發 Escape 才清選取，got ' + JSON.stringify(afterTwo));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K7：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.keyboard.type('Z');
+    await new Promise((r) => setTimeout(r, 250));
+    const back = await ctx.page.evaluate(() => ({
+      at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      text: document.querySelector('.ed-block[data-block-id="1"]')
+        .textContent.replace(/[＋⠿\n]/g, ''),
+    }));
+    assert.deepStrictEqual(back, { at: null, text: 'Alpha paragraph.Z' },
+      '模式沒有指名的鍵要把鍵盤整個交還出去：模式收掉，字照樣打進去，got ' +
+      JSON.stringify(back));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K7 handback：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    const on = await f12Snap(ctx.page);
+    await f12Enter(ctx.page);
+    const off = await f12Snap(ctx.page);
+    assert.strictEqual(on.at, 'undo',
+      '前提失敗：第一發 Alt+F10 必須進得去，got ' + JSON.stringify(on));
+    assert.deepStrictEqual({ at: off.at, cursors: off.cursors },
+      { at: null, cursors: [] },
+      '再按一次入口手勢就出來 —— 那顆鍵不在模式指名的清單裡，走的是交還那一支，' +
+      'got ' + JSON.stringify(off));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K7 toggle：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: edit, source and block-selection all reach the bar — OK');
+
+  // K8：游標腳下那顆若是關著的，Enter 不得把它按下去。這一格是【人造】的 ——
+  // 走位本身會跳過關著的按鈕、updateToolbar() 收尾又會把游標推離剛被關掉的
+  // 那顆，所以產品路徑走不到這裡。這一列直接把那顆按鈕設成 disabled 再按，
+  // 量的是那道防線本身的契約：滑鼠這邊由瀏覽器不派送 disabled 按鈕的 click
+  // 事件擋著，鍵盤這邊沒有人替它擋。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+    }
+    const at = await f12Snap(ctx.page);
+    await ctx.page.evaluate(() => {
+      document.querySelector('.ed-toolbar-btn[data-ed-tb-cursor]').disabled = true;
+    });
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 900));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(at.at, 'quote',
+      'K8 前提失敗：Enter 之前游標必須在 ❝ 上，got ' + JSON.stringify(at));
+    assert.strictEqual(disk, F12_MD,
+      '關著的按鈕即使在游標底下也不得被 Enter 按下去，got ' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K8：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: Enter refuses a button that is switched off under the cursor — OK');
+
   await browser.close();
 }
 
