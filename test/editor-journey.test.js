@@ -5666,6 +5666,55 @@ async function main() {
   }
   console.log('journey: Shift+arrow stays on the toolbar cursor — OK');
 
+  // K11：【單獨】按下一顆修飾鍵 —— 不是和別的鍵組成和弦，就是那一顆自己。
+  // 瀏覽器對這個動作照樣派送 keydown，`e.key` 就是那顆鍵的名字，而交還規則
+  // 排除的正是這四個名字。少了排除，使用者在模式裡剛按下 Ctrl 準備打和弦，
+  // 游標就已經沒了。
+  //
+  // 前提斷言不可省：若這台瀏覽器根本不為裸按的修飾鍵派送 keydown，下面那串
+  // 斷言會在「什麼都沒發生」的情況下自動全綠，看起來像釘住了其實沒有。所以
+  // 先斷「這四發 keydown 真的到了」。
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    await ctx.page.evaluate(() => {
+      window.__f12Keys = [];
+      document.addEventListener('keydown', (e) => { window.__f12Keys.push(e.key); }, true);
+    });
+    const readAt = () => ctx.page.evaluate(
+      () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    const record = [];
+    for (const mod of ['Control', 'Meta', 'Shift', 'Alt']) {
+      await ctx.page.keyboard.down(mod);
+      await new Promise((r) => setTimeout(r, 120));
+      const held = await readAt();
+      await ctx.page.keyboard.up(mod);
+      await new Promise((r) => setTimeout(r, 150));
+      record.push({ mod: mod, held: held, released: await readAt() });
+    }
+    const dispatched = await ctx.page.evaluate(() => window.__f12Keys);
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 150));
+    const steered = await readAt();
+    assert.deepStrictEqual(dispatched, ['Control', 'Meta', 'Shift', 'Alt'],
+      'K11 前提失敗：裸按修飾鍵必須真的派送 keydown，否則下面整串斷言是空的，' +
+      'got ' + JSON.stringify(dispatched));
+    assert.deepStrictEqual(record, [
+      { mod: 'Control', held: 'undo', released: 'undo' },
+      { mod: 'Meta', held: 'undo', released: 'undo' },
+      { mod: 'Shift', held: 'undo', released: 'undo' },
+      { mod: 'Alt', held: 'undo', released: 'undo' },
+    ], '單獨按一顆修飾鍵不得把工具列的鍵盤游標收掉，got ' + JSON.stringify(record));
+    assert.strictEqual(steered, 'redo',
+      '四發裸按之後模式必須還開著、還走得動，got ' + JSON.stringify(steered));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K11：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a bare modifier press leaves the keyboard cursor alone — OK');
+
   await browser.close();
 }
 
