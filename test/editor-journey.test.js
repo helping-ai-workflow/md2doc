@@ -5715,6 +5715,68 @@ async function main() {
   }
   console.log('journey: a bare modifier press leaves the keyboard cursor alone — OK');
 
+  // ── F4: 轉換子選單的項目在矮視窗下都必須可達 ────────────────────────
+  // 量測基礎：開 ⠿ + 轉換成整段手勢從未讀過 window.innerHeight/innerWidth
+  // （對照組 .ed-seltb 的路徑會讀），即 clamp 從未寫過，不是寫壞。見 task-9-brief.md。
+  {
+    const filler = Array.from({ length: 40 }, (_, i) => 'Filler ' + i + '.').join('\n\n');
+    const ctx = await newPage('# Doc\n\n' + filler + '\n');
+    await ctx.page.setViewport({ width: 1400, height: 700 });
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    const target = await ctx.page.evaluate(() => {
+      const bs = Array.from(document.querySelectorAll('.ed-block'));
+      const b = bs.find((e) => e.getBoundingClientRect().top > 400
+                            && e.getBoundingClientRect().top < 650);
+      return b ? b.getAttribute('data-block-id') : null;
+    });
+    assert.ok(target, 'fixture 應有一個 blockTop 落在 400–650 的 block');
+    const blockSel = '.ed-block[data-block-id="' + target + '"]';
+    await ctx.page.hover(blockSel);
+    await new Promise((r) => setTimeout(r, 150));
+    // 偏離 brief Step 1：brief 原文直接 pressClick `.ed-handle-menu-btn`，但那個
+    // class 只長在【已經展開的】選單項目上（lib/editor/client.js 的 item()
+    // 與 openConvertSubmenu() 兩處建立），⠿ 本身的 class 是 `.ed-handle`
+    // （client.js 同一個檔案）。本檔其他場景（例如上面的 R1）一律先
+    // pressClick `.ed-handle` 展開選單、waitForSelector `.ed-handle-menu-btn`
+    // 之後才找項目；F4 照那個既有順序走，不是抄 brief 的字面選擇器。
+    await pressClick(ctx.page, blockSel + ' .ed-handle', 80);
+    await ctx.page.waitForSelector('.ed-handle-menu-btn');
+    const found = await ctx.page.evaluate(() => {
+      // 注意：選單項的 class 是 .ed-handle-menu-btn —— `.ed-handle-menu-item`
+      // 整個 repo 查無此 class（Task 1 實測）。
+      const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+        .find((e) => e.textContent.trim().indexOf('轉換成') === 0);
+      if (!it) return false;
+      // 偏離 brief Step 1：brief 原文送 mouseenter，但 openConvertSubmenu()
+      // 的 hover 展開是委派在 .ed-handle-menu 上的單一 mouseover 監聽
+      // （lib/editor/client.js 的 el.addEventListener('mouseover', …)），
+      // 不是 mouseenter；合成的 mouseenter 送到監聽的是 mouseover 事件類型
+      // 上，事件類型不合，監聽永遠收不到。
+      it.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      return true;
+    });
+    // Ruling T9-2: 找不到就先斷言，不要讓下面的 dispatch 用 TypeError 假冒
+    // product finding。
+    assert.ok(found, 'F4 前提失敗：找不到文字以「轉換成」開頭的 .ed-handle-menu-btn');
+    await new Promise((r) => setTimeout(r, 250));
+    const result = await ctx.page.evaluate(() => {
+      const sub = document.querySelector('.ed-handle-submenu');
+      if (!sub) return { childCount: 0, off: -1 };
+      const off = Array.from(sub.children).filter((c) => {
+        const r = c.getBoundingClientRect();
+        return r.bottom > window.innerHeight || r.top < 0;
+      }).length;
+      return { childCount: sub.children.length, off: off };
+    });
+    // Ruling T9-1: 子選單是空的話 off === 0 會白過，所以先斷子選單真的有項目。
+    assert.ok(result.childCount > 0,
+      'F4 前提失敗：子選單必須先有項目，斷言才有意義，got childCount=' + result.childCount);
+    assert.strictEqual(result.off, 0, '子選單有 ' + result.off + ' 項落在視窗外');
+    assert.strictEqual(ctx.errs.length, 0, 'F4：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the convert submenu stays inside the viewport — OK');
+
   await browser.close();
 }
 
