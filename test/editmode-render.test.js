@@ -238,9 +238,11 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   //   * `margin-left: auto` on the slot broke .ed-toolbar's
   //     `justify-content: center` and snapped the 22-button row flush left;
   //   * without `pointer-events: none`, the `position: fixed` 7rem box
-  //     physically covers the image / outline / preview buttons at 420px
-  //     (measured: elementFromPoint resolves to the span, and a real click
-  //     never reaches the button's listener).
+  //     physically covers real buttons at narrow widths, and hit-testing over
+  //     one of them lands on the span. Which buttons moved when F12 changed the
+  //     bar's scroll geometry, so the current reading is kept where it can be
+  //     re-driven rather than repeated here — see the CSS comment on the rule
+  //     in lib/md2doc.js.
   // v3.2.1 final wave, M5: the slot is no longer EMPTY — paintModeStatus()
   // writes 「編輯」/「原始碼」 into it at mount and on every mode switch — so
   // the assertion messages below say "fixed slot", not "empty fixed slot".
@@ -257,16 +259,39 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     const rule = m[0];
     assert.ok(/pointer-events:\s*none/.test(rule),
       '.ed-toolbar-status must keep `pointer-events: none` — without it the ' +
-      'fixed slot swallows real clicks on image/outline/preview at ' +
-      'narrow widths. Rule was:\n' + rule);
+      'fixed slot wins the hit test over the buttons it overlaps at narrow ' +
+      'widths. Rule was:\n' + rule);
+    // F12 migrated this one's REASON, and the assertion is kept because what
+    // it is really guarding turned out to be the slot's out-of-flow-ness, not
+    // the old centring. Re-driven on this build with the bar at flex-start:
+    // adding margin-left: auto to the slot as it ships changes nothing at all
+    // — the first button's left edge, the slot's own rect and the bar's
+    // scrollWidth all come back identical at 1400px and at 420px, the margin
+    // having nothing to absorb on a box that is out of flow. Put the slot
+    // back IN flow with that same margin and the damage is different from the
+    // v3.2.0 one described above: the button row no longer snaps (the
+    // leading-edge layout already had it flush left), but the slot becomes a
+    // scrolling flex item — scrollWidth went 975 → 1093 at 420px — and at
+    // 1400px its rect moved inboard from [1276, 1388] to [1164, 1276], off
+    // the strip .ed-toolbar's padding-right reserves for it.
     assert.ok(!/margin-left:\s*auto/.test(rule),
-      '.ed-toolbar-status must NOT use `margin-left: auto` — it defeats ' +
-      '.ed-toolbar\'s justify-content: center and snaps the button row flush ' +
-      'left. Rule was:\n' + rule);
-    // The rule is only meaningful while the bar itself is centred; if that
-    // ever changes, the margin-left assertion above stops describing anything.
-    assert.ok(/\.ed-toolbar \{[^}]*justify-content:\s*center/.test(full.html),
-      '.ed-toolbar is expected to still centre its row');
+      '.ed-toolbar-status must NOT use `margin-left: auto` — it is inert ' +
+      'where the slot ships, so its presence means someone put the slot back ' +
+      'in the flex row, where it scrolls away with the buttons and vacates ' +
+      'the room .ed-toolbar reserves for it. Rule was:\n' + rule);
+    // F12: the two declarations the assertions above are written against.
+    // flex-start rather than center because centring an overflowing row puts
+    // part of it off the LEADING end, which no amount of scrolling can bring
+    // back — driven at 820 / 640 / 420px, undo alone, then undo/redo/headings,
+    // then those plus quote/code/list never entered the viewport at any scroll
+    // position. padding-right is what lets every button reach a scroll
+    // position clear of the slot's footprint. The browser-side pins for both
+    // live in test/editor-journey.test.js's F12 section; these two keep the
+    // stylesheet honest in the fast tier.
+    assert.ok(/\.ed-toolbar \{[^}]*justify-content:\s*flex-start/.test(full.html),
+      '.ed-toolbar must lay its row out from the leading edge');
+    assert.ok(/\.ed-toolbar \{[^}]*padding-right:\s*124px/.test(full.html),
+      '.ed-toolbar must keep the room its buttons need to clear the mode slot');
   }
 
   console.log('editmode-render.test.js OK');

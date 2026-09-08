@@ -4999,6 +4999,170 @@ async function main() {
   }
   console.log('journey: closing the tab mid-burst is blocked and the title shows ● — OK');
 
+  // ══ F12：窄視窗下的工具列 ══════════════════════════════
+  //
+  // 這一組量的是【幾何】：一顆按鈕算「拿得到」的條件是它的 rect 落在
+  // 視窗內，而不是「沒被任何東西蓋住」。兩者不同，而這裡取前者是刻意的：
+  // 模式槽（.ed-toolbar-status）真的會蓋在按鈕上面，但它帶著
+  // pointer-events: none，所以 hit test 落在按鈕、不落在槽上。因此【被槽蓋住
+  // 也算拿得到】。那條 pointer-events 規則的承重性由 lib/md2doc.js 裡
+  // .ed-toolbar-status 自己的註解記下的驅動量測守著，不在這一列。
+  for (const w of [820, 640, 420]) {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.setViewport({ width: w, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const shape = await ctx.page.evaluate(() => {
+      const bar = document.querySelector('.ed-toolbar');
+      const btns = Array.from(bar.querySelectorAll('.ed-toolbar-btn'));
+      const slot = document.querySelector('.ed-toolbar-status');
+      const max = bar.scrollWidth - bar.clientWidth;
+      const seen = new Set();
+      const clear = new Set();
+      const look = () => {
+        const sr = slot.getBoundingClientRect();
+        for (const b of btns) {
+          const r = b.getBoundingClientRect();
+          const onScreen = r.left >= 0 && r.right <= window.innerWidth;
+          if (onScreen) seen.add(b.getAttribute('data-ed-tb'));
+          // 半像素的鬆度，不是隨手放的：捲到底時最後一顆按鈕的右緣量到剛好
+          // 越過槽的左緣 0.109px，820／640／420 三個寬度都一樣 —— 那正是按鈕列
+          // 自身寬度的小數部分，而 scrollWidth 只回整數，所以永遠有這麼一截
+          // 捲不掉。0.109 在 dpr 1 上連一個裝置像素都不到；鬆度取 0.5 是為了
+          // 不把它算成「被蓋住」，同時仍然擋得住任何一個像素起跳的真重疊。
+          if (onScreen && (r.right <= sr.left + 0.5 || r.left >= sr.right - 0.5)) {
+            clear.add(b.getAttribute('data-ed-tb'));
+          }
+        }
+      };
+      for (let sl = 0; sl <= max; sl += 8) { bar.scrollLeft = sl; look(); }
+      bar.scrollLeft = max; look();
+      bar.scrollLeft = 0;
+      const ids = btns.map((b) => b.getAttribute('data-ed-tb'));
+      return {
+        count: btns.length,
+        unreachable: ids.filter((id) => !seen.has(id)),
+        neverClear: ids.filter((id) => !clear.has(id)),
+      };
+    });
+    // 前提：這一列在「工具列沒有任何按鈕」時會自動空過 —— btns 是空的、
+    // 兩個差集也都是空的。先把數量釘住，前提倒了就要大聲紅。
+    assert.strictEqual(shape.count, 22,
+      w + '×900 F12 前提失敗：工具列必須真的有按鈕可掃，got ' + shape.count);
+    assert.deepStrictEqual(shape.unreachable, [],
+      w + '×900：這些按鈕在整個捲動範圍內都拿不到: ' + JSON.stringify(shape.unreachable));
+    // padding-right 自己的釘子。只改 justify-content 就能讓上一列綠，所以
+    // 若沒有這一列，padding-right 是沒有人看著的。它承諾的不是「永不重疊」，
+    // 而是「存在一個捲動位置，讓這顆按鈕完全不在槽下面」。
+    assert.deepStrictEqual(shape.neverClear, [],
+      w + '×900：這些按鈕找不到任何一個捲動位置能逃出模式槽的足跡: ' +
+      JSON.stringify(shape.neverClear));
+    assert.strictEqual(ctx.errs.length, 0,
+      w + '×900 F12：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: every toolbar button is reachable at 820/640/420 — OK');
+
+  // 捲動提示：兩端的漸層只在那一側真的還藏著東西時亮。斷的是 computed
+  // background-image，不是屬性也不是那兩個 custom property —— 那是整條鏈的
+  // 末端：client.js 寫屬性、md2doc.js 的狀態規則把 custom property 點亮、
+  // background-image 把它畫出來。只斷屬性的話，一個沒有對應 CSS 的屬性也會綠；
+  // 只斷 custom property 的話，把 background-image 整條刪掉也還是綠。
+  for (const w of [1400, 420]) {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.setViewport({ width: w, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const seen = await ctx.page.evaluate(async () => {
+      const bar = document.querySelector('.ed-toolbar');
+      const max = bar.scrollWidth - bar.clientWidth;
+      const out = [];
+      for (const sl of [0, Math.round(max / 2), max]) {
+        bar.scrollLeft = sl;
+        await new Promise((r) => setTimeout(r, 60));
+        const bgi = getComputedStyle(bar).backgroundImage;
+        out.push({
+          attr: bar.getAttribute('data-ed-tb-overflow'),
+          left: bgi.indexOf('linear-gradient(to right, rgba(0, 0, 0, 0.55)') !== -1,
+          right: bgi.indexOf('linear-gradient(to left, rgba(0, 0, 0, 0.55)') !== -1,
+        });
+      }
+      bar.scrollLeft = 0;
+      return { max: max, at: out };
+    });
+    const want = w === 1400
+      ? { max: 0, at: [{ attr: '', left: false, right: false },
+                       { attr: '', left: false, right: false },
+                       { attr: '', left: false, right: false }] }
+      : { max: 555, at: [{ attr: 'right', left: false, right: true },
+                         { attr: 'left right', left: true, right: true },
+                         { attr: 'left', left: true, right: false }] };
+    assert.deepStrictEqual(seen, want,
+      w + '×900：捲動提示必須只在那一側還有藏著的按鈕時亮，got ' + JSON.stringify(seen));
+    assert.strictEqual(ctx.errs.length, 0,
+      w + '×900 捲動提示：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the toolbar says which end still has buttons behind it — OK');
+
+  // 視窗變寬把藏起來的按鈕全還回來了，提示就必須熄掉。這一段不捲、也不動
+  // 任何會讓 deriveState() 改變的東西（游標留在原地），所以只有 resize
+  // 監聽器能把它熄掉 —— 拿掉那個監聽器這一列就紅。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.setViewport({ width: 420, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const before = await ctx.page.evaluate(
+      () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-overflow'));
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await ctx.page.evaluate(
+      () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-overflow'));
+    assert.strictEqual(before, 'right',
+      '前提失敗：420 寬、捲到最左時右側提示必須是亮的，got ' + JSON.stringify(before));
+    assert.strictEqual(after, '',
+      '視窗變寬到裝得下整列之後，捲動提示必須熄掉，got ' + JSON.stringify(after));
+    assert.strictEqual(ctx.errs.length, 0,
+      '捲動提示 resize：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: widening the window puts the scroll hint out — OK');
+
+  // 按鈕自己的字變寬也會生出新的捲動空間 —— H 鍵在段落上寫 H、在標題上寫 H1。
+  // 這一段既不捲也不 resize，游標從段落移到標題而已，所以只有
+  // updateToolbar() 收尾那一發重畫能把右側提示點回來。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.setViewport({ width: 420, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.evaluate(() => {
+      const bar = document.querySelector('.ed-toolbar');
+      bar.scrollLeft = bar.scrollWidth - bar.clientWidth;
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const snap = () => ctx.page.evaluate(() => {
+      const bar = document.querySelector('.ed-toolbar');
+      return { attr: bar.getAttribute('data-ed-tb-overflow'),
+               label: bar.querySelector('[data-ed-tb="headings"]').textContent,
+               room: bar.scrollWidth - bar.clientWidth - bar.scrollLeft };
+    });
+    const onPara = await snap();
+    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 300));
+    const onHeading = await snap();
+    assert.deepStrictEqual(onPara, { attr: 'left', label: 'H', room: 0 },
+      '前提失敗：段落上捲到底時右側必須是熄的，got ' + JSON.stringify(onPara));
+    assert.deepStrictEqual(onHeading, { attr: 'left right', label: 'H1', room: 7 },
+      '標題把 H 撐成 H1、右邊多出捲動空間，提示就必須跟著亮回來，got ' +
+      JSON.stringify(onHeading));
+    assert.strictEqual(ctx.errs.length, 0,
+      '捲動提示 label：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a wider button label lights the scroll hint back up — OK');
+
   await browser.close();
 }
 
