@@ -3317,9 +3317,13 @@ async function main() {
 
   // ── F10 fix round 1 (J1): 這條信號不得在普通編輯上亂叫，而且必須能退場 ────
   //
-  // 出貨的第一版判別式是純計數（Δblocks < 0 且 Δlines >= 0），它在下面這些手勢
-  // 上都會叫，而磁碟位元組完全正確。它們都是【控制列】：它們斷言 banner
-  // 不出現，所以任何回到計數式判別的改動都會讓它們紅。
+  // 出貨的第一版判別式是純計數（Δblocks < 0 且 Δlines >= 0）。拿 40c9569 的
+  // client 跑同一批（CLIENT_OVERRIDE）量到：S1、S2、R1 在它上面會叫，而磁碟位
+  // 元組完全正確；S3、C3、C10 在它上面【本來就是靜默的】—— 它們守的不是那一
+  // 版，而是每一版都不准叫 —— 拿 40c9569／588ae30／fd2913f／f10792e 的 client
+  // 逐一跑過，S3、C3、C10 在它們上面都是靜默的。下面每一列都是控制列（斷言
+  // banner 不出現），
+  // 差別只在它們各自能抓到哪一版的退步。
   //
   // 誤報住在全文原始碼（M↓／`[data-ed-tb="preview"]`）
   // 與逐區塊的 raw 編輯器（⠿ →「MD 原始碼」）。
@@ -4438,6 +4442,86 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
     }
     console.log('journey: absorption is judged per line, not by two sums that cancel — OK');
+  }
+
+  // ── F9／F10 fix round 5 (N4): fenceOpenerOf() 剩下的規則也各有一列 ─────────
+  //
+  // 「最多三個前導空格」與「至少三個圍欄字元」原本沒有任何一列釘住 —— 單獨把
+  // 它們 ablate 掉，整份案例照樣全綠。下面補上。
+  {
+    // 縮排四格的 ```sh 對 marked 而言是【縮排式】code block，不是圍欄。少了前導
+    // 空格上限那一條，它會被當成 fenced —— 於是它那些行在上一份 render 裡就被算
+    // 成「已經在圍欄裡」，被真的圍欄吃進去時判別式就看不見。
+    {
+      const MD = '# Doc\n\n```js\nx\n```\n\n    ```sh\n    echo\n';
+      const ctx = await newPage(MD);
+      assert.deepStrictEqual(
+        await ctx.page.evaluate(() =>
+          window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+        ['heading[1,1]', 'code[3,5]', 'code[7,8]'],
+        'PIN-o-indent 前提失敗：fixture 必須是「圍欄 ＋ 縮排式 code block」');
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
+      await ctx.page.evaluate(() => {
+        const ta = document.querySelector('.ed-source');
+        ta.value = ta.value.replace('```\n\n    ```sh', '``` MID\n\n    ```sh');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await saveAndRead(ctx),
+        '# Doc\n\n```js\nx\n``` MID\n\n    ```sh\n    echo\n',
+        'PIN-o-indent 前提失敗：收尾圍欄必須真的被打壞');
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 2,
+        'PIN-o-indent 前提失敗：那個縮排式 code block 必須真的被吃進去');
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+        'PIN-o-indent：縮排四格的 ```sh 不是圍欄，它那兩行本來活在圍欄外面');
+      assert.strictEqual(ctx.errs.length, 0,
+        'PIN-o-indent：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // 以【一個】波浪號開頭的段落不是開頭圍欄。少了「至少三個圍欄字元」那一條，
+    // rawEditorSeed() 會把它當開頭圍欄，caret 落到下一行行首 —— 使用者打的字
+    // 跑到別行去。
+    {
+      const MD = '# Doc\n\n~/bin/foo\nis the path\n\nTail.\n';
+      const ctx = await newPage(MD);
+      assert.deepStrictEqual(
+        await ctx.page.evaluate(() =>
+          window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
+        ['heading[1,1]', 'paragraph[3,4]', 'paragraph[6,6]'],
+        'PIN-o-len 前提失敗：那兩行必須是同一個段落，marked 不把 ~/bin/foo 當圍欄');
+      await ctx.page.hover('.ed-block[data-block-id="1"]');
+      await new Promise((r) => setTimeout(r, 150));
+      await pressClick(ctx.page, '.ed-block[data-block-id="1"] .ed-handle', 80);
+      await ctx.page.waitForSelector('.ed-handle-menu-btn', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('PIN-o-len 前提失敗：⠿ 選單裡沒有 MD 原始碼');
+        it.setAttribute('data-journey-target', '1');
+      });
+      await pressClick(ctx.page, '[data-journey-target="1"]', 0);
+      await ctx.page.waitForSelector('textarea.ed-raw', { timeout: 5000 });
+      const sel = await ctx.page.evaluate(() => {
+        const ta = document.querySelector('textarea.ed-raw');
+        return { v: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+      });
+      assert.deepStrictEqual(sel, { v: '~/bin/foo\nis the path', start: 21, end: 21 },
+        'PIN-o-len：這不是圍欄，caret 維持結尾落點，got ' + JSON.stringify(sel));
+      await ctx.page.keyboard.type('Z');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('Enter');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 800));
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\n~/bin/foo\nis the pathZ\n\nTail.\n',
+        'PIN-o-len：打的字必須落在段落結尾，不是被搬到下一行行首');
+      assert.strictEqual(ctx.errs.length, 0,
+        'PIN-o-len：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: the fence-opener rules are pinned too — OK');
   }
 
   await browser.close();
