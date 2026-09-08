@@ -4916,9 +4916,9 @@ async function main() {
       'N5 撤銷：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  // 存檔是這道網的出口：Ctrl+S 會先把 burst 收掉再寫檔（save() 上面那段
-  // 註解），所以打完字直接存的人，字要真的落到磁碟上，● 要熄掉，離站也不
-  // 能再被擋。這一半同時釘住判別式最前面那個「currentBurst 還在不在」——
+  // 存檔是這道網的出口：Ctrl+S 會先把 burst 收掉再寫檔（那段理由寫在
+  // keydown 裡 Ctrl+S 那條分支上，不在 save() 自己頭上），所以打完字直接存
+  // 的人，字要真的落到磁碟上，● 要熄掉，離站也不能再被擋。這一半同時釘住判別式最前面那個「currentBurst 還在不在」——
   // 少了它，save() 尾巴那一發 setDirty() 會在 burst 已經收掉之後去讀
   // null.editEl。實測（把那一條拿掉、其餘不動）：頁面丟出
   // `TypeError: Cannot read properties of null (reading 'editEl')`，堆疊是
@@ -4944,6 +4944,57 @@ async function main() {
     assert.strictEqual(navBlocked, false, 'N5 存檔：存完之後不得再攔導航');
     assert.strictEqual(ctx.errs.length, 0,
       'N5 存檔：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
+  // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
+  // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提
+  // 斷言把這件事釘住），所以只盯著文字與子節點的監看看不見它。
+  // 實測（把監看的 attributes 那一項拿掉、其餘不動、同樣用真滑鼠驅動）：
+  // title 停在 "doc"，而 navBlocked 仍然是 true —— 判別式看得見這筆編輯，
+  // 分頁標題看不見。那個組合同時也證明這一列的 ● 不是 commit 給的。
+  {
+    const ctx = await newPage('# Doc\n\n| A | B |\n| --- | --- |\n| one | two |\n');
+    const colB = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const r = table.tHead.rows[0].cells[1].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(colB.x, colB.y);
+    await ctx.page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 5000 });
+    const grip = await ctx.page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(grip.x, grip.y);
+    await ctx.page.mouse.down(); await ctx.page.mouse.up();
+    await ctx.page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 5000 });
+    await ctx.page.click('.ed-te-menu-align');
+    await new Promise((r) => setTimeout(r, 500));
+    const shape = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const cells = Array.prototype.map.call(table.querySelectorAll('tr'),
+        (tr) => (tr.cells[1] ? tr.cells[1].getAttribute('style') : null));
+      const menu = document.querySelector('.ed-te-menu');
+      return { cells: cells, menuOpen: !!(menu && !menu.hidden),
+               text: table.textContent };
+    });
+    const title = await ctx.page.title();
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.deepStrictEqual(shape,
+      { cells: ['text-align:left', 'text-align:left'], menuOpen: true, text: '\n\nAB\nonetwo\n' },
+      'N5 對齊 前提失敗：整欄的 style 必須真的被寫進去、選單必須還開著、而且' +
+      '面上的文字一個字都不能動（否則這一列量到的就不是「只寫屬性」），got ' +
+      JSON.stringify(shape));
+    assert.strictEqual(title.indexOf('●'), 0,
+      'N5 對齊：只寫 style 屬性也算改過，必須亮 ●，got ' + JSON.stringify(title));
+    assert.strictEqual(navBlocked, true, 'N5 對齊：只寫 style 屬性也必須攔導航');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5 對齊：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: closing the tab mid-burst is blocked and the title shows ● — OK');
