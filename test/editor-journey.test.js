@@ -4820,6 +4820,134 @@ async function main() {
     console.log('journey: the fence-opener rules are pinned too — OK');
   }
 
+  // ── N5: 打了字還沒離開 block 時，關掉分頁必須被攔 ──────────────────
+  // burst 把使用者打的字留在 DOM 裡直到它自己收掉，而 `stack.dirtyDepth`
+  // 是 `_done.length - _savedDepth`（lineops.js），要等 undo stack 被推入／
+  // 彈出一個 op、或存檔重訂基準，它才會動 —— 打字當下這些都還沒發生，所以
+  // 「打了字、還沒離開這個 block」在它眼中是乾淨的。
+  // MEASURED at 2519204（這一列還沒進去的時候）：
+  //   mid-burst   title "doc"    navBlocked false   page.url() "about:blank"
+  //   blur 之後    title "● doc"  navBlocked true    page.url() 沒有變
+  // 也就是說整條關分頁的路徑，對「還沒 blur 的那一筆」完全沒有網。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' unsaved');
+    await new Promise((r) => setTimeout(r, 200));
+    const title = await ctx.page.title();
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    // 這一發導航可能跑得比 evaluate() 自己的回覆還快，把執行環境拆掉、讓這個
+    // 呼叫 reject（"Execution context was destroyed"）。那是時序，不是產品狀態
+    // —— 吞掉它，這一列的判決才會留在下面的斷言上，而不是變成看起來像 harness
+    // 壞掉的錯誤。MEASURED at 2519204（沒有網的那一版）：這個呼叫是 resolve
+    // 的，導航也真的走完了。所以它是被容忍，不是被依賴。
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(title.indexOf('●'), 0,
+      'tab title 必須在 burst 開著時就顯示 ●，got ' + JSON.stringify(title));
+    assert.strictEqual(navBlocked, true, '打了字還沒 blur 時，導航必須被攔');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 控制組：只是把游標點進去、一個字都沒打。判別式裡「現在的面 !== 開 burst
+  // 當下那一份」就是這一半在釘的。實測（把那一條拿掉、其餘不動）：● 這一半
+  // 仍然是綠的 —— 光是點進去不會產生任何 mutation，標題沒有人去重畫 —— 紅的
+  // 是下面那一條，因為 beforeunload 是【當下】現算的：使用者什麼都沒改，卻
+  // 被一個關不掉的離站對話框擋住。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const title = await ctx.page.title();
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(title.indexOf('●'), -1,
+      'N5 控制組：什麼都沒打的時候不得出現 ●，got ' + JSON.stringify(title));
+    assert.strictEqual(navBlocked, false, 'N5 控制組：什麼都沒改就不得攔導航');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5 控制組：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 表格 cell 也是同一個 burst 底座，而它走的是另一個開場函數 —— 少了那一邊
+  // 的接線，在 cell 裡打字一樣不會亮 ●。
+  {
+    const ctx = await newPage('# Doc\n\n| A | B |\n| --- | --- |\n| one | two |\n');
+    await ctx.page.click('.ed-block[data-block-type="table"] td');
+    await ctx.page.keyboard.type('X');
+    await new Promise((r) => setTimeout(r, 250));
+    const title = await ctx.page.title();
+    assert.strictEqual(title.indexOf('●'), 0,
+      'N5 表格：在 cell 裡打字就必須亮 ●，got ' + JSON.stringify(title));
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5 表格：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 反過來的一半：burst 自己被 Ctrl+Z 收回原狀（面被整段換掉，不是逐字改），
+  // ● 必須跟著消失，離站警告也不能再擋。少了它，使用者撤銷完自己的輸入之後
+  // 仍然會被一個沒有東西可救的對話框攔住。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type('ZZ');
+    await new Promise((r) => setTimeout(r, 500));
+    const titleTyped = await ctx.page.title();
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 500));
+    const title = await ctx.page.title();
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(titleTyped.indexOf('●'), 0,
+      'N5 撤銷 前提失敗：撤銷之前必須真的是髒的，got ' + JSON.stringify(titleTyped));
+    assert.strictEqual(title.indexOf('●'), -1,
+      'N5 撤銷：撤回原狀之後 ● 必須消失，got ' + JSON.stringify(title));
+    assert.strictEqual(navBlocked, false, 'N5 撤銷：撤回原狀之後不得再攔導航');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5 撤銷：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 存檔是這道網的出口：Ctrl+S 會先把 burst 收掉再寫檔（save() 上面那段
+  // 註解），所以打完字直接存的人，字要真的落到磁碟上，● 要熄掉，離站也不
+  // 能再被擋。這一半同時釘住判別式最前面那個「currentBurst 還在不在」——
+  // 少了它，save() 尾巴那一發 setDirty() 會在 burst 已經收掉之後去讀
+  // null.editEl。實測（把那一條拿掉、其餘不動）：頁面丟出
+  // `TypeError: Cannot read properties of null (reading 'editEl')`，堆疊是
+  // burstHasUncommittedEdit ← setDirty ← save，而存完之後標題讀回來仍然是
+  // "● doc"。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' typed');
+    await new Promise((r) => setTimeout(r, 200));
+    const disk = await saveAndRead(ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    const title = await ctx.page.title();
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph. typed\n',
+      'N5 存檔 前提失敗：打的字必須真的落到磁碟上，got ' + JSON.stringify(disk));
+    assert.strictEqual(title.indexOf('●'), -1,
+      'N5 存檔：存完之後 ● 必須熄掉，got ' + JSON.stringify(title));
+    assert.strictEqual(navBlocked, false, 'N5 存檔：存完之後不得再攔導航');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5 存檔：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: closing the tab mid-burst is blocked and the title shows ● — OK');
+
   await browser.close();
 }
 
