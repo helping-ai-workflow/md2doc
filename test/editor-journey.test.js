@@ -784,9 +784,14 @@ async function main() {
   // 照樣含有它。壞掉的是連結【前面】多出來的那對 `**`，只有整份比對抓得到。
   // 粗體修前是
   //   `# Doc\n\nAlpha *****ital* bold** text here.\n`
-  for (const [tb, expect, label] of [
-    ['bold', '# Doc\n\nAlpha ***ital* bold** text here.\n', '粗體'],
-    ['link', '# Doc\n\nAlpha [*ital* bold](https://example.com) text here.\n', '連結'],
+  //
+  // `poison` 是【這一列】修前真的出現過的那串殘骸，所以它在自己這一列上咬得
+  // 到。之前這裡放的是一個共用的 `*****`，它在連結那列永遠不會失敗 —— 一個在
+  // 自己列上不可能紅的守衛什麼都沒守到。至於跳脫的星號本身：它不在這兩列，因為
+  // 跳脫是【下一次】存檔才發生的，量它要走完整個循環，見下面的 escape-cycle。
+  for (const [tb, expect, poison, label] of [
+    ['bold', '# Doc\n\nAlpha ***ital* bold** text here.\n', '*****', '粗體'],
+    ['link', '# Doc\n\nAlpha [*ital* bold](https://example.com) text here.\n', '**[', '連結'],
   ]) {
     const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
     // 註冊在按下【之前】：window.prompt() 會擋住頁面直到有人回答它，所以一個
@@ -817,8 +822,8 @@ async function main() {
       assert.strictEqual(dialogFired, true,
         label + '：連結對話框從頭到尾沒有開過 —— 這一列什麼都沒量到，got:\n' + disk);
     }
-    assert.strictEqual(disk.indexOf('\\*'), -1, label + '：不得出現跳脫的星號，got:\n' + disk);
-    assert.strictEqual(disk.indexOf('*****'), -1, label + '：不得出現空標記留下的星號堆，got:\n' + disk);
+    assert.strictEqual(disk.indexOf(poison), -1,
+      label + '：不得留下空標記的殘骸（' + poison + '），got:\n' + disk);
     assert.strictEqual(disk, expect, label + '：整份文件必須就是這樣，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0, label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
@@ -840,6 +845,17 @@ async function main() {
   //   —— inline-md.js 的 EM 分支無條件在兩側輸出 `*`，所以任何送去序列化的
   //   <em><br></em> 都會長成這樣，與本修無關。在「重新載入後斷行的斜體外衣掉
   //   了」與「斷行直接消失」之間，這裡選前者：不掉內容。
+  //
+  // ⚠ 已知的鄰居，【沒有】被任何一列釘住，而且它也會產出使用者回報的那個症狀：
+  //   分隔符連讀。留下來的標記【正確地】活著（它裝著東西）時，它的收尾分隔符
+  //   會緊貼著新標記的起始分隔符。實測 `Alpha *` + 反引號 c 反引號 + `ital*
+  //   bold text here.`，從 `ital` 開頭起算的粗體：
+  //     第一次存檔 `Alpha *`+`` `c` ``+`****ital* bold** text here.`
+  //     重新載入再編輯 `Alpha \*`+`` `c` ``+`\****ital* bold** text here.Z`
+  //   這不是空標記 —— <em> 裝著那個 code span，本檔的判別式正確地留下它。壞的
+  //   是 `*` 後面緊接著 `***` 讀不回來，成因在 inline-md.js 怎麼挑分隔符長度，
+  //   跟本修同源但不同層。刻意不加斷言：釘住現在這個（錯的）位元組，會讓將來
+  //   真正的修法為了錯的理由紅掉。
   for (const [name, md, expect] of [
     ['keeps-text', '# Doc\n\nAlpha *ital* bold text here.\n',
       '# Doc\n\nAlpha *it****al* bold** text here.\n'],
@@ -870,6 +886,188 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: an emptied mark goes, a mark that still holds something stays — OK');
+
+  // ── T9-4 的其他手勢：Shift+Enter／貼上／清單裡按 Enter ────────────────
+  //
+  // 同一個 root cause 的其他路徑。Shift+Enter 與貼上走 deleteContents()，清單
+  // 裡的 Enter 走 splitListItemAtCaret() 的「先刪再抽尾」。它們與工具列那兩列
+  // 共用同一個 dropEmptied() —— 把它的內容拿掉，這些列全部一起紅。
+  //
+  // 修前的磁碟（實測）：
+  //   Shift+Enter  `# Doc\n\nAlpha **<br> text here.\n`
+  //   貼上         `# Doc\n\nAlpha **PASTED text here.\n`
+  //   清單 Enter   `# Doc\n\n- Alpha **\n- *ital* rest\n- Second\n`
+  // 清單那條沒有掉字：每個字元都還在正確的項目裡，壞掉的只有那對分隔符。
+  {
+    // Shift+Enter：選取從斜體第一個字元起算
+    const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      r.setStart(em.firstChild, 0);
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 300));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1,
+      'br-leftover：不得留下空標記的殘骸，got:\n' + disk);
+    assert.strictEqual(disk, '# Doc\n\nAlpha <br> text here.\n',
+      'br-leftover：整份文件必須就是這樣，got:\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, 'br-leftover：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  {
+    // 貼上：同一個選取。dispatchEvent 的回傳值就是「有沒有人 preventDefault」
+    // —— 它必須是 false，否則這一列的貼上根本沒被編輯器接手，什麼都沒量到。
+    const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      r.setStart(em.firstChild, 0);
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    const notPrevented = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'PASTED');
+      return el.dispatchEvent(new ClipboardEvent('paste',
+        { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    await new Promise((r) => setTimeout(r, 400));
+    assert.strictEqual(notPrevented, false,
+      'paste-leftover：貼上事件沒有被編輯器接手（沒有人 preventDefault）—— 這一列什麼都沒量到');
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1,
+      'paste-leftover：不得留下空標記的殘骸，got:\n' + disk);
+    assert.strictEqual(disk, '# Doc\n\nAlpha PASTED text here.\n',
+      'paste-leftover：整份文件必須就是這樣，got:\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, 'paste-leftover：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  {
+    // 清單項目裡按 Enter，caret 落在斜體第一個字元
+    const ctx = await newPage('# Doc\n\n- Alpha *ital* rest\n- Second\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-li-text');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-li-text');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      r.setStart(em.firstChild, 0); r.collapse(true);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 700));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1,
+      'li-enter-leftover：不得留下空標記的殘骸，got:\n' + disk);
+    assert.strictEqual(disk, '# Doc\n\n- Alpha\n- *ital* rest\n- Second\n',
+      'li-enter-leftover：整份文件必須就是這樣，got:\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, 'li-enter-leftover：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: Shift+Enter, paste and a list split leave no empty leftover either — OK');
+
+  // ── nested-order：由深到淺的移除順序 ────────────────────────────────────
+  //
+  // `***ital***` 是 <em><strong>ital</strong></em>（實測 marked 的巢狀方向就是
+  // 這個）。從最裡面那個 text node 的 offset 0 起算的選取會把外層與內層都清
+  // 空，而外層要看得出自己空了，得先等內層被移走。順序反過來時外層先被檢查，
+  // 那時它還裝著內層 —— 它會被留下來，磁碟上多一對 `**`。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha ***ital*** bold text here.\n');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const inner = el.querySelector('em strong').firstChild;
+      const r = document.createRange();
+      r.setStart(inner, 0);
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    const disabled = await ctx.page.evaluate(() =>
+      document.querySelector('[data-ed-tb="strike"]').disabled);
+    assert.strictEqual(disabled, false,
+      'nested-order：刪除線按鈕必須是 enabled，否則這一列什麼都沒點到');
+    await pressClick(ctx.page, '[data-ed-tb="strike"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, '# Doc\n\nAlpha ~~***ital*** bold~~ text here.\n',
+      'nested-order：外層與內層的空標記都要走，而外層只有在內層先走之後才看得出自己空了，got:\n' +
+      JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, 'nested-order：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the outer of two emptied marks goes too — OK');
+  }
+
+  // ── escape-cycle：使用者回報的字面症狀 ──────────────────────────────────
+  //
+  // 「檢視 markdown 後，*字號前面都有 \ 跳脫」。跳脫【不是】在留下空標記的那
+  // 一次存檔發生的，是下一次：那些多出來的星號被重新讀成字面文字，再存檔時
+  // escapeText() 就把它們跳脫掉。所以要量到它，必須走完整個循環 —— 存檔、重新
+  // 載入、再編輯那個 block、再存檔。實測（把 dropEmptied() 的內容拿掉再跑同一
+  // 列）：
+  //   第一次存檔 `# Doc\n\nAlpha *****ital* bold** text here.\n`
+  //   第二次存檔 `# Doc\n\nAlpha \*\****ital* bold** text here.Z\n`
+  // 修好之後兩次都是 `Alpha ***ital* bold** text here.`（第二次多一個 Z），
+  // 也就是這個形狀自己是位元組穩定的。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const em = el.querySelector('em');
+      const r = document.createRange();
+      r.setStart(em.firstChild, 0);
+      r.setEnd(el.lastChild, el.lastChild.data.indexOf(' text'));
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const first = await saveAndRead(ctx);
+    assert.strictEqual(first, '# Doc\n\nAlpha ***ital* bold** text here.\n',
+      'escape-cycle 前提失敗：第一次存檔就必須是乾淨的，got:\n' + JSON.stringify(first));
+    // 重新載入＝從磁碟重新解析，這是跳脫唯一發生得了的地方；再打一個字讓這個
+    // block 真的被重新序列化（沒被編輯過的 block 會被逐位元組原樣重播）。
+    await ctx.page.goto(ctx.url, { waitUntil: 'networkidle0' });
+    await new Promise((r) => setTimeout(r, 400));
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.type('Z');
+    await new Promise((r) => setTimeout(r, 250));
+    const second = await saveAndRead(ctx);
+    assert.strictEqual(second.indexOf('\\*'), -1,
+      'escape-cycle：重新載入再編輯之後不得出現跳脫的星號，got:\n' + JSON.stringify(second));
+    assert.strictEqual(second, '# Doc\n\nAlpha ***ital* bold** text here.Z\n',
+      'escape-cycle：這個形狀必須是位元組穩定的，got:\n' + JSON.stringify(second));
+    assert.strictEqual(ctx.errs.length, 0, 'escape-cycle：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the reported symptom — escaped asterisks on the next save — is gone — OK');
+  }
 
   // ── 表格「對齊」選單：捲動中斷了開啟流程，選單仍要能用 ────────────────
   // v3.2.1 fix round 1 gave runCycleAlign() a scroll-survival fix
