@@ -131,6 +131,13 @@ function baseCtx(overrides) {
     if (id === 'preview') {
       eq(state.preview.disabled, false,
         'the mode button (id preview) stays enabled in source mode — it is the only way out');
+    } else if (id === 'outline') {
+      // T11-2: outline (☰) stays enabled in source mode too, because it is
+      // what opens the sidebar drawer (toggleOutlineSidebar() in
+      // lib/editor/client.js) — the fixed .sidebar-toggle button that used
+      // to reach the drawer another way is hidden in edit mode entirely.
+      eq(state.outline.disabled, false,
+        'outline (☰) stays enabled in source mode — T11-2\'s route to the sidebar drawer');
     } else {
       eq(state[id].disabled, true, id + ' is disabled in source mode');
     }

@@ -9,6 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const puppeteer = require('puppeteer');
 const { createEditorServer } = require('../lib/editor/server.js');
+const { renderMarkdown } = require('../lib/md2doc.js');
 
 const CLIENT_SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
 
@@ -2118,7 +2119,7 @@ async function main() {
   const OVERLAY_RULES = [
     { sel: '.ed-toolbar',              after: 'live' },
     { sel: '.ed-toolbar-status',       after: 'live' },
-    { sel: '.sidebar-toggle',          after: 'live' },
+    { sel: '.sidebar-toggle',          after: 'live-in-reader-gone-in-edit' },
     { sel: '.lightbox',                after: 'live' },
     { sel: '.sidebar-scrim',           after: 'live' },
     { sel: '.reader-sidebar',          after: 'live' },
@@ -2233,29 +2234,144 @@ async function main() {
     console.log('journey: V3 .ed-toolbar / .ed-toolbar-status stay live across a scroll — OK');
   }
 
-  // ── live：.sidebar-toggle ───────────────────────────────────────────
-  // 它在 lib/md2doc.js 是 `display: none`，只有 @media (max-width: 1080px)
-  // 才變 inline-flex —— 所以視窗寬度在這裡是斷言的一部分，不能沿用預設值。
+  // ── T11-2: .sidebar-toggle survives in reader, is gone in edit ──────
+  // Before T11-2 this row asserted the mobile drawer toggle stayed `live` at
+  // <=1080px in EDIT mode too, because editModeLayoutCss carried no override
+  // of its own yet. Measured on THIS build at both 1080x900 and 800x900:
+  // document.elementFromPoint() at the toggle's own rect centre returns
+  // .ed-toolbar (z-index 101 over the toggle's 100), never the toggle — a
+  // real pointer click could never land on it there, so the fix hides it in
+  // edit mode outright rather than only nudging its z-index. See the
+  // matching comment beside `.sidebar-toggle { display: none; }` in
+  // editModeLayoutCss (lib/md2doc.js) for the full measurement.
   {
     const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 800, height: 800 });
-    await new Promise((r) => setTimeout(r, 250));
-    const before = await overlayState(ctx.page, '.sidebar-toggle');
-    assertRaised(before, '.sidebar-toggle');
-    await scrollBy(ctx.page, 2000);
-    const after = await overlayState(ctx.page, '.sidebar-toggle');
-    assert.ok(isLive(after), '.sidebar-toggle 捲動後必須仍然可見，got ' + JSON.stringify(after));
-    assert.strictEqual(after.top, before.top, '.sidebar-toggle 捲動後必須留在同一個視窗座標');
-    // 同一頁順帶量寬視窗：這一列依賴視窗寬度，所以把那個依賴也釘住 ——
-    // 有人把 @media 斷點改掉時，上面那個 800px 的前提會靜默失效。
-    await ctx.page.setViewport({ width: 1400, height: 800 });
-    await new Promise((r) => setTimeout(r, 250));
-    const wide = await overlayState(ctx.page, '.sidebar-toggle');
-    assert.ok(isGone(wide),
-      '.sidebar-toggle 在 1080px 以上必須是 display:none（這一列的 800px 前提靠它成立），got ' +
-      JSON.stringify(wide));
+    for (const w of [800, 1400]) {
+      await ctx.page.setViewport({ width: w, height: 800 });
+      await new Promise((r) => setTimeout(r, 250));
+      const s = await overlayState(ctx.page, '.sidebar-toggle');
+      assert.ok(isGone(s),
+        '.sidebar-toggle 在 edit 模式下必須永遠是 gone（不再是視窗寬度的函式），width=' + w +
+        ' got ' + JSON.stringify(s));
+    }
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: V3 .sidebar-toggle stays live across a scroll (≤1080px only) — OK');
+  }
+  // The other half of the same census answer, checked directly against
+  // renderMarkdown()'s own HTML rather than inferred from the edit-mode
+  // result above: reader-mode output (no editMode) must NOT carry the
+  // edit-only override, so the pre-existing mobile drawer toggle there is
+  // unaffected, while edit-mode output must carry it (otherwise the `gone`
+  // assertions above would be exercising a rule the shipped edit HTML does
+  // not actually contain).
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-journey-census-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# H\n\n## Sub\n\nAlpha.\n', 'utf8');
+    const mdText = fs.readFileSync(mdPath, 'utf8');
+    const readerOut = await renderMarkdown(mdText, mdPath, {});
+    const editOut = await renderMarkdown(mdText, mdPath, { editMode: true });
+    const overrideRe = /\.sidebar-toggle\s*\{\s*display:\s*none;\s*\}/;
+    assert.ok(!overrideRe.test(readerOut.html),
+      'reader-mode 輸出不得含 T11-2 的 edit-only override —— .sidebar-toggle 必須留給既有的 ' +
+      '@media (max-width: 1080px) 規則決定，census 的「reader 存活」才站得住');
+    assert.ok(overrideRe.test(editOut.html),
+      'edit 模式輸出必須含 T11-2 的 override，否則上面 gone 斷言測到的東西和真正出貨的 HTML 不是同一份');
+  }
+  console.log('journey: T11-2 .sidebar-toggle survives in reader, is gone in edit — OK');
+
+  // ── T11-2: edit mode 下側欄必須有辦法打開 ────────────────────────────
+  for (const w of [1080, 800]) {
+    const ctx = await newPage('# Doc\n\n## Sub\n\nAlpha.\n');
+    await ctx.page.setViewport({ width: w, height: 900 });
+    await new Promise((r) => setTimeout(r, 200));
+    const hit = await ctx.page.evaluate(() => {
+      const t = document.querySelector('.sidebar-toggle');
+      if (!t || getComputedStyle(t).display === 'none') return 'hidden';
+      const r = t.getBoundingClientRect();
+      const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return el && (el === t || t.contains(el)) ? 'clickable' : 'occluded';
+    });
+    assert.notStrictEqual(hit, 'occluded',
+      w + '×900：.sidebar-toggle 不得是「看得到但點不到」的狀態');
+    // Ruling T11-2: the assertion above passes just as well when
+    // .sidebar-toggle is plain absent (hit === 'hidden', what the fix above
+    // produces) as it would if the button were clickable — it says nothing
+    // about whether edit mode still has a working way to open the drawer.
+    // That is what this checks: the toolbar's own outline button (id
+    // 'outline', ☰, `[data-ed-tb="outline"]`) must exist, be enabled, and
+    // actually be the element its own centre point hit-tests to — the same
+    // test .sidebar-toggle was just put through, aimed at its replacement.
+    const outlineHit = await ctx.page.evaluate(() => {
+      const b = document.querySelector('[data-ed-tb="outline"]');
+      if (!b) return { present: false };
+      const r = b.getBoundingClientRect();
+      const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { present: true, disabled: b.disabled, hit: el === b || b.contains(el) };
+    });
+    assert.ok(outlineHit.present,
+      w + '×900：工具列的 outline (☰) 按鈕必須存在 —— 拿掉 .sidebar-toggle 之後它是側欄僅剩的入口');
+    assert.strictEqual(outlineHit.disabled, false,
+      w + '×900：outline (☰) 不得 disabled，否則側欄在 edit 模式下沒有任何入口，got ' +
+      JSON.stringify(outlineHit));
+    assert.ok(outlineHit.hit,
+      w + '×900：outline (☰) 必須是自己中心點的 hit-test 結果，否則跟 .sidebar-toggle 犯一樣的錯，got ' +
+      JSON.stringify(outlineHit));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the sidebar toggle is never visible-but-unclickable in edit mode, ' +
+    'and the toolbar outline button is its working replacement at both widths — OK');
+
+  // ── T11-2 step 5: source mode 隱藏抽屜的 TOC 與 search-results，只留 reader-tools ──
+  // 量測基礎（brief）：enterSourceMode() 讓 contentEl.hidden = true；在那個
+  // 狀態下點 TOC 最後一個連結 scrollBefore/scrollAfter 都是 0、textarea 的
+  // scrollTop 前後不變（3924 → 3924），search 同理（找的是一個
+  // display:none 的 .content）。這裡驗證 lib/md2doc.js 那條
+  // `body[data-ed-mode="source"] .toc, body[data-ed-mode="source"]
+  // .search-results { display: none !important; }` 規則真的擋住了兩者，
+  // 而 .reader-tools（搜尋輸入列）維持原樣 —— 先真的跑一次搜尋讓
+  // #search-results 的 `hidden` 屬性變成 false，免得這一列在規則被拿掉時
+  // 也是空跑的綠燈（`hidden` 屬性本身就會讓 computed display 是 none）。
+  {
+    const ctx = await newPage('# Doc\n\n## Sub\n\nAlpha.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      document.getElementById('doc-search-input').value = 'Sub';
+      document.getElementById('doc-search-submit').click();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    const readState = () => ctx.page.evaluate(() => {
+      const g = (sel) => {
+        const el = document.querySelector(sel);
+        return el ? { display: getComputedStyle(el).display, hidden: !!el.hidden } : null;
+      };
+      return { toc: g('.toc'), search: g('.search-results'), tools: g('.reader-tools') };
+    });
+    const before = await readState();
+    assert.strictEqual(before.search.hidden, false,
+      'T11-2 step5 前提失敗：送出搜尋後 #search-results 的 hidden 屬性應為 false，got ' +
+      JSON.stringify(before));
+    assert.notStrictEqual(before.toc.display, 'none', 'T11-2 step5 前提失敗：edit 模式下 .toc 一開始就是 none');
+    assert.notStrictEqual(before.tools.display, 'none', 'T11-2 step5 前提失敗：edit 模式下 .reader-tools 一開始就是 none');
+    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="preview"]').click());
+    await new Promise((r) => setTimeout(r, 300));
+    const mode = await ctx.page.evaluate(() => document.body.getAttribute('data-ed-mode'));
+    assert.strictEqual(mode, 'source', 'T11-2 step5 前提失敗：按下 preview 沒有真的切到 source 模式');
+    const inSource = await readState();
+    assert.strictEqual(inSource.toc.display, 'none',
+      'source 模式下 .toc 必須是 display:none，got ' + JSON.stringify(inSource));
+    assert.strictEqual(inSource.search.display, 'none',
+      'source 模式下 .search-results 必須是 display:none（即使 hidden 屬性仍是 false），got ' +
+      JSON.stringify(inSource));
+    assert.notStrictEqual(inSource.tools.display, 'none',
+      'source 模式下 .reader-tools 必須留著（裁定：只留 reader-tools），got ' + JSON.stringify(inSource));
+    // 切回 edit：兩區必須恢復。
+    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="preview"]').click());
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await readState();
+    assert.notStrictEqual(after.toc.display, 'none', '切回 edit 模式後 .toc 必須恢復，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: T11-2 step5 source mode hides the drawer TOC and search-results, keeps reader-tools — OK');
   }
 
   // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時）──────────
@@ -5338,7 +5454,11 @@ async function main() {
 
   // K4：游標腳下那顆被 updateToolbar() 關掉時。真焦點在這裡會被瀏覽器丟回
   // BODY，而從 BODY 按 Tab 又拿不回來；虛擬游標改成走到下一顆還開著的。
-  // 原始碼模式是這件事最極端的一格：整列只剩一顆是開著的。
+  // 原始碼模式曾經是這件事最極端的一格：整列只剩一顆是開著的。T11-2 之後
+  // 剩兩顆——'outline'（☰，BUTTON_DEFS 裡排在 'preview' 之前）也留著，因為
+  // 拿掉 .sidebar-toggle 之後它是側欄在 edit 模式下唯一的入口。游標從
+  // 'quote' 往前找第一顆還開著的按鈕，中間的 code/list/…/image 全部
+  // disabled，所以停在 'outline'，不是 'preview'。
   {
     const ctx = await newPage(F12_MD);
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
@@ -5357,11 +5477,13 @@ async function main() {
       .map((b) => b.getAttribute('data-ed-tb')));
     assert.strictEqual(before.at, 'quote',
       'K4 前提失敗：切模式之前游標必須在 ❝ 上，got ' + JSON.stringify(before));
-    assert.deepStrictEqual(enabled, ['preview'],
-      'K4 前提失敗：原始碼模式下必須只剩那一顆是開著的，got ' + JSON.stringify(enabled));
+    assert.deepStrictEqual(enabled, ['outline', 'preview'],
+      'K4 前提失敗：原始碼模式下必須恰好剩 outline 與 preview 這兩顆是開著的，got ' +
+      JSON.stringify(enabled));
     assert.deepStrictEqual({ at: after.at, cursors: after.cursors },
-      { at: 'preview', cursors: ['preview'] },
-      '腳下那顆被關掉時，游標必須自己走到還開著的那顆上，got ' + JSON.stringify(after));
+      { at: 'outline', cursors: ['outline'] },
+      '腳下那顆被關掉時，游標必須自己走到「下一顆」還開著的按鈕上 —— BUTTON_DEFS 裡 outline 排在 ' +
+      'preview 之前，所以是 outline，got ' + JSON.stringify(after));
     assert.strictEqual(ctx.errs.length, 0,
       'F12 K4：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
@@ -5478,6 +5600,11 @@ async function main() {
   // K7：三種狀態都到得了，而且進去不動任何東西。原始碼模式的插入點在整份
   // 文件的 textarea 上；區塊選取模式下，選取在進工具列之後原封不動，Escape
   // 的名次是「先退工具列、再清選取」。順帶釘住「打字就交還鍵盤」。
+  //
+  // T11-2: 這裡從 -1 重新進入鍵盤模式（enterToolbarKeynav() 是
+  // moveToolbarCursor(1) 從頭掃），原始碼模式下第一顆還開著的按鈕現在是
+  // 'outline'（BUTTON_DEFS 排序在 'preview' 之前），不再是 'preview' —— 那
+  // 是本檔案 K4 已經釘住的同一個排序事實，這裡是同一件事的另一個入口。
   {
     const ctx = await newPage(F12_MD);
     await ctx.page.click('.ed-toolbar [data-ed-tb="preview"]');
@@ -5486,7 +5613,7 @@ async function main() {
     const inSource = await f12Snap(ctx.page);
     assert.deepStrictEqual(
       { at: inSource.at, who: inSource.who },
-      { at: 'preview', who: 'TEXTAREA.ed-source' },
+      { at: 'outline', who: 'TEXTAREA.ed-source' },
       '原始碼模式下也必須進得了工具列，而且插入點留在原始碼上，got ' +
       JSON.stringify(inSource));
     assert.strictEqual(ctx.errs.length, 0,
