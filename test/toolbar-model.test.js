@@ -261,6 +261,15 @@ function baseCtx(overrides) {
 }
 
 // --- purity: no document/window/navigator reference in source --------------
+//
+// No `window.` assertion here, deliberately: the module's own header comment
+// documents the UMD injection target as `window.md2docToolbarModel`, so a
+// naive `!/\bwindow\./.test(src)` guard would red on that comment, not on a
+// real violation. The promise still holds at runtime — the UMD wrapper picks
+// `root = typeof self !== 'undefined' ? self : this`, never a bare `window`
+// — this file just cannot assert it by source-text search the way it does
+// for `document.`/`navigator.`. Don't add the assertion; it fails on the
+// header, not on a regression.
 
 {
   const src = require('fs').readFileSync(require.resolve('../lib/editor/toolbar-model.js'), 'utf8');
