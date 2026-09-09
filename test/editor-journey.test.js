@@ -6492,6 +6492,145 @@ async function main() {
   }
   console.log('journey: measuring the marks leaves the selection alone — OK');
 
+
+  // ── F8: 有待提交的編輯時，第一次點進表格必須落在【被點的】那一格 ────────
+  //
+  // 使用者回報的字面症狀：在段落裡打完字之後第一次點進表格，游標落在左上角
+  // 那一格，接著打的字蓋掉欄位標題、而且進了磁碟。
+  //
+  // 機制（instrument 過：在 handleTableCellFocusIn() 的 `await switching` 兩側
+  // 放探針量的）：mousedown 讓髒段落
+  // focusout -> switchAwayFrom() -> 提交 -> applyRenderResult()。page load
+  // 之後的第一次提交時 `lastParts` 還是 null，所以那一發交給 applyFullRender()，
+  // 它的 `contentEl.innerHTML =` 把 .content 整片換掉；探針在
+  // handleTableCellFocusIn() 的 `await switching` 兩側記到 route
+  // ["applyFullRender"]、`document.body.contains(cellEl)` false。舊碼在那之後
+  // 用 `tableCellsOf(liveTableEl)[0]` 復原，於是落在表頭第一格。
+  //
+  // 兩個變體都留著：unprimed 是【偵測器】—— 它走的正是上面那條
+  // applyFullRender 路徑；primed 先花掉那一發 fallback，之後的提交走 patch、
+  // 被點的 td 不會被 detach，所以它修好之前就是綠的。它是【控制組】，控的是
+  // 「這一修不得把本來就正確的 patch 路徑弄壞」。
+  const t13LastCellClick = async (page) => {
+    await page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      cells[cells.length - 1].scrollIntoView({ block: 'center' });
+    });
+    const box = await page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      const r = cells[cells.length - 1].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await page.mouse.click(box.x, box.y);
+    await new Promise((r) => setTimeout(r, 500));
+  };
+  const t13Landed = (page) => page.evaluate(() => {
+    const a = document.activeElement;
+    if (!a || !a.classList || !a.classList.contains('ed-wys-cell')) {
+      return 'not-a-cell:' + (a && a.tagName);
+    }
+    return a.textContent.trim();
+  });
+  // ⠿ -> MD 原始碼，把 block 1 的來源換成 `value` 並【留著不提交】——
+  // 之後那一下點進表格的 mousedown 才是提交它的人。
+  const t13DirtyRaw = async (ctx, value) => {
+    const sel = '.ed-block[data-block-id="1"]';
+    await ctx.page.hover(sel);
+    await pressClick(ctx.page, sel + ' .ed-handle', 80);
+    await ctx.page.waitForSelector('.ed-handle-menu-btn');
+    await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+        .find((x) => x.textContent.indexOf('原始碼') !== -1);
+      if (!b) throw new Error('MD 原始碼 item not found');
+      b.click();
+    });
+    await ctx.page.waitForSelector('textarea.ed-raw');
+    await ctx.page.evaluate((v) => {
+      const ta = document.querySelector('textarea.ed-raw');
+      ta.value = v;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
+    await new Promise((r) => setTimeout(r, 250));
+  };
+  const T13_TABLE = '| A | B |\n|---|---|\n| c1 | c2 |\n| c3 | c4 |\n';
+  for (const primed of [false, true]) {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\n' + T13_TABLE);
+    if (primed) {                       // 先做一次無關的 commit，讓 lastParts 非 null
+      await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
+      await ctx.page.keyboard.type('X');
+      await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type('zz');
+    await new Promise((r) => setTimeout(r, 150));
+    await t13LastCellClick(ctx.page);
+    const landed = await t13Landed(ctx.page);
+    assert.strictEqual(landed, 'c4',
+      'F8(primed=' + primed + ')：點最後一格應落在 c4，got ' + landed);
+    // 使用者感知到的傷害是【磁碟上的欄位標題被打的字蓋掉】，所以落點對了之後
+    // 還要把字真的打下去、存檔、讀回來。
+    await ctx.page.keyboard.type('QQ');
+    await new Promise((r) => setTimeout(r, 200));
+    const disk = await saveAndRead(ctx);
+    assert.ok(/\|\s*A\s*\|\s*B\s*\|/.test(disk),
+      'F8(primed=' + primed + ')：欄位標題被覆蓋了，磁碟上是:\n' + disk);
+    assert.ok(disk.indexOf('QQ') !== -1,
+      'F8(primed=' + primed + ') 前提失敗：打的字根本沒進磁碟，這一列什麼都沒量到:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0,
+      'F8(primed=' + primed + ')：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the first click into a table lands where you clicked — OK');
+
+  // ── F8 的復原錨點：兩個 handle 各有對方接不住的提交形狀 ──────────────────
+  //
+  // 復原分兩半：先認回這張表，再認回那一格。認回【那一格】用的是 (row, col)
+  // 座標；認回【這張表】則量過兩個 handle，量到的結論是誰也蓋不住誰，所以
+  // 出貨的是 data-block-id 先問、blockElAtLine(startLine) 接手。下面兩列各
+  // 釘住其中一邊：拿掉哪一個，就有一列紅。
+  //
+  // 行數變、block 數不變：raw 把一行的段落換成三行的段落。表格的
+  // data-block-id 沒動，startLine 往後位移。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\n' + T13_TABLE);
+    await t13DirtyRaw(ctx, 'one\nmore\nlines');
+    await t13LastCellClick(ctx.page);
+    const landed = await t13Landed(ctx.page);
+    assert.strictEqual(landed, 'c4',
+      'F8/行數位移：表格的 data-block-id 沒變、startLine 變了，仍要落在 c4，got ' + landed);
+    assert.strictEqual(ctx.errs.length, 0, 'F8/行數位移：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // block 數變、行數不變：raw 把兩行的段落換成兩行的兩個標題。表格的
+  // startLine 沒動，data-block-id 從 2 變 3 —— blockmap 每次 render 都從 0
+  // 重編號，這正是 ensureTableBurstOpen() 的 S1 註解寫下來的那件事。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha para one\ncontinued line.\n\n' + T13_TABLE);
+    await t13DirtyRaw(ctx, '# One\n# Two');
+    await t13LastCellClick(ctx.page);
+    const landed = await t13Landed(ctx.page);
+    assert.strictEqual(landed, 'c4',
+      'F8/block 數位移：表格的 startLine 沒變、data-block-id 變了，仍要落在 c4，got ' + landed);
+    assert.strictEqual(ctx.errs.length, 0, 'F8/block 數位移：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  // 同一個位移形狀，但文件裡有【兩張】表：舊 id 現在指到的是隔壁那張表，而
+  // (row, col) 座標在那張表裡也存在。tableIdentityOf() 是攔住這一發的東西；
+  // 拿掉它，游標會落在使用者沒碰過的那張表的 c1。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha para one\ncontinued line.\n\n'
+      + T13_TABLE + '\n| Q |\n|---|\n| q1 |\n');
+    await t13DirtyRaw(ctx, '# One\n# Two');
+    await t13LastCellClick(ctx.page);
+    const landed = await t13Landed(ctx.page);
+    assert.strictEqual(landed, 'q1',
+      'F8/兩張表：舊 id 指到隔壁那張表，游標不得落在那裡，got ' + landed);
+    assert.strictEqual(ctx.errs.length, 0, 'F8/兩張表：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: a table the commit renumbered or moved is still recognised — OK');
+
   await browser.close();
 }
 
