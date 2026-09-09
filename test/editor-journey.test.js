@@ -6116,6 +6116,91 @@ async function main() {
   }
   console.log('journey: an all-whitespace selection inside a mark still unwraps it — OK');
 
+  // ── F2e: .ed-seltb 自己那顆按下去之後也要改口 ──────────────────────────────
+  //
+  // 主工具列的按鈕 click handler 尾巴掛著 `.then(updateToolbar)`；.ed-seltb 的
+  // B／I／S／U／<>／🔗【沒有】—— 它們直接呼叫 applyMarkToggle()，重畫是靠
+  // reselectAndReposition() 重設選取之後【非同步】飛回來的 selectionchange。
+  // 那是另一條機制，F2 的 after-press 那一格量不到它。這裡用真滑鼠按壓
+  // .ed-seltb 的 B，兩個方向各一次：WHOLE→拆掉（true 要變 false）、
+  // NONE→包起來（false 要變 true）。
+  //
+  // 中途沒有任何同步的重畫可以冒充它：applyMarkToggle() 那條路上只有
+  // snapBurstIfActive()（只叫 history.snap()）與 reselectAndReposition()
+  // （只 setRange + positionSelToolbar()），而文件層的 click 委派在
+  // `e.target.closest('.ed-seltb')` 就 return 了。實測把
+  // reselectAndReposition() 的 removeAllRanges／addRange 拿掉（其餘不動）：
+  // 這一列紅，而同一次跑動裡 F2 那格按主工具列的 after-press 仍然綠 —— 兩條
+  // 重畫路徑真的是分開的。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha **bold text** and plain words.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    const readB = () => ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-seltb .ed-seltb-b');
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      return { pressed: b ? b.getAttribute('aria-pressed') : null,
+               strongs: el ? el.querySelectorAll('strong').length : -1,
+               sel: window.getSelection().toString() };
+    });
+
+    // WHOLE → 按 B → 拆掉
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange(); r.selectNodeContents(el.childNodes[1]);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    const wholeBefore = await readB();
+    assert.strictEqual(wholeBefore.sel, 'bold text',
+      'F2e 前提失敗：選到的是 ' + JSON.stringify(wholeBefore.sel));
+    assert.strictEqual(wholeBefore.pressed, 'true', 'F2e 前提失敗：按之前 B 應該是 true');
+    await pressClick(ctx.page, '.ed-seltb .ed-seltb-b', 80);
+    await new Promise((r) => setTimeout(r, 500));
+    const wholeAfter = await readB();
+    assert.strictEqual(wholeAfter.strongs, 0, 'F2e：按下去必須真的把 <strong> 拆掉');
+    assert.strictEqual(wholeAfter.pressed, 'false',
+      'F2e：.ed-seltb 的 B 拆掉標記之後必須自己改口說 false');
+
+    // NONE → 按 B → 包起來
+    // 拆掉 <strong> 之後這個區塊的 text node 被切成好幾段（unwrapElement()
+    // 把子節點原地插回去，並不合併），所以要走訪找出帶著 'plain' 的那一段，
+    // 不能再假設它是 firstChild。
+    const found = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const walk = (n, out) => { if (n.nodeType === 3) out.push(n);
+        else for (let x = n.firstChild; x; x = x.nextSibling) walk(x, out); return out; };
+      const t = walk(el, []).find((n) => n.data.indexOf('plain') !== -1);
+      if (!t) return false;
+      const i = t.data.indexOf('plain');
+      const r = document.createRange(); r.setStart(t, i); r.setEnd(t, i + 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+      return true;
+    });
+    assert.ok(found, 'F2e 前提失敗：拆掉標記之後找不到含 plain 的 text node');
+    await new Promise((r) => setTimeout(r, 250));
+    const noneBefore = await readB();
+    assert.strictEqual(noneBefore.sel, 'plain',
+      'F2e 前提失敗：選到的是 ' + JSON.stringify(noneBefore.sel));
+    assert.strictEqual(noneBefore.pressed, 'false', 'F2e 前提失敗：按之前 B 應該是 false');
+    await pressClick(ctx.page, '.ed-seltb .ed-seltb-b', 80);
+    await new Promise((r) => setTimeout(r, 500));
+    const noneAfter = await readB();
+    assert.strictEqual(noneAfter.strongs, 1, 'F2e：按下去必須真的包出一個 <strong>');
+    assert.strictEqual(noneAfter.pressed, 'true',
+      'F2e：.ed-seltb 的 B 包出標記之後必須自己改口說 true');
+
+    const disk = await saveAndRead(ctx);
+    assert.notStrictEqual(disk.indexOf('**plain**'), -1,
+      'F2e：磁碟上應該有 **plain** —— got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'F2e：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the floating bar changes its mind after its own button is pressed — OK');
+
   // ── F2c: .ed-seltb 的 U 不在主工具列的 state 裡，不得被 sig 早退擋掉 ──────
   //
   // updateToolbar() 把 state 序列化成 sig 之後只在變了才寫 DOM，而那份 state
