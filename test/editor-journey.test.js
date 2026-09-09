@@ -743,6 +743,129 @@ async function main() {
     console.log('journey: the floating format bar cannot act on off-screen text — OK');
   }
 
+  // ── 捲動：選取捲回視野裡，浮動選取列就該跟著回來 ────────────────────
+  //
+  // 與上面那一列是同一個手勢的兩半，不衝突：上面釘的是「捲出去之後那列不得
+  // 留在畫面上還能改文件」，這一列釘的是「捲回來之後那列要回得來」。v3.2.1
+  // 只做了前半，而它把列從 DOM 拿掉的那一下，正好讓 onAnyScroll() 的
+  // `selToolbar.parentNode` 閘門從此永遠先 return —— 於是後半不成立。
+  {
+    const filler = Array.from({ length: 60 }, (_, i) => 'Filler ' + i + '.').join('\n\n');
+    const ctx = await newPage('# Doc\n\nAlpha target paragraph.\n\n' + filler + '\n');
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange(); r.selectNodeContents(el);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus(); document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    const up = await ctx.page.evaluate(() => !!document.querySelector('.ed-seltb'));
+    assert.strictEqual(up, true,
+      '前提失敗：選取之後浮動列本來就該在，否則下面兩段都是空的');
+    await ctx.page.evaluate(() => window.scrollTo(0, 4000));
+    await new Promise((r) => setTimeout(r, 400));
+    const gone = await ctx.page.evaluate(() => !document.querySelector('.ed-seltb'));
+    assert.ok(gone, '捲出視窗後浮動列應消失');
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await new Promise((r) => setTimeout(r, 400));
+    const back = await ctx.page.evaluate(() => {
+      const s = window.getSelection();
+      return {
+        tb: !!document.querySelector('.ed-seltb'),
+        collapsed: s.isCollapsed,
+        selRectTop: Math.round(s.getRangeAt(0).getBoundingClientRect().top),
+      };
+    });
+    assert.strictEqual(back.collapsed, false, '選取應仍在, got ' + JSON.stringify(back));
+    assert.ok(back.selRectTop > 0,
+      '前提失敗：捲回來之後選取本身要看得見，否則消失的理由是視窗外而不是這個缺陷, got '
+      + JSON.stringify(back));
+    assert.strictEqual(back.tb, true,
+      '捲回來且選取仍在時，浮動列必須回來, got ' + JSON.stringify(back));
+    assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the floating format bar comes back when you scroll back — OK');
+  }
+
+  // ── 捲動 × Task 15：捲回來的那一發不得把 Tab 壓著的那列放出來 ────────
+  //
+  // 上面那一列讓捲動有能力重新升起 .ed-seltb，而 Tab 走格造出來的整格選取
+  // 正好就是「編輯根裡一段非 collapsed 的選取」——捲動路徑上那些檢查會放行
+  // 的形狀。settled 狀態看不出差別（Tab 之後那顆非同步的 selectionchange
+  // 會再把列壓下去），所以這裡數的是 .ed-seltb 有沒有被掛上 DOM。
+  {
+    const filler = Array.from({ length: 60 }, (_, i) => 'Filler ' + i + '.').join('\n\n');
+    const ctx = await newPage(
+      '# Doc\n\n| Alpha | Beta |\n|---|---|\n| GammaGammaGamma | DeltaDelta |\n\n'
+      + filler + '\n');
+    await ctx.page.click('.ed-wys-table tbody td');
+    await new Promise((r) => setTimeout(r, 300));
+    // 手動選取：邊界落在文字節點上，所以 Task 15 的邊界比對會放行，列會升起。
+    await ctx.page.evaluate(() => {
+      const td = document.querySelector('.ed-wys-table tbody td');
+      const t = td.firstChild;
+      const r = document.createRange(); r.setStart(t, 0); r.setEnd(t, t.length);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    const upInCell = await ctx.page.evaluate(() => !!document.querySelector('.ed-seltb'));
+    assert.strictEqual(upInCell, true, '前提失敗：手動選取格內文字時浮動列該升起');
+    await ctx.page.evaluate(() => window.scrollTo(0, 4000));
+    await new Promise((r) => setTimeout(r, 400));
+    const offInCell = await ctx.page.evaluate(() => !!document.querySelector('.ed-seltb'));
+    assert.strictEqual(offInCell, false, '前提失敗：捲出視窗後浮動列該消失');
+    await ctx.page.evaluate(() => {
+      window.__t16scrolls = 0;
+      window.__t16appends = 0;
+      document.addEventListener('scroll', () => { window.__t16scrolls++; },
+        { passive: true, capture: true });
+      new MutationObserver((recs) => {
+        recs.forEach((rec) => Array.prototype.forEach.call(rec.addedNodes, (n) => {
+          if (n.nodeType === 1 && n.classList && n.classList.contains('ed-seltb')) {
+            window.__t16appends++;
+          }
+        }));
+      }).observe(document.body, { childList: true });
+    });
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 400));
+    // Tab 自己的 target.focus() 會把那一格捲回視野，所以此刻捲回原位是個
+    // no-op、一個 scroll 事件都不會送出。改成從落點抖一下再回來。
+    const y = await ctx.page.evaluate(() => Math.round(window.scrollY));
+    await ctx.page.evaluate((yy) => window.scrollTo(0, yy + 40), y);
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.evaluate((yy) => window.scrollTo(0, yy), y);
+    await new Promise((r) => setTimeout(r, 500));
+    const t15 = await ctx.page.evaluate(() => {
+      const s = window.getSelection();
+      return {
+        appends: window.__t16appends,
+        scrolls: window.__t16scrolls,
+        tb: !!document.querySelector('.ed-seltb'),
+        selText: String(s),
+        collapsed: s.isCollapsed,
+        selRectTop: Math.round(s.getRangeAt(0).getBoundingClientRect().top),
+        innerHeight: window.innerHeight,
+      };
+    });
+    assert.ok(t15.scrolls >= 2,
+      '前提失敗：抖動必須真的送出 scroll 事件, got ' + JSON.stringify(t15));
+    assert.strictEqual(t15.selText, 'DeltaDelta',
+      '前提失敗：Tab 之後選起來的必須是下一格整格, got ' + JSON.stringify(t15));
+    assert.strictEqual(t15.collapsed, false,
+      '前提失敗：Tab 選取必須非 collapsed, got ' + JSON.stringify(t15));
+    assert.ok(t15.selRectTop > 0 && t15.selRectTop < t15.innerHeight,
+      '前提失敗：Tab 選取必須在視窗內，否則壓著列的是視窗外分支, got ' + JSON.stringify(t15));
+    assert.strictEqual(t15.appends, 0,
+      'Tab 壓著的整格選取，捲動不得把 .ed-seltb 掛回 DOM, got ' + JSON.stringify(t15));
+    assert.strictEqual(t15.tb, false,
+      'Tab 壓著的整格選取，捲動之後浮動列仍不得在, got ' + JSON.stringify(t15));
+    assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: scrolling back does not release the Tab-suppressed bar — OK');
+  }
+
   // ── 粗體：選取含尾隨空格時，標記不得把空格包進去 ────────────────────
   {
     const ctx = await newPage('# Doc\n\nAlpha bold text here.\n');
