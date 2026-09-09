@@ -5941,6 +5941,13 @@ async function gutterGeometry(page, sel) {
           'hello',
           'Tab must move the active cell to the next cell in row order, WITHOUT ending the burst'
         );
+        // v3.3.0 Task 15 (F6): Tab now SELECTS the landed cell's contents
+        // (setBaseAndExtent over the cell element), the way a spreadsheet
+        // does, so typing REPLACES rather than appends. Before that change
+        // this line produced 'hello!!'; it now produces '!!'. The point of
+        // this scenario is unchanged — two edits in one row must still
+        // rewrite that row once, in minimal form — only the expected cell
+        // text moved. Driven in test/editor-journey.test.js's Tab rows.
         await page.keyboard.type('!!');
 
         // Focus leaving the TABLE entirely commits the burst — Tab above,
@@ -5964,7 +5971,7 @@ async function gutterGeometry(page, sel) {
 
         assert.ok(fileText.includes('| Name | Note |'), 'header row unchanged, got:\n' + fileText);
         assert.ok(fileText.includes('|---|---|'), 'unpadded separator row, got:\n' + fileText);
-        assert.ok(fileText.includes('| Alice! | hello!! |'),
+        assert.ok(fileText.includes('| Alice! | !! |'),
           'both cell edits land in ONE minimal-form row, got:\n' + fileText);
         assert.ok(fileText.includes('| Bob | world |'),
           'the untouched row of the EDITED table stays byte-identical, got:\n' + fileText);
