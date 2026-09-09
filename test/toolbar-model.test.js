@@ -89,6 +89,7 @@ function baseCtx(overrides) {
   for (const id of ids) {
     ok(Object.prototype.hasOwnProperty.call(state, id), 'deriveState entry exists for ' + id);
     ok(typeof state[id].active === 'boolean', id + '.active is boolean');
+    ok(typeof state[id].mixed === 'boolean', id + '.mixed is boolean');
     ok(typeof state[id].disabled === 'boolean', id + '.disabled is boolean');
   }
 }
@@ -275,6 +276,39 @@ function baseCtx(overrides) {
     'quote 不隨 hasSelection 改變');
 }
 
+// v3.3.0 (F2): ctx.marks 的四個值各自對到什麼。deriveState 不看 DOM，也不
+// 知道 'inert' 是怎麼算出來的（那是 client.js 的 selectionMarkStates()）——
+// 它只負責把每個 tag 的答案翻成該顆按鈕的 active / mixed / disabled。
+{
+  const base = { blockType: 'paragraph', indent: 0, headingDepth: 1, inList: false,
+                 listOrdered: false, hasSelection: true, mode: 'edit' };
+  const mk = (m) => tm.deriveState(Object.assign({}, base, { marks: m }));
+
+  const whole = mk({ STRONG: 'whole', EM: 'none', DEL: 'none', CODE: 'none', A: 'none' });
+  eq(whole.bold, { active: true, mixed: false, disabled: false }, 'whole -> bold pressed in');
+  eq(whole.italic, { active: false, mixed: false, disabled: false }, 'whole 只影響自己那顆');
+
+  const partial = mk({ STRONG: 'partial', EM: 'none', DEL: 'none', CODE: 'none', A: 'none' });
+  eq(partial.bold, { active: false, mixed: true, disabled: false }, 'partial -> bold mixed，而且仍可按');
+
+  const none = mk({ STRONG: 'none', EM: 'none', DEL: 'none', CODE: 'none', A: 'none' });
+  eq(none.bold, { active: false, mixed: false, disabled: false }, 'none -> bold 既不 active 也不 mixed');
+
+  const inert = mk({ STRONG: 'inert', EM: 'inert', DEL: 'inert', CODE: 'inert', A: 'none' });
+  eq(inert.bold, { active: false, mixed: false, disabled: true }, 'inert -> bold disabled');
+  eq(inert.link, { active: false, mixed: false, disabled: false },
+    'inert 是 per-tag 的：同一次 marks 裡 A 是 none，link 就不該被停用');
+
+  // marks 缺席（client 在沒有可格式化選取時交 null）不得憑空點亮任何一顆。
+  for (const m of [null, undefined]) {
+    const st = tm.deriveState(Object.assign({}, base, { marks: m }));
+    for (const id of ['bold', 'italic', 'strike', 'inline-code', 'link']) {
+      eq({ active: st[id].active, mixed: st[id].mixed }, { active: false, mixed: false },
+        'marks=' + String(m) + ' 時 ' + id + ' 不得 active/mixed');
+    }
+  }
+}
+
 // v3.2.0: toggle 欄位存在，且恰好標在 deriveState 會設 active 的那些鈕上。
 //
 // Final review item 11: 這條原本把答案硬寫成
@@ -290,8 +324,26 @@ function baseCtx(overrides) {
   const MODES = require('../lib/editor/docsource.js').MODES;
   const BLOCK_TYPES = [null, undefined, 'paragraph', 'heading', 'blockquote',
     'code', 'li', 'table', 'image', 'html', 'hr'];
+  // v3.3.0 (F2): `marks` is the dimension that makes the five inline buttons
+  // reachable at all. Without it the sweep can never observe one of them
+  // active, so the flip to toggle: true reads here as a drift between the two
+  // lists rather than as the thing it is. Enumerated as whole ctx values
+  // rather than as one more nested loop: the tags are independent of each
+  // other in deriveState (one `for` over MARK_IDS, no cross-tag term), so the
+  // full cross-product of every state on every tag would blow the run up and
+  // observe nothing a uniform sweep plus a mixed row does not already reach.
+  const TAGS = Object.keys(tm.MARK_TAG_BY_ID).map((id) => tm.MARK_TAG_BY_ID[id]);
+  const uniform = (v) => { const o = {}; for (const t of TAGS) o[t] = v; return o; };
+  const MARK_CTXS = [undefined, null, uniform('whole'), uniform('partial'),
+    uniform('none'), uniform('inert'),
+    { STRONG: 'whole', EM: 'partial', DEL: 'none', CODE: 'inert', A: 'none' }];
+  // `mixed` is as much of a lie-vector as `active`: the client writes
+  // aria-pressed="mixed" from it, on the same buttons and through the same
+  // gate. Collected into the SAME set the comparison uses, so a button that
+  // can only ever go mixed is caught too.
   const observedActive = new Set();
   let combos = 0;
+  for (const marks of MARK_CTXS) {
   for (const mode of MODES) {
     for (const blockType of BLOCK_TYPES) {
       for (const inList of [false, true]) {
@@ -301,10 +353,10 @@ function baseCtx(overrides) {
               for (const hasSelection of [false, true]) {
                 combos++;
                 const st = tm.deriveState({ blockType, indent, headingDepth,
-                  inList, listOrdered, hasSelection, mode });
+                  inList, listOrdered, hasSelection, mode, marks });
                 // 不在這裡逐鈕 ok()：那會把 checks 灌到十萬級而毫無資訊量，
                 // 型別本身上面「deriveState entry exists」那段已經釘住了。
-                for (const id of ids) if (st[id].active) observedActive.add(id);
+                for (const id of ids) if (st[id].active || st[id].mixed) observedActive.add(id);
               }
             }
           }
@@ -312,13 +364,14 @@ function baseCtx(overrides) {
       }
     }
   }
+  }
   ok(combos > 1000, 'the ctx sweep is actually broad (' + combos + ' combinations)');
   const declaredToggles = tm.BUTTONS.filter((b) => b.toggle).map((b) => b.id).sort();
   assert.deepStrictEqual(
     Array.from(observedActive).sort(),
     declaredToggles,
-    'every button deriveState can set active:true must carry toggle:true, and ' +
-    'no other button may — observed active: ' +
+    'every button deriveState can set active:true or mixed:true must carry ' +
+    'toggle:true, and no other button may — observed active/mixed: ' +
     JSON.stringify(Array.from(observedActive).sort()) +
     ', declared toggle: ' + JSON.stringify(declaredToggles));
   assert.strictEqual(tm.BUTTONS.every((b) => typeof b.toggle === 'boolean'), true,

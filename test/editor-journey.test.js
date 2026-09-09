@@ -5882,6 +5882,342 @@ async function main() {
   }
   console.log('journey: the row-edge menu stays inside the viewport — OK');
 
+  // ── F2: 行內標記按鈕必須說出選取【已經】是什麼 ───────────────────────────
+  //
+  // 修前量測（1400×900）：選取落在 STRONG／EM／純文字上，兩條工具列的
+  // rendered state 位元組完全相同；主工具列那五顆連 aria-pressed 屬性都沒有
+  // （BUTTON_DEFS 上全是 toggle: false，寫入那一支根本輪不到它們）。
+  //
+  // 四態各一列。WHOLE／NONE 是 brief 的那兩格；PARTIAL 與 INERT 是補的，
+  // 而 INERT 的關鍵一格是【全空白選取落在既有 mark 內】—— applyMarkToggle()
+  // 三支分支只有第三支被 trimRangeToText() 守住，前兩支照樣跑完，所以那一格
+  // 的 B 必須是「按得下去而且已按下」，同一個選取的 I 才是 INERT。無條件畫
+  // INERT 會停用一顆本來會動的按鈕。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha **bold text** and *ital* and plain words.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    // 這個 fixture 的段落 childNodes 是 ['Alpha ', <strong>bold text</strong>,
+    // ' and ', <em>ital</em>, ' and plain words.']；下面每個 offset 都指名其中
+    // 一個節點。每一列都先斷言選到的字串，選錯了就不會靜靜白過。
+    const readState = async (mk) => {
+      await ctx.page.evaluate(mk);
+      await new Promise((r) => setTimeout(r, 200));
+      return ctx.page.evaluate(() => {
+        const tb = (id) => {
+          const b = document.querySelector('[data-ed-tb="' + id + '"]');
+          return { pressed: b.getAttribute('aria-pressed'), disabled: b.disabled };
+        };
+        const stb = (cls) => {
+          const b = document.querySelector('.ed-seltb .' + cls);
+          if (!b) return null;
+          return { pressed: b.getAttribute('aria-pressed'),
+                   ariaDisabled: b.getAttribute('aria-disabled'),
+                   disabled: b.disabled };
+        };
+        return { bold: tb('bold'), italic: tb('italic'), link: tb('link'),
+                 seltbB: stb('ed-seltb-b'), seltbI: stb('ed-seltb-i'),
+                 sel: window.getSelection().toString() };
+      });
+    };
+    const setSel = (fn) => ctx.page.evaluate(fn);
+
+    // WHOLE：整段選取落在 <strong> 內。
+    const whole = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.selectNodeContents(el.childNodes[1]);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    // Ruling T9-1：選取不是我們以為的那一段時，下面每一格都會白過。
+    assert.strictEqual(whole.sel, 'bold text', 'F2/WHOLE 前提失敗：選到的是 ' + JSON.stringify(whole.sel));
+    assert.strictEqual(whole.bold.pressed, 'true', 'F2/WHOLE：整段落在 STRONG 內時 B 應 aria-pressed=true');
+    assert.strictEqual(whole.bold.disabled, false, 'F2/WHOLE：B 必須按得下去');
+    assert.strictEqual(whole.italic.pressed, 'false', 'F2/WHOLE：同一段選取的 I 應 aria-pressed=false');
+    assert.strictEqual(whole.italic.disabled, false, 'F2/WHOLE：I 必須按得下去');
+    assert.ok(whole.seltbB, 'F2/WHOLE 前提失敗：.ed-seltb 沒有升起來');
+    assert.strictEqual(whole.seltbB.pressed, 'true', 'F2/WHOLE：.ed-seltb 的 B 也要說 true');
+    assert.strictEqual(whole.seltbB.ariaDisabled, null, 'F2/WHOLE：.ed-seltb 的 B 不得帶 aria-disabled');
+    assert.strictEqual(whole.seltbI.pressed, 'false', 'F2/WHOLE：.ed-seltb 的 I 應 false');
+
+    // PARTIAL：選取跨過 <strong> 的左邊界 —— 一半在標記外、一半在裡面。
+    const partial = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[0], 2);
+      r.setEnd(el.childNodes[1].firstChild, 4);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(partial.sel, 'pha bold', 'F2/PARTIAL 前提失敗：選到的是 ' + JSON.stringify(partial.sel));
+    assert.strictEqual(partial.bold.pressed, 'mixed',
+      'F2/PARTIAL：只覆蓋一部分 STRONG 時 B 應 aria-pressed=mixed');
+    assert.strictEqual(partial.bold.disabled, false, 'F2/PARTIAL：B 必須按得下去');
+    assert.strictEqual(partial.italic.pressed, 'false', 'F2/PARTIAL：同一段選取的 I 應 false');
+    assert.strictEqual(partial.seltbB.pressed, 'mixed', 'F2/PARTIAL：.ed-seltb 的 B 也要說 mixed');
+    assert.strictEqual(partial.seltbB.ariaDisabled, null, 'F2/PARTIAL：.ed-seltb 的 B 不得帶 aria-disabled');
+
+    // NONE：純文字選取，兩端都沒有空白 —— 按下去會【包】出一個新標記。
+    const none = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[4], 5);
+      r.setEnd(el.childNodes[4], 10);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(none.sel, 'plain', 'F2/NONE 前提失敗：選到的是 ' + JSON.stringify(none.sel));
+    assert.strictEqual(none.bold.pressed, 'false', 'F2/NONE：純文字選取時 B 應 aria-pressed=false');
+    assert.strictEqual(none.bold.disabled, false, 'F2/NONE：B 必須按得下去');
+    assert.strictEqual(none.italic.pressed, 'false', 'F2/NONE：I 應 false');
+    assert.strictEqual(none.italic.disabled, false, 'F2/NONE：I 必須按得下去');
+    assert.strictEqual(none.seltbB.pressed, 'false', 'F2/NONE：.ed-seltb 的 B 應 false');
+    assert.strictEqual(none.seltbB.ariaDisabled, null, 'F2/NONE：.ed-seltb 的 B 不得帶 aria-disabled');
+
+    // INERT（純文字）：全空白選取，applyMarkToggle() 走第三支而 trimRangeToText()
+    // 拒絕它 —— 按下去文件一個位元組都不會變。
+    const inertPlain = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[4], 4);
+      r.setEnd(el.childNodes[4], 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(inertPlain.sel, ' ', 'F2/INERT 前提失敗：選到的是 ' + JSON.stringify(inertPlain.sel));
+    assert.strictEqual(inertPlain.bold.disabled, true, 'F2/INERT：全空白選取時 B 應停用');
+    assert.strictEqual(inertPlain.italic.disabled, true, 'F2/INERT：全空白選取時 I 應停用');
+    assert.strictEqual(inertPlain.bold.pressed, 'false', 'F2/INERT：停用的 B 仍應說 false，不得漏寫屬性');
+    // 🔗 不走 applyMarkToggle()：applyLinkToggleBody() 的第三支直接
+    // window.prompt() + extractRangeInto()，沿路沒有任何 trim 守衛，全空白選取
+    // 照樣開對話框並包出 <a> —— 停用它才是把一顆會動的按鈕畫死。
+    assert.strictEqual(inertPlain.link.disabled, false,
+      'F2/INERT：🔗 沒有 trim 守衛，全空白選取時不得停用');
+    // ⚠ .ed-seltb 用 aria-disabled，不得用 disabled 屬性：B／I／S／U／<>／🔗
+    // 各自靠自己的 mousedown preventDefault() 保住選取，而 disabled button
+    // 根本不派發 mousedown。實測（真滑鼠 move/down/80ms/up，document 上掛
+    // capture 計數器）——出貨版：
+    //   {"active":"P.ed-wys-armed","sel":" ","seltb":true,"downs":1,"clicks":1}
+    // 同一發但那顆帶著 disabled：
+    //   {"active":"BODY.","sel":" ","seltb":false,"downs":0,"clicks":0}
+    // 焦點掉到 BODY、浮動列不見了，而且整條傳遞路徑收不到任何 mousedown。
+    assert.strictEqual(inertPlain.seltbB.ariaDisabled, 'true', 'F2/INERT：.ed-seltb 的 B 應 aria-disabled=true');
+    assert.strictEqual(inertPlain.seltbB.disabled, false, 'F2/INERT：.ed-seltb 的 B 不得使用 disabled 屬性');
+    assert.strictEqual(inertPlain.seltbI.ariaDisabled, 'true', 'F2/INERT：.ed-seltb 的 I 應 aria-disabled=true');
+    assert.strictEqual(inertPlain.seltbI.disabled, false, 'F2/INERT：.ed-seltb 的 I 不得使用 disabled 屬性');
+
+    // INERT 的判別式必須是 per-tag 的：同一個【全空白】選取落在 <strong> 裡面，
+    // B 走的是第一支（unwrap，會成功），I 走的才是被守住的第三支。
+    const inertInMark = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[1].firstChild, 4);
+      r.setEnd(el.childNodes[1].firstChild, 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(inertInMark.sel, ' ', 'F2/INERT-in-mark 前提失敗：選到的是 ' + JSON.stringify(inertInMark.sel));
+    assert.strictEqual(inertInMark.bold.disabled, false,
+      'F2/INERT-in-mark：全空白但落在 STRONG 內 —— B 走 unwrap 那一支，不得停用');
+    assert.strictEqual(inertInMark.bold.pressed, 'true',
+      'F2/INERT-in-mark：B 應 aria-pressed=true');
+    assert.strictEqual(inertInMark.italic.disabled, true,
+      'F2/INERT-in-mark：同一個選取的 I 走的是被守住的那一支，應停用');
+    assert.strictEqual(inertInMark.seltbB.ariaDisabled, null,
+      'F2/INERT-in-mark：.ed-seltb 的 B 不得帶 aria-disabled');
+    assert.strictEqual(inertInMark.seltbI.ariaDisabled, 'true',
+      'F2/INERT-in-mark：.ed-seltb 的 I 應 aria-disabled=true');
+
+    // aria-disabled 要收得回去：從 INERT 回到 NONE 之後屬性必須不見，不是只
+    // 在進入 INERT 時寫上去。
+    const backToNone = await readState(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[4], 5);
+      r.setEnd(el.childNodes[4], 10);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(backToNone.sel, 'plain', 'F2/back-to-NONE 前提失敗：選到的是 ' + JSON.stringify(backToNone.sel));
+    assert.strictEqual(backToNone.seltbI.ariaDisabled, null,
+      'F2/back-to-NONE：離開 INERT 之後 .ed-seltb 的 I 必須把 aria-disabled 拿掉');
+    assert.strictEqual(backToNone.italic.disabled, false,
+      'F2/back-to-NONE：離開 INERT 之後主工具列的 I 必須重新啟用');
+
+    // 按下去之後那顆按鈕要改口：真人按壓（pressClick）取消 WHOLE 態的粗體，
+    // 按鈕必須從 true 變回 false。
+    await setSel(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.selectNodeContents(el.childNodes[1]);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const afterPress = await ctx.page.evaluate(() => {
+      const b = document.querySelector('[data-ed-tb="bold"]');
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      return { pressed: b.getAttribute('aria-pressed'),
+               strongs: el ? el.querySelectorAll('strong').length : -1 };
+    });
+    assert.strictEqual(afterPress.strongs, 0, 'F2/after-press 前提失敗：粗體沒有被取消掉');
+    assert.strictEqual(afterPress.pressed, 'false',
+      'F2/after-press：取消粗體之後 B 必須改口說 false');
+
+    assert.strictEqual(ctx.errs.length, 0, 'F2：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the inline mark buttons say what the selection already is — OK');
+
+  // ── F2d: 全空白選取落在 <strong> 內時，按 B 真的會 unwrap ────────────────
+  //
+  // 這是 F2 那格「不得無條件畫 INERT」背後的行為本身：INERT 的判別式只在
+  // applyMarkToggle() 會走第三支時成立，而這個選取走的是第一支。不量這一列
+  // 的話，「前兩支照樣跑完」就只是一句沒有量測的機制敘述。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha **bold text** and plain words.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    const before = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[1].firstChild, 4);   // <strong>bold text</strong> 裡的那個空格
+      r.setEnd(el.childNodes[1].firstChild, 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+      const b = document.querySelector('[data-ed-tb="bold"]');
+      return { sel: s.toString(), strongs: el.querySelectorAll('strong').length,
+               disabled: b.disabled };
+    });
+    assert.strictEqual(before.sel, ' ', 'F2d 前提失敗：選到的是 ' + JSON.stringify(before.sel));
+    assert.strictEqual(before.strongs, 1, 'F2d 前提失敗：fixture 應該只有一個 <strong>');
+    assert.strictEqual(before.disabled, false, 'F2d 前提失敗：B 這時不該是停用的');
+    await new Promise((r) => setTimeout(r, 200));
+    await pressClick(ctx.page, '[data-ed-tb="bold"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      return { strongs: el ? el.querySelectorAll('strong').length : -1,
+               text: el ? el.textContent : null };
+    });
+    assert.strictEqual(after.strongs, 0,
+      'F2d：全空白選取落在 <strong> 內時按 B 必須把它拆掉（走的是第一支，不是被守住的第三支）');
+    assert.strictEqual(after.text, 'Alpha bold text and plain words.',
+      'F2d：拆掉標記不得動到文字，got ' + JSON.stringify(after.text));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk.indexOf('**'), -1,
+      'F2d：磁碟上不該再有 ** —— got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'F2d：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: an all-whitespace selection inside a mark still unwraps it — OK');
+
+  // ── F2c: .ed-seltb 的 U 不在主工具列的 state 裡，不得被 sig 早退擋掉 ──────
+  //
+  // updateToolbar() 把 state 序列化成 sig 之後只在變了才寫 DOM，而那份 state
+  // 只有主工具列那些按鈕。.ed-seltb 多一顆 U —— 選取在純文字與 <u> 之間移動
+  // 時，主工具列那五顆的答案全都是 none，sig 逐位元組相同、早退成立，U 卻該
+  // 從 false 變成 true。所以 paintSelToolbarMarks() 必須在早退之前跑。
+  {
+    const ctx = await newPage('# Doc\n\nplain <u>under</u> text here.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    const readU = async (mk) => {
+      await ctx.page.evaluate(mk);
+      await new Promise((r) => setTimeout(r, 200));
+      return ctx.page.evaluate(() => {
+        const u = document.querySelector('.ed-seltb .ed-seltb-u');
+        const bar = Array.from(document.querySelectorAll('[data-ed-tb]')).map((b) => [
+          b.getAttribute('data-ed-tb'), b.getAttribute('aria-pressed'),
+          b.disabled, b.textContent, b.title]);
+        return { u: u ? u.getAttribute('aria-pressed') : null, bar: bar,
+                 sel: window.getSelection().toString() };
+      });
+    };
+    const outside = await readU(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[2], 1); r.setEnd(el.childNodes[2], 5);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(outside.sel, 'text', 'F2c 前提失敗：選到的是 ' + JSON.stringify(outside.sel));
+    assert.strictEqual(outside.u, 'false', 'F2c：純文字上 U 應 false');
+    const inside = await readU(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.selectNodeContents(el.childNodes[1]);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    assert.strictEqual(inside.sel, 'under', 'F2c 前提失敗：選到的是 ' + JSON.stringify(inside.sel));
+    // 前提：主工具列在這兩個選取之間【整條都沒有變】—— 只要有一顆變了，
+    // updateToolbar() 的 sig 就不同、早退不成立，這一列就不是在量它想量的
+    // 東西。所以比的是每顆按鈕的 aria-pressed / disabled / 文字 / title。
+    assert.deepStrictEqual(inside.bar, outside.bar,
+      'F2c 前提失敗：兩個選取之間主工具列的狀態變了，sig 早退量不到');
+    assert.ok(inside.bar.length > 0, 'F2c 前提失敗：主工具列一顆按鈕都沒讀到');
+    assert.strictEqual(inside.u, 'true',
+      'F2c：選取整段落在 <u> 內時 .ed-seltb 的 U 必須說 true');
+    assert.strictEqual(ctx.errs.length, 0, 'F2c：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the floating bar repaints a button the fixed bar has no opinion about — OK');
+
+  // ── F2b: 量 mark 身分不得動到使用者的選取（trimRangeToText 的 cloneRange）─
+  //
+  // trimRangeToText() 回 true 時會 setStart/setEnd 改掉【傳進去的】Range，而
+  // selectionMarkStates() 每次 selectionchange 都會叫它一次。傳 live range 的
+  // 話，使用者每按一次 Shift+→ 就會被偷偷把選取的前後空白吃掉，下一按就從錯
+  // 的地方接續。這裡用真鍵盤把選取一格一格拉過 <strong>，兩種斷言：每一步
+  // 派發 selectionchange 前後的邊界必須逐位元組相同（whole/overlapping/trim
+  // 三支都不得寫入），而且選到的字串必須一次長一個字。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha **bold text** and *ital* and plain words.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const r = document.createRange();
+      r.setStart(el.childNodes[0], 5);   // 'Alpha' 之後、那個空格之前
+      r.collapse(true);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      el.focus();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const want = [' ', ' b', ' bo', ' bol', ' bold', ' bold ', ' bold t'];
+    await ctx.page.keyboard.down('Shift');
+    for (let i = 0; i < want.length; i++) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 90));
+      const step = await ctx.page.evaluate(() => {
+        const snap = () => {
+          const s = window.getSelection();
+          const r = s.getRangeAt(0);
+          return { str: s.toString(), so: r.startOffset, eo: r.endOffset,
+                   sn: r.startContainer.nodeName, en: r.endContainer.nodeName };
+        };
+        const before = snap();
+        document.dispatchEvent(new Event('selectionchange'));
+        return { before: before, after: snap() };
+      });
+      assert.deepStrictEqual(step.after, step.before,
+        'F2b：第 ' + (i + 1) + ' 步的 selectionchange 改掉了使用者的選取 —— ' +
+        JSON.stringify(step));
+      assert.strictEqual(step.after.str, want[i],
+        'F2b：第 ' + (i + 1) + ' 步應選到 ' + JSON.stringify(want[i]) +
+        '，實際 ' + JSON.stringify(step.after.str));
+    }
+    await ctx.page.keyboard.up('Shift');
+    assert.strictEqual(ctx.errs.length, 0, 'F2b：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: measuring the marks leaves the selection alone — OK');
+
   await browser.close();
 }
 
