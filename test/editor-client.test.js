@@ -208,6 +208,25 @@ assert.ok(!/attachGutters/.test(src), 'client.js must not reference the removed 
 // selected element, 'showBarFor'/'dismissBar'/'updateBarButtons' were its
 // whole lifecycle, 'ed-bar' its own root class), so resurrecting the bar
 // without tripping this list is not possible.
+//
+// v3.3.0: the converse is NOT true, and it costs a whole suite run when it
+// happens. These are bare substrings, and 'ed-bar' sits inside the ordinary
+// English word 'fix' + 'ed-bar' — so a COMMENT in client.js that says
+// something about the fixed toolbar trips this assertion with nothing
+// resurrected at all. That is exactly how it was tripped: a comment added
+// beside updateToolbar()'s signature diff read "no fixed-bar button speaks
+// for", and `npm test` came back with 'client.js must NOT reference the
+// retired ed-bar'. It was reworded, not excused.
+//
+// Do NOT loosen these into word-boundary patterns to make that go away. The
+// guard's job is to be impossible to slip past, and a \b anchor is exactly
+// the kind of loophole a resurrection would come back through
+// (`class="edBar"`, `ed-bar-2`, a template that concatenates the name). The
+// cost of the collision is one reworded sentence; the cost of a porous guard
+// is the retirement itself. If you are here because this assertion just fired,
+// read the offending line first — a prose word is the likelier cause than a
+// resurrection, and 'ed-bar' / 'dismissBar' / 'showBarFor' /
+// 'updateBarButtons' are all substrings that ordinary prose can produce.
 for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
                       'selectedBlockEl', 'dismissBar', 'showBarFor', 'updateBarButtons']) {
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
