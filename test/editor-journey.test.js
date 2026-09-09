@@ -6788,6 +6788,241 @@ async function main() {
     console.log('journey: the ＋ bubble survives you reaching for it — OK');
   }
 
+  // ── F5/F6: Tab 走完表格就離開它，落點是「整格被選起來」 ──────────────────
+  //
+  // F6 = 格內 Tab 的落點。舊行為把游標塞在目標格【結尾】，所以「Tab 過去直接
+  // 打字」是附加而不是取代。
+  // F5 = 最後一格的 Tab（與第一格的 Shift+Tab）是死鍵：索引被 clamp 回原格，
+  // handler 照樣 preventDefault()，連瀏覽器自己的 Tab 巡覽都被吃掉。
+  {
+    const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.click('.ed-wys-table thead th');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.type('ZZ');
+    await new Promise((r) => setTimeout(r, 250));
+    const cell = await ctx.page.evaluate(() => document.activeElement.textContent.trim());
+    assert.strictEqual(cell, 'ZZ',
+      'F6：Tab 的落點必須是整格被選起來，打字取代而非附加；got ' + JSON.stringify(cell));
+    // A → B → c1 → c2：再兩次 Tab 停在最後一格
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 200));
+    const atLast = await ctx.page.evaluate(() => document.activeElement.textContent.trim());
+    assert.strictEqual(atLast, 'c2',
+      'F5 前提失敗：這一列要量的是【最後一格】的 Tab，可是走到的不是它，got ' + JSON.stringify(atLast));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 900));
+    const out = await ctx.page.evaluate(() => {
+      const a = document.activeElement;
+      return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
+    });
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-armed') !== -1,
+      'F5：最後一格的 Tab 必須離開表格，落在下一個有可聚焦面的 block，got ' + JSON.stringify(out));
+    assert.strictEqual(out.txt, 'After paragraph.',
+      'F5：落點必須是那個段落本身，got ' + JSON.stringify(out));
+    // 跨 block 的落點是【內容起點的游標】，不是整段選取 —— 打字插在最前面。
+    await ctx.page.keyboard.type('QQ');
+    await new Promise((r) => setTimeout(r, 300));
+    const typed = await ctx.page.evaluate(() => document.activeElement.textContent);
+    assert.strictEqual(typed, 'QQAfter paragraph.',
+      'F5：跨 block 的落點必須是內容起點的游標，got ' + JSON.stringify(typed));
+    assert.strictEqual(ctx.errs.length, 0, 'F5/F6：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Tab walks the cells, selects each one, then leaves the table — OK');
+  }
+
+  // 頭尾對稱：第一格的 Shift+Tab 要往回跨出去。這一列的表格是【乾淨的】，所以
+  // 走的是「沒有提交、目標元素從頭到尾沒被換掉」那一支。
+  {
+    const ctx = await newPage('Before paragraph.\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.click('.ed-wys-table thead th');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 700));
+    const out = await ctx.page.evaluate(() => {
+      const a = document.activeElement;
+      return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
+    });
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-armed') !== -1,
+      'F5：第一格的 Shift+Tab 必須離開表格，got ' + JSON.stringify(out));
+    assert.strictEqual(out.txt, 'Before paragraph.',
+      'F5：Shift+Tab 的落點必須是【前一個】有可聚焦面的 block，got ' + JSON.stringify(out));
+    assert.strictEqual(ctx.errs.length, 0, 'F5/反向：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Shift+Tab in the first cell leaves the table backwards — OK');
+  }
+
+  // 降級 block（圍欄、引言、分隔線）沒有可聚焦面，Tab 要跳過它們；下一個
+  // 表格的落點是它的【第一格】。
+  {
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n\n' +
+      '> a quote\n\n---\n\n| P | Q |\n|---|---|\n| p1 | q1 |\n');
+    await ctx.page.evaluate(() => {
+      const t = document.querySelectorAll('.ed-wys-table')[0];
+      const cells = t.querySelectorAll('th, td');
+      cells[cells.length - 1].focus();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 700));
+    const out = await ctx.page.evaluate(() => {
+      const a = document.activeElement;
+      const t2 = document.querySelectorAll('.ed-wys-table')[1];
+      return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null,
+        isSecondTablesFirstCell: !!t2 && t2.querySelectorAll('th, td')[0] === a };
+    });
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1,
+      'F5：Tab 必須跳過降級 block，落在下一個表格的儲存格，got ' + JSON.stringify(out));
+    assert.ok(out.isSecondTablesFirstCell,
+      'F5：跨進表格的落點必須是它的第一格，got ' + JSON.stringify(out));
+    assert.strictEqual(ctx.errs.length, 0, 'F5/跳過降級：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Tab skips degraded blocks and lands in the next table — OK');
+  }
+
+  // T15-7：後面沒有任何有可聚焦面的 block 時原地不動，而且【繼續】
+  // preventDefault() —— 交還給瀏覽器的 Tab 會走進每個區塊後面的 gutter 按鈕。
+  //
+  // 這一列是【存活保證】，不是缺陷列：修之前它就是綠的，因為被 clamp 回原格的
+  // 死鍵在螢幕上跟「找不到落點所以不動」長得一模一樣。它會紅的對象是一個把這
+  // 個按鍵交還給瀏覽器的修法 —— 已用「Tab 分支不呼叫 preventDefault()」單獨
+  // ablate 過，那一改就讓它紅。
+  {
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n');
+    await ctx.page.evaluate(() => {
+      window.__tabPrevented = null;
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab') window.__tabPrevented = e.defaultPrevented;
+      });
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      cells[cells.length - 1].focus();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 600));
+    const out = await ctx.page.evaluate(() => ({
+      prevented: window.__tabPrevented,
+      cls: document.activeElement ? document.activeElement.className : null,
+      txt: document.activeElement ? document.activeElement.textContent.trim() : null,
+    }));
+    assert.strictEqual(out.prevented, true,
+      'T15-7：找不到落點時 Tab 仍必須被吃掉，got ' + JSON.stringify(out));
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1 && out.txt === 'c2',
+      'T15-7：找不到落點時必須原地不動，got ' + JSON.stringify(out));
+    assert.strictEqual(ctx.errs.length, 0, 'T15-7：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Tab with nowhere to go stays put and stays swallowed — OK');
+  }
+
+  // T15-5：Tab 造出來的整格選取不得讓浮動的 .ed-seltb 每按一次就彈一次；
+  // 使用者自己重新選一次同樣的範圍時它必須照樣出現。
+  {
+    const ctx = await newPage(
+      '# Doc\n\n| Alpha | Beta |\n|---|---|\n| c1 | GammaGammaGamma |\n\nAfter paragraph.\n');
+    await ctx.page.click('.ed-wys-table thead th');
+    await new Promise((r) => setTimeout(r, 250));
+    for (let i = 0; i < 3; i++) {   // Alpha → Beta → c1 → GammaGammaGamma
+      await ctx.page.keyboard.press('Tab');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+    const sup = await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-toolbar-btn[data-ed-tb="bold"]');
+      return { seltb: !!document.querySelector('.ed-seltb'),
+        selText: String(window.getSelection()), boldEnabled: !!b && !b.disabled };
+    });
+    assert.strictEqual(sup.selText, 'GammaGammaGamma',
+      'T15-5 前提失敗：Tab 之後選起來的必須是整格，這一列什麼都沒量到，got ' + JSON.stringify(sup));
+    assert.strictEqual(sup.seltb, false,
+      'T15-5：Tab 造出來的整格選取不得讓 .ed-seltb 彈出來，got ' + JSON.stringify(sup));
+    assert.strictEqual(sup.boldEnabled, true,
+      'T15-5：.ed-seltb 被抑制時，主工具列的 B 仍必須是可按的，got ' + JSON.stringify(sup));
+
+    // T15-6 的殘留，量到的成因是【瀏覽器自己】而不是這個抑制：在已經有選取的
+    // 地方按下去再拖，Chromium 起的是「把選取的文字拖走」，dragstart 就位、全程
+    // 一次 selectionchange 也沒有 —— 抑制在不在都一樣。
+    const geom = await ctx.page.evaluate(() => {
+      window.__dnd = [];
+      ['dragstart', 'dragend'].forEach((t) =>
+        document.addEventListener(t, () => window.__dnd.push(t)));
+      const tn = document.querySelectorAll('.ed-wys-cell')[3].firstChild;
+      const r = document.createRange();
+      r.selectNodeContents(tn);
+      const rect = r.getBoundingClientRect();
+      return { l: rect.left, r: rect.right, y: rect.top + rect.height / 2 };
+    });
+    await ctx.page.mouse.move(geom.l + 1, geom.y);
+    await ctx.page.mouse.down();
+    await ctx.page.mouse.move((geom.l + geom.r) / 2, geom.y);
+    await ctx.page.mouse.move(geom.r - 1, geom.y);
+    await ctx.page.mouse.up();
+    await new Promise((r) => setTimeout(r, 400));
+    const inside = await ctx.page.evaluate(() => ({
+      dnd: window.__dnd.slice(), seltb: !!document.querySelector('.ed-seltb') }));
+    assert.ok(inside.dnd.indexOf('dragstart') !== -1,
+      'T15-6 前提失敗：從選取【內部】按下去起的應該是瀏覽器的文字拖曳，' +
+      '這一列的殘留說明就沒有量到，got ' + JSON.stringify(inside));
+
+    // 使用者先點一下（選取塌成游標）再拖 —— 抑制必須解除。
+    await ctx.page.mouse.click((geom.l + geom.r) / 2, geom.y);
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.mouse.move(geom.l + 1, geom.y);
+    await ctx.page.mouse.down();
+    await ctx.page.mouse.move((geom.l + geom.r) / 2, geom.y);
+    await ctx.page.mouse.move(geom.r - 1, geom.y);
+    await ctx.page.mouse.up();
+    await new Promise((r) => setTimeout(r, 400));
+    const rel = await ctx.page.evaluate(() => ({
+      seltb: !!document.querySelector('.ed-seltb'), selText: String(window.getSelection()) }));
+    assert.strictEqual(rel.selText, 'GammaGammaGamma',
+      'T15-6 前提失敗：先點一下再拖沒有選到整格，got ' + JSON.stringify(rel));
+    assert.strictEqual(rel.seltb, true,
+      'T15-6：使用者自己重新選取整格內容時 .ed-seltb 必須出現，got ' + JSON.stringify(rel));
+    assert.strictEqual(ctx.errs.length, 0, 'T15-5：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the Tab selection keeps .ed-seltb down, a hand-made one raises it — OK');
+  }
+
+  // 同一個解除條件，改走鍵盤（沒有滑鼠、沒有瀏覽器的文字拖曳可以混淆）：
+  // ArrowLeft 把選取塌成游標，Shift+End 再選回一模一樣的整格內容。
+  {
+    const ctx = await newPage(
+      '# Doc\n\n| Alpha | Beta |\n|---|---|\n| c1 | GammaGammaGamma |\n\nAfter paragraph.\n');
+    await ctx.page.click('.ed-wys-table thead th');
+    await new Promise((r) => setTimeout(r, 250));
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.press('Tab');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+    const sup = await ctx.page.evaluate(() => ({
+      seltb: !!document.querySelector('.ed-seltb'), selText: String(window.getSelection()) }));
+    assert.strictEqual(sup.selText, 'GammaGammaGamma',
+      'T15-5/鍵盤 前提失敗：Tab 之後選起來的必須是整格，got ' + JSON.stringify(sup));
+    assert.strictEqual(sup.seltb, false,
+      'T15-5/鍵盤：Tab 造出來的整格選取不得讓 .ed-seltb 彈出來，got ' + JSON.stringify(sup));
+    await ctx.page.keyboard.press('ArrowLeft');
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 400));
+    const rel = await ctx.page.evaluate(() => ({
+      seltb: !!document.querySelector('.ed-seltb'), selText: String(window.getSelection()) }));
+    assert.strictEqual(rel.selText, 'GammaGammaGamma',
+      'T15-6/鍵盤 前提失敗：Shift+End 沒有選回整格，got ' + JSON.stringify(rel));
+    assert.strictEqual(rel.seltb, true,
+      'T15-6/鍵盤：使用者自己選回整格內容時 .ed-seltb 必須出現，got ' + JSON.stringify(rel));
+    assert.strictEqual(ctx.errs.length, 0, 'T15-5/鍵盤：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: collapsing then reselecting by keyboard raises .ed-seltb again — OK');
+  }
+
   await browser.close();
 }
 
