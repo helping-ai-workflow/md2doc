@@ -2446,6 +2446,68 @@ async function main() {
     console.log('journey: V3 .lightbox survives a document scroll — OK');
   }
 
+  // ── lock：lightbox 開著時真實手勢不得捲動底下的文件 ────────────────
+  // v3.2.1 removed the only assertion covering `body[data-lightbox-open] {
+  // overflow: hidden; }` (commit 70ba7a6) because it checked
+  // getComputedStyle(document.body).overflow === 'hidden' — the rule
+  // existing, not any scroll actually being blocked — and the row above
+  // already established that documentElement, not body, is the element a
+  // real gesture scrolls. Now that lib/md2doc.js also locks documentElement
+  // itself (the `html[data-lightbox-open]` rule next to the `overflow-x:
+  // clip` comment), this row re-pins the coverage as a fact: after a real
+  // gesture, window.scrollY does not move.
+  //
+  // window.scrollBy() cannot stand in for the gesture — it moves the page
+  // under overflow:hidden by definition (that is why the .lightbox row
+  // above uses it to test the overlay survives a scroll, not to test a
+  // lock). PageDown and End go through page.keyboard.press(), which drives
+  // the real input pipeline.
+  {
+    const ctx = await newPage('# Doc\n\n![x](data:image/png;base64,'
+      + 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)\n\n'
+      + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+
+    // Precondition (Ruling T12-1): the same PageDown must move the page
+    // BEFORE the lightbox opens. Without this, a fixture that stopped being
+    // taller than the viewport would leave scrollY at 0 before and after,
+    // and the locked-state assertions below would pass for the wrong reason.
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const preOpenY = await ctx.page.evaluate(() => window.scrollY);
+    assert.ok(preOpenY > 0,
+      'V3 前提失敗：lightbox 關著時 PageDown 沒有真的捲動文件（scrollY=' + preOpenY +
+      '），下面「鎖住」的斷言測不到東西');
+
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await ctx.page.click('.content img');
+    await new Promise((r) => setTimeout(r, 400));
+    const open = await ctx.page.evaluate(() => {
+      const box = document.querySelector('.lightbox');
+      return !!box && !box.hidden;
+    });
+    assert.ok(open, 'lightbox 應已開啟');
+
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterPageDown = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterPageDown, 0,
+      'lightbox 開著時 PageDown 不得捲動底下的文件，got ' + afterPageDown);
+
+    // End jumps straight to the bottom instead of advancing by a viewport
+    // at a time — a different code path from PageDown. Pre-fix on this
+    // fixture it leaked further than PageDown's 700px: measured 1048px.
+    await ctx.page.keyboard.press('End');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterEnd = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterEnd, 0,
+      'lightbox 開著時 End 不得捲動底下的文件，got ' + afterEnd);
+
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the lightbox actually locks the page behind it — OK');
+  }
+
   // ── live：.ed-conflict ──────────────────────────────────────────────
   // 存檔／render 失敗的橫幅是 z-index 999（全檔最高），而且是使用者唯一能
   // 知道「剛剛那次編輯沒有套用」的東西。幾何是 top/left/right 定死，捲動不
