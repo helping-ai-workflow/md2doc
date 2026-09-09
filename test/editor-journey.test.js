@@ -225,19 +225,26 @@ async function visibleBannerText(page) {
 //
 // Why it exists: `.ed-tb-insert` (the ＋ bubbles) is appended to
 // `document.body`, so `updateTableInsertBubbles()`'s
-// `target.closest('.ed-block[data-block-type="table"]')` is null for any
-// mousemove whose target is the bubble ITSELF, and that call hides it.
-// MEASURED on this repo's puppeteer, hovering the row boundary to raise the
-// bubble and then pressing it:
+// `target.closest('.ed-block[data-block-type="table"]')` used to be null for
+// any mousemove whose target was the bubble ITSELF, and that call hid it.
+// MEASURED on this repo's puppeteer back then, hovering the row boundary to
+// raise the bubble and then pressing it:
 //
 //   with pressClick's own mouse.move()   bubble.hidden = true,  events []
 //   pressing without moving              bubble.hidden = false, events
 //                                        ["mousedown","click"], row inserted
 //
-// So the ONLY way to press this button with a real mouse is to arrive at it
-// with the move that raises it and then not move again. The bubble's
-// hide-on-hover is Task 14 / F7, already diagnosed with the same mechanism;
-// this helper only has to be able to express the gesture that works.
+// So at that time the way to press this button with a real mouse was to
+// arrive at it with the move that raises it and then not move again, and
+// this option is what let the 地基 B / C1 row express that gesture.
+//
+// v3.3.0 F7 fixed the visibility test itself (the fallback to the table the
+// hover already resolved, in updateTableInsertBubbles()), so C1 now presses
+// the bubble through pressClick's own real move — see its own comment — and
+// the F7 rows near the end of this file pin the hover directly. What is left
+// here is a general "press at exactly this point, without moving first"
+// facility with its own two assertions; grep says nothing in this file
+// passes `pressAtPointer` any more.
 async function pressClick(page, selector, holdMs, opts) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
@@ -3238,11 +3245,13 @@ async function main() {
     await ctx.page.keyboard.type('TYPED');
     await new Promise((r) => setTimeout(r, 500));   // 超過 400ms 的 noteTyping 門檻
     // ＋ 列泡泡：只在距表格【左緣】TB_EDGE_PX(10) 內、且對齊某條列邊界時升起。
+    // 起點壓在那條帶子的最外圈（左緣往左 TB_EDGE_PX）—— 泡泡叫得起來，而
+    // 指標還沒踩到泡泡本身，接下來才有「伸手過去」這段路可走。
     const bp = await ctx.page.evaluate((t) => {
       const tb = document.querySelector(t + ' table');
       const tr = tb.getBoundingClientRect();
       const rr = tb.tBodies[0].rows[0].getBoundingClientRect();
-      return { x: tr.left, y: rr.bottom };
+      return { x: tr.left - 10, y: rr.bottom };
     }, TSEL);
     await ctx.page.mouse.move(bp.x - 60, bp.y);
     await ctx.page.mouse.move(bp.x, bp.y);
@@ -3259,11 +3268,13 @@ async function main() {
       'C1 前提失敗：＋ 列泡泡沒升起來，got ' + JSON.stringify(bub));
     assert.strictEqual(bub.after, '0',
       'C1 前提失敗：＋ 列泡泡瞄的不是第一條 body 列的下緣，got ' + JSON.stringify(bub));
-    // 這一發【不能】讓 pressClick 自己 move —— 見 pressClick() 的 opts 註解：
-    // 游標一移到泡泡上，泡泡就自己隱藏，按壓會落到表格上。指標已經在
-    // (bp.x, bp.y)（就是上面那一發把泡泡升起來的移動），pressClick 會斷言
-    // 那個點確實落在泡泡的可見矩形內，然後原地按下去。
-    await pressClick(ctx.page, '.ed-tb-insert-row', 80, { pressAtPointer: bp });
+    // v3.3.0 F7 之前，這一發不能讓 pressClick 自己 move：指標一移到泡泡上，
+    // 泡泡就把自己收掉，按壓就落不到它身上，所以當時走的是「原地按下去」
+    // 的 pressAtPointer 路徑。F7 把可見性判斷修好之後，這裡走的就是使用者
+    // 真的做的那件事 —— 讓 pressClick 自己把指標移上泡泡再按。把 F7 那個
+    // 修正拿掉重跑，這一列會停在下面「插列沒發生（按到空氣）」那條前提上，
+    // 所以它量的確實是那一段真實的移動。
+    await pressClick(ctx.page, '.ed-tb-insert-row', 80);
     await new Promise((r) => setTimeout(r, 400));
     const ins = await ctx.page.evaluate((t) => {
       const tb = document.querySelector(t + ' table');
@@ -6630,6 +6641,152 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: a table the commit renumbered or moved is still recognised — OK');
+
+  // ── F7: ＋ 泡泡不得在使用者伸手過去的半路上自己消失 ─────────────────────
+  //
+  // 泡泡本體與 row grip 都是掛在 document.body 上的 position: fixed 浮層，
+  // 就畫在「把泡泡叫出來」的那條帶子上面。指標一碰到它們，mousemove 的
+  // target 就不再是表格的後代，可見性判斷因而收掉使用者正伸手要按的那顆
+  // 泡泡；下一個 mousemove 又打回底下的儲存格、泡泡再升起來，所以整段接近
+  // 的路上它一閃一閃，按下去那一刻在不在，取決於最後一個移動事件剛好落在
+  // 哪一邊。
+  //
+  // 【量測，1400×1000，表格左緣 412】row 泡泡置中在它提供的那條列邊界上、
+  // 橫向落在 x∈[403,421]，而觸發帶是 x∈[402,422]、y 為該邊界 ±10 —— 泡泡
+  // 幾乎蓋滿整條帶子，只剩最外一圈叫得動它而不踩到它。column 帶子更窄：
+  // 表格上緣【以上】的 target 實測是 MAIN.content，不在表格 block 裡，
+  // 所以只有上緣往下那一半叫得動泡泡，而那一半又被泡泡自己蓋掉大半。
+  // 所以下面每一列的起點都刻意壓在帶子的最外圈。
+  //
+  // 每一列都用【真的把指標移過去】的多步移動，並且獨立盯住泡泡的 hidden
+  // 屬性：路上被藏起來過就算紅。停下來之後的可點性另外斷言，但它單獨看會
+  // 受奇偶影響 —— 未修時 target 在泡泡與底下元素之間逐事件交替，停在哪一
+  // 邊由落在泡泡上的事件數的奇偶決定。屬性觀察不受這件事影響。
+  {
+    // 走一趟「伸手過去」：先把指標放在 `from` 把泡泡叫起來，裝上盯著
+    // hidden 的 MutationObserver，再用多步移動走到 `to`。
+    const reachForBubble = async (page, sel, from, to, steps) => {
+      await page.mouse.move(from.x - 60, from.y);
+      await page.mouse.move(from.x, from.y);
+      await new Promise((r) => setTimeout(r, 250));
+      const raised = await overlayState(page, sel);
+      const aim = await page.evaluate((s) => {
+        const b = document.querySelector(s);
+        window.__f7Hides = 0;
+        // 只數「本來沒有 hidden、現在有了」這種轉換。實測：對一顆已經藏
+        // 起來的泡泡再寫一次 hidden = true，MutationObserver 照樣收到
+        // record（oldValue 是 ""），所以用「現在是不是藏著」去數，會把那
+        // 種畫面上什麼都沒發生的寫入也算進來。
+        window.__f7Obs = new MutationObserver((ms) => {
+          for (const m of ms) if (m.oldValue === null) window.__f7Hides++;
+        });
+        window.__f7Obs.observe(b,
+          { attributes: true, attributeFilter: ['hidden'], attributeOldValue: true });
+        return { after: b.dataset.afterRowIndex, col: b.dataset.colIndex };
+      }, sel);
+      await page.mouse.move(to.x, to.y, { steps });
+      await new Promise((r) => setTimeout(r, 250));
+      const hides = await page.evaluate(() => {
+        window.__f7Obs.disconnect();
+        return window.__f7Hides;
+      });
+      const rest = await overlayState(page, sel);
+      // 只有還活著的浮層才問得出可點性：display:none 的元素矩形全是 0
+      // （實測就是 l/t/w/h 全 0），拿它的「中心」去問 elementFromPoint，
+      // 問到的是頁面左上角那一點，跟這顆泡泡點不點得到無關。直接判成
+      // 不可點，讓失敗訊息落在 `rest` 上。
+      const reachable = isLive(rest) ? await page.evaluate((s) => {
+        const b = document.querySelector(s);
+        const r = b.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return !!(el && (el === b || b.contains(el)));
+      }, sel) : false;
+      return { raised, aim, hides, rest, reachable };
+    };
+    const F7_MD = '# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n| c3 | c4 |\n';
+
+    // 列泡泡：從帶子最外圈（表格左緣往左 TB_EDGE_PX，那裡是
+    // .ed-block::before 的走廊，target 仍是表格 block 本身）橫著伸手到泡泡
+    // 正中心。
+    {
+      const ctx = await newPage(F7_MD);
+      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      const g = await ctx.page.evaluate(() => {
+        const tb = document.querySelector('.ed-block[data-block-type="table"] table');
+        return { left: tb.getBoundingClientRect().left,
+          boundary: tb.tBodies[0].rows[0].getBoundingClientRect().bottom };
+      });
+      const out = await reachForBubble(ctx.page, '.ed-tb-insert-row',
+        { x: g.left - 10, y: g.boundary }, { x: g.left, y: g.boundary }, 9);
+      assert.ok(isLive(out.raised),
+        'F7/列 前提失敗：泡泡根本沒升起來，這一列什麼都沒量到，got ' + JSON.stringify(out.raised));
+      assert.strictEqual(out.aim.after, '0',
+        'F7/列 前提失敗：泡泡瞄的不是第一條 body 列的下緣，got ' + JSON.stringify(out.aim));
+      assert.strictEqual(out.hides, 0,
+        'F7/列：伸手過去的路上泡泡不得自己消失，實際被藏起來的次數 ' + out.hides);
+      assert.ok(out.reachable,
+        'F7/列：指標停在泡泡上時它必須還在、還點得到，got ' + JSON.stringify(out.rest));
+      assert.strictEqual(ctx.errs.length, 0, 'F7/列：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+
+    // 欄泡泡：只有表格上緣【往下】那一側叫得動它，而泡泡自己蓋掉其中大半，
+    // 所以起點壓在 top + TB_EDGE_PX，再直直往上伸手到泡泡正中心。
+    {
+      const ctx = await newPage(F7_MD);
+      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      const g = await ctx.page.evaluate(() => {
+        const tb = document.querySelector('.ed-block[data-block-type="table"] table');
+        return { top: tb.getBoundingClientRect().top,
+          right: tb.rows[0].cells[0].getBoundingClientRect().right };
+      });
+      const out = await reachForBubble(ctx.page, '.ed-tb-insert-col',
+        { x: g.right, y: g.top + 10 }, { x: g.right, y: g.top }, 11);
+      assert.ok(isLive(out.raised),
+        'F7/欄 前提失敗：泡泡根本沒升起來，這一列什麼都沒量到，got ' + JSON.stringify(out.raised));
+      assert.strictEqual(out.aim.col, '0',
+        'F7/欄 前提失敗：泡泡瞄的不是第一欄的右緣，got ' + JSON.stringify(out.aim));
+      assert.strictEqual(out.hides, 0,
+        'F7/欄：伸手過去的路上泡泡不得自己消失，實際被藏起來的次數 ' + out.hides);
+      assert.ok(out.reachable,
+        'F7/欄：指標停在泡泡上時它必須還在、還點得到，got ' + JSON.stringify(out.rest));
+      assert.strictEqual(ctx.errs.length, 0, 'F7/欄：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+
+    // 同一條帶子上的第二個 body 層浮層：row grip 跨在表格左邊界上，它的
+    // 矩形比泡泡寬，所以帶子裡有一小塊是「還在泡泡的觸發範圍內、但踩到的
+    // 是 grip」。指標經過那裡時泡泡同樣不得消失。
+    {
+      const ctx = await newPage(F7_MD);
+      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      const g = await ctx.page.evaluate(() => {
+        const tb = document.querySelector('.ed-block[data-block-type="table"] table');
+        return { left: tb.getBoundingClientRect().left,
+          boundary: tb.tBodies[0].rows[0].getBoundingClientRect().bottom };
+      });
+      const out = await reachForBubble(ctx.page, '.ed-tb-insert-row',
+        { x: g.left + 10, y: g.boundary + 5 }, { x: g.left + 9.5, y: g.boundary + 6 }, 1);
+      assert.ok(isLive(out.raised),
+        'F7/grip 前提失敗：泡泡根本沒升起來，這一列什麼都沒量到，got ' + JSON.stringify(out.raised));
+      // 前提：指標停的那一點踩到的【真的】是 row grip。少了它，一個落在
+      // 儲存格上的落點會讓下面兩條斷言原封不動地綠 —— 那條路徑由列泡泡
+      // 自己那一列負責，grip 這一半就沒測到。
+      const underPointer = await ctx.page.evaluate((p) => {
+        const el = document.elementFromPoint(p.x, p.y);
+        return el ? el.tagName + '.' + String(el.className || '') : 'null';
+      }, { x: g.left + 9.5, y: g.boundary + 6 });
+      assert.ok(underPointer.indexOf('ed-te-grip-row') !== -1,
+        'F7/grip 前提失敗：指標停的那一點踩到的不是 row grip，got ' + underPointer);
+      assert.strictEqual(out.hides, 0,
+        'F7/grip：指標踩到 row grip 時泡泡不得消失，實際被藏起來的次數 ' + out.hides);
+      assert.ok(out.reachable,
+        'F7/grip：指標踩到 row grip 時泡泡必須還在、還點得到，got ' + JSON.stringify(out.rest));
+      assert.strictEqual(ctx.errs.length, 0, 'F7/grip：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: the ＋ bubble survives you reaching for it — OK');
+  }
 
   await browser.close();
 }
