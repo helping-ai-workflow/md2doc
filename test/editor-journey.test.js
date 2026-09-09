@@ -1485,6 +1485,65 @@ async function main() {
     mode: document.body.getAttribute('data-ed-mode'),
   }));
 
+  // v3.3.0 Task 19（Ruling T19-4）：這張表原本的 oracle 只讀「游標在哪／工具列
+  // 還有幾顆亮著／在哪個模式」，對「這顆按鈕到底做了什麼」是沉默的。實測把
+  // client.js 的 `case 'insert-after': return blockEl ?
+  // insertBlockBelow(blockEl, 'paragraph') : undefined;` 改成 `return undefined;`：
+  // 紅的是拿它當探針的那幾列 bar-only（checkLeverage() 自己會再按一次「在下方
+  // 插入區塊」），insert-after 自己那一列是綠的 —— 一顆什麼都不做的按鈕，在它
+  // 自己的列上通過了。
+  //
+  // 所以每一列多帶一個 effect(before, after)：會改文件的按鈕拿 block-type 清單、
+  // 區塊文字、行內標記或 data-indent 當謂詞（效果會落到磁碟的再加一條逐位元組
+  // 的 disk()），只改 chrome 的按鈕各自宣告自己的可觀察量。
+  //
+  // 順序上，effect 在 checkLeverage() 【之前】量，disk 在之後：
+  //   * checkLeverage() 的 bar-only 分支自己會再按一次「在下方插入區塊」，那一
+  //     下也會改文件形狀。
+  //   * 存檔會動到 caret oracle —— 實測在 press 與 checkLeverage 之間插一次
+  //     Ctrl+S，bold 那一列從 {active:'P',activeClass:'ed-wys-armed',enabled:15}
+  //     變成 {active:'BODY',activeClass:'',enabled:4}。
+  //   * insert-before / insert-after / table 的效果到不了磁碟（實測：按完存檔，
+  //     位元組與原檔相同），所以它們的謂詞只能是 DOM 上的 block 形狀。
+  const docSnap = (page) => page.evaluate(() => {
+    const blocks = Array.from(document.querySelectorAll('.ed-block'));
+    const tg = document.querySelector('.sidebar-toggle, #sidebar-toggle');
+    const clean = (s) => String(s || '').replace(/[＋⠿]/g, '')
+      .replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
+    return {
+      types: blocks.map((b) => b.getAttribute('data-block-type')).join(','),
+      indents: blocks.map((b) => String(b.getAttribute('data-indent'))).join(','),
+      text: blocks.map((b) => clean(b.textContent)).join(' | '),
+      marks: blocks.map((b) => Array.from(b.querySelectorAll('strong, em, del, a, code'))
+        .map((e) => e.tagName + '(' + clean(e.textContent) + ')').join('+')).join(' | '),
+      mode: document.body.getAttribute('data-ed-mode'),
+      toolbarMenu: !!document.querySelector('.ed-toolbar-menu'),
+      source: !!document.querySelector('.ed-source'),
+      filePickers: document.querySelectorAll('input[type="file"]').length,
+      sidebarOpen: document.body.hasAttribute('data-sidebar-open'),
+      toggleExpanded: tg ? tg.getAttribute('aria-expanded') : null,
+    };
+  });
+  // 'sel' fixture 開檔時的形狀，以及它被打過字之後的形狀。
+  const V2_TEXT0 = 'H | Alpha bravo charlie delta. | Bravo paragraph.';
+  const V2_TEXT_ZZ = 'H | ZZ bravo charlie delta. | Bravo paragraph.';
+  const V2_NEST_TEXT0 = 'H | one item | two item | nested item | three item | Tail para.';
+  const same = (b, a) => b.types === a.types && b.text === a.text && b.marks === a.marks;
+  // undo / redo / indent 在原本的 fixture 上是無事可做的 no-op —— undo 沒有歷史，
+  // 而 indent 原本的落點 'nested item' 按下去磁碟逐位元組不變（實測）。
+  // 無事可做的按鈕與壞掉的按鈕在任何謂詞下都長得一樣，所以這三列先把事情安排
+  // 出來。⚠ 打完字要先提交再按：實測「還開著髒 burst 就按工具列的 undo」落在
+  // {active:'BODY',activeClass:'',enabled:4}，那是另一個題目，不是這一列要測的
+  // 東西。
+  const v2TypeAndCommit = async (ctx) => {
+    await ctx.page.keyboard.type('ZZ');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Enter');          // blur → commit → render
+    await new Promise((r) => setTimeout(r, 700));
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 300));
+  };
+
   // 每一列共用的「必需答案」判定。回傳失敗訊息，或 null 表示通過。
   async function checkLeverage(ctx, name, answer) {
     const st = await readLeverage(ctx.page);
@@ -1564,18 +1623,69 @@ async function main() {
     assert.strictEqual(ids.length, 22, '工具列應為 22 顆，got ' + ids.length);
 
     const TB_ROWS = [
-      { id: 'undo',         state: 'sel',  answer: 'caret' },
-      { id: 'redo',         state: 'sel',  answer: 'caret' },
-      { id: 'headings',     state: 'sel',  answer: 'caret' },   // 只開 H▾ 選單，不轉換
-      { id: 'quote',        state: 'sel',  answer: 'bar-only' },
-      { id: 'code',         state: 'sel',  answer: 'bar-only' },
-      { id: 'list',         state: 'sel',  answer: 'caret' },
-      { id: 'ordered-list', state: 'sel',  answer: 'caret' },
-      { id: 'check',        state: 'sel',  answer: 'caret' },
-      { id: 'bold',         state: 'sel',  answer: 'caret' },
-      { id: 'italic',       state: 'sel',  answer: 'caret' },
-      { id: 'strike',       state: 'sel',  answer: 'caret' },
-      { id: 'inline-code',  state: 'sel',  answer: 'caret' },
+      { id: 'undo',         state: 'sel',  answer: 'caret',
+        arrange: v2TypeAndCommit,
+        effect: (b, a) => b.text !== V2_TEXT_ZZ
+          ? 'arrange 沒有把文件改成可以退回的樣子，got ' + b.text
+          : (a.text === V2_TEXT0 ? null : '按下去必須把剛剛提交的那次編輯退回去，got ' + a.text) },
+      { id: 'redo',         state: 'sel',  answer: 'caret',
+        arrange: async (ctx) => {
+          await v2TypeAndCommit(ctx);
+          await pressClick(ctx.page, '[data-ed-tb="undo"]', 80);
+          await new Promise((r) => setTimeout(r, 500));
+          await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+          await new Promise((r) => setTimeout(r, 300));
+        },
+        effect: (b, a) => b.text !== V2_TEXT0
+          ? 'arrange 的那一次 undo 沒有生效，redo 就沒有東西可以重做，got ' + b.text
+          : (a.text === V2_TEXT_ZZ ? null : '按下去必須把被退回的那次編輯做回來，got ' + a.text) },
+      // 只開 H▾ 選單，不轉換 —— 所以它的可觀察量是那張下拉，不是文件。
+      { id: 'headings',     state: 'sel',  answer: 'caret',
+        effect: (b, a) => !a.toolbarMenu ? 'H▾ 必須開出 .ed-toolbar-menu'
+          : (same(b, a) ? null : '只開選單不得動到文件，got ' + a.types + ' / ' + a.text) },
+      { id: 'quote',        state: 'sel',  answer: 'bar-only',
+        effect: (b, a) => a.types === 'heading,blockquote,paragraph' ? null
+          : '選取所在的段落必須變成 blockquote，got ' + a.types },
+      { id: 'code',         state: 'sel',  answer: 'bar-only',
+        effect: (b, a) => a.types === 'heading,code,paragraph' ? null
+          : '選取所在的段落必須變成 code block，got ' + a.types },
+      // ul / ol / task 在 DOM 上都是 li，分不出來 —— 那三列各自靠 disk() 的
+      // 逐位元組比對區分（實測 '- ' / '1. ' / '- [ ] '）。
+      { id: 'list',         state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.types === 'heading,li,paragraph' ? null
+          : '選取所在的段落必須變成清單項，got ' + a.types,
+        disk: (d) => d === '# H\n\n- Alpha bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 ul' },
+      { id: 'ordered-list', state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.types === 'heading,li,paragraph' ? null
+          : '選取所在的段落必須變成清單項，got ' + a.types,
+        disk: (d) => d === '# H\n\n1. Alpha bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 ol' },
+      { id: 'check',        state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.types === 'heading,li,paragraph' ? null
+          : '選取所在的段落必須變成清單項，got ' + a.types,
+        disk: (d) => d === '# H\n\n- [ ] Alpha bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是待辦項' },
+      { id: 'bold',         state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.marks === ' | STRONG(Alpha) | ' ? null
+          : '選取的字必須被 STRONG 包起來，而且不得多出別的標記，got ' + a.marks,
+        disk: (d) => d === '# H\n\n**Alpha** bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 **Alpha**' },
+      { id: 'italic',       state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.marks === ' | EM(Alpha) | ' ? null
+          : '選取的字必須被 EM 包起來，而且不得多出別的標記，got ' + a.marks,
+        disk: (d) => d === '# H\n\n*Alpha* bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 *Alpha*' },
+      { id: 'strike',       state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.marks === ' | DEL(Alpha) | ' ? null
+          : '選取的字必須被 DEL 包起來，而且不得多出別的標記，got ' + a.marks,
+        disk: (d) => d === '# H\n\n~~Alpha~~ bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 ~~Alpha~~' },
+      { id: 'inline-code',  state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.marks === ' | CODE(Alpha) | ' ? null
+          : '選取的字必須被 CODE 包起來，而且不得多出別的標記，got ' + a.marks,
+        disk: (d) => d === '# H\n\n`Alpha` bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是 `Alpha`' },
       // v3.2.1 Task 11b：BROKEN → caret。成因量測（見報告的時間軸）是
       // window.prompt() 關閉【之後】瀏覽器補的那一發 focusout —— 焦點其實立刻
       // 回到那個面（t=31ms 的 focusin），真正拆掉著力點的是文件層 delegator
@@ -1585,23 +1695,87 @@ async function main() {
       // （連結是 block 內的 inline 編輯，block 本身活著）。實測：連結照樣寫進
       // 磁碟（[Alpha](https://example.com/)），activeElement 回到
       // P.ed-wys-armed、工具列 15 顆。
-      { id: 'link',         state: 'sel',  answer: 'caret' },
-      { id: 'outdent',      state: 'nest', answer: 'caret' },
-      { id: 'indent',       state: 'nest', answer: 'caret' },
-      { id: 'table',        state: 'sel',  answer: 'caret' },
-      { id: 'insert-before', state: 'sel', answer: 'caret' },
-      { id: 'insert-after', state: 'sel',  answer: 'caret' },
-      { id: 'line',         state: 'sel',  answer: 'bar-only' },
-      { id: 'image',        state: 'sel',  answer: 'caret' },
-      { id: 'outline',      state: 'sel',  answer: 'caret' },
-      { id: 'preview',      state: 'sel',  answer: 'source' },
+      { id: 'link',         state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.marks === ' | A(Alpha) | ' ? null
+          : '選取的字必須變成連結，而且不得多出別的標記，got ' + a.marks,
+        disk: (d) => d === '# H\n\n[Alpha](https://example.com/) bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '磁碟上必須是對話框回答的那個網址' },
+      { id: 'outdent',      state: 'nest', answer: 'caret',
+        effect: (b, a) => b.indents !== 'null,0,0,1,0,null'
+          ? 'nest fixture 的縮排層級不是預期的樣子，got ' + b.indents
+          : (a.indents === 'null,0,0,0,0,null' && a.text === V2_NEST_TEXT0 ? null
+            : '游標所在的那一項必須退一層，其他項不得被搬動，got ' +
+              a.indents + ' / ' + a.text),
+        disk: (d) => d === '# H\n\n- one item\n- two item\n- nested item\n- three item\n\nTail para.\n'
+          ? null : '磁碟上那一項必須退回頂層' },
+      // indent 換一個落點：在原本的 'nested item' 上按下去，磁碟逐位元組不變
+      // （實測），那一列因此對「按鈕壞掉」是沉默的。改瞄 'three item' —— 實測
+      // 它會從頂層進到第一層，磁碟上也跟著多兩格。
+      { id: 'indent',       state: 'nest', answer: 'caret',
+        arrange: async (ctx) => {
+          await ctx.page.evaluate(() => {
+            const els = document.querySelectorAll('.ed-li-text');
+            els[3].focus();
+            const r = document.createRange();
+            r.selectNodeContents(els[3]); r.collapse(false);
+            const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+            document.dispatchEvent(new Event('selectionchange'));
+          });
+          await new Promise((r) => setTimeout(r, 300));
+        },
+        effect: (b, a) => b.indents !== 'null,0,0,1,0,null'
+          ? 'nest fixture 的縮排層級不是預期的樣子，got ' + b.indents
+          : (a.indents === 'null,0,0,1,1,null' && a.text === V2_NEST_TEXT0 ? null
+            : '游標所在的那一項必須進一層，其他項不得被搬動，got ' +
+              a.indents + ' / ' + a.text),
+        disk: (d) => d === '# H\n\n- one item\n- two item\n  - nested item\n  - three item\n\nTail para.\n'
+          ? null : '磁碟上那一項必須縮進一層' },
+      { id: 'table',        state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.types === 'heading,paragraph,table,paragraph' ? null
+          : '必須在游標那個 block 後面長出一個表格，got ' + a.types },
+      { id: 'insert-before', state: 'sel', answer: 'caret',
+        effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
+          ? '必須多出一個段落，got ' + a.types
+          : (a.text === 'H |  | Alpha bravo charlie delta. | Bravo paragraph.' ? null
+            : '新段落必須落在游標那個 block 【前面】，got ' + a.text) },
+      { id: 'insert-after', state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
+          ? '必須多出一個段落，got ' + a.types
+          : (a.text === 'H | Alpha bravo charlie delta. |  | Bravo paragraph.' ? null
+            : '新段落必須落在游標那個 block 【後面】，got ' + a.text) },
+      { id: 'line',         state: 'sel',  answer: 'bar-only',
+        effect: (b, a) => a.types === 'heading,paragraph,hr,paragraph' ? null
+          : '必須在游標那個 block 後面長出一條分隔線，got ' + a.types },
+      // 圖片按鈕開的是一顆 hidden 的 input[type=file]（pickAndInsertImage()
+      // 自己建、append 到 body），檔案要等使用者選了才進文件 —— 所以它宣告的
+      // 可觀察量是「那顆挑選器出現了」。
+      { id: 'image',        state: 'sel',  answer: 'caret',
+        effect: (b, a) => a.filePickers > b.filePickers ? null
+          : '必須開出一顆檔案挑選器，got filePickers ' + b.filePickers + ' → ' + a.filePickers },
+      // 1000px 寬（見 v2Boot()）落在 toggleOutlineSidebar() 的 mobile 分支，
+      // 它動的是 body 的 data-sidebar-open 與 .sidebar-toggle 的 aria-expanded。
+      { id: 'outline',      state: 'sel',  answer: 'caret',
+        effect: (b, a) => b.sidebarOpen
+          ? '前提失敗：抽屜在按之前就是開的，這一列量不到切換'
+          : (a.sidebarOpen && a.toggleExpanded === 'true' ? null
+            : '必須把抽屜打開、並且讓 .sidebar-toggle 說自己 expanded，got ' +
+              a.sidebarOpen + ' / ' + a.toggleExpanded) },
+      { id: 'preview',      state: 'sel',  answer: 'source',
+        effect: (b, a) => a.mode === 'source' && a.source ? null
+          : '必須切到 source 模式並且開出 .ed-source，got ' + a.mode + ' / ' + a.source },
     ];
     assert.deepStrictEqual(TB_ROWS.map((r) => r.id).slice().sort(), ids.slice().sort(),
       'V2 表必須恰好覆蓋工具列上的每一顆按鈕 —— 新增按鈕時必須同時決定它的必需答案');
+    // 沒有效果謂詞的一列就是回到舊 oracle 的一列，所以少寫一個就直接紅在這裡，
+    // 而不是安靜地退化成「按下去、游標還在、算按鈕數」。
+    assert.deepStrictEqual(TB_ROWS.filter((r) => typeof r.effect !== 'function')
+      .map((r) => r.id), [],
+      'V2 表的每一列都必須宣告自己的效果謂詞 effect(before, after)');
 
     const bad = [];
     for (const row of TB_ROWS) {
       const ctx = await v2Boot(row.state);
+      if (row.arrange) await row.arrange(ctx);
       const dis = await ctx.page.evaluate((i) =>
         document.querySelector('[data-ed-tb="' + i + '"]').disabled, row.id);
       if (dis) {
@@ -1609,10 +1783,22 @@ async function main() {
         await ctx.page.close(); ctx.srv.close();
         continue;
       }
+      const before = await docSnap(ctx.page);
       await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
+      const after = await docSnap(ctx.page);
+      const noEffect = row.effect(before, after);
+      if (noEffect) {
+        bad.push(row.id + ' → 效果謂詞不成立：' + noEffect +
+          '\n    before ' + JSON.stringify(before) + '\n    after  ' + JSON.stringify(after));
+      }
       const fail = await checkLeverage(ctx, row.id, row.answer);
       if (fail) bad.push(fail);
+      if (row.disk) {
+        const bytes = await saveAndRead(ctx);
+        const wrong = row.disk(bytes);
+        if (wrong) bad.push(row.id + ' → 磁碟謂詞不成立：' + wrong + '，got:\n' + bytes);
+      }
       await ctx.page.close(); ctx.srv.close();
     }
     assert.deepStrictEqual(bad, [], '這些工具列按鈕的必需答案沒有成立:\n' + bad.join('\n'));
@@ -2154,6 +2340,118 @@ async function main() {
     console.log('journey: V2h a refused ⠿ operation keeps the caret and the bar — OK');
   }
 
+  // ── NF-3: 拒絕之後，工具列必須描述【游標所在】的那個 block ──────────────
+  //
+  // restoreAfterStructuralOp() 的 heldSurface 分支挑的是游標自己的 block
+  //（`heldSurface.closest('.ed-block')`），不是 resolveGutterOperands() 交出來
+  // 的 `anchorLine`。它自己的註解說兩者在量過的路徑上是同一個 block —— 上面
+  // V2h 那些列的形狀是「⠿ 按在游標【所在】的那個 li 上」，兩者因此指同一個
+  // block —— 實測在那個形狀上把那兩行換成 reaimToolbarBlockAtLine(anchorLine)，
+  // V2h 讀的那些量（activeElement 的 class、工具列 enabled、橫幅）逐項不變。
+  //
+  // 這一列把兩者分開：髒 burst 留在【段落 A】，⠿ 按在另一個 hard-wrapped 的
+  // li B 上（§4.1 的拒絕條件長在 B 身上）。實測（primed、1000×700）：
+  //   原碼    工具列的「清單」aria-pressed=false、「縮排」是 disabled
+  //   mutant  「清單」aria-pressed=true、「縮排」是 enabled
+  // 兩邊的游標都留在 A 的 .ed-wys-armed 上，橫幅也都是 §4.1 那一條 —— 使用者
+  // 看得到的差別就是那條 bar 在講一個他人不在的 block。
+  //
+  // 這一列只跑 primed。unprimed 走 fallback：focus 掉到 BODY、heldSurface 是
+  // null，restoreAfterStructuralOp() 因此走 focusBlockAtLine(anchorLine) 那一
+  // 支，把游標真的搬進 B（實測 blk 是那個 li、DIV.ed-li-text ed-wys-armed）。
+  // 那時候工具列瞄著 B 是對的，兩種寫法的答案一致，手勢就分不開它們。
+  //
+  // 為什麼不用「按下去看文件怎麼變」當謂詞：這個拒絕之後按工具列按鈕，原碼與
+  // mutant 都是 activeElement 掉回 BODY、磁碟逐位元組不變（實測按「在下方插入
+  // 區塊」與按「引用」各一次），所以那條路上沒有可鑑別的效果可以量。
+  {
+    const NF3_MD = '# H\n\nAlpha paragraph.\n\n- alpha item that is\n  hard wrapped here\n' +
+      '- bravo item\n\nTail para two.\n';
+    const ctx = await newPage(NF3_MD);
+    await ctx.page.setViewport({ width: 1000, height: 700 });
+    await primeOneCommit(ctx);
+    await installPatchSpy(ctx);
+    const aId = await ctx.page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+        .find((x) => (x.textContent || '').indexOf('Alpha paragraph') !== -1);
+      if (!b) throw new Error('NF-3 fixture 裡找不到 Alpha paragraph');
+      return b.getAttribute('data-block-id');
+    });
+    const bId = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-block[data-block-type="li"]').getAttribute('data-block-id'));
+    assert.notStrictEqual(aId, bId, 'NF-3 前提：段落 A 與 li B 必須是不同的 block');
+    const A = '.ed-block[data-block-id="' + aId + '"]';
+    const B = '.ed-block[data-block-id="' + bId + '"]';
+    await ctx.page.click(A + ' .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.type('X');          // 髒 burst 留在 A
+    await new Promise((r) => setTimeout(r, 250));
+    const before = await readLeverage(ctx.page);
+    assert.ok(/\bed-wys-armed\b/.test(before.activeClass),
+      'NF-3 前提：髒 burst 必須真的開在 A 的編輯面上，got ' + JSON.stringify(before));
+    // ⠿ 開在 B 上 —— 這是 anchorLine 與游標所在 block 分家的那一步。
+    await ctx.page.hover(B);
+    await pressClick(ctx.page, B + ' .ed-handle', 80);
+    await ctx.page.waitForSelector('.ed-handle-menu-btn');
+    await armDetachProbe(ctx.page, '.ed-handle-menu-btn', '轉換成 ›');
+    await pressClick(ctx.page, '[data-journey-target="1"]', 80);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.strictEqual(await itemClickFired(ctx.page), 'ok',
+      'NF-3 轉換成 toggle：選單在 mouseup 前就消失了');
+    // 250ms 而不是 V2h 那些列的 80ms：assertDetachCapable() 要求按壓長過這台
+    // 機器把一次 commit 的 /api/render 套用到 DOM 的時間，而那個數字在冷開的
+    // 行程上量到過 141ms（隔離副本、單跑這一列）。
+    await armDetachProbe(ctx.page, '.ed-handle-menu-btn', '引用');
+    const leafPress = await pressClick(ctx.page, '[data-journey-target="1"]', 250);
+    await new Promise((r) => setTimeout(r, 800));
+    await assertDetachCapable(ctx.page, leafPress, 'NF-3');
+    assert.strictEqual(await itemClickFired(ctx.page), 'ok',
+      'NF-3：選單在 mouseup 前就消失了');
+    assertRoute(await patchRoutes(ctx), true, 'NF-3');
+    const st = await ctx.page.evaluate((sel) => {
+      const btn = (id) => document.querySelector('[data-ed-tb="' + id + '"]');
+      const ae = document.activeElement;
+      const blk = ae && ae.closest ? ae.closest('.ed-block') : null;
+      return {
+        cls: ae ? String(ae.className || '') : '',
+        caretBlock: blk ? blk.getAttribute('data-block-id') : null,
+        wantBlock: document.querySelector(sel).getAttribute('data-block-id'),
+        listPressed: btn('list').getAttribute('aria-pressed'),
+        indentOff: btn('indent').disabled,
+        quoteOff: btn('quote').disabled,
+        listOff: btn('list').disabled,
+        banner: (document.querySelector('.ed-conflict') || {}).textContent || '',
+      };
+    }, A);
+    // 前提之一：這真的是一次 §4.1 的拒絕，不是一次成功。
+    assert.ok(st.banner.indexOf('無法調整結構') !== -1,
+      'NF-3 前提：必須真的被 §4.1 拒絕（橫幅），否則量到的是成功路徑，got ' +
+      JSON.stringify(st));
+    // 前提之二：游標留在 A。它要是被搬走了，「工具列該講 A」這個問題就換了
+    // 題目 —— 那正是 unprimed 那條路的形狀。
+    assert.strictEqual(st.caretBlock, st.wantBlock,
+      'NF-3 前提：拒絕之後游標必須還在 A 這個 block 裡，got ' + JSON.stringify(st));
+    assert.ok(/\bed-wys-armed\b/.test(st.cls),
+      'NF-3 前提：游標必須還在真的編輯面上，got ' + JSON.stringify(st));
+    // 前提之三：bar 沒有整條塌掉。塌掉的 bar 什麼都不 pressed，下面那條
+    // 「清單不得亮著」就會白過。
+    assert.strictEqual(st.quoteOff, false,
+      'NF-3 前提：工具列必須還瞄著某個 block（引用鈕是 enabled），got ' + JSON.stringify(st));
+    assert.strictEqual(st.listOff, false,
+      'NF-3 前提：工具列必須還瞄著某個 block（清單鈕是 enabled），got ' + JSON.stringify(st));
+    // 正題：bar 講的是游標所在的段落，不是 ⠿ 按下去的那個 li。
+    assert.strictEqual(st.listPressed, 'false',
+      'NF-3：游標在段落裡，工具列的「清單」不得亮著 —— 亮著代表 bar 瞄的是 ⠿ ' +
+      '按下去的那個 li（anchorLine），不是游標所在的 block，got ' + JSON.stringify(st));
+    assert.strictEqual(st.indentOff, true,
+      'NF-3：游標在段落裡，「縮排」必須是 disabled —— 它是 enabled 代表 bar 瞄的是 ' +
+      '那個 li，got ' + JSON.stringify(st));
+    assert.strictEqual(ctx.errs.length, 0,
+      'NF-3：不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: NF-3 a refusal aims the bar at the block the caret is in — OK');
+  }
+
   // ── V2i: 🔗 套用在【段落】上 —— C1 的第二個發生點 ────────────────────────
   //
   // 第二波 C1。applyLinkToggle() 的 `stillHeld` 閘門原本把
@@ -2661,7 +2959,8 @@ async function main() {
     console.log('journey: V3 .ed-conflict stays live across a scroll — OK');
   }
 
-  // ── gone × 3：.ed-te-grip / .ed-te-menu / .ed-tb-insert ─────────────
+  // ── gone × 3：.ed-te-grip-col / .ed-te-menu / .ed-tb-insert ─────────
+  // 列軸的 grip 由下面它自己那一列驅動 —— 這裡查的是 `-col`。
   {
     // grip：把游標移到表頭儲存格中央。
     const ctx = await newPage(V3_TABLE_MD);
@@ -2674,7 +2973,7 @@ async function main() {
     await ctx.page.mouse.move(cell.x, cell.y);
     await ctx.page.waitForSelector('.ed-te-grip-col:not([hidden])', { timeout: 4000 });
     const gripBefore = await overlayState(ctx.page, '.ed-te-grip-col');
-    assertRaised(gripBefore, '.ed-te-grip');
+    assertRaised(gripBefore, '.ed-te-grip-col');
     // menu：點那顆 grip。
     const g = await ctx.page.evaluate(() => {
       const r = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
@@ -2688,11 +2987,12 @@ async function main() {
     await scrollBy(ctx.page, 200);
     const gripAfter = await overlayState(ctx.page, '.ed-te-grip-col');
     const menuAfter = await overlayState(ctx.page, '.ed-te-menu');
-    assert.ok(isGone(gripAfter), '.ed-te-grip 捲動後必須消失，got ' + JSON.stringify(gripAfter));
+    assert.ok(isGone(gripAfter),
+      '.ed-te-grip-col 捲動後必須消失，got ' + JSON.stringify(gripAfter));
     assert.ok(isGone(menuAfter),
       '.ed-te-menu 捲動後必須消失（它是唯一會真的刪掉整欄整列的浮層），got ' + JSON.stringify(menuAfter));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: V3 .ed-te-grip / .ed-te-menu vanish on scroll — OK');
+    console.log('journey: V3 .ed-te-grip-col / .ed-te-menu vanish on scroll — OK');
   }
   {
     // ＋ 泡泡：只在距離表格邊界 TB_EDGE_PX(10) 內才升起 —— 欄泡泡在表格
@@ -2716,6 +3016,105 @@ async function main() {
     assert.ok(isGone(after), '.ed-tb-insert 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-tb-insert vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-te-grip-row —— 上面那一列驅的是欄軸 ────────────────────
+  //
+  // 上面那一列的訊息寫 `.ed-te-grip`，查詢的卻是 `.ed-te-grip-col`：列軸的
+  // grip 在那裡沒有升起來過，所以 hideTableGrips() 漏收列軸也照樣綠。實測
+  // （把 hideTableGrips() 裡的 `rowGrip.hidden = true;` 拿掉）：上面那一列
+  // 綠，這一列紅。
+  //
+  // fixture 的形狀不是隨手挑的。header-only 的表格會 withhold 列 grip
+  //（updateTableEdgeGrips() 的 `rowEl !== headerRow ||
+  // bodyRowsOf(tableEl).length > 0`，理由寫在它自己的註解裡：拖走 thead 的
+  // 那一列會讓表格降級消失），而欄 grip 照樣升起 —— 實測 header-only 的
+  // 表格上 row 是 hidden、col 是 display:grid。所以這裡用帶著 body 列的
+  // V3_TABLE_MD（one/two 與 three/four），hover 起點落在儲存格內，並且真的
+  // 從一列移到另一列。
+  //
+  // 幾何實測（1400×800、V3_TABLE_MD、centreTable() 之後）：grip 20×28、
+  // left 落在表格左緣減去自己一半寬（80 → 70），縱向對齊被 hover 的那一列
+  // 的中線（列 382..419 時 top=386；指標移到 419..456 那一列時變成 424）。
+  // 按下去之後看得到的選單項目是「刪除列」。
+  {
+    const ctx = await newPage(V3_TABLE_MD);
+    await ctx.page.setViewport({ width: 1400, height: 800 });
+    const ts = await centreTable(ctx.page);
+    const bodyRows = await ctx.page.evaluate((t) => {
+      const tb = document.querySelector(t + ' table');
+      return tb.tBodies.length ? tb.tBodies[0].rows.length : 0;
+    }, ts);
+    assert.ok(bodyRows > 1,
+      '列 grip 前提失敗：fixture 的表格必須有可以 hover 的 body 列，而且不只一列 —— ' +
+      'header-only 的表格是列 grip 被 withhold、欄 grip 照升的形狀，' +
+      '在那種 fixture 上這一列會變成空跑的綠燈，got bodyRows=' + bodyRows);
+    const cellAt = (i) => ctx.page.evaluate((a) => {
+      const r = document.querySelector(a.t + ' table').tBodies[0].rows[a.i]
+        .cells[0].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, { t: ts, i: i });
+    // grip 與它此刻該對齊的那一列，一起量回來。
+    const rowGeom = (i) => ctx.page.evaluate((a) => {
+      const g = document.querySelector('.ed-te-grip-row');
+      const tb = document.querySelector(a.t + ' table');
+      const gr = g.getBoundingClientRect();
+      const rr = tb.tBodies[0].rows[a.i].getBoundingClientRect();
+      return { gripMid: gr.top + gr.height / 2, gripLeft: gr.left, gripW: gr.width,
+        rowMid: rr.top + rr.height / 2, tableLeft: tb.getBoundingClientRect().left };
+    }, { t: ts, i: i });
+    const first = await cellAt(0);
+    await ctx.page.mouse.move(first.x, first.y);
+    await ctx.page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 4000 });
+    const gripBefore = await overlayState(ctx.page, '.ed-te-grip-row');
+    assertRaised(gripBefore, '.ed-te-grip-row');
+    const g0 = await rowGeom(0);
+    assert.ok(Math.abs(g0.gripLeft - (g0.tableLeft - g0.gripW / 2)) <= 1,
+      '.ed-te-grip-row 必須跨在表格左邊界上（left = 表格左緣 − 自己一半寬），got ' +
+      JSON.stringify(g0));
+    assert.ok(Math.abs(g0.gripMid - g0.rowMid) <= 1,
+      '.ed-te-grip-row 必須縱向對齊被 hover 的那一列，got ' + JSON.stringify(g0));
+    // 指標移到另一列：grip 必須跟過去。少了這一步，一個釘死在表頭高度上不動
+    // 的 grip 也能讓上面那條「對齊」斷言在第一列上成立。
+    const second = await cellAt(1);
+    await ctx.page.mouse.move(second.x, second.y);
+    await new Promise((r) => setTimeout(r, 250));
+    const g1 = await rowGeom(1);
+    assert.notStrictEqual(Math.round(g1.gripMid), Math.round(g0.gripMid),
+      '.ed-te-grip-row 換一列 hover 之後必須移動，got ' + JSON.stringify({ g0: g0, g1: g1 }));
+    assert.ok(Math.abs(g1.gripMid - g1.rowMid) <= 1,
+      '.ed-te-grip-row 必須跟著指標所在的那一列走，got ' + JSON.stringify(g1));
+    // 按下去：量的是使用者【看得到】的項目。showRowMenu() 把 teAlignBtn 設成
+    // hidden（對齊是欄軸的事），而它仍留在 .ed-te-menu 的 children 裡 ——
+    // 實測 [{刪除列,shown:true},{對齊,shown:false}]，所以照 children 數就會
+    // 把一顆看不到的按鈕算進來。
+    const gp = await ctx.page.evaluate(() => {
+      const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(gp.x, gp.y);
+    await ctx.page.mouse.down(); await ctx.page.mouse.up();
+    await ctx.page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 4000 });
+    const menuBefore = await overlayState(ctx.page, '.ed-te-menu');
+    assertRaised(menuBefore, '.ed-te-menu（列軸）');
+    const items = await ctx.page.evaluate(() =>
+      Array.from(document.querySelector('.ed-te-menu').children)
+        .map((c) => ({ label: c.textContent.trim(), shown: c.offsetParent !== null })));
+    assert.deepStrictEqual(items.filter((i) => i.shown).map((i) => i.label), ['刪除列'],
+      '列 grip 按下去之後看得到的選單項目變了，got ' + JSON.stringify(items));
+    await scrollBy(ctx.page, 200);
+    const gripAfter = await overlayState(ctx.page, '.ed-te-grip-row');
+    const menuAfter = await overlayState(ctx.page, '.ed-te-menu');
+    assert.ok(isGone(gripAfter),
+      '.ed-te-grip-row 捲動後必須消失（欄軸那一列看不到列軸漏收），got ' +
+      JSON.stringify(gripAfter));
+    assert.ok(isGone(menuAfter),
+      '.ed-te-menu（列軸）捲動後必須消失 —— 它是會真的刪掉整列的那個選單，got ' +
+      JSON.stringify(menuAfter));
+    assert.strictEqual(ctx.errs.length, 0,
+      '列 grip：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-te-grip-row follows the hovered row and vanishes on scroll — OK');
   }
 
   // ── gone：.ed-toolbar-menu（H▾ 下拉）────────────────────────────────
@@ -6645,6 +7044,17 @@ async function main() {
   // applyFullRender 路徑；primed 先花掉那一發 fallback，之後的提交走 patch、
   // 被點的 td 不會被 detach，所以它修好之前就是綠的。它是【控制組】，控的是
   // 「這一修不得把本來就正確的 patch 路徑弄壞」。
+  // v3.3.0 Task 19：這一行 scrollIntoView() 是刻意的，不要當雜訊刪掉。下面那
+  // 一發是 page.mouse.click(x, y)，座標來自那一格【當下】的
+  // getBoundingClientRect()，所以落點跟著 fixture 有多長、以及前一步把畫面捲到
+  // 哪裡走；這一行把落點與那兩件事脫鉤。
+  //
+  // 它在【現在這個 fixture 上】不是這一列的偵測力來源，而這句話是量出來的：
+  // 把 client.js 的復原改回 pre-fix 的 `tableCellsOf(liveTableEl)[0]`（1400×1000、
+  // 髒 burst 留在表格【後面】那個段落上、用 filler 把表格推出視窗），有沒有這
+  // 一行，缺陷都照樣被抓到 —— 落點都是表頭那一格 'A'。也就是說在這台機器的
+  // puppeteer 上，座標落在視窗外的 mouse.click 仍然打到了那一格（兩個方向都量
+  // 過：那一格的 client y 是 -117 與 1299）。
   const t13LastCellClick = async (page) => {
     await page.evaluate(() => {
       const cells = document.querySelectorAll('.ed-wys-cell');
