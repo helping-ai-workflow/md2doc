@@ -24062,12 +24062,38 @@ async function gutterGeometry(page, sel) {
           'precondition: 點擊＋輸入必須真的把焦點放在表頭那格並打進文字. Got ' + cellBefore);
 
         const from = await rowGripCoords(page, table0, 2); // "3"/"c"
-        const to = await rowBoundaryCoords(page, table0, -1); // above-header
+        // Review fix: NOT rowBoundaryCoords(page, table0, -1) — that helper
+        // uses the header row's own BOTTOM edge, which nearestRowDropTarget()
+        // (client.js) does NOT classify as 'above-header' (that mode needs
+        // clientY <= the header's own MIDLINE: `hr.top + hr.height / 2`; the
+        // bottom edge is always below it). Dropping at the bottom edge falls
+        // through to the ordinary 'before-row' branch instead — inserts as
+        // the new first BODY row, never touches the header at all. This is
+        // exactly the "升格沒發生" branch this comment's own diagnostic
+        // probe (runs/t2-caseB-diag-probe.js) confirmed: headerFirstCellText
+        // stayed "Col1", bodyOrder became "3,c,1,a,2,b". Every OTHER
+        // pre-existing scenario in this file that genuinely promotes a row
+        // computes the header's own midline directly (see the "Task 6: 純
+        // 搬移 + 位置決定表頭身分" scenario above) — do the same here.
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left, y: hr.top + hr.height / 2 };
+        }, table0);
         await dragRowTo(page, from, to);
-        await page.waitForFunction((s) =>
-          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '3',
-          {}, table0);
         await settleEditor(page);
+        // Bounded grace + read-actual-then-assert, NOT an open-ended
+        // waitForFunction on a predicted value — the same "settle + grace +
+        // read + assert" shape scenarios 1/2 above already use. An
+        // unbounded wait on a value that never arrives is exactly the round-2
+        // mistake this task already paid a 30s timeout for once; it must not
+        // repeat here.
+        await new Promise((r) => setTimeout(r, 500));
+
+        const headerFirstCellText = await page.evaluate((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim(), table0);
+        assert.strictEqual(headerFirstCellText, '3',
+          'Case B 前置：拖曳必須真的把 "3" 升格成新表頭，否則量不到 retagCell() 重建那顆儲存格的情境（診斷用，非產品缺陷斷言）. Got ' + headerFirstCellText);
 
         const after = await page.evaluate(() => ({
           text: document.activeElement ? document.activeElement.textContent : null,
