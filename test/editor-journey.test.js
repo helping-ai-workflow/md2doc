@@ -1556,7 +1556,7 @@ async function main() {
 
   // ══ V2: 工具列 + ⠿ 選單全矩陣 ═════════════════════════════════════════
   // 族群級的網：Task 3 只修了 convertBlockViaMenu() 一條路徑，這一段逐一
-  // 真實點擊 22 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
+  // 真實點擊 23 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
   // 按完之後還有著力點」。
   //
   // 每一列的「必需答案」是量測出來的，不是猜的（量測腳本見 task-11 報告）：
@@ -1771,9 +1771,30 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       return r;
     })();
-    assert.strictEqual(ids.length, 22, '工具列應為 22 顆，got ' + ids.length);
+    assert.strictEqual(ids.length, 23, '工具列應為 23 顆，got ' + ids.length);
 
     const TB_ROWS = [
+      // v3.4.0 §3: `save` is a deliberate standing exception to this whole
+      // matrix's own premise ("每一顆按鈕都在它真的 enabled 的狀態下被按").
+      // deriveState() (lib/editor/toolbar-model.js) only lights this button
+      // up when ctx.dirty is true, but toolbarContext() (lib/editor/
+      // client.js) does not forward a `dirty` field at all yet — Task 3
+      // scoped toolbar-model.js as a pure function module and left wiring
+      // the real `stack.dirtyDepth !== 0 || burstHasUncommittedEdit()` value
+      // into the client for a later task. Until that wiring lands, NO
+      // fixture this matrix can construct (v2Boot('sel') / v2Boot('nest'),
+      // both freshly-loaded clean documents, and nothing in `arrange` can
+      // change that — client.js never asks the model about dirtiness at
+      // all) can ever make this button clickable. `answer: 'disabled'` is
+      // the signal the loop below reads to accept "stayed disabled" as the
+      // row's actual required answer instead of failing it the way every
+      // other disabled-when-it-shouldn't-be button would. The day the
+      // client-wiring task ships, this row must go red (disabled turns
+      // clickable) and migrate to whatever real answer clicking Save
+      // produces — `effect` is a required-shape stub, never actually
+      // invoked while this row stays in the 'disabled' branch.
+      { id: 'save',         state: 'sel',  answer: 'disabled',
+        effect: () => null },
       { id: 'undo',         state: 'sel',  answer: 'caret',
         arrange: v2TypeAndCommit,
         effect: (b, a) => b.text !== V2_TEXT_ZZ
@@ -1930,7 +1951,20 @@ async function main() {
       const dis = await ctx.page.evaluate((i) =>
         document.querySelector('[data-ed-tb="' + i + '"]').disabled, row.id);
       if (dis) {
-        bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
+        // v3.4.0 §3: `answer: 'disabled'` is the one legitimate reason a row
+        // may find its button disabled — see the `save` row's own comment
+        // above for why. Every other row still treats this branch as the
+        // bug it always was: a disabled button means the row clicked
+        // nothing and its whole verdict is a false green.
+        if (row.answer !== 'disabled') {
+          bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
+        }
+        await ctx.page.close(); ctx.srv.close();
+        continue;
+      }
+      if (row.answer === 'disabled') {
+        bad.push(row.id + ' → 預期在 ' + row.state + ' 狀態下維持 disabled，但現在是 enabled —— ' +
+          'client.js 的 ctx.dirty 佈線任務顯然已經上線，這一列必須搬到它實際點下去的答案');
         await ctx.page.close(); ctx.srv.close();
         continue;
       }
@@ -5957,7 +5991,7 @@ async function main() {
     });
     // 前提：這一列在「工具列沒有任何按鈕」時會自動空過 —— btns 是空的、
     // 兩個差集也都是空的。先把數量釘住，前提倒了就要大聲紅。
-    assert.strictEqual(shape.count, 22,
+    assert.strictEqual(shape.count, 23,
       w + '×900 F12 前提失敗：工具列必須真的有按鈕可掃，got ' + shape.count);
     assert.deepStrictEqual(shape.unreachable, [],
       w + '×900：這些按鈕在整個捲動範圍內都拿不到: ' + JSON.stringify(shape.unreachable));

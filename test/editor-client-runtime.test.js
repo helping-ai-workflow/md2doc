@@ -23080,7 +23080,7 @@ async function gutterGeometry(page, sel) {
     //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
     //    client.js's own comment on that seam), which is the only way to reach
     //    that swap without going through a commit first. The bar must still be
-    //    there, still be the ONLY one, still carry the whole 22-button roster
+    //    there, still be the ONLY one, still carry the whole 23-button roster
     //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
     //    the tracked block on every rerender, so what a post-rerender click
     //    meets is the model's documented no-block state (undo / redo /
@@ -23100,8 +23100,8 @@ async function gutterGeometry(page, sel) {
             bars: document.querySelectorAll('.ed-toolbar').length,
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
           })),
-          { bars: 1, btns: 22 },
-          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
+          { bars: 1, btns: 23 },
+          'sanity: exactly one toolbar carrying the 23-button roster before any rerender');
 
         await page.evaluate(() => window.__edTestForceRerender());
         await settleEditor(page);
@@ -23112,8 +23112,8 @@ async function gutterGeometry(page, sel) {
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
             attached: document.body.contains(document.querySelector('.ed-toolbar')),
           })),
-          { bars: 1, btns: 22, attached: true },
-          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
+          { bars: 1, btns: 23, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 23 buttons, still on document.body');
 
         assert.strictEqual(
           await page.evaluate(() =>
