@@ -208,6 +208,25 @@ assert.ok(!/attachGutters/.test(src), 'client.js must not reference the removed 
 // selected element, 'showBarFor'/'dismissBar'/'updateBarButtons' were its
 // whole lifecycle, 'ed-bar' its own root class), so resurrecting the bar
 // without tripping this list is not possible.
+//
+// v3.3.0: the converse is NOT true, and it costs a whole suite run when it
+// happens. These are bare substrings, and 'ed-bar' sits inside the ordinary
+// English word 'fix' + 'ed-bar' — so a COMMENT in client.js that says
+// something about the fixed toolbar trips this assertion with nothing
+// resurrected at all. That is exactly how it was tripped: a comment added
+// beside updateToolbar()'s signature diff read "no fixed-bar button speaks
+// for", and `npm test` came back with 'client.js must NOT reference the
+// retired ed-bar'. It was reworded, not excused.
+//
+// Do NOT loosen these into word-boundary patterns to make that go away. The
+// guard's job is to be impossible to slip past, and a \b anchor is exactly
+// the kind of loophole a resurrection would come back through
+// (`class="edBar"`, `ed-bar-2`, a template that concatenates the name). The
+// cost of the collision is one reworded sentence; the cost of a porous guard
+// is the retirement itself. If you are here because this assertion just fired,
+// read the offending line first — a prose word is the likelier cause than a
+// resurrection, and 'ed-bar' / 'dismissBar' / 'showBarFor' /
+// 'updateBarButtons' are all substrings that ordinary prose can produce.
 for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
                       'selectedBlockEl', 'dismissBar', 'showBarFor', 'updateBarButtons']) {
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
@@ -228,15 +247,18 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
 // means some site got the assignment but not the try/finally).
 {
   const setTrueSites = src.match(/suppressTableFocusout = true;/g) || [];
-  assert.strictEqual(setTrueSites.length, 4,
-    'expected exactly 4 suppressTableFocusout = true sites: tableBurstUndo and tableBurstRedo ' +
+  assert.strictEqual(setTrueSites.length, 5,
+    'expected exactly 5 suppressTableFocusout = true sites: tableBurstUndo and tableBurstRedo ' +
     '(each guarding `tableEl.innerHTML = state`), performRowDrop\'s rebuildTableSections() ' +
     'call (Task 6 — a row drop is a pure move, so the thead/tbody rebuild detaches the cell that ' +
     'currently holds focus and Chromium fires a synchronous focusout mid-mutation, exactly the ' +
-    'quirk the other two guard), plus performColDrop\'s per-row cell-reorder loop (Task 8 — a ' +
+    'quirk the other two guard), performColDrop\'s per-row cell-reorder loop (Task 8 — a ' +
     'column drop appends every row\'s moved cell back via appendChild(), which detaches the ' +
-    'currently-focused cell the same way) — if a new site is ever added, update this count ' +
-    'deliberately and audit it for the same guard');
+    'currently-focused cell the same way), plus restoreDiscardedBurst\'s table branch (T21 item ' +
+    '1 — putting an Escaped table burst back is the same whole-table innerHTML swap tableBurstUndo ' +
+    'does, and it was DRIVEN: activeElement went TD.ed-wys-cell -> BODY with a blur and a focusout ' +
+    'fired synchronously inside the assignment, with the burst deliberately still live) — if a new ' +
+    'site is ever added, update this count deliberately and audit it for the same guard');
   const guardedSites = src.match(
     /suppressTableFocusout = true;\s*try\s*\{[\s\S]*?\}\s*finally\s*\{\s*suppressTableFocusout = false;\s*\}/g
   ) || [];

@@ -155,7 +155,7 @@ for (const f of fixtures) {
 }
 
 // --- mutation-kill anchor -----------------------------------------------
-// (documented in task-D-report.md: forcing fromSource to always return
+// (forcing fromSource to always return
 // changed: true unconditionally -- collapsing the 3-arg content-diff
 // branch too -- is caught by the first 3-arg round-trip fixture assertion
 // above -- `result3.changed === false` -- which fails immediately.)

@@ -278,4 +278,225 @@ assert.deepStrictEqual(
   });
 }
 
+// ── N4: a trailing space on a nested list's last line ──────────────────────
+//
+// marked strips the trailing spaces off a nested list token's `raw` but keeps
+// them in the enclosing `item.text`, so childListStartOffsets()'s byte-for-byte
+// indexOf() missed and fell back to "the line the cursor is already on" — line
+// offset 0. That gave the parent an INVERTED range and shifted every descendant
+// UP one line, which is what let a commit against the empty item replay the
+// item above it.
+//
+// Provenance of the three shapes, which is not uniform:
+//   * the first two are the markdown test/editor-journey.test.js drives. It
+//     presses Enter on each of them and then Tab on the first one again — three
+//     rows over two strings, a split this tier cannot express, which is why the
+//     two strings earn only one entry apiece here;
+//   * the third is not a journey fixture at all. It came out of client.js's OWN
+//     serialiser: capturing every markdown string a full journey run handed
+//     buildBlockMap() turned up '# H\n\n- alpha\n  - beta\n    - \n- gamma\n'
+//     arriving from the client mid-session, and it mapped to an inverted range
+//     under the old search. A three-level shape is pinned here because that is
+//     where the defect was found in the wild, not because a journey row types it.
+{
+  [
+    ['# H\n\n- alpha\n  - beta\n  - \n- gamma\n', 'empty last item'],
+    ['# H\n\n- alpha\n  - beta\n  - x \n- gamma\n', 'non-empty last item'],
+    ['- alpha\n  - beta\n    - deep \n- gamma\n', 'three levels deep'],
+  ].forEach(([md, label]) => {
+    const bs = buildBlockMap(md).blocks;
+    bs.forEach((b) => {
+      assert.ok(b.endLine >= b.startLine,
+        label + ' ' + JSON.stringify(md) + ': block ' + b.id +
+        ' must have a well-formed range, got [' + b.startLine + '-' + b.endLine + ']');
+      assert.strictEqual(b.unlocatable, undefined,
+        label + ' ' + JSON.stringify(md) + ': block ' + b.id +
+        ' is locatable, so it must carry no unlocatable flag');
+    });
+    // Ranges must also be RIGHT, not merely well-formed. "startLine names A
+    // marker line" is NOT that check and does not belong here: the pre-fix map
+    // shifted the descendants up by one, which lands them on the marker line of
+    // the item ABOVE — still a marker line, so a test phrased that way is green
+    // on the very build it is supposed to catch (measured).
+    //
+    // The check that bites: in each of these shapes every item owns exactly one
+    // source line and the blocks come out in document order, so the k-th li
+    // block must own the k-th MARKER LINE of the source, start and end.
+    //
+    // That is NOT a general rule about block maps, and the difference matters to
+    // whoever adds the fourth fixture. Four shapes produce a CORRECT map that
+    // this invariant would call wrong, and each is checked for below:
+    //
+    //   '- a\n  cont\n- b\n'      indented continuation — the item owns two
+    //                             lines, so the endLine half breaks.
+    //   '- a\ncont\n- b\n'        lazy continuation, unindented — same, and it
+    //                             slips past an indent-based check.
+    //   a fence holding '- fake'  the marker scan below counts a line no li
+    //                             owns, so the startLine half breaks. At any
+    //                             indent: a top-level fence is not indented, so
+    //                             the fence check is the only one that sees it.
+    //   '- - a\n- b\n'            same-line nesting — TWO items begin on one
+    //                             marker line, so there are more li blocks than
+    //                             marker lines. Not hypothetical: this very file
+    //                             fixtures that shape a few assertions down.
+    //
+    // Asserting the fixture's shape first means a fourth fixture fails HERE,
+    // with a message naming the shape, instead of failing the invariant with a
+    // confusing one that sends the next person into blockmap.js.
+    const lines = md.split('\n');
+    const isMarkerLine = (ln) => /^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln);
+    const contentLines = lines.filter((ln) =>
+      ln !== '' && /^[ \t]/.test(ln) && !isMarkerLine(ln));
+    assert.deepStrictEqual(contentLines, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — every indented line must itself be a list marker. An ' +
+      'indented line that is not one is item content (a continuation, or a line ' +
+      'inside a fence), which means some item owns more than one line and the ' +
+      'invariant no longer describes a correct map. Got ' +
+      JSON.stringify(contentLines));
+    const fences = lines.filter((ln) => /^\s*(?:```|~~~)/.test(ln));
+    assert.deepStrictEqual(fences, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no fenced block, at any indent. A fence can hold a line ' +
+      'that looks like a marker to the scan below but belongs to no li. Got ' +
+      JSON.stringify(fences));
+    const sameLineNests = lines.filter((ln) =>
+      /^\s*(?:[-*+]|\d+[.)])\s+(?:[-*+]|\d+[.)])(\s|$)/.test(ln));
+    assert.deepStrictEqual(sameLineNests, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no same-line nesting. Two items beginning on one line ' +
+      'means more li blocks than marker lines, and the outer one owns no line at ' +
+      'all. Got ' + JSON.stringify(sameLineNests));
+    const lazyLines = [];
+    let inListLine = false;
+    lines.forEach((ln) => {
+      if (ln.trim() === '') { inListLine = false; return; }
+      if (isMarkerLine(ln)) { inListLine = true; return; }
+      // Unindented, non-blank, straight after a list line: CommonMark folds it
+      // into that item (lazy continuation), so the item owns two lines while
+      // staying invisible to the indent check above.
+      if (inListLine && !/^[ \t]/.test(ln)) { lazyLines.push(ln); return; }
+      inListLine = false;
+    });
+    assert.deepStrictEqual(lazyLines, [],
+      label + ' ' + JSON.stringify(md) + ': PRECONDITION for the marker-line ' +
+      'invariant below — no lazy (unindented) continuation. Got ' +
+      JSON.stringify(lazyLines));
+    const markerLines = [];
+    lines.forEach((ln, i) => {
+      if (/^\s*(?:[-*+]|\d+[.)])(\s|$)/.test(ln)) markerLines.push(i + 1);
+    });
+    const lis = bs.filter((b) => b.type === 'li');
+    assert.deepStrictEqual(lis.map((b) => b.startLine), markerLines,
+      label + ' ' + JSON.stringify(md) + ': the li blocks must START on the ' +
+      'marker lines of the source, in order — got ' +
+      JSON.stringify(lis.map((b) => b.startLine)) + ', source marker lines are ' +
+      JSON.stringify(markerLines) + '. A startLine one line early IS the defect: ' +
+      'it addresses the item ABOVE, and a commit replays that item\'s source');
+    assert.deepStrictEqual(lis.map((b) => b.endLine), markerLines,
+      label + ' ' + JSON.stringify(md) + ': every item here owns exactly its own ' +
+      'one line, so endLine must equal that same marker line — got ' +
+      JSON.stringify(lis.map((b) => b.endLine)));
+  });
+  // The specific corruption, spelled out: with the trailing space, 'beta' is on
+  // source line 4 and the empty item on line 5. Before the fix the map said 3
+  // and 4, so editing the empty item wrote over beta.
+  const bs = buildBlockMap('# H\n\n- alpha\n  - beta\n  - \n- gamma\n').blocks
+    .filter((b) => b.type === 'li').map((b) => [b.startLine, b.endLine]);
+  assert.deepStrictEqual(bs, [[3, 3], [4, 4], [5, 5], [6, 6]],
+    'the four items own lines 3/4/5/6 one apiece');
+}
+
+// ── N4: same-line nesting keeps its empty range and stays UNFLAGGED ─────────
+//
+// '- - a' produces endLine === startLine - 1 too, but for a completely
+// different reason: that item genuinely owns no line. It is a modelled shape,
+// not a degraded one, and client.js picks its refusal wording off this flag —
+// so flagging it would tell the user their document could not be located when
+// it could.
+{
+  ['- - a\n', '- 1. a\n', '* + b\n', '1. - c\n'].forEach((md) => {
+    const lis = buildBlockMap(md).blocks.filter((b) => b.type === 'li');
+    assert.strictEqual(lis[0].endLine, lis[0].startLine - 1,
+      JSON.stringify(md) + ': the outer item still has an empty range');
+    lis.forEach((b) => {
+      assert.strictEqual(b.unlocatable, undefined,
+        JSON.stringify(md) + ': block ' + b.id + ' must carry NO unlocatable flag — ' +
+        'an empty range is not by itself a degradation');
+    });
+  });
+}
+
+// ── N4: the degraded-subtree path, driven through the REAL search ──────────
+//
+// Every `unlocatable === undefined` assertion above is negative: they would all
+// stay green forever if the field were renamed, or if it stopped being set at
+// all. This is their positive counterpart, and it does not stub the flag onto
+// a record — it makes the real childListStartOffsets() search genuinely fail, by
+// perturbing what marked hands it, and then asserts on what the real
+// pushListItemBlocks() does about that.
+//
+// Prefixing a nested list token's `raw` with text that appears nowhere in the
+// parent's own `item.text` is exactly the condition the widened search cannot
+// recover from, so `at < 0` is reached the same way an unmodelled shape would
+// reach it.
+{
+  const { marked } = require('marked');
+  const realLexer = marked.lexer;
+  let blocks;
+  try {
+    marked.lexer = function () {
+      const toks = realLexer.apply(this, arguments);
+      const walk = (lt) => {
+        for (const it of lt.items || []) {
+          for (const tk of it.tokens || []) {
+            if (tk.type === 'list') { tk.raw = ' UNFINDABLE\n' + tk.raw; walk(tk); }
+          }
+        }
+      };
+      for (const t of toks) if (t.type === 'list') walk(t);
+      return toks;
+    };
+    blocks = buildBlockMap('- alpha\n  - beta\n    - deep\n- gamma\n').blocks;
+  } finally {
+    marked.lexer = realLexer;
+  }
+  // Ruling T4-0: degrade, never skip. lib/md2doc.js's edit-mode render walk
+  // throws on `biRef.v !== blocks.length`, so a dropped block takes the whole
+  // document down — worse than the defect it would be degrading around.
+  assert.strictEqual(blocks.length, 4,
+    'all four items must still be emitted when the search fails — a missing ' +
+    'block desynchronises the render walk, got ' + JSON.stringify(blocks));
+  const flagged = blocks.filter((b) => b.unlocatable === true).map((b) => b.indent);
+  assert.deepStrictEqual(flagged, [0, 1, 2],
+    'the WHOLE subtree under the unlocatable child degrades — the parent whose ' +
+    'search failed and every descendant built off its guessed offset, got ' +
+    JSON.stringify(blocks));
+  // Addressed by POSITION, not by filtering on the flag. Filtering meant the
+  // loop body ran zero times on a build that sets no flag — an assertion that
+  // asserts nothing on exactly the build it is meant to catch. The first three
+  // blocks ARE the subtree (C1 has just pinned the count at four, and the walk
+  // emits parent-then-descendants before the next sibling), so this runs
+  // everywhere and reds on a build that leaves them addressing real lines.
+  blocks.slice(0, 3).forEach((b) => {
+    assert.ok(b.endLine < b.startLine,
+      'every block of the degraded subtree must carry an EMPTY range, so ' +
+      'client.js\'s blockOwnsNoLine() refuses it at every arming and commit ' +
+      'boundary, got [' + b.startLine + '-' + b.endLine + ']');
+  });
+  // The sibling is NOT collateral: its cursor advance comes from `item.raw`'s
+  // newline count, which the failed search never touched.
+  const gamma = blocks[3];
+  assert.strictEqual(gamma.unlocatable, undefined,
+    '- gamma has no unlocatable child of its own and must not be flagged');
+  assert.deepStrictEqual([gamma.startLine, gamma.endLine], [4, 4],
+    '- gamma keeps its real, editable range while its sibling subtree degrades');
+  // The perturbation must be gone: everything after this point in the file — and
+  // every other test sharing this process — uses the real lexer again.
+  const sane = buildBlockMap('- alpha\n  - beta\n- gamma\n').blocks;
+  assert.strictEqual(sane.filter((b) => b.unlocatable).length, 0,
+    'the lexer wrapper must be restored — a leaked one would degrade every ' +
+    'nested list mapped after it, got ' + JSON.stringify(sane));
+}
+
 console.log('blockmap.test.js OK');

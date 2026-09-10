@@ -63,6 +63,10 @@ for the cursor-anchored zoom maths.
 
 Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tbody td:first-child` + `thead th:first-child`. Zebra-stripe and header overrides are kept in source-order to win cascade. Don't reorder them.
 
+## Editor Client — Guarded Retired-Name Substrings
+
+`test/editor-client.test.js` asserts `lib/editor/client.js` contains none of a list of bare substrings naming retired editor-bar internals (`ed-bar`, `attachGutters`, `dismissBar`, etc., matched with plain `includes`, not word boundaries) — ordinary prose can trip it (a comment mentioning "fixed-bar" once reddened the whole suite via `ed-bar`), so grep that guarded list before committing a new comment into `client.js`.
+
 ## Do NOT Stage
 
 - `docs/superpowers/specs/`, `docs/superpowers/plans/` — local working state from brainstorming / writing-plans skills. Not for the repo (already in `.gitignore`? — if not, the rule still stands).
