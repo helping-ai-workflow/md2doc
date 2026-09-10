@@ -3036,10 +3036,13 @@ async function main() {
     console.log('journey: T11-2 step5 source mode hides the drawer TOC and search-results, keeps reader-tools — OK');
   }
 
-  // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時）──────────
-  // 實測：抽屜打開時 body 仍然可以捲（overflow 是 `clip visible`，scrollY
-  // 真的從 0 走到 1938），而兩者被捲動會動到的那個軸都定死在視窗上，所以
-  // 捲動之後位置一格都沒動：
+  // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時仍可見）──────
+  // window.scrollBy() cannot stand in for a real gesture under
+  // overflow:hidden — see the lightbox lock row below, which measured this
+  // first: it moves the page BY DEFINITION regardless of the CSS lock, so it
+  // is the right tool for "does the overlay survive a scroll" and the wrong
+  // one for "is scrolling actually blocked". This row keeps window.scrollBy()
+  // for exactly the former question; the lock itself is a separate row below.
   //   .sidebar-scrim   `inset: 0` —— 四個邊都定死。
   //   .reader-sidebar  只定死 top / left / bottom 三個邊（lib/md2doc.js
   //                    :2104），寬度是 `width: 85%; max-width: 360px`。
@@ -3068,6 +3071,78 @@ async function main() {
     }
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .sidebar-scrim / .reader-sidebar stay live across a scroll — OK');
+  }
+
+  // ── lock：窄視窗抽屜打開時真實手勢不得捲動底下的文件 ────────────────
+  // Task 11 (backlog #12): body[data-sidebar-open] / html[data-sidebar-open]
+  // both go `overflow: hidden`, mirroring the lightbox's own two-rule shape
+  // a few hundred lines below (body[data-lightbox-open] /
+  // html[data-lightbox-open], next to the 'overflow-x: clip' comment) and for
+  // the identical reason: documentElement, not body, is the element a real
+  // gesture scrolls, so a body-only rule would not have closed the gap. JS
+  // mirrors data-sidebar-open onto documentElement in setSidebarOpen(),
+  // matching openLightbox/closeLightbox.
+  //
+  // This is a MISSING lock, not a defeated one: there was never any rule
+  // here before this task, and the row above never covered it — it only
+  // ever asked whether the overlays kept their viewport position, using
+  // window.scrollBy(), which (per the comment on that row) moves the page
+  // regardless of any lock. PageDown / End go through page.keyboard.press(),
+  // which drives the real input pipeline the lock is meant to stop.
+  {
+    const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 800, height: 800 });
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Precondition: the same PageDown must move the page BEFORE the drawer
+    // opens. Without this, a fixture that stopped being taller than the
+    // viewport would leave scrollY at 0 before and after, and the
+    // locked-state assertions below would pass for the wrong reason.
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const preOpenY = await ctx.page.evaluate(() => window.scrollY);
+    assert.ok(preOpenY > 0,
+      '前提失敗：抽屜關著時 PageDown 沒有真的捲動文件（scrollY=' + preOpenY +
+      '），下面「鎖住」的斷言測不到東西');
+
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    // .sidebar-toggle 在 edit 模式下被 .ed-toolbar（z-index 101 > 100）蓋住，
+    // 滑鼠點不到它，用 DOM click 繞過（見上面那一列的同一段註解）。
+    await ctx.page.evaluate(() => document.querySelector('.sidebar-toggle').click());
+    await new Promise((r) => setTimeout(r, 450));
+    const open = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
+    assert.notStrictEqual(open, null, '前提失敗：抽屜沒有打開');
+
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterPageDown = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterPageDown, 0,
+      '抽屜開著時 PageDown 不得捲動底下的文件，got ' + afterPageDown);
+
+    // End jumps straight to the bottom instead of advancing by a viewport at
+    // a time — a different code path from PageDown, checked separately.
+    await ctx.page.keyboard.press('End');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterEnd = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterEnd, 0,
+      '抽屜開著時 End 不得捲動底下的文件，got ' + afterEnd);
+
+    // Closing the drawer must release the lock — otherwise the fix would
+    // have traded one stuck state (unlocked-forever) for another
+    // (locked-forever).
+    await ctx.page.evaluate(() => document.querySelector('.sidebar-scrim').click());
+    await new Promise((r) => setTimeout(r, 300));
+    const closedAttr = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
+    assert.strictEqual(closedAttr, null, '抽屜必須真的關上，scrim 點擊沒有生效');
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterClose = await ctx.page.evaluate(() => window.scrollY);
+    assert.ok(afterClose > 0,
+      '抽屜關上後 PageDown 必須恢復正常捲動，got ' + afterClose);
+
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the sidebar drawer actually locks the page behind it — OK');
   }
 
   // ── live：.lightbox ─────────────────────────────────────────────────
