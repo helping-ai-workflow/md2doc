@@ -22,6 +22,14 @@
 // 補表時的機械檢查因此是兩題，兩題都答完才算收完一列：
 //   Q1 這個函式有沒有 table / 非 table 的對稱雙胞胎？雙胞胎收了沒？
 //   Q2 這個【函式裡】還有沒有第二行會寫 DOM 的敘述？本列記的是哪一行？
+// ⚠ 2026-09-10（T21）第三種漏法，跟上面那一種不同、也要按名字查：「只數了
+// burst / table 那幾個函式，沒數選取工具列那條路上的行內手術」。extractRangeInto()
+// 的 `el.appendChild(range.extractContents())` 與 dropEmptied() 的
+// `x.el.parentNode.removeChild(x.el)` 從本分支加進來就一直不在表上 —— 它們不在
+// 任何 burst 函式裡，兩題機械檢查（雙胞胎、同函式第二行）都問不到它們。第三題
+// 因此是：Q3 這一版新增/改動的程式碼裡，還有沒有【不在 burst 家族】但會寫 DOM
+// 的敘述？本輪同時補進 T21 item 1 自己新增的兩個站點（restoreDiscardedBurst()
+// 的兩支），總數 25 -> 29。
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -56,6 +64,8 @@ const CENSUS = [
     why: '(b) lexical —— 在 suppressTableFocusout = true/false 這對指派之間；T3 測到 sup=[true,false]' },
   { fn: 'tableBurstRedo()', needle: 'tableEl.innerHTML = state;', disposition: 'b',
     why: '(b) lexical —— 同一個 suppressTableFocusout span；T3 測到 sup=[true,false]' },
+  { fn: 'restoreDiscardedBurst() 的表格分支', needle: 'tableEl.innerHTML = typed;', disposition: 'b',
+    why: '(b) lexical —— tableBurstUndo() 的雙胞胎（T21 item 1 新增），寫在自己的 suppressTableFocusout = true/false 之間。這一個【確實會 detach】而且量得到：實測 Escape → Ctrl+Z 在儲存格上，賦值當下 activeElement 由 TD.ed-wys-cell 變成 BODY 並同步送出 blur + focusout（驅動的手勢是「在儲存格裡打字 → Escape → Ctrl+Z」）—— 拿掉那對旗標，這一發 focusout 會在 burst 還活著的時候走進 resolveBurst()' },
   { fn: 'retagCell()', needle: 'next.appendChild(cell.firstChild);', disposition: 'b',
     why: '(b) DYNAMIC —— 只有透過呼叫者 rebuildTableSections()（再上一層 performRowDrop()）開的 suppressTableFocusout span 才被抑制，本身不在任何 span 的語彙範圍內' },
   { fn: 'rebuildTableSections()', needle: '(i === 0 ? thead : tbody).appendChild(row);', disposition: 'b',
@@ -138,8 +148,14 @@ const CENSUS = [
     why: '(d) —— editEl 是聚焦的 .ed-wys-armed 本身，賦值只換掉它的子樹；probe 情境 1/4 實測賦值前後 activeElement 不變、零 focus 事件、零 /api/render。下一行的 placeCaretAtEnd(editEl) 收的是被塌成 (editEl, 0) 的插入符（該函式沒呼叫 focus()），不是焦點。needle 與 burstRedo() 逐字相同 —— 兩個函式真的共用這一行內容' },
   { fn: 'burstRedo()（tableBurstRedo() 的平版雙胞胎）', needle: 'editEl.innerHTML = state;', disposition: 'd',
     why: '(d) —— 與 burstUndo() 逐行對稱（burst.history.redo() 取代 undo()），同樣寫在聚焦的 editEl 自己身上、同樣接一行 placeCaretAtEnd(editEl)；probe 情境 2 實測賦值前後 activeElement 不變、零 focus 事件、零 /api/render' },
+  { fn: 'extractRangeInto()', needle: 'el.appendChild(range.extractContents());', disposition: 'd',
+    why: '(d) —— 抽出的是聚焦面的【子樹】，聚焦元素本身沒動。T21 逐一驅動三種 range 形狀（純文字中段、起點落在 <em> 內、起點落在 <a> 內），每一次都在賦值前後各讀一次 document.activeElement 並在 capture 期記 focus/focusin/blur/focusout：三種都是 before=after=P.ed-wys-armed、零 focus 事件。這一列是【本分支新增】的站點，v3.3.0 之前不存在' },
+  { fn: 'dropEmptied()', needle: 'x.el.parentNode.removeChild(x.el);', disposition: 'd',
+    why: '(d) —— 被移除的是抽取後空掉的行內標記，不是聚焦元素。實測兩種：<em>（起點在 em 內、終點跨出去）與【<a>】（起點在連結【前】的文字、終點停在連結文字結尾 —— 這是唯一能讓 <a> 真的空掉、而 insertNode 又不落在它裡面的形狀）。兩次都是 before=after=P.ed-wys-armed、零 focus 事件。⚠ <a> 是可聚焦元素，所以這一列的安全性【建立在焦點永遠不落在行內元素上】：實測連刻意呼叫 a.focus() 都做不到（contenteditable 的 host 把焦點收走了，activeElement 仍是 P），但哪天焦點真的能落在行內，這一列就要從 (d) 改成 (b)。這一列是【本分支新增】的站點' },
+  { fn: 'restoreDiscardedBurst() 的非表格分支', needle: 'd.editEl.innerHTML = typed;', disposition: 'd',
+    why: '(d) —— burstUndo() 的第三個雙胞胎（T21 item 1 新增）：d.editEl 就是聚焦的 .ed-wys-armed 本身，賦值只換掉子樹。實測 Escape → Ctrl+Z 這一手勢：before=after=P.ed-wys-armed、零 focus 事件。下一行的 placeCaretAtEnd(d.editEl) 收的一樣是插入符不是焦點' },
   { fn: 'revertBurstAndEnd() 的 innerHTML 寫入（不是它下面那行 blur()）', needle: 'editEl.innerHTML = burst.original;', disposition: 'd',
-    why: '(d) —— 這一行跑在同函式的 `currentBurst = null;` 【之前】（順序是 history.dispose() → innerHTML → currentBurst = null → ... → blur()），所以上面那列 blur() 站點「已先歸零」的理由蓋不到它；它安全的理由不同：editEl 就是聚焦面本身。probe 情境 3 實測 Escape 當下這次賦值零 focusout、磁碟未被寫，該手勢唯一的 blur/focusout 出現在賦值之後、來自那行明寫的 editEl.blur()。這裡沒有 placeCaretAtEnd() —— 它不需要插入符，下一步就是 blur' },
+    why: '(d) —— 這一行跑在同函式的 `currentBurst = null;` 【之前】（T21 item 1 之後的順序是 history.flushTyping() → innerHTML → history.snap() → 存進 discardedBurst → currentBurst = null → ... → blur()；v3.3.0 之前第一步是 history.dispose()，改成保留是因為 Escape 丟掉的字現在要能被下一個 Ctrl+Z 拿回來），所以上面那列 blur() 站點「已先歸零」的理由蓋不到它；它安全的理由不同：editEl 就是聚焦面本身。probe 情境 3 實測 Escape 當下這次賦值零 focusout、磁碟未被寫，該手勢唯一的 blur/focusout 出現在賦值之後、來自那行明寫的 editEl.blur()。這裡沒有 placeCaretAtEnd() —— 它不需要插入符，下一步就是 blur' },
 ];
 
 let checks = 0;
@@ -160,12 +176,13 @@ assert.strictEqual(CENSUS.filter((r) => r.disposition === 'a').length >= 6, true
 
 // (d) 家族（純 d 與 b+d）。2026-09-06 補表補進來的四列就是這四個，數字釘住的是
 // 「table 變體有、平版沒有」那個漏法不會再默默發生一次。
-assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 4,
-  'census: (d) 家族應為 4 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
-  'innerHTML 寫入 / handleLiKeydown 空項目 Enter 的 textEl 清空）');
+assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 7,
+  'census: (d) 家族應為 7 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
+  'innerHTML 寫入 / handleLiKeydown 空項目 Enter 的 textEl 清空 / extractRangeInto / ' +
+  'dropEmptied / restoreDiscardedBurst 的非表格分支）');
 
-assert.strictEqual(CENSUS.length, 25,
-  'census: 站點總數應為 25。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
+assert.strictEqual(CENSUS.length, 29,
+  'census: 站點總數應為 29。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
   'commit message 說明是哪一個站點 —— 這條斷言存在的唯一理由是讓「表悄悄變短或 ' +
   '變長」變成紅燈。');
 

@@ -472,6 +472,157 @@ async function main() {
     console.log('journey: R1 Escape discards, never commits — OK');
   }
 
+  // ── T21 item 1: Escape still discards, and Ctrl+Z brings it back ──────
+  //
+  // Escape meaning "throw this away" is not what changed and is not what
+  // these rows are about — R1 above still pins it, and the first assertion in
+  // each row here re-states it. What changed is that the throw-away was
+  // final: driven on this branch on all three burst surfaces, Ctrl+Z ×3 and
+  // Ctrl+Y ×3 after an Escape all left the typing gone, and the title had
+  // gone back to 'doc', so the close-the-tab guard was off over it as well
+  // The dropped Alt+F10 cursor is what puts
+  // people here — Escape is the documented way out of the toolbar, and by
+  // the time they press it the cursor is usually already gone — but the loss
+  // is reachable from a plain Escape with no toolbar involved at all, which
+  // is what these rows drive.
+  //
+  // The save at the end of each row is the half that a DOM-only check would
+  // miss: the restored text has to be a live edit that COMMITS, not a
+  // repaint. It is what pins restoreDiscardedBurst()'s focus-then-write
+  // order — write first and the restored text becomes the new burst
+  // baseline, and resolveBurst()'s zero-edit guard drops it on the way out.
+  {
+    const doc = '# Doc\n\nAlpha paragraph.\n\n- alpha\n  - beta\n\n| A | B |\n| --- | --- |\n| one | two |\n';
+    const cases = [
+      { label: 'paragraph',
+        sel: '.ed-block[data-block-type="paragraph"] .ed-wys-armed',
+        read: '.ed-block[data-block-type="paragraph"] .ed-wys-armed',
+        base: 'Alpha paragraph.', typed: ' MYWORDS' },
+      { label: 'list item',
+        sel: '.ed-block[data-block-type="li"][data-indent="1"] .ed-li-text',
+        read: '.ed-block[data-block-type="li"][data-indent="1"] .ed-li-text',
+        base: 'beta', typed: 'LIWORDS' },
+      { label: 'table cell',
+        sel: '.ed-block[data-block-type="table"] tbody td',
+        read: '.ed-block[data-block-type="table"] tbody td',
+        base: 'one', typed: 'CELLWORDS' },
+    ];
+    for (const t of cases) {
+      const ctx = await newPage(doc);
+      const readText = () => ctx.page.evaluate((s2) => {
+        const el = document.querySelector(s2);
+        return el ? el.textContent.trim() : null;
+      }, t.read);
+      const title = () => ctx.page.evaluate(() => document.title);
+
+      await ctx.page.click(t.sel);
+      await new Promise((r) => setTimeout(r, 250));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('End');
+      await ctx.page.keyboard.up('Control');
+      await ctx.page.keyboard.type(t.typed);
+      await new Promise((r) => setTimeout(r, 250));
+      assert.ok((await readText()).indexOf(t.typed.trim()) !== -1,
+        t.label + '：前提失敗 —— 打的字沒進到編輯面，got ' + JSON.stringify(await readText()));
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 350));
+      assert.strictEqual(await readText(), t.base,
+        t.label + '：Escape 仍然必須丟棄（這一版沒有改變它的意思），got ' +
+        JSON.stringify(await readText()));
+
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok((await readText() || '').indexOf(t.typed.trim()) !== -1,
+        t.label + '：Escape 之後的 Ctrl+Z 必須把打的字帶回來，got ' +
+        JSON.stringify(await readText()));
+      assert.ok((await title()).indexOf('●') === 0,
+        t.label + '：帶回來的字是還沒提交的編輯，標題必須重新亮髒點（否則關分頁的' +
+        '守衛對它是關的），got ' + JSON.stringify(await title()));
+
+      // A second Ctrl+Z steps back through the same burst history to the
+      // pre-edit baseline — the stash hands the history back, it does not
+      // spend it.
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await readText(), t.base,
+        t.label + '：帶回來之後再 Ctrl+Z 必須退回打字前的基準，got ' +
+        JSON.stringify(await readText()));
+
+      // ...and Ctrl+Y forward again, then save: the restored text must reach
+      // disk, which is what makes it an edit rather than a repaint.
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 400));
+      const disk = await saveAndRead(ctx);
+      assert.ok(disk.indexOf(t.typed.trim()) !== -1,
+        t.label + '：帶回來的字必須是活的編輯 —— Ctrl+S 之後要在磁碟上，got:\n' + disk);
+      assert.strictEqual(ctx.errs.length, 0, t.label + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: T21 Escape discards and Ctrl+Z brings it back, on all three burst surfaces — OK');
+  }
+
+  // The other side of the same switch: an Escape that discarded NOTHING must
+  // not eat the Ctrl+Z after it. The stash exists for every Escape, so
+  // without restoreDiscardedBurst()'s "the history had only its baseline"
+  // answer this row's Ctrl+Z would be swallowed and the committed edit before
+  // it would stay on screen.
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    // Real clicks, not element.click(): a synthetic click on a contenteditable
+    // dispatches the event without moving focus, so the typing below would go
+    // to BODY and this row would measure nothing. Selected by block id rather
+    // than by nth match for the same reason of being explicit — 0 is the
+    // heading, 1 and 2 are the two paragraphs.
+    const first = '.ed-block[data-block-id="1"] .ed-wys-armed';
+    const second = '.ed-block[data-block-id="2"] .ed-wys-armed';
+    await ctx.page.click(first);
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.up('Control');
+    await ctx.page.keyboard.type(' COMMITTED');
+    await new Promise((r) => setTimeout(r, 250));
+    // Leave the block: the edit is committed and pushed onto the document stack.
+    await ctx.page.click(second);
+    await new Promise((r) => setTimeout(r, 900));
+    const readFirst = () => ctx.page.evaluate((s2) => {
+      const el = document.querySelector(s2);
+      return el ? el.textContent.trim() : null;
+    }, first);
+    const beforeEsc = await readFirst();
+    assert.ok(beforeEsc.indexOf('COMMITTED') !== -1,
+      '前提失敗：第一段的編輯應該已經提交，got ' + JSON.stringify(beforeEsc));
+
+    // Escape out of the second paragraph without having touched it. The
+    // precondition matters: if the commit's re-render had dropped focus, the
+    // Escape would reach no burst at all and this row would pass while
+    // measuring nothing.
+    const activeBeforeEsc = await ctx.page.evaluate(() =>
+      document.activeElement ? String(document.activeElement.className || '') : null);
+    assert.ok(String(activeBeforeEsc).indexOf('ed-wys-armed') !== -1,
+      '前提失敗：Escape 之前焦點必須還在第二段的編輯面上，got ' + JSON.stringify(activeBeforeEsc));
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 700));
+    const afterUndo = await readFirst();
+    assert.strictEqual(afterUndo, 'Alpha paragraph.',
+      '空的 Escape 不得吃掉後面那個 Ctrl+Z —— 文件層的 undo 必須照跑，got ' +
+      JSON.stringify(afterUndo));
+    assert.strictEqual(ctx.errs.length, 0, '空 Escape：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: T21 an Escape that discarded nothing leaves Ctrl+Z alone — OK');
+  }
+
   // ── openRawViaGutter: ⠿ → MD 原始碼 on a TABLE burst must discard ─────
   {
     const ctx = await newPage('# Doc\n\nAnchor para.\n\n| A | B |\n| --- | --- |\n| one | two |\n\nTail para.\n');
@@ -2706,6 +2857,55 @@ async function main() {
       'edit 模式輸出必須含 T11-2 的 override，否則上面 gone 斷言測到的東西和真正出貨的 HTML 不是同一份');
   }
   console.log('journey: T11-2 .sidebar-toggle survives in reader, is gone in edit — OK');
+
+  // ── T21 item 4: the page reserves the toolbar's band and nothing else ──
+  // The row T11-2 never grew. editModeLayoutCss hid .sidebar-toggle but its
+  // '@media (max-width: 1080px)' rule went on reserving the 60px that button
+  // used to occupy, on top of the toolbar's own --ed-toolbar-h. Nothing
+  // measured .page-layout, so three green batches went past it. Measured on
+  // that build: padding-top 104px against a
+  // 44px toolbar at 1080/1000/800, i.e. a 60px band with nothing painted in
+  // it, and a 105px toolbar-bottom-to-first-block gap there against 45px at
+  // 1200 wide.
+  //
+  // The reservation is checked against the toolbar's OWN measured height
+  // rather than a literal 44: the point is that the page clears the fixed
+  // chrome it actually has, which is what stays true if --ed-toolbar-h is
+  // ever retuned. The display check on .sidebar-toggle is the licence for
+  // the small number — a build that shows that button again at these widths
+  // needs its 60px back, and must fail here rather than silently overlap.
+  {
+    const ctx = await newPage('# H\n\n## Sub\n\nAlpha.\n');
+    const widths = [1400, 1081, 1080, 800];
+    const bands = {};
+    for (const w of widths) {
+      await ctx.page.setViewport({ width: w, height: 800 });
+      await new Promise((r) => setTimeout(r, 250));
+      bands[w] = await ctx.page.evaluate(() => {
+        const pl = document.querySelector('.page-layout');
+        const tb = document.querySelector('.ed-toolbar');
+        const tg = document.querySelector('.sidebar-toggle');
+        return {
+          paddingTop: Math.round(parseFloat(getComputedStyle(pl).paddingTop) || 0),
+          toolbarH: tb ? Math.round(tb.getBoundingClientRect().height) : null,
+          toggleDisplay: tg ? getComputedStyle(tg).display : '(absent)',
+        };
+      });
+    }
+    for (const w of widths) {
+      assert.strictEqual(bands[w].toggleDisplay, 'none',
+        w + '×800：.sidebar-toggle 必須是 display:none —— .page-layout 只保留工具列高度的' +
+        '前提就是它不在版面上，got ' + JSON.stringify(bands[w]));
+      assert.strictEqual(bands[w].paddingTop, bands[w].toolbarH,
+        w + '×800：.page-layout 的 padding-top 必須剛好等於 .ed-toolbar 的高度 —— ' +
+        '多出來的每一 px 都是沒有東西畫進去的死空間，got ' + JSON.stringify(bands[w]));
+    }
+    assert.strictEqual(bands[800].paddingTop, bands[1400].paddingTop,
+      '1080px 斷點不得改變 edit 模式的頂部保留量（該斷點在 reader 模式是替 ' +
+      '.sidebar-toggle 讓位，而 edit 模式沒有那顆按鈕），got ' + JSON.stringify(bands));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: T21 .page-layout reserves the toolbar band and nothing else — OK');
 
   // ── T11-2: edit mode 下側欄必須有辦法打開 ────────────────────────────
   for (const w of [1080, 800]) {
@@ -7388,6 +7588,130 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'F5/反向：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: Shift+Tab in the first cell leaves the table backwards — OK');
+  }
+
+  // ── T21 item 2: one more Tab after the landing moves on, it does not edit ─
+  //
+  // Task 15 gave Tab a cross-block landing and stopped there: the Tab AFTER
+  // the landing was still read by the block it had just landed on, so a key
+  // being used to navigate rewrote the document. Driven on the fixture
+  // before the fix: the table's last body cell,
+  // then Tab ×4, took '### Build snippet' to '######' and Ctrl+S wrote that;
+  // backwards, Shift+Tab ×2 from the first header cell outdented
+  // '  - epsilon' to '- epsilon' on disk. Both silent — a heading changing
+  // size and the title's dot were the only tells.
+  //
+  // The two rows after these are the other half of the same switch: the
+  // landing's mark is spent by anything that is not another Tab, so the
+  // heading-depth and list-indent contracts are untouched for a block the
+  // user is actually working in.
+  {
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      cells[cells.length - 1].focus();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    for (let i = 0; i < 4; i++) {
+      await ctx.page.keyboard.press('Tab');
+      await new Promise((r) => setTimeout(r, 450));
+    }
+    const out = await ctx.page.evaluate(() => {
+      const h = document.querySelector('.ed-block[data-block-type="heading"] .ed-wys-armed');
+      const a = document.activeElement;
+      return { headingTag: h ? h.tagName : null, title: document.title,
+        activeText: a ? a.textContent.trim() : null };
+    });
+    assert.strictEqual(out.headingTag, 'H3',
+      'T21：走過標題的 Tab 不得改它的層級，got ' + JSON.stringify(out));
+    assert.strictEqual(out.activeText, 'After paragraph.',
+      'T21：後續的 Tab 必須【繼續走】到下一個 block，不是停在標題上，got ' + JSON.stringify(out));
+    assert.strictEqual(out.title.indexOf('●'), -1,
+      'T21：只是走過去不得把文件弄髒，got ' + JSON.stringify(out));
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('### Build snippet') !== -1,
+      'T21：磁碟上的標題必須原封不動，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'T21/Tab：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: T21 a Tab after the landing keeps walking, it does not retitle — OK');
+  }
+
+  {
+    const ctx = await newPage('- alpha\n  - epsilon\n\n| A | B |\n|---|---|\n| c1 | c2 |\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
+    await new Promise((r) => setTimeout(r, 250));
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('Tab');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 450));
+    }
+    const out = await ctx.page.evaluate(() => {
+      const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+        .map((b) => b.getAttribute('data-indent') + ':' + b.textContent.trim().replace(/[＋⠿]/g, ''));
+      const a = document.activeElement;
+      return { lis, title: document.title, activeText: a ? a.textContent.trim() : null };
+    });
+    assert.deepStrictEqual(out.lis, ['0:alpha', '1:epsilon'],
+      'T21：走過清單項目的 Shift+Tab 不得改它的縮排，got ' + JSON.stringify(out));
+    assert.strictEqual(out.activeText, 'alpha',
+      'T21：後續的 Shift+Tab 必須【繼續往回走】，got ' + JSON.stringify(out));
+    const disk = await saveAndRead(ctx);
+    assert.ok(disk.indexOf('  - epsilon') !== -1,
+      'T21：磁碟上的縮排必須原封不動，got:\n' + disk);
+    assert.strictEqual(ctx.errs.length, 0, 'T21/Shift+Tab：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: T21 a Shift+Tab after the landing keeps walking backwards — OK');
+  }
+
+  // The mark is spent by any key that is not Tab: type into the block you
+  // landed on and Tab means heading depth again.
+  {
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      cells[cells.length - 1].focus();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 450));
+    await ctx.page.keyboard.type('X');
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 450));
+    const tag = await ctx.page.evaluate(() => {
+      const h = document.querySelector('.ed-block[data-block-type="heading"] .ed-wys-armed');
+      return h ? h.tagName : null;
+    });
+    assert.strictEqual(tag, 'H4',
+      'T21：在落點上打過字之後，Tab 必須恢復成「改標題層級」，got ' + JSON.stringify(tag));
+    await ctx.page.close(); ctx.srv.close();
+  }
+
+  // ...and by pointing at it. A click that lands on the same surface does not
+  // open a new burst, so nothing else would clear the mark.
+  {
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const cells = document.querySelectorAll('.ed-wys-cell');
+      cells[cells.length - 1].focus();
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 450));
+    await pressClick(ctx.page, '.ed-block[data-block-type="heading"] .ed-wys-armed', 80);
+    await new Promise((r) => setTimeout(r, 300));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 450));
+    const tag = await ctx.page.evaluate(() => {
+      const h = document.querySelector('.ed-block[data-block-type="heading"] .ed-wys-armed');
+      return h ? h.tagName : null;
+    });
+    assert.strictEqual(tag, 'H4',
+      'T21：在落點上點過一下之後，Tab 必須恢復成「改標題層級」，got ' + JSON.stringify(tag));
+    assert.strictEqual(ctx.errs.length, 0, 'T21/clear：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: T21 the landing mark is spent by typing and by pointing — OK');
   }
 
   // 降級 block（圍欄、引言、分隔線）沒有可聚焦面，Tab 要跳過它們；下一個

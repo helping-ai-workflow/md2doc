@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const net = require('net');
 const assert = require('assert');
 const { spawn, spawnSync } = require('child_process');
 
@@ -31,6 +32,24 @@ function ping(url) {
     r.on('error', reject);
     r.end('{}');
   });
+}
+
+// T21 item 3: opens a TCP connection to the server and sends nothing on it —
+// what a browser handed the edit URL does when it warms a connection it may
+// never use. Such a socket is not one `server.close()` retires on its own, so
+// it is the shape that made `md2doc --edit doc.md` print its interrupt line
+// and then sit there. Driven directly against the shipped CLI before the fix:
+// SIGINT, still alive 10 s later, 3 runs of 3.
+function openBareSocket(url) {
+  const u = new URL(url);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(Number(u.port), u.hostname, () => resolve(sock));
+    sock.on('error', reject);
+  });
+}
+
+function countInterruptLines(out) {
+  return out.split('md2doc: interrupted — closing this editor session.').length - 1;
 }
 
 function sleepMs(ms) {
@@ -194,6 +213,91 @@ async function waitForUrl(state, timeoutMs) {
       JSON.stringify(state.out));
     assert.ok(!state.out.includes('the editor link was never opened'),
       'an opened session must never print the never-opened line — got stdout: ' + JSON.stringify(state.out));
+  }
+
+  // (e) T21 item 3: SIGINT must exit even when a socket is open that has
+  // never carried a request. This is the whole of the reported defect — the
+  // interrupt line printed and the process stayed — and the reason
+  // `--no-open` looked innocent is that nothing had opened such a socket in
+  // that run. Ablated: with shutdownServer()'s closeAllConnections() call
+  // removed from lib/editor/server.js, this row fails with 'process did not
+  // exit within 9000ms'.
+  {
+    const { child, state } = spawnDirect([a], { idleTimeoutMs: 60000, neverOpenedGraceMs: 60000 });
+    const url = await waitForUrl(state, 15000);
+    const sock = await openBareSocket(url);
+
+    child.kill('SIGINT');
+    const { code, signal } = await waitForExit(child, 8000);
+    sock.destroy();
+    assert.strictEqual(code, 0,
+      '(e) SIGINT with an unused-but-open socket must still exit 0 (got signal=' + signal + ')');
+    assert.strictEqual(countInterruptLines(state.out), 1,
+      '(e) the interrupt line must be printed exactly once — got stdout: ' + JSON.stringify(state.out));
+  }
+
+  // (f) the same socket against the IDLE deadline, which has no second
+  // keystroke to rescue it: a tab that was opened and then went silent while
+  // leaving a warmed connection behind must still close the session. Same
+  // root cause as (e), a path the user cannot intervene on.
+  {
+    const { child, state } = spawnDirect([b], { idleTimeoutMs: 900, neverOpenedGraceMs: 60000 });
+    const url = await waitForUrl(state, 15000);
+    const page = await get(url); // marks started=true, arms the idle timer
+    assert.strictEqual(page.status, 200);
+    const sock = await openBareSocket(url);
+
+    const { code, signal } = await waitForExit(child, 9000);
+    sock.destroy();
+    assert.strictEqual(code, 0,
+      '(f) idle close with an unused-but-open socket must still exit 0 (got signal=' + signal + ')');
+    assert.ok(state.out.includes('md2doc: no browser activity for a while — closing this editor session.'),
+      '(f) idle close must still print its own line — got stdout: ' + JSON.stringify(state.out));
+  }
+
+  // (g) Ruling T21-4: the SIGINT handler replaces Node's default action, so
+  // whatever else it does, a second Ctrl+C has to remain a way out — and it
+  // must not repeat the line, which is what the reported run saw twice. The
+  // first close is made unable to complete on purpose (srv.close replaced
+  // with a no-op after the session is up, which is exactly what the handler
+  // calls), because with the (e) fix in place a first SIGINT otherwise
+  // succeeds and there is nothing for a second one to rescue.
+  {
+    const script =
+      'const { startEditSession } = require(' + JSON.stringify(CLI_PATH) + ');\n' +
+      'startEditSession({ files: ' + JSON.stringify([c]) + ', open: false })\n' +
+      '  .then((srv) => { srv.close = () => {}; })\n' +
+      '  .catch((e) => { console.error(e); process.exit(1); });\n';
+    const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const state = { out: '' };
+    child.stdout.on('data', (ch) => { state.out += ch; });
+    await waitForUrl(state, 15000);
+
+    try {
+      child.kill('SIGINT');
+      await waitFor(() => countInterruptLines(state.out) === 1, 5000, 'the first interrupt line');
+      await sleepMs(600);
+      assert.strictEqual(child.exitCode, null,
+        '(g) precondition: with close() unable to complete, the first SIGINT must leave it running — ' +
+        'otherwise this row is not measuring the second one');
+
+      child.kill('SIGINT');
+      const { code, signal } = await waitForExit(child, 8000);
+      assert.strictEqual(code, 130,
+        '(g) a second SIGINT must end the process itself, 130 (got code=' + code + ' signal=' + signal + ')');
+      assert.strictEqual(countInterruptLines(state.out), 1,
+        '(g) the second SIGINT must not reprint the line — got stdout: ' + JSON.stringify(state.out));
+    } finally {
+      // This child is deliberately built so that it CANNOT close its own
+      // server, so a failure here leaves it running — and its stderr is
+      // inherited from this process, which means anything waiting on this
+      // process's pipes (a spawnSync in an ablation driver, a CI harness)
+      // would wait for that child forever. Measured: an ablation run that
+      // removed the handler's `interrupted = true;` hung past 300 s on
+      // exactly this. The kill is unconditional; on the passing path the
+      // process is already gone and it is a no-op.
+      try { child.kill('SIGKILL'); } catch (e) { /* already exited */ }
+    }
   }
 
   console.log('cli-edit.test.js OK');
