@@ -6012,6 +6012,16 @@ async function main() {
   // 末端：client.js 寫屬性、md2doc.js 的狀態規則把 custom property 點亮、
   // background-image 把它畫出來。只斷屬性的話，一個沒有對應 CSS 的屬性也會綠；
   // 只斷 custom property 的話，把 background-image 整條刪掉也還是綠。
+  //
+  // v3.4.0 §3: 420px 的 max 555 → 522（.ed-toolbar 的 gap 6px → 3px 之後
+  // scrollWidth 變小）。改之前先讀過 paintToolbarOverflow()（lib/editor/
+  // client.js）：它的判準是 `sl > 1` 亮 left、`sl < max - 1` 亮 right —— 中間
+  // 取樣點 Math.round(max/2) 要能同時亮兩側，靠的是離那兩個邊界夠遠，不是
+  // 剛好卡在門檻上。522 時中間取樣點是 261，離 1 與 521 都還很遠，不是薄冰；
+  // 用一支獨立量測腳本（runs/t3-scrollhint.js）在 820/640/420 分別重新測過
+  // `at` 圖案，三個寬度都還是「只右／兩側都亮／只左」，不是剛好卡在邊緣才過。
+  // 這裡只釘 420（跟 1400 一樣是這條既有測試唯一驗的兩個寬度）；820/640 這條
+  // 測試本來就沒有釘 max，這次也沒有新增。
   for (const w of [1400, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     await ctx.page.setViewport({ width: w, height: 900 });
@@ -6038,7 +6048,7 @@ async function main() {
       ? { max: 0, at: [{ attr: '', left: false, right: false },
                        { attr: '', left: false, right: false },
                        { attr: '', left: false, right: false }] }
-      : { max: 555, at: [{ attr: 'right', left: false, right: true },
+      : { max: 522, at: [{ attr: 'right', left: false, right: true },
                          { attr: 'left right', left: true, right: true },
                          { attr: 'left', left: true, right: false }] };
     assert.deepStrictEqual(seen, want,
