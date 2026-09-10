@@ -1,0 +1,99 @@
+# Review package: 5c93d77..HEAD
+
+## Commits
+808af13 fix(render): stripHtmlTags no longer leaks HTML comments into slugs
+
+## Files changed
+ lib/md2doc.js       | 10 +++++++++-
+ test/md2doc.test.js | 27 +++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/lib/md2doc.js b/lib/md2doc.js
+index d9c0b01..c2a15eb 100644
+--- a/lib/md2doc.js
++++ b/lib/md2doc.js
+@@ -667,22 +667,30 @@ ${itemsHtml}
+         }
+       }
+       return classes;
+     }
+ 
+     // Real HTML tags always have a letter (optionally after a `/`) immediately
+     // after `<` — `<x>`, `</div>`, `<br/>`. This deliberately does NOT match
+     // `<[^>]*>` generically: once flattenTokenText() started handing back
+     // unescaped plain text (v3.4.0 §1), literal author text like "C < D > E"
+     // would otherwise look like a tag and get silently eaten here.
++    //
++    // HTML comments (`<!-- ... -->`) don't start with a letter either, so they
++    // need their own alternative — without it a heading like
++    // "## Section <!-- note --> Title" leaks "note" into the slug
++    // (v3.4.0 Task 1 fix round 1). Known gap, deliberately left open: this
++    // does NOT special-case `<!DOCTYPE ...>` or `<? ... ?>` (processing
++    // instructions) — same non-letter-after-`<` shape, but neither has shown
++    // up in a real heading/prose fixture. Add an alternative here if one does.
+     function stripHtmlTags(value) {
+-      return String(value || '').replace(/<\/?[a-zA-Z][^<>]*>/g, '');
++      return String(value || '').replace(/<!--[\s\S]*?-->|<\/?[a-zA-Z][^<>]*>/g, '');
+     }
+ 
+     function slugifyHeading(value) {
+       const base = stripHtmlTags(value)
+         .normalize('NFKD')
+         .replace(/[\u0300-\u036f]/g, '')
+         .trim()
+         .toLowerCase()
+         .replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-')
+         .replace(/^-+|-+$/g, '')
+diff --git a/test/md2doc.test.js b/test/md2doc.test.js
+index fee8ca3..6efb943 100644
+--- a/test/md2doc.test.js
++++ b/test/md2doc.test.js
+@@ -297,20 +297,47 @@ console.log('md2doc heading rendering test passed');
+     'TOC 標籤不得雙重跳脫（&amp;lt; 會顯示成 &lt;）');
+ 
+   // TOC 連結本身仍必須是單層跳脫的合法 HTML
+   assert.ok(dhtml2.includes('title="Alpha &amp; Beta"'),
+     'TOC 的 title 應為單層跳脫。Got: ' +
+     (dhtml2.match(/title="[^"]*"/g) || []).join(', '));
+ 
+   console.log('md2doc heading double-escape test passed');
+ }
+ 
++// v3.4.0 Task 1 fix round 1: HTML 註解不得滲進 slug。
++// flattenTokenText() 改成回傳未跳脫文字之後，任何「靠角括號形狀猜標籤」的
++// 判別都要面對 <!-- --> / <!DOCTYPE> / <? ?> 這些不以字母開頭的形狀。
++{
++  const commentMd = path.join(tmpDir, 'html-comment-heading.md');
++  const commentHtml = path.join(tmpDir, 'html-comment-heading.html');
++  fs.writeFileSync(commentMd, [
++    '## Section <!-- note --> Title',
++    '',
++    'text',
++    '',
++  ].join('\n'), 'utf8');
++
++  const crun = spawnSync('node', ['lib/md2doc.js', commentMd, commentHtml], {
++    cwd: path.resolve(__dirname, '..'),
++    encoding: 'utf8',
++  });
++  assert.strictEqual(crun.status, 0, 'html-comment-heading fixture renders');
++  const chtml = fs.readFileSync(commentHtml, 'utf8');
++
++  assert.ok(chtml.includes('href="#section-title"'),
++    'HTML 註解不得滲進 slug。Got: ' +
++    (chtml.match(/href="#[^"]*"/g) || []).join(', '));
++
++  console.log('md2doc heading html-comment slug test passed');
++}
++
+ // --- Mermaid block: escaped source + CDN v11 ---
+ {
+     const mermaidMd = path.join(tmpDir, 'mermaid.md');
+     const mermaidHtml = path.join(tmpDir, 'mermaid.html');
+     fs.writeFileSync(mermaidMd, [
+         '# Diagram',
+         '',
+         '```mermaid',
+         'flowchart TD',
+         '    A["make IP=&lt;IP&gt; run"] --> B["x<br/>y"]',

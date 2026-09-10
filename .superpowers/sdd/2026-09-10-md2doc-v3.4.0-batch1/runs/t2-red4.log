@@ -1,0 +1,12 @@
+HEAD_AT_LAUNCH=808af1340942807dbb671355a10f657552c6c627
+DIRTY= M test/editor-client-runtime.test.js;
+fix 1: block edit-bar revives after cancel / no-op commit — OK
+fix 2: render failure leaves DOM untouched + dismissible banner — OK
+fix 3: save failure surfaces a banner and keeps dirty state — OK
+Error: No element found for selector: .ed-block[data-block-id="2"] .ed-handle
+    at assert (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/util/assert.js:18:15)
+    at CdpFrame.click (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Frame.js:751:40)
+    at async clickGutterMenuItem (/home/user/hp_workspace/md2doc/test/editor-client-runtime.test.js:328:9)
+    at async openBlockEditor (/home/user/hp_workspace/md2doc/test/editor-client-runtime.test.js:303:9)
+    at async /home/user/hp_workspace/md2doc/test/editor-client-runtime.test.js:1680:7
+EXIT=1

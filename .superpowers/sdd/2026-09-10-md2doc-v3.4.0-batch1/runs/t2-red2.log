@@ -1,0 +1,161 @@
+HEAD_AT_LAUNCH=808af1340942807dbb671355a10f657552c6c627
+DIRTY= M test/editor-client-runtime.test.js;
+fix 1: block edit-bar revives after cancel / no-op commit — OK
+fix 2: render failure leaves DOM untouched + dismissible banner — OK
+fix 3: save failure surfaces a banner and keeps dirty state — OK
+switch-commits: A auto-commits on switch to B, undo reverts A's edit — OK
+switch-cancels: A closes silently (unmodified), B opens — OK
+undo-with-modified-open-editor: A auto-commits then undo reverts it, no lockout — OK
+switch-commit-failure: commit failure keeps A open, blocks B from opening — OK
+single-flight switchAwayFrom: concurrent triggers share one commit, no request race — OK
+always-on: click = caret/focus, lightbox-exempt, ⠿ handle opens menu + MD escape hatch — OK
+S2 ⠿ menu: vertical, four §3.7 items, 轉換成 submenu of twelve §3.2 targets — OK
+gutter menu: both levels share one icon/text baseline — OK
+S2 轉換成 › 標題 2: a paragraph becomes an H2 and saves byte-exactly — OK
+S2 轉換成: 引用 / 程式碼 round-trip through 文字, byte-identical — OK
+S2 轉換成: one conversion is exactly one undo op — OK
+S2 ⠿ menu: a table block offers no 轉換成 (spec 7) — OK
+S2 ⠿ menu: hr and html blocks offer no 轉換成 — OK
+S2 ⠿ menu: a list item now offers MD 原始碼 too (修正 4 supersedes RULING F-O) — OK
+S2 轉換成 › 編號列表: one bullet becomes an ordinal, run splits — OK
+S2 轉換成 › 待辦清單: a bullet gains a checkbox, stays a ul — OK
+S2 轉換成: 待辦清單 → 項目符號列表 drops the checkbox — OK
+S2 轉換成: a child re-indents to the new marker width, keeps its type — OK
+S2 轉換成: a multi-line li refuses with the §4.1 banner — OK
+S2 轉換成: a list-type change never re-escapes the item’s own content — OK
+S2 轉換成: the §4.3 gate reaches a DEEPER loose run (listRunOf scope) — OK
+S2 轉換成 › 文字: a middle item splits the list and renumbers — OK
+S2 轉換成 › 標題 2: the FIRST item leaves, the rest stay one run — OK
+S2 轉換成: a converted parent re-anchors its orphaned subtree — OK
+S2 轉換成: the §3.4 segment deltas survive the split commit — OK
+S2 轉換成 › 程式碼 on an indented item breaks the list (§3.9) — OK
+S2 轉換成: converting away from a list is exactly one undo op — OK
+S2 轉換成: a multi-line bystander is replayed, not refused — OK
+S2 轉換成: a run-boundary neighbour outside the clamp span is untouched — OK
+S2 轉換成: a block outside rule 2’s scope re-anchors via the width stack — OK
+S2 轉換成: §4.3 rule 1 inserts the blanks at the run’s own edges — OK
+S2 轉換成 › 項目符號列表: a paragraph joins the run TIGHTLY — OK
+S2 轉換成 › 項目符號列表: no adjacent list, blank lines survive — OK
+S2 轉換成 › 項目符號列表: only the matching side is merged — OK
+S2 轉換成: convert out and back in is a byte-identical round trip — OK
+S2 轉換成 › 編號列表: a different type does NOT eat the separators — OK
+S2 轉換成 › 編號列表 on a heading: numbered 1, nothing re-anchored — OK
+S2 轉換成: li → li does not freeze the merged run (the S2 T3 defect) — OK
+S2 轉換成: merging into a DEGRADED run is refused, not performed — OK
+S2 轉換成: rule 2 asks the neighbour’s RUN, not the neighbour block — OK
+S2 建立副本: a paragraph gets a copy directly below it — OK
+S2 建立副本: the copy goes after the whole subtree — OK
+S2 建立副本: type, indent and checked state are preserved — OK
+S2 建立副本: an ordered item’s copy renumbers the run — OK
+S2 建立副本: the copy is not re-escaped, and neither is the original — OK
+S2 建立副本: one duplicate is exactly one undo op, on both paths — OK
+S2 建立副本: a multi-line li refuses with the §4.1 banner — OK
+S2 建立副本: works with a dirty burst open on its own block — OK
+S2 刪除: works with a dirty burst open on its own block — OK
+S2 Task 7: a list item has a ＋, aligned with its ⠿ — OK
+S2 Task 7: ＋ 清單 on a nested li inserts a tight sibling — OK
+S2 Task 7: ＋ on a parent inserts after its whole subtree — OK
+S2 Task 7: the new item's indent comes from the marker-width stack — OK
+S2 Task 7: ＋ 清單 inherits the ordered type and renumbers, one undo — OK
+S2 Task 7: ＋ 段落 under a li orphans no descendant — OK
+S2 Task 7: ＋ on a li in a degraded run refuses — OK
+S2 Task 7: ＋ on a li works with a dirty burst open on that li — OK
+S2 T8 conversion matrix — 96 cells: {"no-op":6,"converted":66,"refused":24}
+  paragraph: text== h1=C h2=C h3=C h4=C h5=C h6=C ul=C ol=C task=C code=C quote=C
+  heading(h2): text=C h1=C h2== h3=C h4=C h5=C h6=C ul=C ol=C task=C code=C quote=C
+  blockquote: text=C h1=C h2=C h3=C h4=C h5=C h6=C ul=C ol=C task=C code=C quote==
+  code(fenced): text=C h1=C h2=C h3=C h4=C h5=C h6=C ul=C ol=C task=C code== quote=C
+  li(ul, 2-level subtree): text=C h1=C h2=C h3=C h4=C h5=C h6=C ul== ol=C task=C code=C quote=C
+  li(ol, sole run member): text=C h1=C h2=C h3=C h4=C h5=C h6=C ul=C ol== task=C code=C quote=C
+  table: text=R h1=R h2=R h3=R h4=R h5=R h6=R ul=R ol=R task=R code=R quote=R
+  li(degraded run): text=R h1=R h2=R h3=R h4=R h5=R h6=R ul=R ol=R task=R code=R quote=R
+  (C=converted  ==identity no-op  R=refused  !=silent)
+  refused: table → text — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h1 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h2 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h3 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h4 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h5 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → h6 — §3.7: a table block is offered no 轉換成 at all
+  refused: table → ul — §3.7: a table block is offered no 轉換成 at all
+  refused: table → ol — §3.7: a table block is offered no 轉換成 at all
+  refused: table → task — §3.7: a table block is offered no 轉換成 at all
+  refused: table → code — §3.7: a table block is offered no 轉換成 at all
+  refused: table → quote — §3.7: a table block is offered no 轉換成 at all
+  refused: li(degraded run) → text — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h1 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h2 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h3 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h4 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h5 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → h6 — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → ul — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → ol — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → task — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → code — 此清單含不支援的格式，無法調整結構
+  refused: li(degraded run) → quote — 此清單含不支援的格式，無法調整結構
+S2 T8: the conversion matrix is swept, 24 cells refuse by design and none corrupts — OK
+wysiwyg: paragraph edit commits via Enter and persists to file — OK
+wysiwyg: bold shows <strong> while editing, Esc reverts exactly — OK
+degrade block click->textarea: image paragraph opens raw-edit immediately on click — OK
+⠿ menu 轉換成: offered on heading and paragraph, Esc/outside-click close it, 標題 2 persists to file — OK
+wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK
+wysiwyg: a rich paste converts to markdown source, no live markup enters the DOM — OK
+wysiwyg: Ctrl+Shift+V pastes text/plain verbatim, ignoring text/html — OK
+wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK
+wysiwyg: listener-leak regression — 3x open/Esc then commit fires exactly one render — OK
+wysiwyg: unsupported-degrade on A and C's independent burst coexist cleanly (no shared-state split) — OK
+burst undo: Ctrl+Z mid-burst reverts typing; a second Ctrl+Z cascades to the previous commit — OK
+burst undo: bold via toolbar then Ctrl+Z reverts it locally, no server round trip — OK
+always-on: focus + type + blur (no Enter) commits and persists to disk — OK
+burst commit-failure: stays open with typed text intact, banner dismissible — OK
+degrade block: blur restores when unchanged, commits when changed — OK
+sel-toolbar: shows on selection, hides on collapse and on session end — OK
+sel-toolbar: Bold toggles ON then OFF on the same selection — OK
+sel-toolbar: Bold + Enter commits **word** to source and <strong> to render — OK
+sel-toolbar: S (strikethrough) toggles ON then OFF on the same selection — OK
+sel-toolbar: S + Enter commits ~~word~~ to source and <del> to render — OK
+sel-toolbar: U + Enter commits <u>word</u> to source and renders underlined — OK
+sel-toolbar: code button on backtick-containing text emits the double-backtick fence — OK
+sel-toolbar: link button wraps selection in <a href>, commits to [text](url) — OK
+sel-toolbar: link button on an existing link edits then clears it — OK
+sel-toolbar regression: rerenderAll() resets toolbar state, no leaked listener — OK
+table WYSIWYG: click cell -> type -> Tab -> type -> blur commits minimal form as ONE burst; other table untouched — OK
+table WYSIWYG: Enter in a cell emits literal <br> in the saved source — OK
+table WYSIWYG: pasting multi-line text into a cell commits as ONE row with <br> — OK
+table WYSIWYG: Esc mid-burst reverts the whole burst (cells stay armed); file unchanged after save — OK
+table WYSIWYG: any unsupported cell degrades the whole table to raw-edit on click, no bar step — OK
+table hover-insert: an unsupported table shows no insert bubble — OK
+table hover-insert: ＋ column bubble inserts an empty column after the hovered boundary — OK
+table hover-insert: ＋ row bubble inserts an empty row after the hovered boundary — OK
+table hover-insert: bubble click auto-starts a burst; Ctrl+Z reverts the insert in-burst — OK
+table edge menus: column menu highlights/aligns/deletes; last column refuses — OK
+table edge menus: row menu highlights/deletes; last-body-row refuses — OK
+table grip handles: adequately sized (>=18x24px); one position for every row, straddling the table's left border — OK
+table grips: the row grip straddles the border and clears the ⠿ — OK
+spec §4.2 conflict 2: every pixel of a block ⠿ answers the ⠿, row grip showing or not — OK
+table row grip: right edge stays clear of the first cell's text — OK
+table header grip: header-only table gets no row grip — OK
+table header grip: click highlights only, and the highlight clears — OK
+table header grip: highlight/un-highlight on a col-default table leaves the file byte-identical — OK
+table header grip: Esc clears the highlight without reverting the burst — OK
+row corner hit-test: {"overlaps":true,"pointInGripY":true,"pointInBubbleY":true,"hitsBubble":true,"hitsGrip":false,"tagName":"BUTTON","className":"ed-tb-insert ed-tb-insert-row","bubbleZ":"8","gripZ":"7"}
+col corner hit-test: {"overlaps":false,"b":{"left":419,"right":437,"width":18},"g":{"left":587.75,"right":615.75,"width":28},"pointInGripX":false,"pointInBubbleX":false,"hitsBubble":false,"hitsGrip":false,"tagName":null,"className":null,"bubbleZ":"8","gripZ":"7"}
+table grip/bubble click priority: bubble wins hit-test at the overlap corner (z-index ordering) — OK
+table grips: survive a REAL pointer travelling across the hover corridor — OK
+table grips: the row grip straddles the table's left border again; the keep-zone tracks its own footprint — OK
+table row drag: drop reorders the row; Ctrl+Z reverts it in-burst — OK
+table row drag: Esc mid-drag cancels with no mutation — OK
+table drop target: header-midline threshold splits above-header / before-row — OK
+table row drag: pure move promotes the dropped row to header, alignment survives — OK
+table row drag: drop-in-place is byte-identical (no canonical rewrite) — OK
+table row drag: drop-in-place with a pre-existing burst is byte-identical — OK
+table row drag: promote-then-demote round trip is byte-identical — OK
+TimeoutError: Waiting failed: 30000ms exceeded
+    at new WaitTask (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/common/WaitTask.js:49:34)
+    at IsolatedWorld.waitForFunction (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Realm.js:52:26)
+    at CdpFrame.waitForFunction (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Frame.js:583:43)
+    at CdpFrame.<anonymous> (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/util/decorators.js:109:27)
+    at CdpPage.waitForFunction (/home/user/hp_workspace/md2doc/node_modules/puppeteer-core/lib/cjs/puppeteer/api/Page.js:1451:37)
+    at /home/user/hp_workspace/md2doc/test/editor-client-runtime.test.js:8131:20
+EXIT=1
