@@ -1027,17 +1027,6 @@ async function typeIntoCell(page, tableSel, rowIndex, colIndex, text) {
   await page.keyboard.type(text);
 }
 
-// v3.4.0 §2 helper: scrolls the table block into view (the fixture below
-// pads enough content above it that it starts below the fold on page load)
-// and returns the resulting scrollY — the position a drag gesture below it
-// must leave alone.
-async function scrollToTable(page, tableSel) {
-  await page.evaluate((ts) => {
-    document.querySelector(ts).scrollIntoView({ block: 'center' });
-  }, tableSel);
-  return page.evaluate(() => window.scrollY);
-}
-
 // v3.4.0 §2 fixture: enough filler paragraphs to push the table below the
 // fold (same 'pad\n\n'.repeat() scroll-inducing shape the S3 §4.4 "scrolling
 // does not clear the selection" scenario already uses elsewhere in this
@@ -23918,9 +23907,22 @@ async function gutterGeometry(page, sel) {
           active: document.activeElement
             ? document.activeElement.tagName + '.' + (document.activeElement.className || '')
             : null,
+          armed: !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell'),
         }));
         assert.strictEqual(after.scrollY, before,
           '拖曳不得改變捲動位置. Got ' + JSON.stringify(after));
+        // Review fix (M5): a purely negative assertion (!/^TH/) also passes
+        // when activeElement is null (focus dropped to <body> entirely) —
+        // add the positive half so "focus landed on SOME armed cell" is
+        // actually checked, not just "not a TH".
+        assert.ok(after.armed,
+          '拖曳後必須有作用中的 .ed-wys-cell，不能整個掉焦到 <body>. Got ' + JSON.stringify(after));
+        // !/^TH/ is this FIXTURE's invariant, not a general one: this drag
+        // (fromIndex=N-1 to just after N-4) never crosses the header
+        // boundary, so the landed cell can never legitimately be a TH here.
+        // A drag that promotes a body row ABOVE the header (see the
+        // separate "pure move" scenarios elsewhere in this file) SHOULD
+        // land on a TH — that row really did become the new header.
         assert.ok(!/^TH/.test(after.active || ''),
           '拖曳不得把焦點放到表頭儲存格. Got ' + JSON.stringify(after));
 
@@ -23966,6 +23968,118 @@ async function gutterGeometry(page, sel) {
 
         await page.close();
         console.log('table row drag (v3.4.0 §2): a drag started from an edited cell keeps that cell focused — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // ── v3.4.0 §2 review follow-up (Important): the round-7 stale-index fix
+    // has two genuinely different code paths (performRowDrop()'s (row, col)
+    // seat vs. performColDrop()'s simpler post-reorder indexOf()), and
+    // NEITHER of the two scenarios above exercises either one: scenario 1
+    // has no pre-focused cell (goes through ensureTableBurstOpen()'s
+    // forDrag branch, never reaches the stale-index code at all), scenario
+    // 2's row drag never crosses the header (retagCell() never recreates
+    // the edited cell, so even the NAIVE "capture a cell reference before
+    // the reorder, focus it after" fix would have passed this one too).
+    // Case A below exercises performColDrop()'s fix specifically; Case B
+    // exercises performRowDrop()'s (row, col)-seat fix in the ONE case a
+    // plain post-reorder cell reference can't handle — the edited cell's
+    // OWN row crosses the header boundary, so its element gets recreated
+    // (TH -> TD) by retagCell() mid-rebuild.
+    //
+    // Both were confirmed RED against `a7b4e32^` (the commit immediately
+    // before this whole fix) via one-shot probe scripts before being
+    // written as scenarios here — see runs/t2-caseA-colDrag-probe.js and
+    // runs/t2-caseB-rowDrag-headerCross-probe.js in this task's SDD
+    // directory, and their -OLD.log/-HEAD.log outputs.
+
+    // Case A: a column drag started from an edited cell (pre-existing
+    // burst, NOT the forDrag path) must keep focus on that same cell — the
+    // performColDrop() half of the round-7 fix. Pre-fix this landed on "b"
+    // (a DIFFERENT cell — the pre-reorder ordinal, read after the column
+    // swap, named a different column's cell in the same row).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(
+        ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await typeIntoCell(page, table0, 1, 0, 'PROBE'); // body row "2"/col0 -> "2PROBE"
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, '2PROBE',
+          'precondition: typeIntoCell 必須真的把焦點放在那格並打進文字. Got ' + cellBefore);
+
+        // Swap Col1/Col2 — colGripCoords(page, table0, 1) dragged to just
+        // before Col1's own left edge, same geometry the pre-existing Task
+        // 8 column-drag scenario above uses.
+        const from = await colGripCoords(page, table0, 1);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: table.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 5 });
+        await page.mouse.move(to.x, to.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Col2',
+          {}, table0);
+        await settleEditor(page);
+
+        const cellAfter = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellAfter, cellBefore,
+          'Case A: 欄拖曳前有作用中儲存格時，焦點必須回到同一格（performColDrop() 的 stale-index 修法）. Got ' + cellAfter);
+
+        await page.close();
+        console.log('table col drag (v3.4.0 §2 review Case A): a drag started from an edited cell keeps that cell focused — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Case B: a row drag that PROMOTES a different row above the header,
+    // where the edited cell is IN the header being demoted — the ONE case
+    // performRowDrop()'s (row, col)-seat fix (vs. a naive cell-reference
+    // fix) is actually necessary for: retagCell() recreates that cell's
+    // element (TH -> TD) mid-rebuild. Pre-fix this landed on "c" (the
+    // DRAGGED row's own cell) and was still a TH.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(
+        ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await clickCellWithText(page, table0, 'Col2');
+        await page.keyboard.type('PROBE'); // header's own "Col2" cell -> "Col2PROBE"
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, 'Col2PROBE',
+          'precondition: 點擊＋輸入必須真的把焦點放在表頭那格並打進文字. Got ' + cellBefore);
+
+        const from = await rowGripCoords(page, table0, 2); // "3"/"c"
+        const to = await rowBoundaryCoords(page, table0, -1); // above-header
+        await dragRowTo(page, from, to);
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === '3',
+          {}, table0);
+        await settleEditor(page);
+
+        const after = await page.evaluate(() => ({
+          text: document.activeElement ? document.activeElement.textContent : null,
+          tag: document.activeElement ? document.activeElement.tagName : null,
+        }));
+        assert.strictEqual(after.text, cellBefore,
+          'Case B: 列拖曳把作用中儲存格所在的那列升格/降格時，焦點必須回到同一格（performRowDrop() 的 (row,col) 修法）. Got ' + JSON.stringify(after));
+        assert.strictEqual(after.tag, 'TD',
+          'Case B: 被降成本文的那列，儲存格必須真的變成 TD（retagCell() 重建過）. Got ' + JSON.stringify(after));
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2 review Case B): a drag promoting a DIFFERENT row keeps focus on the demoted header cell, now a TD — OK');
       } finally { tsrv.close(); }
     }
 
