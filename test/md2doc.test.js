@@ -304,6 +304,33 @@ console.log('md2doc heading rendering test passed');
   console.log('md2doc heading double-escape test passed');
 }
 
+// v3.4.0 Task 1 fix round 1: HTML 註解不得滲進 slug。
+// flattenTokenText() 改成回傳未跳脫文字之後，任何「靠角括號形狀猜標籤」的
+// 判別都要面對 <!-- --> / <!DOCTYPE> / <? ?> 這些不以字母開頭的形狀。
+{
+  const commentMd = path.join(tmpDir, 'html-comment-heading.md');
+  const commentHtml = path.join(tmpDir, 'html-comment-heading.html');
+  fs.writeFileSync(commentMd, [
+    '## Section <!-- note --> Title',
+    '',
+    'text',
+    '',
+  ].join('\n'), 'utf8');
+
+  const crun = spawnSync('node', ['lib/md2doc.js', commentMd, commentHtml], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf8',
+  });
+  assert.strictEqual(crun.status, 0, 'html-comment-heading fixture renders');
+  const chtml = fs.readFileSync(commentHtml, 'utf8');
+
+  assert.ok(chtml.includes('href="#section-title"'),
+    'HTML 註解不得滲進 slug。Got: ' +
+    (chtml.match(/href="#[^"]*"/g) || []).join(', '));
+
+  console.log('md2doc heading html-comment slug test passed');
+}
+
 // --- Mermaid block: escaped source + CDN v11 ---
 {
     const mermaidMd = path.join(tmpDir, 'mermaid.md');
