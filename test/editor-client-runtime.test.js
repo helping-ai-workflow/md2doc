@@ -124,6 +124,31 @@ async function newPage(browser) {
   // ("Node is either not clickable or not an Element" out of page.hover()),
   // and of its siblings "Node is detached from document", "gutter menu item
   // not found" and a textarea that never appears.
+  //
+  // ⚠ The counter is released when the response BODY has been read, never when
+  // `fetch()` resolves. `fetch()` resolves on response HEADERS: client.js then
+  // still has to `await res.json()` and only THEN assigns `blocks = j.blocks`
+  // and swaps the DOM. MEASURED on this branch (S3 T6's batch delete, four
+  // instrumented runs): the gesture removes its own li nodes from the DOM
+  // synchronously, sends /api/render 4-13 ms later, the headers land 8-34 ms
+  // after that — and `res.json()` takes a further 1.5-2.3 ms during which the
+  // main thread is IDLE. A counter released at the headers is therefore 0
+  // across a window in which the DOM already shows the deletion, `blocks` is
+  // still the PRE-delete map, and `blockSelection` still holds the old line
+  // range (rerenderAll() copies `pendingSelectionRange` into a local before
+  // the fetch, so rebuildBlockSelection() has not run either). Sampling that
+  // window is what made S3 T6 read
+  //   {anchorLine:4, focusLine:5, memberLines:[[4,4],[5,5]],
+  //    domSelectedLines:[], focusHolderId:null}
+  // where the settled state is `null` — a value the same page reports ~10 ms
+  // later and holds for the rest of its life. Everything from `res.json()`
+  // resolving to the DOM swap is one unbroken synchronous chain (measured: no
+  // longtask boundary, 4.5-8.8 ms of straight-line work), so releasing the
+  // counter inside the body-read's own `.then` — one microtask BEFORE
+  // client.js's `await res.json()` continuation — puts the whole apply inside
+  // a single microtask drain. A `requestAnimationFrame` poll (which is what
+  // settleEditor()'s waitForFunction uses) cannot run inside one, so the
+  // window is closed by construction rather than merely made narrower.
   await page.evaluateOnNewDocument(() => {
     window.__edInflight = 0;
     const origFetch = window.fetch;
@@ -131,9 +156,42 @@ async function newPage(browser) {
       const url = String(typeof input === 'string' ? input : (input && input.url) || '');
       if (!/\/api\/(render|save)\b/.test(url)) return origFetch.call(this, input, init);
       window.__edInflight++;
-      const settle = () => { window.__edInflight--; };
+      let settled = false;
+      const settle = () => { if (!settled) { settled = true; window.__edInflight--; } };
       return origFetch.call(this, input, init).then(
-        (res) => { settle(); return res; },
+        (res) => {
+          // Wrap the body readers ON THIS INSTANCE (never the prototype — a
+          // page-side stub elsewhere in this file builds its own Response
+          // objects, and those must stay untouched). `asked` records that a
+          // reader was CALLED, which is always decided within microtasks of
+          // this function returning: every call site in client.js issues its
+          // `res.json()` straight after its `await fetch(...)`.
+          let asked = false;
+          ['json', 'text', 'arrayBuffer', 'blob', 'formData'].forEach((m) => {
+            if (typeof res[m] !== 'function') return;
+            const orig = res[m].bind(res);
+            res[m] = function () {
+              asked = true;
+              return orig().then(
+                (v) => { settle(); return v; },
+                (e) => { settle(); throw e; }
+              );
+            };
+          });
+          // Safety net for a response whose body is never read. save()'s 409
+          // branch is the real one — it shows the conflict banner off the
+          // STATUS alone and never touches the body — and without this the
+          // counter would stay pinned and every settleEditor() after it would
+          // time out. Armed off a CLONE so it observes the body arriving
+          // without disturbing the one client.js will read, and deferred one
+          // task so `asked` is already final when it is consulted.
+          try {
+            const arm = () => { if (!asked) settle(); };
+            res.clone().arrayBuffer().then(
+              () => setTimeout(arm, 0), () => setTimeout(arm, 0));
+          } catch (e) { settle(); }
+          return res;
+        },
         (err) => { settle(); throw err; }
       );
     };
@@ -162,8 +220,18 @@ async function newPageStubbingRemote(browser) {
 // Waits until no /api/render or /api/save is in flight AND the frame that
 // applies its DOM swap has been painted. Deterministic (unlike a fixed sleep):
 // the counter is incremented by client.js's own request and decremented when
-// that request settles; the two rAFs then let rerenderAll()'s synchronous
-// .content swap land before the caller resolves an element handle.
+// that request's BODY has been read — see newPage()'s own ⚠ for why the
+// distinction between "the headers arrived" and "the response was read" is the
+// whole ballgame — after which the model update and the DOM swap are one
+// synchronous chain that no rAF can interleave with. The two rAFs then let
+// that swap be painted before the caller resolves an element handle.
+//
+// The two rAFs are a PAINT grace, not the correctness argument. They used to
+// be the only thing covering the read-and-apply window as well, and the margin
+// that gave was measured rather than assumed: two frames (~33 ms) against
+// 7-11 ms of read-plus-apply. That is a 3x cushion on an idle box and a coin
+// flip on a loaded one — S3 T6's batch delete went red on it once in three
+// full-file runs of the same commit.
 async function settleEditor(page) {
   await page.waitForFunction(() => !window.__edInflight, { timeout: 15000 });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
