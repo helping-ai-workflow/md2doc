@@ -258,6 +258,52 @@ assert.match(html, /toggleAttribute\('data-toc-collapsed'\)/, 'expected toggle h
 
 console.log('md2doc heading rendering test passed');
 
+// v3.4.0 §1: marked's inline text/codespan tokens carry an already-escaped
+// `text`, while heading token's own `text` is raw. flattenTokenText() must
+// not hand the escaped form out — handing it out lets escapeHtml() double-
+// escape it in the TOC label, and slugifyHeading() folds the entity NAMES
+// (amp/lt/gt) into the anchor.
+{
+  const dblMd = path.join(tmpDir, 'double-escape.md');
+  const dblHtml = path.join(tmpDir, 'double-escape.html');
+  fs.writeFileSync(dblMd, [
+    '# Alpha & Beta',
+    '',
+    'text',
+    '',
+    '## C < D > E',
+    '',
+    'more',
+    '',
+  ].join('\n'), 'utf8');
+
+  const drun2 = spawnSync('node', ['lib/md2doc.js', dblMd, dblHtml], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf8',
+  });
+  assert.strictEqual(drun2.status, 0, 'double-escape fixture renders');
+  const dhtml2 = fs.readFileSync(dblHtml, 'utf8');
+
+  assert.ok(dhtml2.includes('href="#alpha-beta"'),
+    'slug 不得含實體名稱 amp。Got: ' +
+    (dhtml2.match(/href="#[^"]*"/g) || []).join(', '));
+  assert.ok(dhtml2.includes('href="#c-d-e"'),
+    'slug 不得含實體名稱 lt / gt。Got: ' +
+    (dhtml2.match(/href="#[^"]*"/g) || []).join(', '));
+
+  assert.ok(!dhtml2.includes('&amp;amp;'),
+    'TOC 標籤不得雙重跳脫（&amp;amp; 會顯示成 &amp;）');
+  assert.ok(!dhtml2.includes('&amp;lt;'),
+    'TOC 標籤不得雙重跳脫（&amp;lt; 會顯示成 &lt;）');
+
+  // TOC 連結本身仍必須是單層跳脫的合法 HTML
+  assert.ok(dhtml2.includes('title="Alpha &amp; Beta"'),
+    'TOC 的 title 應為單層跳脫。Got: ' +
+    (dhtml2.match(/title="[^"]*"/g) || []).join(', '));
+
+  console.log('md2doc heading double-escape test passed');
+}
+
 // --- Mermaid block: escaped source + CDN v11 ---
 {
     const mermaidMd = path.join(tmpDir, 'mermaid.md');
