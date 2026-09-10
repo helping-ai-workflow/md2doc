@@ -202,8 +202,11 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
 // ── v3.4.0 / backlog 3 (Ruling T6-7): star-delimiter boundary guard ──────
 // v3.3.0 measured this live and deliberately shipped no test for it: pinning
 // the wrong bytes of the day would have gone red on the real fix for the
-// wrong reason (see the module's own `starBoundaryGuard` comment). This pins
-// the shape measured in task-8's report and the fixed output.
+// wrong reason (see `walkChildren`'s own comment block in inline-md.js).
+// This pins the SAME-TAG shapes measured in task-8's report and the fixed
+// output — same-tag adjacency (EM-then-EM, STRONG-then-STRONG) is exactly
+// the case that must still insert `<!-- -->`; see further down for the
+// cross-tag fix-round regression (must NOT insert).
 {
   // Canonical repro: a selection ending right at `*`code`*`'s own boundary,
   // immediately followed (no separating text) by another EM. Before the fix
@@ -233,12 +236,18 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
   assert.strictEqual(serializeInline(el('p', {}, 'a ', el('em', {}, 'x'), ' c')).md, 'a *x* c');
 }
 
-// ── review Minor 1: TRAILING_LIVE_STAR must not fire on an ESCAPED trailing
-// star ──────────────────────────────────────────────────────────────────
+// ── review Minor 1: no false trigger on an ESCAPED trailing star ─────────
 // A literal '*' the user typed (escaped by escapeText() to "\*") followed
 // directly by a toggled EM is, if anything, a MORE everyday gesture than two
 // marks landing DOM-adjacent — and it already round-tripped correctly
 // without any guard, so inserting `<!-- -->` there would be pure waste.
+// (This was originally fixed with a backslash-parity regex on the trailing
+// character; the fix-round rewrite below replaced that with `lastMarkTag`
+// tag-tracking, which resolves the same false trigger as a side effect —
+// see `walkChildren`'s own comment block — without needing a regex at all:
+// a TEXT node always resets `lastMarkTag` to null when it contributes any
+// characters, since escapeText() never leaves a live trailing '*' behind.
+// These assertions are unchanged; only the mechanism underneath moved.)
 {
   const md = serializeInline(el('p', {}, 'a*', el('em', {}, 'x'))).md;
   assert.strictEqual(md, 'a\\**x*',
@@ -254,14 +263,63 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
     '一個逃脫的反斜線加一個逃脫的星號，星號仍然不是活的，不該觸發守衛');
   assert.strictEqual(marked.parseInline(md2), 'a\\*<em>x</em>');
 
-  // two literal backslashes (renders as ONE literal backslash char) + a live
-  // star that was NOT typed by the user but IS the boundary from an EM/
-  // STRONG this module itself just emitted — this is the real bug shape,
-  // the guard must still fire here.
+  // two EM nodes DOM-adjacent (not a text node's escaped star) is the real
+  // bug shape — same-tag, the guard must still fire here.
   const shapeStillGuarded = el('p', {},
     el('em', {}, el('code', {}, 'code')), el('em', {}, 'text'));
   assert.ok(serializeInline(shapeStillGuarded).md.indexOf('<!-- -->') !== -1,
-    '兩個真正相鄰的 EM 定界符仍然要觸發守衛（regex 的正例）');
+    '兩個真正相鄰、同 tag 的 EM 定界符仍然要觸發守衛');
+}
+
+// ── fix-round regression (editor-journey.test.js:1165): CROSS-tag adjacency
+// must NOT be guarded ─────────────────────────────────────────────────────
+// The first version of this fix guarded on ANY trailing '*', regardless of
+// which tag produced it. That over-inserted for `<em>it</em>` immediately
+// followed by `<strong><em>al</em> bold</strong>` (EM's closing 1 star
+// touching STRONG's opening 2+1 stars) — already-correct output
+// `*it****al* bold**` gained a needless `<!-- -->`, changing bytes a
+// journey scenario had pinned. A 100-context sweep (5 front contexts × 5
+// back contexts × {em-em, strong-strong, em-strong, strong-em}) measured:
+// same-tag breaks 50/50 without a guard, cross-tag is correct 50/50
+// WITHOUT one. The fix distinguishes them via `lastMarkTag` (see
+// `walkChildren`): only fires when the tag about to open matches the tag
+// that most recently closed at this sibling level.
+{
+  // the exact journey shape, reduced to its DOM: EM(it) directly followed
+  // by STRONG wrapping [EM(al), ' bold'] — cross-tag (EM, then STRONG).
+  const journeyShape = el('p', {}, 'Alpha ',
+    el('em', {}, 'it'),
+    el('strong', {}, el('em', {}, 'al'), ' bold'),
+    ' text here.');
+  const journeyMd = serializeInline(journeyShape).md;
+  assert.strictEqual(journeyMd, 'Alpha *it****al* bold** text here.',
+    '跨 tag 相鄰（EM 接 STRONG）本來就正確，不該被守衛插入 <!-- -->');
+  assert.strictEqual(marked.parseInline(journeyMd),
+    'Alpha <em>it</em><strong><em>al</em> bold</strong> text here.');
+
+  // both directions of simple cross-tag adjacency, no nesting involved.
+  const emThenStrong = serializeInline(
+    el('p', {}, el('em', {}, 'a'), el('strong', {}, 'b'))).md;
+  assert.strictEqual(emThenStrong, '*a***b**');
+  assert.strictEqual(marked.parseInline(emThenStrong), '<em>a</em><strong>b</strong>');
+
+  const strongThenEm = serializeInline(
+    el('p', {}, el('strong', {}, 'a'), el('em', {}, 'b'))).md;
+  assert.strictEqual(strongThenEm, '**a***b*');
+  assert.strictEqual(marked.parseInline(strongThenEm), '<strong>a</strong><em>b</em>');
+
+  // same-tag adjacency must still be caught (the regression fix must not
+  // have swung the other way and stopped guarding the real bug).
+  const emThenEm = serializeInline(
+    el('p', {}, el('em', {}, 'a'), el('em', {}, 'b'))).md;
+  assert.strictEqual(emThenEm, '*a*<!-- -->*b*');
+  assert.strictEqual(marked.parseInline(emThenEm), '<em>a</em><!-- --><em>b</em>');
+
+  const strongThenStrong = serializeInline(
+    el('p', {}, el('strong', {}, 'a'), el('strong', {}, 'b'))).md;
+  assert.strictEqual(strongThenStrong, '**a**<!-- -->**b**');
+  assert.strictEqual(marked.parseInline(strongThenStrong),
+    '<strong>a</strong><!-- --><strong>b</strong>');
 }
 
 // ── review Minor 2: the guard's `<!-- -->` must not accumulate on re-save
@@ -271,12 +329,16 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
 // parser as an actual DOM comment (nodeType 8) sitting between the two
 // marks on the NEXT edit session. walkChildren() only ever handles
 // nodeType 3 (text) and nodeType 1 (element) and silently skips everything
-// else, so that leftover comment contributes nothing to `out` — the guard
-// re-evaluates the same boundary and reinserts exactly one `<!-- -->`, not
-// two. Proven here by building the DOM the SECOND save would actually see
-// (comment node already present) and asserting the output is BYTE-IDENTICAL
-// to the first save's output — not just "still parses", but the exact same
-// string, which is what rules out linear growth across edit sessions.
+// else, so that leftover comment contributes nothing to `out` and leaves
+// `lastMarkTag` untouched (fix-round rewrite: the guard now keys off
+// `lastMarkTag`, not the trailing character of `out`, but the same
+// "zero-contribution nodes don't reset state" property is what makes this
+// idempotent either way) — the guard re-evaluates the same boundary and
+// reinserts exactly one `<!-- -->`, not two. Proven here by building the
+// DOM the SECOND save would actually see (comment node already present)
+// and asserting the output is BYTE-IDENTICAL to the first save's output —
+// not just "still parses", but the exact same string, which is what rules
+// out linear growth across edit sessions.
 {
   const freshShape = el('p', {}, el('em', {}, el('code', {}, 'code')), el('em', {}, 'text'));
   const freshMd = serializeInline(freshShape).md;
