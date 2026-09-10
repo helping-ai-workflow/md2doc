@@ -7639,6 +7639,67 @@ async function main() {
     console.log('journey: the ＋ bubble survives you reaching for it — OK');
   }
 
+  // ── backlog #11 (T14-5 closed): standing ON the ＋ bubble must not hide
+  // the ⠿ row grip ────────────────────────────────────────────────────────
+  // The F7 block above is the SYMMETRIC, already-fixed half: the BUBBLE
+  // surviving the pointer's approach (updateTableInsertBubbles()). This is
+  // the half T14-5 deferred — updateTableEdgeGrips()'s own guard did not
+  // list '.ed-tb-insert', so once the pointer actually landed ON the bubble,
+  // the GRIP fell through to hideTableGrips() and vanished, along with the
+  // module-level refs (gripRowTableEl/gripRowEl) it needs to redraw itself
+  // when the pointer leaves the bubble again.
+  {
+    const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n| c3 | c4 |\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    const headerCellPt = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const th = table.tHead.rows[0].cells[0];
+      const r = th.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(headerCellPt.x, headerCellPt.y);
+    await ctx.page.mouse.move(headerCellPt.x + 1, headerCellPt.y + 1);
+    await new Promise((r) => setTimeout(r, 250));
+    const gripBefore = await overlayState(ctx.page, '.ed-te-grip-row');
+    assertRaised(gripBefore, '.ed-te-grip-row');
+
+    // The row-insert bubble for "after the header row" — the one boundary
+    // whose grip can ever be the HEADER row's (headerGripBlock()'s own gate).
+    const rowBubblePt = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const headerRow = table.tHead.rows[0];
+      const r = headerRow.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      return { x: tableRect.left, y: r.bottom };
+    });
+    await ctx.page.mouse.move(rowBubblePt.x, rowBubblePt.y, { steps: 3 });
+    await new Promise((r) => setTimeout(r, 250));
+    const onBubble = await ctx.page.evaluate(() => {
+      const bubble = document.querySelector('.ed-tb-insert-row');
+      const rowGrip = document.querySelector('.ed-te-grip-row');
+      return { bubbleHidden: bubble.hidden, rowGripHidden: rowGrip.hidden };
+    });
+    assert.strictEqual(onBubble.bubbleHidden, false,
+      '前提失敗：泡泡自己沒有升起來，got ' + JSON.stringify(onBubble));
+    assert.strictEqual(onBubble.rowGripHidden, false,
+      '指標停在 ＋ 泡泡上時 row grip 不得消失，got ' + JSON.stringify(onBubble));
+
+    // Leaving the bubble back onto the header cell must still find a live,
+    // correctly-anchored grip — proof the module state was never torn down.
+    await ctx.page.mouse.move(headerCellPt.x, headerCellPt.y);
+    await ctx.page.mouse.move(headerCellPt.x - 1, headerCellPt.y);
+    await new Promise((r) => setTimeout(r, 250));
+    const gripAfter = await overlayState(ctx.page, '.ed-te-grip-row');
+    assert.ok(isLive(gripAfter),
+      '離開泡泡回到表頭儲存格後，row grip 必須恢復正常，got ' + JSON.stringify(gripAfter));
+    assert.strictEqual(gripAfter.left, gripBefore.left,
+      'row grip 的錨定必須沒被弄壞，got ' + JSON.stringify({ before: gripBefore, after: gripAfter }));
+
+    assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: standing on the ＋ bubble no longer hides the row grip — OK');
+  }
+
   // ── F5/F6: Tab 走完表格就離開它，落點是「整格被選起來」 ──────────────────
   //
   // F6 = 格內 Tab 的落點。舊行為把游標塞在目標格【結尾】，所以「Tab 過去直接
