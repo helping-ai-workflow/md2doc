@@ -1010,6 +1010,126 @@ async function clickCellWithText(page, tableSel, text) {
   await page.mouse.click(box.x, box.y);
 }
 
+// v3.4.0 §2 helper: same real-coordinate-click reasoning as
+// clickCellWithText() above, but addressed by (bodyRowIndex, colIndex)
+// instead of by text — the v3.4.0 §2 "pre-focused cell" regression scenario
+// needs to click a cell BEFORE typing into it changes its text, so it
+// cannot locate the cell by its post-edit content. Types `text` at the
+// resulting caret (end of the cell), same as every other
+// page.keyboard.type() scenario in this file.
+async function typeIntoCell(page, tableSel, rowIndex, colIndex, text) {
+  const box = await page.evaluate((ts, ri, ci) => {
+    const table = document.querySelector(ts + ' table');
+    const r = table.tBodies[0].rows[ri].cells[ci].getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, tableSel, rowIndex, colIndex);
+  await page.mouse.click(box.x, box.y);
+  await page.keyboard.type(text);
+}
+
+// v3.4.0 §2 helper: scrolls the table block into view (the fixture below
+// pads enough content above it that it starts below the fold on page load)
+// and returns the resulting scrollY — the position a drag gesture below it
+// must leave alone.
+async function scrollToTable(page, tableSel) {
+  await page.evaluate((ts) => {
+    document.querySelector(ts).scrollIntoView({ block: 'center' });
+  }, tableSel);
+  return page.evaluate(() => window.scrollY);
+}
+
+// v3.4.0 §2 fixture: enough filler paragraphs to push the table below the
+// fold (same 'pad\n\n'.repeat() scroll-inducing shape the S3 §4.4 "scrolling
+// does not clear the selection" scenario already uses elsewhere in this
+// file), followed by a 3-row/2-column table — enough rows for a real,
+// non-adjacent row move.
+function longDocWithTableRows() {
+  return ['# Doc\n\n' + 'pad\n\n'.repeat(100),
+    '| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', ''];
+}
+
+// v3.4.0 §2 fixture (round 2 — see the scenario comment below for why round 1
+// wasn't enough): `n` body rows, so the TABLE ITSELF is taller than one
+// viewport. Col2 uses 'r<i>' rather than a single letter so `n` is not
+// bounded by the alphabet. Filler paragraphs above it (smaller than
+// longDocWithTableRows()'s — the table's own height does the scrolling work
+// here) still push it below the fold at initial load.
+function tallTableRows(n) {
+  const body = [];
+  for (let i = 1; i <= n; i++) body.push('| ' + i + ' | r' + i + ' |');
+  return ['# Doc\n\n' + 'pad\n\n'.repeat(40),
+    '| Col1 | Col2 |', '|---|---|', ...body, ''];
+}
+
+// v3.4.0 §2 helper: scrolls the table block into view (the fixture below
+// pads enough content above it that it starts below the fold on page load)
+// and returns the resulting scrollY — the position a drag gesture below it
+// must leave alone.
+async function scrollToTable(page, tableSel) {
+  await page.evaluate((ts) => {
+    document.querySelector(ts).scrollIntoView({ block: 'center' });
+  }, tableSel);
+  return page.evaluate(() => window.scrollY);
+}
+
+// v3.4.0 §2 helper (round 2): centers ONE body row (by index) in the
+// viewport, then reads back both window.scrollY and the table's OWN header
+// row's bottom edge. A plain focus() only scrolls the page when its target
+// is actually off-screen — scrollToTable()'s block:'center' on the whole
+// table block does not guarantee the HEADER specifically is off-screen for
+// a short table (the whole block can fit in one viewport with the header
+// still visible, which is exactly what round 1 of this scenario missed:
+// scrollY moved but the header never left the viewport, so focusing it
+// never had to scroll anything). Centering a row deep inside a table built
+// by tallTableRows() puts many rows' worth of height between that row and
+// the header, which is what actually pushes header.getBoundingClientRect()
+// .bottom negative.
+async function scrollRowIntoView(page, tableSel, bodyIndex) {
+  await page.evaluate((ts, bi) => {
+    document.querySelector(ts + ' table').tBodies[0].rows[bi].scrollIntoView({ block: 'center' });
+  }, tableSel, bodyIndex);
+  return page.evaluate((ts) => ({
+    scrollY: window.scrollY,
+    headerBottom: document.querySelector(ts + ' table').tHead.rows[0].getBoundingClientRect().bottom,
+  }), tableSel);
+}
+
+// v3.4.0 §2 helper (round 3 finding): predicts the flat tbody-td join
+// string performRowDrop() leaves behind after dragging body row
+// `fromBodyIndex` to the boundary just after body row `afterBodyIndex`.
+//
+// A round-2 version of this hand-derived the splice WITHOUT the header —
+// `orig.splice(toIndex, 0, moved)` over a body-only array — and got the
+// wrong answer (a `waitForFunction` on it timed out at 30s with zero
+// diagnostic value). Read against the actual source instead of guessing
+// again:
+//   - allRowsOf(tableEl) (client.js ~9203) = [headerRow, ...bodyRows] —
+//     the header occupies index 0, so a body row's real ordinal is its
+//     body index + 1.
+//   - nearestRowDropTarget() (client.js ~10541)'s 'before-row' branch
+//     returns `rowIndex: all.indexOf(rows[i])` for the first body row
+//     whose OWN midline is below the drop clientY. rowBoundaryCoords()
+//     (this file) releases at the BOTTOM edge of body row
+//     `afterBodyIndex` — which is the TOP edge of the next body row
+//     (afterBodyIndex + 1), below that next row's own midline — so
+//     production's toIndex resolves to allRowsOf().indexOf(bodyRow[
+//     afterBodyIndex + 1]) = (afterBodyIndex + 1) + 1 = afterBodyIndex + 2.
+//   - performRowDrop() then does the exact splice reproduced below.
+// Validated against the round-1 3-row result that DID match production
+// (fromBodyIndex=2, afterBodyIndex=0 -> '1,a,3,c,2,b'/'...bPROBE', both
+// observed correct on the real page).
+function expectedRowDragOrder(n, fromBodyIndex, afterBodyIndex) {
+  const all = ['H'];
+  for (let i = 0; i < n; i++) all.push('B' + i);
+  const rowIndex = fromBodyIndex + 1;
+  const toIndex = afterBodyIndex + 2;
+  const moved = all.splice(rowIndex, 1)[0];
+  all.splice(toIndex > rowIndex ? toIndex - 1 : toIndex, 0, moved);
+  return all.filter((tag) => tag !== 'H')
+    .map((tag) => { const v = Number(tag.slice(1)) + 1; return v + ',r' + v; })
+    .join(',');
+}
+
 // Task 5 (hover-edge insert bubbles) helpers: compute the pixel coordinates
 // of a column or row insert boundary from the table's LIVE cell rects — the
 // SAME geometry client.js's own updateTableInsertBubbles() computes, so
@@ -1167,6 +1287,18 @@ async function dragRowTo(page, from, to) {
   await page.mouse.move(from.x + (to.x - from.x) / 2, from.y + (to.y - from.y) / 2, { steps: 5 });
   await page.mouse.move(to.x, to.y, { steps: 5 });
   await page.mouse.up();
+}
+
+// v3.4.0 §2 helper: composes rowGripCoords()/rowBoundaryCoords()/dragRowTo()
+// above into one call — `fromIndex` is the dragged row's body index,
+// `toIndex` is the boundary-after body index dragRowTo releases at (or -1
+// for "above the header", same convention rowBoundaryCoords() itself uses).
+// Every existing row-drag scenario above does this same three-call sequence
+// inline; this just names it for the two v3.4.0 §2 scenarios below.
+async function dragRow(page, tableSel, fromIndex, toIndex) {
+  const from = await rowGripCoords(page, tableSel, fromIndex);
+  const to = await rowBoundaryCoords(page, tableSel, toIndex);
+  await dragRowTo(page, from, to);
 }
 
 // Ctrl+S then re-read the file from disk — used by the Task 5/6 scenarios
@@ -23709,6 +23841,132 @@ async function gutterGeometry(page, sel) {
       } finally {
         srv.close();
       }
+    }
+
+    // ── v3.4.0 §2: a table drag must not throw the page at the header ──────
+    // restoreTableFocus() falls back to cells[0] — the first header cell —
+    // whenever cellIndex is -1, then focus()es it; a plain .focus() with no
+    // `{ preventScroll: true }` scrolls its target into view (this file's
+    // own applyFullRender()/rebuildBlockSelection() comments document that
+    // exact browser behaviour elsewhere). Both restoreTableFocus() call
+    // sites (performRowDrop, performColDrop) compute activeIndex the same
+    // way: null when the drag never focused any cell first, which is -1.
+    // performBlockDrop() and performListItemDrop() call neither focus() nor
+    // scrollIntoView() at all — a drag gesture not manufacturing a focus is
+    // already this file's convention on those two other drag paths.
+    //
+    // Placed at the very end of the file, after every pre-existing
+    // scenario, rather than inline with the other row-drag tests above:
+    // this file has no per-scenario try/catch (one `(async () => {...})()
+    // .catch((e) => { ...; process.exit(1); })` around the whole run), so
+    // any assertion or timeout in these two new scenarios would abort
+    // every scenario after it. Two rounds of getting this fixture wrong
+    // already cost a 30s timeout mid-file; keeping them last means a third
+    // miss only costs itself, not the ~350 scenarios that used to follow.
+    //
+    // This scenario reproduces the user-reported symptom directly: scroll
+    // so the table's HEADER is off-screen, drag a body row with no cell
+    // pre-focused, and measure window.scrollY and document.activeElement
+    // afterward.
+    //
+    // ROUND 1 (a 3-row table, scrollToTable()'s block:'center' on the
+    // whole block) DID reproduce the focus defect (`active` came back
+    // `TH.cell-narrow ed-wys-cell`) but NOT the scroll-jump symptom:
+    // `after.scrollY === before` held, because focus() only scrolls when
+    // its target is actually off-screen, and a 3-row table's header is
+    // still on-screen even centered.
+    // ROUND 2 (tallTableRows()/scrollRowIntoView() below, which DID push
+    // the header off-screen — that precondition passed) hung a 30s
+    // `waitForFunction` on a hand-derived `expectedOrder` that turned out
+    // wrong (see expectedRowDragOrder()'s comment above for the actual
+    // header-offset bug and how it was found), so the timeout carried zero
+    // diagnostic value. Round 3 fixes the prediction AND replaces the
+    // open-ended wait with a bounded grace + a real-value assertion, so a
+    // wrong prediction shows up as a fast, informative diff instead of
+    // another blind 30s timeout.
+    {
+      const N = 40;
+      const fromIndex = N - 1; // last row
+      const afterIndex = N - 4; // drop boundary after body row (N-4)
+      const { srv: tsrv, url: turl } = await setupTableDoc(tallTableRows(N));
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const { scrollY: before, headerBottom } = await scrollRowIntoView(page, table0, fromIndex);
+        assert.ok(headerBottom < 0,
+          'precondition: 拖曳發生時表頭必須已經捲出視窗（bottom < 0），否則 focus() 不會捲動，' +
+          '這一列量不到使用者回報的症狀. Got headerBottom=' + headerBottom);
+
+        await dragRow(page, table0, fromIndex, afterIndex);
+        await settleEditor(page);
+        // Bounded grace for the (local, no-network) DOM rebuild to land —
+        // NOT an open-ended waitForFunction on the predicted order: if the
+        // prediction is wrong again, this must fail fast with the real
+        // value, not burn another 30s telling us nothing.
+        await new Promise((r) => setTimeout(r, 500));
+
+        const actualOrder = await page.evaluate((s) =>
+          Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0);
+        const expectedOrder = expectedRowDragOrder(N, fromIndex, afterIndex);
+        assert.strictEqual(actualOrder, expectedOrder,
+          '拖曳後的實際列序與預期不符（診斷用，非產品缺陷斷言）. Got ' + actualOrder);
+
+        const after = await page.evaluate(() => ({
+          scrollY: window.scrollY,
+          active: document.activeElement
+            ? document.activeElement.tagName + '.' + (document.activeElement.className || '')
+            : null,
+        }));
+        assert.strictEqual(after.scrollY, before,
+          '拖曳不得改變捲動位置. Got ' + JSON.stringify(after));
+        assert.ok(!/^TH/.test(after.active || ''),
+          '拖曳不得把焦點放到表頭儲存格. Got ' + JSON.stringify(after));
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2): a drag with no pre-focused cell and the header scrolled off-screen leaves the scroll position alone — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // The other half — must NOT regress: a drag started from a cell that WAS
+    // genuinely focused (and edited) before the gesture began must still
+    // restore focus to that same cell afterward. currentBurst.activeCellEl
+    // is non-null here, so activeIndex is >= 0 and restoreTableFocus() must
+    // still be called. Kept at the very end alongside the scenario above,
+    // same reasoning (this file's single top-level catch aborts every
+    // scenario after the first failure).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(longDocWithTableRows());
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await scrollToTable(page, table0);
+
+        await typeIntoCell(page, table0, 1, 1, 'PROBE'); // body row "2"/"b" 的 Col2 儲存格
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, 'bPROBE',
+          'precondition: typeIntoCell 必須真的把焦點放在那格並打進文字. Got ' + cellBefore);
+
+        await dragRow(page, table0, 2, 0); // "3"/"c" -> right after body row 0 ("1"/"a")
+        await settleEditor(page);
+        await new Promise((r) => setTimeout(r, 500));
+
+        const actualOrder = await page.evaluate((s) =>
+          Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0);
+        assert.strictEqual(actualOrder, '1,a,3,c,2,bPROBE',
+          '拖曳後的實際列序與預期不符（診斷用，非產品缺陷斷言）. Got ' + actualOrder);
+
+        const cellAfter = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellAfter, cellBefore,
+          '拖曳前有作用中儲存格時，焦點必須回到同一格. Got ' + cellAfter);
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2): a drag started from an edited cell keeps that cell focused — OK');
+      } finally { tsrv.close(); }
     }
 
     console.log('editor-client-runtime.test.js OK');
