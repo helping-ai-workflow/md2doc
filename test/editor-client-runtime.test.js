@@ -6436,6 +6436,26 @@ async function gutterGeometry(page, sel) {
           '2,B',
           'clicking column B\'s top edge must highlight exactly column B\'s cells (header+body)');
 
+        // The menu's buttons must be the topmost element at their OWN centre.
+        // `.ed-te-menu` is fixed at z-index 12 and `.ed-toolbar` is fixed at
+        // the top of the viewport at 101, so a menu placed inside the
+        // toolbar's band is painted under it: `hidden` still reads false, the
+        // rectangle still looks ordinary, and every click below silently
+        // lands on the toolbar instead. This fixture's table IS the first
+        // block, which is the shape that puts the menu closest to that band,
+        // so this row is where the occlusion shows up first.
+        assert.strictEqual(
+          await page.evaluate(() => {
+            const b = document.querySelector('.ed-te-menu-align');
+            const r = b.getBoundingClientRect();
+            const hit = document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)[0];
+            return hit === b ? true : (hit ? hit.tagName + '.' + hit.className : null);
+          }),
+          true,
+          'the column menu\'s 對齊 button must be the topmost element at its own ' +
+          'centre — anything else there means the button is painted over and no ' +
+          'click can reach it');
+
         // 對齊: cycle left -> center -> right, each click keeping the menu
         // (an overlay element) open and NOT ending the burst — the menu
         // button's own mousedown preventDefault() must keep whatever cell
