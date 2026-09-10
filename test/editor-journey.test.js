@@ -3808,8 +3808,7 @@ async function main() {
 
   // ── 階段 0 的開放決定裁定 (a)：⠿ → MD 原始碼 維持【丟棄】語意 ──────────
   //
-  // 量測表與裁定理由寫在 .superpowers/sdd/2026-09-07-md2doc-v3.3.0/
-  // task-1-report.md。這一條把裁定釘在磁碟位元組上，理由是「丟棄」在 HEAD
+  // 這一條把裁定釘在磁碟位元組上，理由是「丟棄」在 HEAD
   // 上【真人永遠碰不到】：實測按壓 0 / 5 ms 時 mousedown 的 blur 搶先提交
   // （磁碟拿到那些字；表格連沒碰過的分隔列都被重新序列化成 `|---|`），
   // 按壓 80 ms 時整個手勢死掉、raw 編輯器根本沒開。修好委派清單之後三個
@@ -3865,7 +3864,7 @@ async function main() {
 
   // ── 地基 B: undo 一個標記不得連同剛打的整句一起丟掉 ──────────────────
   //
-  // 缺陷形狀（量測，見 task-3-report.md）：`noteTyping()` 沒有 timer，一段
+  // 缺陷形狀（量測）：`noteTyping()` 沒有 timer，一段
   // 打字自己永遠不會 checkpoint；而 mark toggle 在【改完 DOM 之後】才 snap，
   // 於是那一筆 snapshot 同時裝著「打的字」與「粗體」。一次 undo 把兩者一起
   // 退掉，段落回到全新狀態。
@@ -6639,7 +6638,7 @@ async function main() {
 
   // ── F4: 轉換子選單的項目在矮視窗下都必須可達 ────────────────────────
   // 量測基礎：開 ⠿ + 轉換成整段手勢從未讀過 window.innerHeight/innerWidth
-  // （對照組 .ed-seltb 的路徑會讀），即 clamp 從未寫過，不是寫壞。見 task-9-brief.md。
+  // （對照組 .ed-seltb 的路徑會讀），即 clamp 從未寫過，不是寫壞。
   {
     const filler = Array.from({ length: 40 }, (_, i) => 'Filler ' + i + '.').join('\n\n');
     const ctx = await newPage('# Doc\n\n' + filler + '\n');
