@@ -3106,14 +3106,25 @@ async function main() {
       '前提失敗：抽屜關著時 PageDown 沒有真的捲動文件（scrollY=' + preOpenY +
       '），下面「鎖住」的斷言測不到東西');
 
-    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    // Review round 2, M3: open the drawer while scrollY is still NON-zero
+    // (deliberately do NOT reset to 0 first) and assert it does not move.
+    // `overflow: hidden` is a hold-in-place lock — it does not itself alter
+    // scroll position — but a `position: fixed`-based lock (a plausible
+    // future rewrite) WOULD snap the page back to the top when engaged, and
+    // every assertion below resets to 0 before checking, so none of them
+    // would ever notice that regression without this one.
     // .sidebar-toggle 在 edit 模式下被 .ed-toolbar（z-index 101 > 100）蓋住，
     // 滑鼠點不到它，用 DOM click 繞過（見上面那一列的同一段註解）。
     await ctx.page.evaluate(() => document.querySelector('.sidebar-toggle').click());
     await new Promise((r) => setTimeout(r, 450));
     const open = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
     assert.notStrictEqual(open, null, '前提失敗：抽屜沒有打開');
+    const yAtOpen = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(yAtOpen, preOpenY,
+      '打開抽屜本身不得移動捲動位置（不是 position:fixed 那種會把頁面拉回頂端的鎖法），' +
+      'got before=' + preOpenY + ' after=' + yAtOpen);
 
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
     await ctx.page.keyboard.press('PageDown');
     await new Promise((r) => setTimeout(r, 250));
     const afterPageDown = await ctx.page.evaluate(() => window.scrollY);
@@ -7685,7 +7696,17 @@ async function main() {
       '指標停在 ＋ 泡泡上時 row grip 不得消失，got ' + JSON.stringify(onBubble));
 
     // Leaving the bubble back onto the header cell must still find a live,
-    // correctly-anchored grip — proof the module state was never torn down.
+    // correctly-anchored grip. Review round 2, M1: this does NOT prove the
+    // module state survived the visit to the bubble — re-hovering the
+    // header cell takes the onValidCell branch, which unconditionally
+    // RECOMPUTES gripRowTableEl/gripRowEl/the grip's own rect from the cell,
+    // so the same rect would come back even in a world where the bubble had
+    // torn everything down and this test just rebuilt it. All the detecting
+    // power for "did the grip survive" is in the onBubble.rowGripHidden
+    // assertion above; this second check only guards that the grip still
+    // functions normally afterward — a real, if weaker, regression net (a
+    // gesture that left gripRowTableEl pointing at a stale/detached element
+    // would fail it), just not proof of state continuity.
     await ctx.page.mouse.move(headerCellPt.x, headerCellPt.y);
     await ctx.page.mouse.move(headerCellPt.x - 1, headerCellPt.y);
     await new Promise((r) => setTimeout(r, 250));
