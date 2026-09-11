@@ -694,7 +694,17 @@ async function main() {
     await new Promise((r) => setTimeout(r, 400));
     const b = await ctx.page.evaluate(() => ({
       active: document.activeElement ? document.activeElement.tagName : null,
-      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+      // Review I2: `save` excluded — it is one of NO_BLOCK_ALLOWED
+      // (lib/editor/toolbar-model.js) and, unlike the other four members of
+      // that set, its OWN disabled flag also tracks ctx.dirty rather than
+      // being unconditionally live. A gesture that dirties the document (a
+      // commit, not just a save) would otherwise make a genuine collapse-to-
+      // no-block read as 5 instead of 4 and slip past every `> 4` sentinel
+      // in this file — counting it back in restores the ORIGINAL meaning
+      // ("did the toolbar collapse to its structural no-block floor")
+      // this count has always pinned.
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+        .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(b.active, 'BODY', 'B 態轉換後焦點不得掉到 BODY');
     assert.ok(b.enabled > 4, 'B 態轉換後工具列不得塌成 4 顆，got ' + b.enabled);
@@ -744,7 +754,10 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500));
     const h = await ctx.page.evaluate(() => ({
       active: document.activeElement ? document.activeElement.tagName : null,
-      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+      // Review I2: `save` excluded — see the identical comment on the
+      // conversion scenario above for why.
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+        .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(h.active, 'BODY', 'H▾ 改既有標題層級後焦點不得掉到 BODY');
     assert.ok(h.enabled > 4, 'H▾ 改既有標題層級後工具列不得塌成 4 顆，got ' + h.enabled);
@@ -1632,7 +1645,14 @@ async function main() {
   const readLeverage = (page) => page.evaluate(() => ({
     active: document.activeElement ? document.activeElement.tagName : null,
     activeClass: document.activeElement ? String(document.activeElement.className) : '',
-    enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+    // Review I2: `save` excluded from this count — see the identical
+    // comment on the "conversion restores focus" scenario earlier in this
+    // file for why (NO_BLOCK_ALLOWED member whose OWN disabled flag tracks
+    // ctx.dirty, which would otherwise let a dirty-but-genuinely-collapsed
+    // toolbar read as 5 and slip every `<= 4` / `> 4` sentinel this
+    // function feeds — TB_ROWS' checkLeverage() among them).
+    enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+      .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     mode: document.body.getAttribute('data-ed-mode'),
   }));
 
@@ -1799,9 +1819,18 @@ async function main() {
         },
         // The click must not itself change what is on screen — the
         // uncommitted "ZZ" was already visible before the press, and a
-        // commit-then-save round-trip re-renders the same bytes. The real,
-        // load-bearing effect (uncommitted -> committed -> on disk) is the
-        // `disk` predicate below.
+        // commit-then-save round-trip re-renders the same bytes.
+        //
+        // Review I3: the `disk` predicate below is NOT what proves the
+        // click wrote anything — saveAndRead() (the loop's shared `row.disk`
+        // runner) issues its OWN Ctrl+S before reading the file, so `disk`
+        // would read back correct bytes even if the save BUTTON did
+        // nothing at all. The actual proof that the CLICK itself persisted
+        // the commit is the direct `fs.readFileSync()` the main loop does
+        // for this row specifically, BEFORE saveAndRead() ever runs (see
+        // "review I3" in the loop body, right after the press). `disk`
+        // stays as a secondary, harmless confirmation of the same bytes
+        // post-Ctrl+S.
         effect: (b, a) => same(b, a) ? null
           : '按下 save 不應該改變畫面上的任何區塊內容，got before ' +
             JSON.stringify(b) + ' after ' + JSON.stringify(a),
@@ -1986,6 +2015,18 @@ async function main() {
       const before = await docSnap(ctx.page);
       await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
+      // Review I3: read the file directly HERE, before anything below gets a
+      // chance to press Ctrl+S of its own accord (saveAndRead(), which
+      // `row.disk` runs through further down, issues its own Ctrl+S — a
+      // save button that did nothing would still pass that check). This is
+      // the one assertion that actually proves THE CLICK wrote the bytes.
+      if (row.id === 'save') {
+        const clickOnlyBytes = fs.readFileSync(ctx.mdPath, 'utf8');
+        if (clickOnlyBytes !== '# H\n\nZZ bravo charlie delta.\n\nBravo paragraph.\n') {
+          bad.push('save → 按下按鈕本身（在任何 Ctrl+S 之前）必須已經把提交後的內容存到磁碟，got:\n' +
+            clickOnlyBytes);
+        }
+      }
       const after = await docSnap(ctx.page);
       const noEffect = row.effect(before, after);
       if (noEffect) {
@@ -2150,14 +2191,12 @@ async function main() {
         'V2c(dirty=' + dirty + '): 按到一顆停用的按鈕不得帶走游標，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2c(dirty=' + dirty + '): 游標必須還在原來那個編輯面上，got ' + JSON.stringify(st));
-      // v3.4.0 §3: the base count shifts by exactly one, and only for the
-      // dirty=true iteration — `save` reads ctx.dirty, which typing 'XY'
-      // above already set to true regardless of this click (an uncommitted
-      // burst edit alone is enough, see documentIsDirty()). The invariant
-      // this assertion actually pins ("clicking a DISABLED button changes
-      // nothing") is untouched: it is still exactly the pre-click count in
-      // both branches, `save`'s own state included.
-      assert.strictEqual(st.enabled, dirty ? 16 : 15,
+      // v3.4.0 §3 / review I2: stays 15 in BOTH branches — readLeverage()'s
+      // `enabled` deliberately excludes `save` (see its own comment) so
+      // this count keeps meaning exactly what it always meant here
+      // ("clicking a DISABLED button changes nothing"), independent of
+      // whether typing 'XY' above also lit the save button itself.
+      assert.strictEqual(st.enabled, 15,
         'V2c(dirty=' + dirty + '): 工具列不得改變 —— 沒有 commit、沒有 render，' +
         'got ' + JSON.stringify(st));
       assert.strictEqual(ctx.errs.length, 0, 'V2c: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
@@ -2375,14 +2414,11 @@ async function main() {
       await ctx.page.keyboard.type('X');          // 髒 burst：switchAwayFrom() 會提交＋重繪
       await new Promise((r) => setTimeout(r, 250));
       const before = await readLeverage(ctx.page);
-      // v3.4.0 §3: 16, not 15 — typing 'X' just made the document dirty
-      // (documentIsDirty()), and `save` reads exactly that, so it joins the
-      // 15 buttons a focused, no-selection burst already had enabled. Commit
-      // alone (this test never calls save()) does not clear dirtiness —
-      // only a real save does — so this stays 16 for the rest of the block
-      // too (the `st.enabled` check below, after Tab).
-      assert.strictEqual(before.enabled, 16,
-        'V2g(' + name + ') 前提：打字後工具列應是 16 顆（含 save 亮起），got ' + JSON.stringify(before));
+      // review I2: stays 15 — readLeverage()'s `enabled` deliberately
+      // excludes `save` (see its own comment), so typing 'X' lighting it up
+      // does not move this count.
+      assert.strictEqual(before.enabled, 15,
+        'V2g(' + name + ') 前提：打字後工具列應是 15 顆，got ' + JSON.stringify(before));
       if (shift) await ctx.page.keyboard.down('Shift');
       await ctx.page.keyboard.press('Tab');
       if (shift) await ctx.page.keyboard.up('Shift');
@@ -2393,7 +2429,7 @@ async function main() {
         'V2g(' + name + ')：游標必須留在（或落到）' + wantTag + '，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2g(' + name + ')：而且必須是一個真的編輯面，got ' + JSON.stringify(st));
-      assert.strictEqual(st.enabled, 16,
+      assert.strictEqual(st.enabled, 15,
         'V2g(' + name + ')：工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
         '游標還在但整條工具列已經被 applyPatch() 的 resetToolbarBlock() 收掉了，got ' +
         JSON.stringify(st));
@@ -2524,7 +2560,13 @@ async function main() {
       const st = await ctx.page.evaluate(() => ({
         active: document.activeElement ? document.activeElement.tagName : null,
         activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
-        enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+        // Review I2: `save` excluded — see the identical comment on the
+        // "conversion restores focus" scenario earlier in this file for
+        // why. This fixture types 'X' before reaching this scenario (it is
+        // what the C1 primed variant needs), which would otherwise light
+        // `save` and hide a real collapse-to-no-block behind a count of 5.
+        enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+          .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
         banner: (document.querySelector('.ed-conflict') || {}).textContent || '',
       }));
       assertRoute(await patchRoutes(ctx), primed, 'V2h(' + name + ')');

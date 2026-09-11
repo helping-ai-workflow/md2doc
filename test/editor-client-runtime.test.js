@@ -24178,6 +24178,74 @@ async function gutterGeometry(page, sel) {
       } finally { s4srv.close(); }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 §3 review C1: the caret rescue must also cover a NON-collapsed
+    // selection at click time — captureCaretForSave() used to bail out on
+    // `!sel.isCollapsed` entirely, so a burst dirtied by typing and then
+    // trimmed with Shift+ArrowLeft (fixing a typo is exactly this gesture)
+    // left restoreCaretForSave() with nothing to work from: MEASURED before
+    // this fix, save's click left activeElement on BODY and every
+    // subsequent keystroke was silently discarded — precisely backlog #6's
+    // own symptom, reached through `save` instead of quote/code/line.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: s5srv, url: s5url, mdPath: s5mdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5url, { waitUntil: 'networkidle0' });
+        const btn = '.ed-toolbar [data-ed-tb="save"]';
+
+        const sel = await paragraphSelByText(page, 'alpha');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PROBE'); // "alpha PROBE", caret at offset 11
+        await settleEditor(page);
+
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.up('Shift'); // selects "OBE" — focus end lands at offset 8
+        await new Promise((r) => setTimeout(r, 150));
+
+        const preClick = await page.evaluate(() => {
+          const s = getSelection();
+          return {
+            collapsed: s.isCollapsed,
+            text: s.toString(),
+            dis: document.querySelector('.ed-toolbar [data-ed-tb="save"]').disabled,
+          };
+        });
+        assert.deepStrictEqual(preClick, { collapsed: false, text: 'OBE', dis: false },
+          '前提失敗：必須真的立起一段非空選取，而且 save 必須是亮的，got ' + JSON.stringify(preClick));
+
+        await page.click(btn);
+        await settleEditor(page);
+        await new Promise((r) => setTimeout(r, 300));
+
+        assert.strictEqual(fs.readFileSync(s5mdPath, 'utf8'), '# Doc\n\nalpha PROBE\n',
+          '非 collapsed 選取時按下儲存，還沒提交的編輯照樣必須先提交再落磁碟');
+
+        const isBody = await page.evaluate(() => document.activeElement === document.body);
+        assert.strictEqual(isBody, false,
+          'C1：非 collapsed 選取時按下儲存，caret 不得掉到 BODY（backlog #6 的症狀本體）');
+
+        // 不只是「不是 BODY」——鍵盤使用者必須真的還能打字，字必須落在正確位置
+        // （focus 端的 offset 8：'alpha PR' 與 'OBE' 之間）。
+        await page.keyboard.type('Z');
+        await new Promise((r) => setTimeout(r, 200));
+        const afterType = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
+        assert.strictEqual(afterType, 'alpha PRZOBE',
+          'C1：save 之後打的字必須真的進得去畫面、而且落在正確位置，不是被靜默吞掉。Got ' +
+          JSON.stringify(afterType));
+
+        await page.close();
+        console.log('save button (v3.4.0 §3 review C1): a NON-collapsed selection also gets its caret back — OK');
+      } finally { s5srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
