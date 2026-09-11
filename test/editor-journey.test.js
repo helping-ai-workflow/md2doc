@@ -8637,6 +8637,50 @@ async function main() {
     console.log('journey: the raw-editor rescue stays scoped to the toolbar quote/code conversion — OK');
   }
 
+  // ── Task 9 review M3: toggleOutlineSidebar() must tell a keyboard
+  // activation apart from a mouse click by WHICH DEVICE fired THIS call,
+  // not by whether keynav happens to be on — `toolbarRovingIndex >= 0` is
+  // true after Alt+F10 regardless of whether the very next input is a
+  // keypress or a mouse click, so the first cut of backlog #9's fix
+  // treated a mouse click as keyboard whenever keynav was still on from an
+  // earlier keypress, stealing focus into the search box in direct
+  // contradiction of its own commit message ("a mouse click on the same
+  // button must not steal focus"). Fixed with an explicit `viaKeyboard`
+  // parameter threaded from activateToolbarCursor() (the one call path
+  // that IS the keyboard route) through runToolbarAction() to
+  // toggleOutlineSidebar().
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const focusedBefore = await ctx.page.evaluate(() => document.activeElement.className);
+
+    // Alt+F10 turns keynav ON, but the user reaches for the MOUSE instead
+    // of pressing Enter.
+    await ctx.page.keyboard.down('Alt');
+    await ctx.page.keyboard.press('F10');
+    await ctx.page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 200));
+    const keynavOn = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    assert.notStrictEqual(keynavOn, null, 'M3 前提失敗：Alt+F10 之後 keynav 必須是開的，got ' + keynavOn);
+
+    await ctx.page.click('.ed-toolbar [data-ed-tb="outline"]');
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await ctx.page.evaluate(() => ({
+      cls: document.activeElement.className,
+      inSidebar: !!(document.activeElement.closest &&
+        document.activeElement.closest('[data-reader-sidebar]')),
+    }));
+    assert.strictEqual(after.inSidebar, false,
+      'M3：keynav 開著時用滑鼠點 ☰ 不得把 focus 搶進側欄，got ' + JSON.stringify(after));
+    assert.strictEqual(after.cls, focusedBefore,
+      'M3：滑鼠點 ☰ 不得動到原本的 focus，got ' + JSON.stringify({ focusedBefore, after }));
+    assert.strictEqual(ctx.errs.length, 0, 'M3：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a mouse click on outline never steals focus, even with keynav still on — OK');
+  }
+
   await browser.close();
 }
 
