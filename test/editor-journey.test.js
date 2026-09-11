@@ -8205,6 +8205,84 @@ async function main() {
     console.log('journey: collapsing then reselecting by keyboard raises .ed-seltb again — OK');
   }
 
+  // ── Task 9 backlog #7: the H▾ dropdown's six items must be reachable and
+  // operable by keyboard, not mouse-only. ArrowDown/ArrowUp now move a
+  // cursor INSIDE the open panel (own index, own attribute
+  // data-ed-tb-menu-cursor — the bar's own toolbarRovingIndex stays parked
+  // on `headings` throughout, per K6's own pinned assertion a few dozen
+  // lines above this one), and Enter/Space activate the highlighted item —
+  // but ONLY once the panel cursor has actually moved. With nothing
+  // highlighted yet, Enter/Space still just toggle the H▾ button itself
+  // (K6's exact pinned shape), so this row is deliberately layered on top of
+  // K6 rather than replacing any of it.
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const menuState = () => ctx.page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll('.ed-toolbar-menu-btn'));
+      return {
+        open: !!document.querySelector('.ed-toolbar-menu'),
+        at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+        cursorIdx: items.findIndex((b) => b.hasAttribute('data-ed-tb-menu-cursor')),
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'headings' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    assert.strictEqual(at, 'headings', 'T9-7 前提失敗：走不到 headings 按鈕，got ' + at);
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+    const opened = await menuState();
+    assert.strictEqual(opened.open, true, 'T9-7：Enter 必須打開 H▾ 面板，got ' + JSON.stringify(opened));
+    assert.strictEqual(opened.cursorIdx, -1,
+      'T9-7：剛打開時面板裡不得有任何項目帶游標，got ' + JSON.stringify(opened));
+
+    await ctx.page.keyboard.press('ArrowDown');
+    await new Promise((r) => setTimeout(r, 200));
+    const firstItem = await menuState();
+    assert.strictEqual(firstItem.cursorIdx, 0,
+      'T9-7：ArrowDown 必須把面板游標移到第一項（標題 1），got ' + JSON.stringify(firstItem));
+
+    await ctx.page.keyboard.press('ArrowDown');
+    await new Promise((r) => setTimeout(r, 200));
+    const secondItem = await menuState();
+    assert.strictEqual(secondItem.cursorIdx, 1,
+      'T9-7：再一次 ArrowDown 必須移到第二項（標題 2），got ' + JSON.stringify(secondItem));
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    const afterActivate = await menuState();
+    assert.strictEqual(afterActivate.open, false,
+      'T9-7：Enter 在已高亮的項目上必須把面板收起來，got ' + JSON.stringify(afterActivate));
+    const converted = await ctx.page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll('.ed-block'))
+        .find((b) => (b.textContent || '').indexOf('Alpha paragraph') !== -1);
+      const h = el && el.querySelector('h1,h2,h3,h4,h5,h6');
+      return { type: el && el.getAttribute('data-block-type'), tag: h ? h.tagName : null };
+    });
+    assert.deepStrictEqual(converted, { type: 'heading', tag: 'H2' },
+      'T9-7：鍵盤選到的第二項必須真的把該區塊轉成 H2，got ' + JSON.stringify(converted));
+    assert.strictEqual(ctx.errs.length, 0, 'T9-7：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the H▾ dropdown items are keyboard-reachable — OK');
+  }
+
   // ── Task 9 backlog #10: a stray key must not silently drop the toolbar's
   // keyboard cursor. MEASURED (v3.3.0): ArrowUp / ArrowDown / Tab / Home /
   // End / 'a' / Backspace all dropped [data-ed-tb-cursor] AND the bar's own
