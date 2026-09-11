@@ -67,6 +67,51 @@ Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tb
 
 `test/editor-client.test.js` asserts `lib/editor/client.js` contains none of a list of bare substrings naming retired editor-bar internals (`ed-bar`, `attachGutters`, `dismissBar`, etc., matched with plain `includes`, not word boundaries) — ordinary prose can trip it (a comment mentioning "fixed-bar" once reddened the whole suite via `ed-bar`), so grep that guarded list before committing a new comment into `client.js`.
 
+## The Two Long Puppeteer Suites — No Per-Scenario `try`/`catch`
+
+`test/editor-client-runtime.test.js` and `test/editor-journey.test.js` run every
+scenario in one unguarded sequence. **The first throw ends the run**, so every
+scenario after it is silently not executed — the log just stops. Two consequences
+that cost this repo 20 minutes a pop, twice in one batch:
+
+1. **A `TimeoutError` returns zero information.** Never use a bare
+   `waitForFunction` to wait for a value you can predict. Use
+   `act → settle → grace → read the actual value → assert.strictEqual(...)`, so a
+   wrong guess prints the real value instead of `Timeout 30000ms exceeded`.
+2. **"The test exists" is not "the test ran."** A v3.4.0 data-correctness bug
+   (a table row drag re-pointing the caret at the wrong cell, so every subsequent
+   keystroke lands in the wrong cell) sat undetected because scenario 1 always
+   threw first and scenario 2 was never reached. When you add a scenario, confirm
+   it actually appears in the `OK` output — an unreached scenario reads exactly
+   like a passing one.
+
+Reading a red run: a failure carrying **0 `AssertionError`** plus
+`TargetCloseError` / `Navigating frame was detached` / `Protocol error` is
+infrastructure (the browser was reaped), not a product defect — rerun. A
+`TimeoutError` landing on a **newly written fixture** is usually real; one landing
+on a **pre-existing helper the diff never touched** is usually flake. Either way,
+rerun until green — never interpret a red run you have not reproduced.
+
+## Changing a Count, a Roster, or a Pinned Measurement
+
+Before you change any "number of X" — button counts, enabled-button tallies,
+`scrollWidth` values in comments — grep the whole repo for that literal first.
+Adding one toolbar button in v3.4.0 hit four test files, and one of the hits was
+not the literal at all but a completeness assertion over the button-id set
+(`TB_ROWS` in `editor-journey.test.js`).
+
+Two rules that fall out of it:
+
+- **Present-tense descriptions migrate; historical measurement narratives do
+  not.** A comment saying "owns the 22-button roster" is a claim about today and
+  must become 23. A comment saying "v3.2.1 measured 7/22 disabled" is a record of
+  a measurement — editing the number fabricates data that was never measured.
+- **Re-measure, don't recompute.** When a change invalidates a `MEASURED` comment,
+  take the measurement again. A v3.4.0 gap tweak looked like it only moved one
+  pinned number from 555 to 522; re-measuring showed the *other* number in the
+  same sentence was already wrong (75, actually 42). This repo makes real
+  decisions from `MEASURED` comments, so a stale one is expensive.
+
 ## Do NOT Stage
 
 - `docs/superpowers/specs/`, `docs/superpowers/plans/` — local working state from brainstorming / writing-plans skills. Not for the repo (already in `.gitignore`? — if not, the rule still stands).

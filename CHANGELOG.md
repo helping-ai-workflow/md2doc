@@ -3,6 +3,352 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.4.0 — 未發布（批次 1/3）
+
+**這一版還沒發，而且下面列的只是它的第一批。** v3.4.0 的設計刻意把工作切成三批，
+任何一批做完停下來都是一個完整可發的狀態：批次 1 是「使用者回報的新缺陷 ＋ 儲存按鈕
+＋ v3.3.0 留下的 13 項 backlog」，批次 2 是 drawio 內嵌檢視，批次 3 是 wavedrom 的
+GUI 波形編輯。**批次 2 與批次 3 一行都還沒寫**——下面所有內容只涵蓋批次 1 的 12 個
+task、39 顆 commit。
+
+方法跟 v3.3.0 一樣不是重讀 diff，而是把每一條 backlog 重新驅動出來再修。過程中有
+**兩條 backlog 條目的形狀描述被證明是錯的**——一條連症狀本體都寫錯（記的是「會產生
+`\*` 跳脫」，實際上沒有任何路徑會吐出反斜線），一條被誤分類成「這一版讓它更容易踩
+到的缺陷」而其實今天用真實手勢到不了。另外有**四個從來沒有人知道的既存缺陷是修別的
+東西時被量出來的**：拖曳列之後接下來每一個按鍵會寫進錯的儲存格、`stripHtmlTags()`
+會把 HTML 註解裡的字滲進永久連結、段落的合成 `raw` 讓它之後每一個 block 的行號位移
+一行、以及一條「編輯模式下側欄僅剩的入口」的斷言其實一直靠 5px 的餘裕在過。每一條的
+實測數字都寫在它自己那一段裡。
+
+### Breaking
+
+- **heading 的錨點（slug）變了，外部指向舊錨點的連結會斷。** `## Alpha & Beta` 的
+  錨點從 `#alpha-amp-beta` 變成 `#alpha-beta`，`## C < D > E` 從 `#c-lt-d-gt-e`
+  變成 `#c-d-e`。根因是 `marked` 的 lexer 對同一個 heading 給出兩種跳脫狀態——
+  `heading.text` 是原始字串，走 inline token 的那條路拿到的是已跳脫的
+  （`"Alpha &amp; Beta "`）——而 `renderer.heading` 寫的是
+  `stripHtmlTags(flattenTokenText(token.tokens) || token.text || '')`，**同一個 `||`
+  的兩邊跳脫狀態不一致**。三個下游同時吃到已跳脫的字串：`slugifyHeading()` 把實體
+  名稱 `amp` / `lt` / `gt` 當成單字併進錨點，`renderTocNodes()` 的 `escapeHtml()`
+  跳第二次（目錄上看到的是字面的 `&amp;`），section index 也跟著錯。
+  **舊錨點是缺陷的產物，不是設計。** 留著它等於把 bug 當契約——每一份新產出的文件都
+  會繼續帶著 `amp` / `lt` / `gt` 這種沒有人會手打的錨點，而且目錄上的雙重跳脫是使用者
+  直接看得到的錯字。所以這一版改掉，並在這裡明講會斷什麼。
+  修法連帶暴露了一個**既存、無聲、沒有任何測試會抓到的缺陷**：`flattenTokenText()`
+  改回傳未跳脫文字之後，`stripHtmlTags()` 原本的 `/<[^>]*>/g` 會把字面上的 `< D >`
+  當成標籤整段吃掉（`#c-d-e` 實際會變成 `#c-e`）。收緊成
+  `/<\/?[a-zA-Z][^<>]*>/g` 之後又冒出第二個：`## Section <!-- note --> Title` 的
+  錨點從 `#section-title` 變成 `#section-note-title`——**HTML 註解裡的字滲進永久連結，
+  不報錯，也不會讓任何既有測試變紅**。最後補了 `<!--[\s\S]*?-->` 分支，
+  `stripHtmlTags()` 的三個呼叫點一起受益。原本想把剝除搬進 `flattenTokenText()` 的
+  `html` 分支（結構上更乾淨），量過之後放棄：`collectCellText()` 的 `cell.text` 與
+  `renderer.heading` 的 `token.text` 是兩條**不經 token 化**的後備支，搬進去等於讓
+  那兩條路完全不跑剝除。`<!DOCTYPE` 與 `<?` 仍未涵蓋，已寫進程式碼註解。
+
+### Added
+
+- **工具列有儲存按鈕了（`💾`，最左邊的新 `file` 群組）。** 先前存檔只有 `Ctrl+S`
+  一條路，髒狀態只表現在分頁標題的 ●。**按鈕本身就是儲存狀態指示器**：乾淨時
+  disabled 並視覺淡化，髒的時候亮起——而它讀的是 `client.js` 既有的那一個
+  `dirtyDepth !== 0 || burstHasUncommittedEdit()`，與標題 ● 同源，沒有另造一套真相
+  （這次順手把它抽成 `documentIsDirty()`，讓 `setDirty()` 與工具列共用）。點擊走的
+  是同一支 `save()`，一行邏輯都沒複製。**不自動存檔這一點沒有改。**
+  它也是 `Alt+F10` 鍵盤游標走得到的按鈕，而且**按完之後 caret 會回到按之前的位置**
+  ——這一條是刻意不沿用 `undo` / `redo` 的既有做法，因為那條路自己就有同一個缺陷
+  （見下方「quote／code／line」那一條）。第一版的救援只涵蓋 collapsed 的 caret
+  （`if (!sel.isCollapsed) return null`），實測「打字（未 commit）→ `Shift+←`×3 →
+  點儲存」之後 `activeElement` 是 BODY、**接下來打的字完全沒有進去**；改成讀
+  `sel.focusNode` / `focusOffset` 之後 collapsed 路徑自動涵蓋，整個 guard 拿掉而不是
+  加分支。
+  加這一顆按鈕的**真實後果比預期寬**，兩件都只有端到端的網看得到：工具列名冊常數
+  22→23 散在四個測試檔裡（其中一處不是字面的 22，而是 `editor-journey.test.js` 的
+  `TB_ROWS` 完整性斷言）；以及它成為 `BUTTON_DEFS` 裡**第一顆「有條件啟用」的按鈕**，
+  於是每一個髒文件的 `Alt+F10` 跳躍次數與 enabled 計數都位移一格（五處）。後者的處理
+  不是把計數 15 改成 16，而是**把 `save` 從那些哨兵的計數裡排除**，讓 `enabled` 回到
+  「與 save 存不存在、與髒不髒都無關」的原始語意——`save` 自己會不會隨髒度正確點亮，
+  另外有專屬場景把關。
+
+### Fixed
+
+- **拖曳表格的列或欄，畫面會跳到表頭——而且那只是四個缺陷裡最看得見的一個。**
+  使用者回報的是「拖完跳到表頭」，查下去底下疊了四件事。
+  第一，**同一顆儲存格被 `focus()` 了兩次**：`ensureTableBurstOpen()` 自己會對
+  `cells[0]`（也就是表頭那一格）對焦一次，`restoreTableFocus()` 接著又對焦一次、
+  而且不帶 `preventScroll`。外部探針量到的順序是
+  `focus({preventScroll:true})` → `focus()` → `scroll-event`，`scrollY` 從 2754
+  掉到 1517。兩次都要處理：拖曳路徑改挑**第一個 body 儲存格**而不是表頭那一格，
+  第二次補上 `preventScroll`。`ensureTableBurstOpen()` 的政策**不能改**——它的 7 個
+  呼叫端裡有 5 個非拖曳的依賴那次對焦（`insertColumn()` / `insertRow()` 自己完全不
+  設焦點，而且 `currentBurst` 唯一的產生路徑就是那次 focus → `focusin` →
+  `startTableBurst()`，拿掉等於整個操作不會發生），所以加的是拖曳專屬的參數。
+  第二，**擋在中間的那道 `if (activeIndex >= 0)` 是恆真的死碼**。`activeCellEl` 在
+  建立 `currentBurst` 的同一個賦值式裡就一定被設好，而 `ensureTableBurstOpen()` 只在
+  burst 確實屬於這個表格時才回非 null——`activeIndex` 在那兩個呼叫點結構上永遠 `>= 0`。
+  留著一段看起來在防什麼、實際永遠成立的判斷比沒有更糟，已換成記錄「為何恆真、這條路
+  行不通別再試、真正的來源是哪次 focus」的註解。
+  第三，**一個既存的資料正確性缺陷**：`performRowDrop()` / `performColDrop()` 的
+  `activeIndex` 在 `rebuildTableSections()` **之前**用序位算出來，卻在重排**之後**才
+  拿去找格子。編輯某一格、拖一列、放開，焦點就落到另一格，**接下來每一個按鍵都寫進錯
+  的儲存格，而畫面看起來一切正常**。它一直沒被抓到，是因為那個場景從來沒跑到過——
+  這支測試檔沒有 per-scenario try/catch，前面的場景每次先倒就結束了。修法先量了
+  `rebuildTableSections()` 到底是搬還是重建：`<tr>` 只是 `appendChild()` 搬動、從不
+  重建；`<td>`/`<th>` 同 tag 時 `retagCell()` 直接回傳原物件，**但跨表頭／本文邊界時
+  會重建**——所以列那條要用「列＋欄」座標重新定位，欄那條只要把序位計算搬到重排之後。
+  （量的時候用的是 JS expando 屬性而不是 HTML attribute，因為 `retagCell()` 會複製
+  attribute，用 attribute 根本測不出「是不是同一顆物件」。）
+  第四，`restoreTableFocus()` 的 `cellIndex < 0` fallback 現在真的打得到了，而它落在
+  `cells[0]`＝表頭，在拖曳路徑上是錯的落點；改成優先挑 body 第一格。
+- **一個表格手勢會落到隔壁那張表上。** v3.3.0 對這條路試過兩次證偽、兩次都失敗，
+  所以它一直掛在「未裁定的調查」。這一版驅動出來了，而且證明了為什麼前兩次會失敗：
+  先前走的是**泡泡點擊**，提交在 `mousedown` 就被 focusout 觸發，click 跑到時 render
+  已經落地、泡泡已經清掉，復原分支根本沒機會被走到。打得開那扇門的是 **grip 拖曳**
+  ——grip 的 `pointerdown` 有 `preventDefault()`，髒的 textarea 不失焦、不提早提交，
+  而 `tePointer.hit.tableEl` 是 pointerdown 抓的硬參照、`hideTableGrips()` 不清它。
+  三個形狀實測 `detached: true`。
+  復原時用來認表的錨點只有 `startLine` 一個數字，行號一變就認到別張表。23 萬份亂數
+  掃描量到的「改到別張表」件數是這一條最重要的數據，因為它同時否決了一個看起來很自然
+  的半套修法——`startLine` 單獨（修前）**302 件**；只改成複合錨點而 identity 不動
+  **1,275 件，四倍糟**；複合錨點 ＋ 強 identity 12 件；出貨版（三段齊全）**0 件**。
+  三段是複合錨點、`tableIdentityOf()` 改成雜湊每一列每一格、以及「identity 相同的表
+  不只一張時一律拒絕猜」。ablation 跑出來的歸因跟直覺不同：**安全性由最後那道唯一性
+  閘門一段獨力承擔**（拿掉它 12 件，拿掉另外兩段各自都還是 0 件），另兩段貢獻的是完成
+  率（+64,655 / +31,126 次能正常完成的手勢）。第三段關掉的那條路 v3.3.0 本來是綠的，
+  **是第一版修法自己帶進來的危害**，一併關掉。
+- **兩個相鄰的同 tag 行內標記會互相吞掉，第一個標記整個從你的檔案裡消失。**
+  backlog 記的是「會產生 `\*` 跳脫」——查下去**沒有任何路徑會吐出反斜線**，那句
+  `\*` 是寫筆記的人為了在散文裡顯示星號而做的 markdown 轉義，不是對輸出位元組的主張。
+  真正的缺陷是 `<em>a</em><em>b</em>` 序列化成 `*a**b*`，兩個 `*` 黏成一個 CommonMark
+  delimiter run，`marked` 重新解析時**第一個標記整個不見**。100 個上下文的暴力掃描：
+  **同 tag 相鄰 50/50 全壞、跨 tag 相鄰 50/50 全正常**。修法是在邊界插一個看不見的
+  `<!-- -->`，實際插入率 75/12516 個標記＝**0.60%**，4 輪往返固定不動點、不累積、
+  不汙染 slug。
+  第一版守衛**只看輸出字串的星號，於是把跨 tag 的情況也一起插了**——過度插入率估 1.3%，
+  而那 1.3% 不是理論值，它就在 journey 的既有場景裡（`*it****al* bold**` 被改成
+  `*it*<!-- -->***al* bold**`）。那條期望值是正確且驗證過的形狀，所以修的是守衛不是
+  測試：改成追蹤 `lastMarkTag`（每一層記住最近收尾的是 EM 還是 STRONG），**只在即將
+  開的 tag 等於剛收尾的 tag 時才插**。副作用是好的——文字節點非空時一律重設，於是原本
+  為了防「字面星號接斜體」假觸發而加的 regex 整支可以移除（`escapeText()` 本來就不會
+  留下活的尾端星號，那條 regex 一直是多餘的）。
+- **一個段落只要帶著過縮排的 lazy continuation、後面又緊接 `---`，它之後每一個 block
+  的行號就全部位移一行。** `startLine` 是每一次 gutter 動作與每一次 commit 的位址，
+  位移一行是**會寫錯行**的等級，不是純視覺。根因在 `buildBlockMap()` 頂層迴圈的
+  `cursor += rawNewlines`：marked 14.1.4 把 `"a\n    b\n"` 這種段落的 `raw` 合成成
+  `"a\n\n    b\n"`（3 個換行、2 行原始碼），頂層無條件信任它。**這個檔案自己的註解
+  早就寫過這個危害，但只防了 item 內的 `text` token，頂層那一圈沒有對應的防線。**
+  修法只對頂層的 `'paragraph'` token 改用 `t.text` 的換行數；試過把 `'heading'` 也
+  納入，量到 ATX heading 合法摺入尾隨空行、`.text` 還原不回來，所以排除。
+  這一條先前被判成「已不復現」，翻案靠的是方法而不是運氣：定向的手工良構 fixture
+  各跑 5 萬份是 0 違反（所以「我的 fixture 集合裡沒有」不等於「不存在」），改成
+  **6 萬份亂數行湯 ＋ 三條明寫的 oracle**（startLine／endLine 不落空行、blocks 不重疊
+  遞增、li 落在 marker 行）之後：**修前 125 份違反、修後 0 份**，132 份新舊輸出有差異。
+- **在 raw 編輯器裡打的字，按 Escape 就沒了，`Ctrl+Z` 也救不回來。** Escape 的語意
+  仍然是丟棄，改掉的是「丟掉的東西要停放得回來」。修法不能沿用 burst 那一套：
+  `openRawEditor()` 開起來時會把自己的 DOM 拆掉，**以節點為鍵的停放撐不過去**，所以
+  新的 `discardedRawEdit` 是 `discardedBurst` 的**以值為鍵**的雙生體，停放
+  `{blockId, range, startLine, endLine, source, value, caret}`，`undo()` 先試
+  `restoreDiscardedRawEdit()` 再落回一般 undo。失效規則沿用 `discardedBurst` 的同一組
+  呼叫點，另加一條新的：**兩個停放互斥**——若不互斥，舊 burst 的 staleness guard 在
+  期間沒有 render 時會通過，`undo()` 會真的答錯更舊的那一份。
+  **這一條對 rangeMode（單一 li、多區塊）結構性失效，見下方 Known issues。**
+- **對一個已被吞噬的 code block 重開 raw 編輯器去補 fence，會把尾巴在磁碟上複製一份。**
+  跟 F10（吞噬本身）不同根因——這是從吞噬狀態復原時自己的路。根因是這一批第二次撞到
+  的同一族：**同步 `focusout` 在 DOM detach 時重入**。`applyFullRender()` 在 DOM swap
+  **之前**就無條件清掉 `activeEditor`（旁邊就有一段 v3.2.1 的註解在描述這個危害），
+  但 `applyPatch()` 只在 `removeChild()` **之後**才清；raw-edit commit 生出新 block
+  時，編輯器自己的 block 落在 `replaceSpan` 內 ⇒ `removeChild()` 同步觸發 focusout ⇒
+  重入 `commit()` ⇒ 用還沒縮過的 textarea 內容蓋掉該 block 的新範圍。實測：修前一次
+  `Ctrl+Enter` 打出 3 次 `/api/render`，修後 2 次，多的那一次只能來自同步重入。
+  修法**刻意保留**「編輯器在 `replaceSpan` 之外時存活」的既有行為，那是設計不是漏網。
+  **要重現它必須同一個 session 裡先有一次成功提交**（才會走 patch 路徑而不是全量重繪），
+  在全新開啟的文件上不會發生——這個前提已經寫進程式碼註解與測試註解，因為不寫的話
+  下一個照 backlog 敘述試的人會失敗，然後誤判成「已經好了」。
+- **對純空白的選取按 🔗，會把那段空白包進 `<a>` 裡。** 粗體／斜體那條路在包起來之前
+  有一個「整段都是空白就不要動」的守衛，新建連結那條路沒有。修前實測：在
+  `Alpha bold text here.` 裡選 `Alpha` 後面那一個空白、按 🔗、網址填 `https://probe/`，
+  段落變成 `Alpha<a href="https://probe/"> </a>bold text here.`。守衛加在
+  `prompt()` **之前**（不會先問一個註定要丟掉的網址），回 `false` 符合呼叫端文件化的
+  「returns TRUE iff this call actually reached a `window.prompt()`」契約——回 `true`
+  會讓呼叫端誤以為開了 modal、去等一個永遠不會來的 `blurred` promise。混合選取
+  （`" bold "`）是驗過不是假設的：`trimRangeToText()` 原地修剪傳進去的 range，守衛
+  之後緊接的 `extractRangeInto()` 用的正是同一個已修剪的 range，所以只有 `bold` 會被
+  包進去、空白留在外面。
+- **列／欄插入泡泡的座標過期時，現在是把手勢丟掉並升起 banner，不是猜一個位置。**
+  原本的 fallback 是 `tbody.insertBefore(newRow, tbody.firstChild)`——定位失敗就
+  **靜默把列插到最上面**；欄那條更糟，`row.cells[colIndex]` 回 `undefined` 之後
+  `insertBefore(cell, ref ? ref.nextSibling : null)` 會**靜默把新欄插到最後一欄**，
+  而且連守衛都沒有。**這條路今天用真實手勢到不了**（理由與那個分類的更正見下方
+  Known issues），修法保留的理由與可達性無關：那個失敗模式本身就是錯的。列與欄兩條
+  一起修——不對稱本身就是危害，未來讀的人看到「列有守衛、欄沒有」會合理推論欄是刻意
+  豁免，而那個推論是錯的、也沒有東西會糾正他。
+- **`quote` / `code` / `line` 按完把 caret 留在 BODY，鍵盤使用者出不來；surface 上有
+  未 commit 的編輯時 `undo` / `redo` / `image` 也一樣。** 這一條的答案是分裂的，而且
+  是量出來的：`undo` / `redo` / `image` 真的可以共用儲存按鈕那一對 caret
+  capture/restore（同樣的失敗形狀、同樣類型的目標 block）；`quote` / `code` / `line`
+  **不行**——`armEditables()` 從來不 arm quote／code／hr，那些 block 根本沒有
+  contenteditable 表面，caret walker 走進去什麼都找不到。它們真正的修法是開該 block
+  自己的 `openRawEditor()`，也就是「剛插入的 code block」已經在用的同一套。
+  `line`（hr）那個缺口還不在原本假設的那條路上：不是 `focusInsertedBlock()` 的分支，
+  而是 `insertBlockBelow()` 自己的 `kind === 'line'` 分支——那裡有一段前一個 task
+  誠實寫下的「不在範圍內」註解，是一條死碼路徑。
+  修法的作用域收窄過一次：原本放在四個手勢家族共用的 `restoreAfterStructuralOp()`，
+  實測 duplicate／delete 也跟著從 BODY 變成 raw 編輯器——**在破壞性手勢之後自動彈出
+  raw editor 會踩到「Escape 丟掉未 commit 編輯」那個當時還沒修的缺口**，所以改成只開給
+  `convertBlockViaMenu()`。
+- **`H▾` 下拉的六個項目現在鍵盤操作得到。** 順帶修掉一個很諷刺的東西：做出來的鍵盤
+  游標標記 `data-ed-tb-menu-cursor` **沒有任何 CSS**，也就是那個游標看不見——正是下面
+  那一條「沒有可見信號」的缺陷本身。現在它命中
+  `outline: 2px solid rgb(110,168,254)`，對照手足按鈕是 `3px none`。
+- **側欄抽屜有鍵盤入口了。** 先前這版只給了「打開」抽屜的路，沒有給「進到抽屜裡面」
+  的路。**這一條與下一條互相踩過一次**：把焦點送進搜尋框卻沒關掉工具列的 keynav，
+  工具列會繼續吃方向鍵——而 `Home` / `End` 正是下一條這次新吃的鍵。修前那個狀態幾乎
+  不可能出現（點工具列外任何東西都會 `exitToolbarKeynav()`），這一條讓它變成常態：
+  使用者得打一個字才能脫身，而那個字又會升起下一條新加的 banner。改成按參考排除
+  `sourceTextarea` 而不是排除所有 focused `TEXTAREA`——後者會打壞「source textarea
+  持有焦點時用方向鍵走 outline↔preview」這條合法路徑。
+- **工具列的鍵盤游標不再被一般按鍵靜靜地丟掉。** 修前實測 `ArrowUp` / `ArrowDown` /
+  `Tab` / `Home` / `End` / `a` / `Backspace` 七顆，按下去游標外框與 keynav 標記同時
+  消失、沒有任何訊息。`Alt+F10` 在畫面上造成的唯一差別就是那個外框，所以它一消失，
+  工具列看起來就跟按 `Alt+F10` 之前一模一樣。修法刻意做成兩半：`Home` / `End` 改成
+  真的在工具列上導航（有用，不只是無害），**其餘迷走按鍵仍然交還控制權但升起可見的
+  banner**。理由是「列舉每一顆無處可去的按鍵」無法被審計完整性——只做前者，永遠不知道
+  有沒有漏掉第八顆；加信號則對所有沒列舉到的按鍵都成立。`Tab` 與 `Escape` 例外：
+  `Tab` 是 ARIA toolbar pattern 規定的離開手勢，**為一個合法動作升紅色橫幅是錯的方向**，
+  兩者都改成安靜退出，banner 自己也接 Escape 關閉。
+- **任何 banner 升起時，整條工具列都按不到。** 修前實測兩條獨立的觸發路徑，都是
+  **23/23 顆按鈕的 `elementFromPoint` 全部回 banner**；而且缺陷範圍比 backlog 寫的寬
+  ——`showBanner()` 是唯一的產生點，所以 conflict / render-failed / save-failed /
+  dropped-gesture / structural-refusal / swallow / keynav-exit **全部家族同時成立**。
+  修法**沒有動 z-index**，而是把 banner 從 `top: 0` 移到 `top: var(--ed-toolbar-h)`
+  ——沿用 `.ed-te-menu` / `.ed-seltb` 已經在用的同一個地板值。移下來之後會蓋住共用同一個
+  地板的四個動態浮層，所以 `showBanner()` 開頭把那四個收起來；**那四行是用 ablation
+  證明載重的**（暫時拿掉之後 H▾ 選單真的被蓋住）。
+  這個缺陷從頭到尾是滑鼠問題：工具列按鈕是 `tabindex="-1"`、本來就不走 Tab（只走
+  `Alt+F10`）。**但 banner 自己的 ✕ 鍵盤也走不到**，那是另一條既有規則造成的，見下方
+  Known issues。
+- **站在 ＋ 泡泡上不再讓 ⠿ grip 消失。** `updateTableEdgeGrips()` 的守衛沒有列入
+  `.ed-tb-insert`。代價是純視覺的——而且比原本估計的更弱：`.ed-handle` 的宣告自陳
+  「Only ever a visibility toggle (opacity), never display or pointer-events」，
+  也就是連可點擊性都沒有少。
+- **窄視窗開側欄時，背後的頁面不能再捲了。** 先前是「缺一個鎖」而不是「鎖被打敗」。
+  第一版把兩條鎖規則放在 base scope，但抽屜只存在於 `@media (max-width:1080px)`，
+  而且沒有任何 resize handler 會清掉 `data-sidebar-open`——窄視窗開抽屜、拉寬，
+  桌面版就會同時得到既有的全視窗灰 scrim 與**這次新加的整頁不能捲**。
+  （同一份檔案裡已經有一段量測過的警語在講這件事，講的正是同一個屬性。）改成把規則
+  搬進 `@media (max-width:1080px)`，而不是加 resize handler——精準對症、不碰 JS，
+  而且**不會順手把那個既有、範圍外的灰 scrim 缺陷一起修掉**（它該獨立立項）。
+- **工具列加到 23 顆之後 ☰ 在 800px 寬的視窗裡按不到了——而 22 顆時它只剩 5px 的餘裕。**
+  儲存按鈕加在最左邊，把最右邊的 `outline`（☰）擠出可視範圍。量到的是：800×900 下
+  `scrollWidth` 1026、溢出 226px、☰ 中心 (846, 22)、`elementFromPoint()` 回
+  **`null`** ⇒ 是溢出問題不是遮蔽問題（那兩種的修法完全不同）。
+  **這一條真正的發現在對照組**：把儲存按鈕拿掉跑 22 顆，溢出 175px、☰ 中心 (795, 22)
+  ——**只卡在視窗內側 5px**。也就是說「編輯模式下 ☰ 是側欄僅剩的入口、必須不捲動就點
+  得到」這條斷言，一直是靠 5px 的安全邊際在過，沒有人知道。**儲存按鈕沒有製造脆弱，
+  它只是把一個本來就在的脆弱推倒。** 修法是 `.ed-toolbar` 的 flex `gap` 6px → 3px，
+  ☰ 中心回到 (765, 22)、命中自己，安全邊際 **35px**。更根治的做法（把 `view` 群組
+  釘在右側不隨捲動離開）記進了 backlog。
+
+### Known issues
+
+這一批的驗證基礎是 40 個測試檔（新增 `test/table-anchor-recovery.test.js`），其中兩套
+是長跑的 puppeteer 套件。最後一次全綠：`editor-client-runtime.test.js` **366 OK**、
+`editor-journey.test.js` **126 OK**，AssertionError 0。這一批往 runtime 那支加了 1,038
+行、journey 那支 1,031 行，上面每一條缺陷幾乎都是靠這兩支釘住的。
+
+下面同樣分成**兩類，而且差別是有意義的**——延後的缺陷有人會去修、修完就不見了；
+刻意接受的邊界不是缺陷，將來也還會在那裡。
+
+**裁定延後到 v3.4.x 的缺陷。** 會把資料弄髒的（優先）：
+
+- **`lib/editor/paste-md.js` 的貼上路徑走 turndown，帶著與「相鄰同 tag 標記互吞」
+  完全相同的根因，而且是活的。** 實測 `<p><em><code>code</code></em><em>text</em></p>`
+  貼進來序列化成 `` "_`code`__text_" ``，第一個 `<em>` 同樣消失。（`list-md.js` 與
+  `table-md.js` 查過沒有這個洞——一個 item／一個 cell 一次 `serializeInline`，累積字串
+  橫跨全部 sibling，守衛在那裡是有效的。）
+- **`inline-md.js` 的守衛對透明 SPAN 穿透漏檢**（`<em>a</em><span><em>b</em></span>`）。
+  既有缺口，不是這一批造成的——用修改前的版本跑同一個形狀，兩版輸出逐位元組相同。
+- **`discardedRawEdit` 對 rangeMode（單一 li、多區塊）結構性失效。**
+  `cancelAndMaybeDiscard()` 先建 stash、接著 `await restore()`，而 rangeMode 分支走
+  `safeRerenderAll()` → `rerenderAll()` → **`dropDiscardedRawEdit()`** ⇒ stash 建立後
+  兩行就被自己的 Escape 路徑清掉；多區塊另有獨立的阻擋（guard 拿第一個 block 的 id 去
+  比整段 span，必然不等）。也就是說那個 stash 分支對每一個 rangeMode session 都是死碼。
+  **非 regression**（修之前那些面一樣全丟），但危害在誤導：下一個人很可能在 li 上試一次、
+  發現沒回來、誤判整個機制壞掉。
+- **`Ctrl+S` 自己有一模一樣的 caret 缺口**（`switchAwayFrom().then(save)` 的 commit
+  重繪造成），而它才是鍵盤使用者的主要存檔路徑。修法已知——把儲存按鈕那一對
+  capture/restore 套上去就是了；這一批沒做，是因為 `test/editor-client.test.js` 有一條
+  regex 逐字釘住那段原始碼，改它超出當時 task 的範圍。
+
+可達性／鍵盤：
+
+- **鍵盤沒有任何非滑鼠的手段關掉 conflict / save-failed banner。** 實測從普通段落打字
+  → Enter → 升起 banner → **連按 60 次 Tab，焦點一次都沒離開那個段落**。根因是一條
+  既有的通用 Tab 攔截規則（v2.11.1 acceptance, escape class A）：
+  `if ((inBlock && !control) || nothingFocused) { e.preventDefault(); return; }`。
+  沒有一起修是因為修它牽涉 a11y 設計決策（banner 出現時要不要搶焦點？要不要專屬快捷
+  鍵？），不該在一個 task 的尾巴倉促決定。這一批已經修掉比較嚴重的那一半——banner
+  不再遮住工具列，鍵盤使用者可以繼續工作，banner 只是留在畫面上。
+- **逃生路的回程仍然不還原 caret。** `Alt+F10 → preview → Enter` 進 source textarea
+  之後回來，caret 不回原位。source textarea 的 caret 是**原始字元偏移**，而儲存按鈕
+  那套用的是 block-id + text-offset ——**不是同一個座標系**，需要自己的對映與測試。
+  理由已寫進 `activateToolbarCursor()` 的註解。
+- **側欄抽屜只補了入口沒補出口**：抽屜裡按 `Escape` 沒有作用，caret 也不回文件。
+- **工具列的鍵盤游標在 `H▾` 選完一個項目之後會無聲漂移。**
+- `redo` 與 quote／code／line 在有髒 burst 時的行為今天是對的，**但沒有 journey 列
+  釘住它**。
+
+程式碼形狀（不影響使用者，但會影響下一個修這裡的人）：
+
+- **工具列的 `view` 群組沒有釘在右側不隨捲動離開。** 這比上面那個 gap 6px→3px 更根治
+  ——gap 那一版是在不能跑長套件的情況下選的、風險小且已實測的做法。
+- **`restoreTableFocus()` 的 API 仍然收序位而不是 cell 物件。** 收物件更貼合這一批修正
+  的意圖，但那是 API 改形，範圍比當時那個 task 大。
+- **「同 tag 合併」（`<em>a</em><em>b</em>` → `*ab*`）這個零位元組的替代方案沒有採用。**
+  現在的守衛插一個看不見的 `<!-- -->`，實測插入率 0.60%；合併法完全不留位元組，但它
+  要在 **DOM 上前瞻**，遇到 `<em>a</em><span></span><em>b</em>` 就得重新實作整套透明
+  節點規則——守衛現在是對**輸出字串**判斷的。
+
+**已知且刻意接受的邊界**（不是缺陷，將來也還會在，但要讓使用者知道）：
+
+- **列／欄插入泡泡的座標過期之後，今天用真實手勢到不了。** v3.3.0 把這一條列成「這版
+  修好泡泡的可達性、把那個資料缺陷的曝光面放大了」——**那個分類是錯的**。泡泡的
+  可見性由兩層獨立機制守住：proximity-hide（每次 `mousemove` 重算，沒有例外分支）與
+  `applyFullRender()` 裡無條件執行的 `hideTableInsertBubbles()`（前面沒有任何 `if`）。
+  唯一能讓過期的值撐到點擊落下的方式，是「造成過期的事件」與「點擊本身」是同一個事件。
+  四條真實手勢全部失敗且各有機制解釋（其中「外部推送」那條是用讀碼排除的：這個編輯器
+  沒有任何 push／live-reload，唯一相關的衝突處理是 `location.reload()`，整頁重載、
+  JS 狀態歸零，邏輯上不可能製造那個前提）。而那兩層守護分別是 `863a894`（2026-08-29）
+  與 `b38bc51`（2026-08-26），**都早於 v3.3.0**——當時的量測沒有涵蓋「泡泡可見性」
+  這個維度。守衛還是加了（理由見上方 Fixed），但它釘住的是**防禦分支**，測試要靠注入
+  dataset 才走得到。**哪天有人能用真實手勢走到那條路，代表那兩層守護破了。**
+- **`handleTableCellFocusIn()` 是「表格手勢落到隔壁那張表」的姊妹路徑，帶著同一個洞而且
+  沒有唯一性閘門**——雙胞胎那一格會把 caret 放進別張表的同座標格。**沒有驅動出重現**，
+  按這個 repo 的標準不算已證實的缺陷，所以列在這裡而不是上面。
+- **工具列的 flex gap 現在是 3px。** 桌面滑鼠場景沒問題（整個 v3.3.0 的手勢本來就建立
+  在 hover 上），觸控裝置上會偏擠。用 35px vs 5px 的安全邊際換的。
+- **v3.3.0 那六項原封不動**：F10 吞噬偵測的兩個沉默缺口、trim-to-EOF 那個逐位元組無法
+  分辨的內在誤判、`unlocatable` 降級路徑在真實語料上量不到、按下的起點落在既有選取
+  範圍內時 Chromium 走的是拖曳文字手勢、點進程式碼區塊 caret 一律落在第 2 行、以及
+  `Alt+F10` 會不會被真實瀏覽器或 OS 攔截在自動化環境裡原理上驗不出來。設計上它們
+  就沒有「修好」這個終點。
+
+### 這一版還沒做的
+
+- **批次 2：drawio 內嵌檢視**（`![alt](path.drawio)`、`#SheetName` / `#N` 選頁、
+  多頁分頁、掛進既有的圖表 lightbox、編輯器 server 監看 `.drawio` 檔案變更後重烤）
+  ——**一行都還沒寫**。只做檢視，不做編輯。
+- **批次 3：wavedrom 的 GUI 波形編輯**（滑到已渲染的圖上出現 Edit，用滑鼠塗電位、
+  增刪 cycle、lane 改名與重排、畫 edge 標註，存檔以最小 patch 寫回 code block）
+  ——**一行都還沒寫**。這一批的量體單獨接近整個 v3.3.0。
+
+先前就記錄過、到今天仍然成立的：
+
+- **§3 雙向同步仍未做。** 外部程式改了 markdown 檔案，開著的編輯器分頁不會反映那次
+  改動，仍然要重新整理頁面。
+- **`export▾` 仍然缺。** 工具列這一版變成 23 顆按鈕，但多的那一顆是 `save`。
+- **每一個結構性的清單手勢都會整份重繪**（清單裡按 Enter、Backspace 併回或刪除項目、
+  ＋ 新增項目、⠿ 建立副本或上下搬移），這仍是刻意保留的 fallback，不是退化。
+- **light／dark 主題切換沒有做**，這一批也沒有開始做。
+
 ## v3.3.0 — 2026-09-10
 
 v3.2.1 出貨時，Known issues 裡誠實列了十三個「用產品」審查席位在一次就座裡找出來、
