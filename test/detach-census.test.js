@@ -49,7 +49,7 @@ const CENSUS = [
   { fn: 'applyFullRender()', needle: "contentEl.innerHTML = j.parts.join('\\n');", disposition: 'a',
     why: 'fallback 全量置換；v3.2.1 Task 3 把 activeEditor 清除上移到它之前。currentBurst 在兩種情況下都未覆蓋 —— branch1/branch3 的 7 個重入實測靠 switching 單飛快取遮蓋，不是靠這次的 teardown 順序關閉' },
   { fn: 'applyPatch()', needle: 'contentEl.removeChild(children[i]);', disposition: 'a',
-    why: '只移除 replaceSpan；activeEditor teardown 是條件式（`document.body.contains(blockEl) && blockEl.querySelector(\'.ed-raw\')`）且必須在 DOM patch 之後求值，不得比照 Task 3 上移' },
+    why: '只移除 replaceSpan；條件式那一發 teardown（`document.body.contains(blockEl) && blockEl.querySelector(\'.ed-raw\')`）仍在 DOM patch 之後求值，服務的是「落在保留前綴／後綴裡的 raw 編輯器要撐過 patch」這件事，不得整批比照 Task 3 上移。**另有一道 v3.4.0 (Task 7 item 1) 的 pre-mutation 收窄歸零**，在這個 `removeChild()` 迴圈之前、只吃 `activeEditor.blockEl` 落在 `plan.replaceSpan` 內的情況（該 block 自己這次就要被換掉，不是「撐過 patch」那一族）——修的是「raw-edit 提交衍生新 block 時，自己的 removeChild 同步 focusout 重入 commit() 兩次」那個洞，範圍窄於 Task 3 的無條件上移，兩道歸零並存、不衝突' },
   { fn: 'openRawEditor()', needle: "blockEl.innerHTML = '';", disposition: 'none',
     why: 'UNMEASURED as a detacher —— 37 次驅動手勢裡這裡永遠是在 activeElement === BODY 時執行到的（T35, G2），不需要處置' },
   { fn: 'restore()', needle: 'blockEl.innerHTML = original;', disposition: 'a',
