@@ -1579,13 +1579,17 @@ async function main() {
   //             清單項）、ed-wys-cell（表格儲存格）或 ed-raw（MD 原始碼
   //             textarea）三者之一；而且工具列沒有塌回「沒有瞄準任何 block」
   //             的 4 顆。
-  //   bar-only  目標型別【依設計】沒有可聚焦的編輯面 —— client.js 的
-  //             convertBlockViaMenu() 自己就寫著「降級目標（quote / code）
-  //             沒有可聚焦編輯面，focusBlockAtLine 會安靜 no-op；把
-  //             toolbarBlockEl 指回轉換後的 block，工具列才不會塌成 4 顆」。
-  //             所以 BODY 是合法答案，但工具列必須還瞄著那個 block —— 這裡
-  //             不只數按鈕數，還真的再按一次「在下方插入區塊」並確認游標落
-  //             在新段落上，證明那個「還瞄著」是真的能用而不只是計數好看。
+  //   bar-only  目標沒有可聚焦的編輯面、也沒有 raw editor 可以退回去 —— BODY
+  //             是合法答案，但工具列必須還瞄著那個 block。這裡不只數按鈕數，
+  //             還真的再按一次「在下方插入區塊」並確認游標落在新段落上，
+  //             證明那個「還瞄著」是真的能用而不只是計數好看。
+  //             ⚠ quote / code / line 曾經是這一類（convertBlockViaMenu()
+  //             自己寫著「降級目標沒有可聚焦編輯面，focusBlockAtLine 會安靜
+  //             no-op」），Task 9 backlog #6 之後不再是 —— 那句話現在只描述
+  //             focusBlockAtLine() 本身的行為，`restoreAfterStructuralOp()`
+  //             接著開的 raw editor 把落點升級成 caret（見 TB_ROWS / GUTTER_ROWS
+  //             各自的 review M4 註解）。目前唯一還在用這個答案的是 V2d
+  //             的「🔗 in a table cell」。
   //   source    離開 edit 模式；游標必須在 .ed-source textarea 裡，工具列
   //             此時合法地只剩模式切換一顆，所以改為斷言再按一次能回到
   //             edit 且工具列復原。
@@ -1807,11 +1811,13 @@ async function main() {
       // (commit + re-render) this very burst before save() itself ever
       // runs — same precondition Ctrl+S already has, see save()'s own
       // dispatch comments — and that commit's render is exactly the class
-      // of render that strands the caret on BODY: unconditionally for
-      // quote/code/line (backlog #6, still open) and for undo/redo/image
-      // whenever a burst was left open (activateToolbarCursor()'s own
-      // comment). `save` must not become a fourth name on that list, and
-      // `answer: 'caret'` below is exactly the claim that it did not.
+      // of render that used to strand the caret on BODY: unconditionally
+      // for quote/code/line and for undo/redo/image whenever a burst was
+      // left open (activateToolbarCursor()'s own comment) — both now fixed
+      // (Task 9 backlog #6: the raw-editor rescue for quote/code/line, and
+      // undoViaToolbar()/redoViaToolbar()/imageViaToolbar() for the other
+      // three). `save` must not become a fourth name needing the same fix,
+      // and `answer: 'caret'` below is exactly the claim that it does not.
       { id: 'save',         state: 'sel',  answer: 'caret',
         arrange: async (ctx) => {
           await ctx.page.keyboard.type('ZZ'); // replaces the pre-selected "Alpha"
@@ -1856,10 +1862,15 @@ async function main() {
       { id: 'headings',     state: 'sel',  answer: 'caret',
         effect: (b, a) => !a.toolbarMenu ? 'H▾ 必須開出 .ed-toolbar-menu'
           : (same(b, a) ? null : '只開選單不得動到文件，got ' + a.types + ' / ' + a.text) },
-      { id: 'quote',        state: 'sel',  answer: 'bar-only',
+      // Task 9 review M4: bar-only → caret. backlog #6's fix
+      // (restoreAfterStructuralOp()'s `allowRawEditRescue`) now opens the
+      // converted block's own raw editor when it lands with no focusable
+      // WYSIWYG surface — MEASURED (review): activeClass 'ed-raw',
+      // enabled 15, mode 'edit', matching 'caret''s own shape exactly.
+      { id: 'quote',        state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,blockquote,paragraph' ? null
           : '選取所在的段落必須變成 blockquote，got ' + a.types },
-      { id: 'code',         state: 'sel',  answer: 'bar-only',
+      { id: 'code',         state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,code,paragraph' ? null
           : '選取所在的段落必須變成 code block，got ' + a.types },
       // ul / ol / task 在 DOM 上都是 li，分不出來 —— 那三列各自靠 disk() 的
@@ -1956,7 +1967,10 @@ async function main() {
           ? '必須多出一個段落，got ' + a.types
           : (a.text === 'H | Alpha bravo charlie delta. |  | Bravo paragraph.' ? null
             : '新段落必須落在游標那個 block 【後面】，got ' + a.text) },
-      { id: 'line',         state: 'sel',  answer: 'bar-only',
+      // Task 9 review M4: bar-only → caret. insertBlockBelow()'s own
+      // `kind === 'line'` branch now opens the new hr's raw editor — same
+      // MEASURED shape as quote/code above.
+      { id: 'line',         state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,paragraph,hr,paragraph' ? null
           : '必須在游標那個 block 後面長出一條分隔線，got ' + a.types },
       // 圖片按鈕開的是一顆 hidden 的 input[type=file]（pickAndInsertImage()
@@ -2073,8 +2087,13 @@ async function main() {
       { label: '項目符號列表',  answer: 'caret',    convert: true },
       { label: '編號列表',     answer: 'caret',    convert: true },
       { label: '待辦清單',     answer: 'caret',    convert: true },
-      { label: '程式碼',       answer: 'bar-only', convert: true },
-      { label: '引用',        answer: 'bar-only', convert: true },
+      // Task 9 review M4 (found while fixing the identical staleness in
+      // TB_ROWS above): bar-only → caret. The ⠿ menu's own 轉換成 submenu
+      // calls the SAME convertBlockViaMenu() the toolbar's quote/code
+      // buttons do, so backlog #6's `allowRawEditRescue` fix applies here
+      // too — MEASURED, activeClass 'ed-raw', enabled 15, mode 'edit'.
+      { label: '程式碼',       answer: 'caret', convert: true },
+      { label: '引用',        answer: 'caret', convert: true },
     ];
     // 覆蓋率守衛：⠿ 的葉節點集合必須恰好等於上表。多一項少一項都要有人決定
     // 它的必需答案，而不是安靜地不被測到。
@@ -8422,7 +8441,10 @@ async function main() {
   // of v3.3.0's own ruling ("一併處理，加上可見的信號"): Home/End now move
   // the cursor to the first/last enabled button (a useful thing to do with
   // them, not merely "harmless"), and every OTHER stray key still exits the
-  // mode but now raises a visible .ed-conflict banner saying so.
+  // mode but now raises a visible .ed-conflict banner saying so — EXCEPT
+  // Tab (review I3, below this row): Tab is asserted separately since it
+  // exits keynav WITHOUT a banner (a legitimate ARIA-toolbar "leave"
+  // gesture, not a stray key with nowhere to go).
   {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
     const enterKeynav = async () => {
@@ -8436,7 +8458,11 @@ async function main() {
       keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
       banner: !!document.querySelector('.ed-conflict'),
     }));
-    for (const key of ['ArrowUp', 'ArrowDown', 'Tab', 'Home', 'End', 'a', 'Backspace']) {
+    // Task 9 review I3: `Tab` is asserted separately below — it exits
+    // keynav WITHOUT a banner (a legitimate ARIA-toolbar "leave" gesture,
+    // not a stray key with nowhere to go — Tab moving real DOM focus IS
+    // its own visible signal), so it no longer belongs in this shared loop.
+    for (const key of ['ArrowUp', 'ArrowDown', 'Home', 'End', 'a', 'Backspace']) {
       // Known clean slate: Escape exits keynav if a prior iteration left it
       // on (Home/End no longer exit it), and dismiss any leftover banner —
       // otherwise Alt+F10's own toggle semantics would turn THIS iteration's
@@ -8459,6 +8485,24 @@ async function main() {
         key + ' 不得靜靜丟掉鍵盤游標 —— 要嘛游標還在，要嘛有可見的信號，got ' +
         JSON.stringify(after));
     }
+
+    // Tab (review I3): exits keynav cleanly with NO banner.
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-conflict button');
+      if (b) b.click();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    await enterKeynav();
+    const beforeTab = await cursorState();
+    assert.ok(beforeTab.cursor, 'Tab：前提失敗 —— Alt+F10 沒有點亮鍵盤游標，got ' + JSON.stringify(beforeTab));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterTab = await cursorState();
+    assert.deepStrictEqual(afterTab, { cursor: false, keynav: null, banner: false },
+      'Tab 必須乾淨退出 keynav、不升 banner，got ' + JSON.stringify(afterTab));
+
     assert.strictEqual(ctx.errs.length, 0, 'T9-10：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: a stray key inside toolbar keynav says the cursor is going away — OK');
