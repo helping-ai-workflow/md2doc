@@ -8523,6 +8523,53 @@ async function main() {
     console.log('journey: a real control focused inside the drawer keeps its own keys — OK');
   }
 
+  // ── Task 9 review I3: the keynav-exit banner (backlog #10) sits at
+  // z-index:999 over the toolbar's own z-index:101 — MEASURED, 22-23 of 23
+  // buttons' own centre points hit-test to the banner, not the button — and
+  // a keyboard user had no way to take it down (Escape did not dismiss it,
+  // and a bare Tab is swallowed elsewhere with nothing real focused). Fix:
+  // Escape now dismisses it (dismissKeynavExitBanner()), and Tab — a
+  // legitimate "leave the toolbar" gesture per the ARIA toolbar pattern,
+  // not a stray key with nowhere to go — no longer raises it at all (it
+  // still exits keynav, unchanged).
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const state = () => ctx.page.evaluate(() => ({
+      banner: !!document.querySelector('.ed-conflict'),
+      keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+    }));
+
+    await enterKeynav();
+    await ctx.page.keyboard.press('ArrowUp');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterStray = await state();
+    assert.strictEqual(afterStray.banner, true,
+      'I3 前提失敗：真正無處可去的鍵仍必須升起 banner，got ' + JSON.stringify(afterStray));
+
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterEscape = await state();
+    assert.strictEqual(afterEscape.banner, false,
+      'I3：Escape 必須能收掉 keynav-exit banner，got ' + JSON.stringify(afterEscape));
+
+    await enterKeynav();
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterTab = await state();
+    assert.strictEqual(afterTab.keynav, null, 'I3：Tab 仍必須退出 keynav，got ' + JSON.stringify(afterTab));
+    assert.strictEqual(afterTab.banner, false,
+      'I3：Tab 是合法離開手勢，不得升起 banner，got ' + JSON.stringify(afterTab));
+    assert.strictEqual(ctx.errs.length, 0, 'I3：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Escape dismisses the keynav banner, Tab never raises it — OK');
+  }
+
   await browser.close();
 }
 
