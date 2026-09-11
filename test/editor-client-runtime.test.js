@@ -12459,6 +12459,261 @@ async function gutterGeometry(page, sel) {
         f6bSrv.close();
       }
     }
+    // ── v3.4.0 backlog #2: onRowInsertBubbleClick()'s afterRowIndex must be
+    //    re-validated against the LIVE table, not blindly trusted — a stale
+    //    index (set by updateTableInsertBubbles() at an earlier hover, no
+    //    longer naming a real row by the time the click lands) must drop the
+    //    gesture with the existing DROPPED_GESTURE_MESSAGE banner, never
+    //    fall through to insertRow()'s `tbody.insertBefore(newRow,
+    //    tbody.firstChild)` branch (that branch is `afterRowIndex: -1`'s
+    //    OWN, deliberate, top-of-table placement — a stale positive index
+    //    must never alias it). That fallback's failure mode (silently guess
+    //    a position) is wrong on its own terms, independent of reachability
+    //    — same policy as performRowDrop()/runDeleteRow() above.
+    //
+    //    ⚠ THIS SCENARIO PINS A DEFENSE-IN-DEPTH BRANCH, NOT A PATH A REAL
+    //    USER CAN REACH TODAY. MEASURED (task-6-report.md, "真實手勢到不到
+    //    得了" section): four real, uninjected gesture sequences were tried
+    //    — grip-menu row delete, an external file push (no such mechanism
+    //    exists in this editor), the original backlog narrative itself (an
+    //    unrelated block's dirty burst forcing a full-render handover), and
+    //    Ctrl+Z after a row insert — and NONE of them left the bubble both
+    //    STALE and CLICKABLE. Two independent, pre-existing mechanisms
+    //    guard this: (a) updateTableInsertBubbles()'s own proximity check
+    //    re-hides the bubble the instant the pointer leaves its
+    //    TB_EDGE_PX zone (reaching a row grip to shrink the table always
+    //    crosses that boundary first), and (b) rerenderAll()'s full-render
+    //    fallback unconditionally calls hideTableInsertBubbles() +
+    //    hideTableGrips() after every full re-render regardless of pointer
+    //    position (covers undo/redo and any other full-render trigger).
+    //    That is WHY this scenario has to force the precondition directly
+    //    (overwriting the bubble's dataset attribute after a real, valid
+    //    hover) instead of driving it out of pure mouse choreography like
+    //    every other scenario in this file — real choreography cannot get
+    //    there, full stop, not because nobody tried hard enough.
+    //
+    //    SIGNPOST FOR THE FUTURE: if this scenario's injection step is ever
+    //    replaced with a real-mouse/real-keyboard sequence that STILL
+    //    reaches the assertions below, that means one of the two guard
+    //    mechanisms above broke — go look at updateTableInsertBubbles()'s
+    //    proximity check and/or rerenderAll()'s unconditional
+    //    hideTableInsertBubbles()/hideTableGrips() cleanup, not at this
+    //    fix. The paragraph-commit check further down stays in place to
+    //    prove ensureTableBurstOpen()'s OTHER-block-commit path is
+    //    otherwise untouched by this fix — same "byte-identical wire
+    //    assertion" spirit as the file's other Finding-6-style scenarios.
+    {
+      const { srv: f7Srv, url: f7Url, mdPath: f7MdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| Name | Note |',
+        '|---|---|',
+        '| Row0 | 0 |',
+        '| Row1 | 1 |',
+        '| Row2 | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f7Url, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the row-insert click'
+        );
+
+        // A real, valid hover at the LAST body-row boundary (afterRowIndex=2,
+        // after "Row2") — exactly what updateTableInsertBubbles() would
+        // compute for THIS 3-body-row table right now.
+        const { x, y } = await rowBoundaryCoords(page, table0, 2);
+        await page.mouse.move(x, y);
+        await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-row').dataset.afterRowIndex),
+          '2',
+          'sanity: the hover must compute the genuinely valid boundary before it is forced stale'
+        );
+        // Force the stale precondition: an index that names no row on the
+        // CURRENT (3-body-row) table, without touching `hoveredInsertTableEl`
+        // (still the live, attached table from the hover above).
+        await page.evaluate(() => {
+          document.querySelector('.ed-tb-insert-row').dataset.afterRowIndex = '5';
+        });
+        await page.click('.ed-tb-insert-row');
+        // The click's ensureTableBurstOpen() commits the dirty paragraph —
+        // the FIRST commit of the session, therefore a full render (v3.2.0
+        // Task F) that detaches and re-resolves the table — before ever
+        // reaching the stale-index check this fix adds.
+        await settleEditor(page);
+
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/文件已更新/.test(bannerText),
+          'a stale afterRowIndex must drop the gesture via the existing DROPPED_GESTURE_MESSAGE banner, got: ' + bannerText);
+
+        const bodyRowsAfter = await page.evaluate((ts) =>
+          Array.from(document.querySelectorAll(ts + ' table tbody tr')).map((r) => r.cells[0].textContent.trim()),
+          table0);
+        assert.deepStrictEqual(bodyRowsAfter, ['Row0', 'Row1', 'Row2'],
+          'no row may be inserted at all (never at the TOP) when afterRowIndex cannot be relocated, got: ' +
+            JSON.stringify(bodyRowsAfter));
+
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the row insert'
+        );
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+
+        const fileText = fs.readFileSync(f7MdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const rowLines = fileText.split('\n').filter((l) => l.startsWith('| Row'));
+        assert.deepStrictEqual(rowLines.map((l) => l.split('|')[1].trim()), ['Row0', 'Row1', 'Row2'],
+          'the saved file must show exactly the original 3 rows (no phantom top row), got rows:\n' + rowLines.join('\n'));
+
+        await page.close();
+        console.log('v3.4.0 backlog #2: a stale row-insert afterRowIndex drops the gesture instead of guessing — OK');
+      } finally {
+        f7Srv.close();
+      }
+    }
+    // ── v3.4.0 backlog #2 sister fix: onColInsertBubbleClick()'s colIndex
+    //    has the SAME structural hazard as afterRowIndex above — set by an
+    //    earlier hover, never re-validated against the live table at click
+    //    time. Unlike afterRowIndex, colIndex has NO legal sentinel value
+    //    (no "-1" case for columns; updateTableInsertBubbles() only ever
+    //    assigns 0..headerCells.length-1), so ANY value that no longer names
+    //    a real column is stale. Left unfixed, insertColumn()'s
+    //    `row.cells[colIndex]` lookup comes back undefined and
+    //    `row.insertBefore(cell, ref ? ref.nextSibling : null)` silently
+    //    APPENDS the new column at the very END of the table instead of
+    //    dropping the gesture.
+    //
+    //    ⚠ THIS SCENARIO ALSO PINS A DEFENSE-IN-DEPTH BRANCH, NOT A PATH A
+    //    REAL USER CAN REACH TODAY — same finding as the row scenario above,
+    //    independently re-verified for the col path (task-6-report.md, "欄
+    //    的可達性" section): the same two guards apply verbatim.
+    //    updateTableInsertBubbles()'s proximity check re-hides
+    //    `.ed-tb-insert-col` the instant the pointer leaves its band
+    //    (reaching the col grip to shrink the table crosses it first — the
+    //    grip sits on the header cell's CENTRE while the bubble's own band
+    //    hugs that cell's RIGHT edge, so there is no way to touch the grip
+    //    without leaving the bubble's zone), and rerenderAll()'s full-render
+    //    fallback unconditionally hides both bubbles and both grips
+    //    regardless of pointer position. Real grip-menu column delete and
+    //    Ctrl+Z-after-insert were both tried and both left the bubble
+    //    `hidden` before a subsequent click could land — same shape as the
+    //    row path's #1 and #4. That is why this scenario forces the
+    //    precondition directly (overwriting the bubble's dataset attribute
+    //    after a real, valid hover) instead of real mouse choreography.
+    //
+    //    SIGNPOST FOR THE FUTURE: same as the row scenario above — if this
+    //    scenario's injection step is ever replaced with a real gesture that
+    //    STILL reaches the assertions below, one of those two guard
+    //    mechanisms broke; go look there, not at this fix.
+    {
+      const { srv: f8Srv, url: f8Url, mdPath: f8MdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| ColA | ColB | ColC |',
+        '|---|---|---|',
+        '| a | b | c |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f8Url, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the col-insert click'
+        );
+
+        // A real, valid hover at the LAST column boundary (colIndex=2,
+        // ColC's right edge) — exactly what updateTableInsertBubbles() would
+        // compute for THIS 3-column table right now.
+        const boundary = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const r = table.tHead.rows[0].cells[2].getBoundingClientRect();
+          return { x: r.right, y: table.getBoundingClientRect().top };
+        }, table0);
+        await page.mouse.move(boundary.x, boundary.y);
+        await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-col').dataset.colIndex),
+          '2',
+          'sanity: the hover must compute the genuinely valid boundary before it is forced stale'
+        );
+        // Force the stale precondition: an index that names no column on the
+        // CURRENT (3-column) table, without touching `hoveredInsertTableEl`
+        // (still the live, attached table from the hover above).
+        await page.evaluate(() => {
+          document.querySelector('.ed-tb-insert-col').dataset.colIndex = '9';
+        });
+        await page.click('.ed-tb-insert-col');
+        // The click's ensureTableBurstOpen() commits the dirty paragraph —
+        // the FIRST commit of the session, therefore a full render (v3.2.0
+        // Task F) that detaches and re-resolves the table — before ever
+        // reaching the stale-index check this fix adds.
+        await settleEditor(page);
+
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/文件已更新/.test(bannerText),
+          'a stale colIndex must drop the gesture via the existing DROPPED_GESTURE_MESSAGE banner, got: ' + bannerText);
+
+        const headerColsAfter = await page.evaluate((ts) =>
+          Array.from(document.querySelectorAll(ts + ' table thead th')).map((c) => c.textContent.trim()),
+          table0);
+        assert.deepStrictEqual(headerColsAfter, ['ColA', 'ColB', 'ColC'],
+          'no column may be inserted at all (never appended at the END) when colIndex cannot be relocated, got: ' +
+            JSON.stringify(headerColsAfter));
+
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the col insert'
+        );
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+
+        const fileText = fs.readFileSync(f8MdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const headerLine = fileText.split('\n').find((l) => l.trim().startsWith('|') && l.includes('ColA'));
+        assert.ok(headerLine, 'header line not found in saved file:\n' + fileText);
+        assert.strictEqual(headerLine.split('|').length - 2, 3,
+          'the saved file must show exactly the original 3 columns (no phantom trailing column), got header line: ' +
+            headerLine);
+
+        await page.close();
+        console.log('v3.4.0 backlog #2 (sister): a stale col-insert colIndex drops the gesture instead of guessing — OK');
+      } finally {
+        f8Srv.close();
+      }
+    }
 
     // ── §10-gap fix: block-level INSERT (＋) and DELETE (⠿ menu) ───────────
 
