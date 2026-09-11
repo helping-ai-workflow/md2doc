@@ -24663,6 +24663,82 @@ async function gutterGeometry(page, sel) {
       } finally { t7srv.close(); }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 Task 7 item 1: repairing a swallowed fence's closing marker via
+    // the raw editor must not duplicate the tail it frees, on disk. Root
+    // cause (see client.js's applyPatch(), right above the
+    // `if (activeEditor && activeEditor.blockEl) { ... }` guard added for
+    // this fix): the repair spawns a NEW block (the freed trailing
+    // paragraph), so it commits via the PATCH path — and until this fix,
+    // applyPatch()'s removeChild() of THIS EDITOR'S OWN (now-replaced) block
+    // fired a synchronous focusout that reentered commit() a second time
+    // before the outer commit had nulled `activeEditor`, re-writing the
+    // stale, un-shrunk textarea value over the block's new (shrunk) range.
+    // Reproducing needs the patch path specifically, which needs a PRIOR
+    // successful commit in the same session — the very first commit always
+    // falls back to a full render (see applyRenderResult()'s own comment) —
+    // hence the warm-up edit below. IMPORTANT: this means the defect does
+    // NOT reproduce on a freshly opened document with no prior commit in the
+    // session — repairing a swallowed fence as the very FIRST edit after
+    // page load is safe (fallback path). Driving this scenario without the
+    // warm-up step will NOT turn it red; do not read that as "already
+    // fixed" or "backlog description wrong".
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: t7bsrv, url: t7burl, mdPath: t7bmdPath } = await setupTableDoc([
+        '# Doc', '', 'Intro paragraph.', '', '```js', "console.log('a');", '',
+        'Trailing paragraph text.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t7burl, { waitUntil: 'networkidle0' });
+
+        // Warm-up: a real commit on a DIFFERENT block, so the repair below
+        // goes through applyPatch() rather than the always-fallback first
+        // commit of the session.
+        const introSel = await paragraphSelByText(page, 'Intro paragraph.');
+        await clickGutterMenuItem(page, introSel, 'MD 原始碼');
+        await page.waitForSelector(introSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(introSel + ' textarea.ed-raw');
+        await page.keyboard.type(' WARM');
+        await page.keyboard.down('Control'); await page.keyboard.press('Enter'); await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        // Repair the swallowed fence: add the closing marker right after the
+        // one real line of code — this is what frees the trailing paragraph
+        // back into its own block.
+        const codeSel = '.ed-block[data-block-type="code"]';
+        await page.click(codeSel);
+        await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
+        const repaired = "```js\nconsole.log('a');\n```\n\nTrailing paragraph text.";
+        await page.evaluate((sel, val) => {
+          const ta = document.querySelector(sel + ' textarea.ed-raw');
+          ta.value = val;
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, codeSel, repaired);
+        await page.focus(codeSel + ' textarea.ed-raw');
+        await page.keyboard.down('Control'); await page.keyboard.press('Enter'); await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        await page.keyboard.down('Control'); await page.keyboard.press('s'); await page.keyboard.up('Control');
+        await awaitSaveSettled(page);
+
+        const after = fs.readFileSync(t7bmdPath, 'utf8');
+        const tailOccurrences = after.split('Trailing paragraph text.').length - 1;
+        assert.strictEqual(tailOccurrences, 1,
+          '補回收尾圍欄不得把被吞掉的尾巴在磁碟上複製一份。got:\n' + after);
+        assert.strictEqual(after,
+          "# Doc\n\nIntro paragraph. WARM\n\n```js\nconsole.log('a');\n```\n\nTrailing paragraph text.\n",
+          '修好之後的磁碟內容應逐位元組吻合預期。got:\n' + after);
+
+        const rawLeft = await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length);
+        assert.strictEqual(rawLeft, 0, '修復提交之後不得留下殭屍 raw 編輯器');
+
+        await page.close();
+        console.log('Task 7 item 1: repairing a swallowed fence no longer duplicates the tail on disk — OK');
+      } finally { t7bsrv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
