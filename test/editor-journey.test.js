@@ -8570,6 +8570,73 @@ async function main() {
     console.log('journey: Escape dismisses the keynav banner, Tab never raises it — OK');
   }
 
+  // ── Task 9 review I4: the backlog #6 raw-editor rescue in
+  // restoreAfterStructuralOp() must stay scoped to convertBlockViaMenu()
+  // (the toolbar's quote/code conversion, the one gesture backlog #6 names)
+  // — it must NOT spill into 建立副本 (duplicate) or 刪除 (delete) via the
+  // ⠿ gutter menu, even when either lands on a quote/code block. MEASURED
+  // before this scoping: 建立副本 on a code block, 建立副本 on a
+  // blockquote, and 刪除 landing on a surviving blockquote all went
+  // BODY → TEXTAREA.ed-raw — philosophically consistent but never asked
+  // for, and risking backlog #5's still-open Escape-discards-uncommitted-
+  // edit gap right after a DESTRUCTIVE gesture.
+  {
+    const clickGutterMenuItem = async (page, blockSel, label) => {
+      await page.hover(blockSel);
+      await pressClick(page, blockSel + ' .ed-handle', 80);
+      await page.waitForSelector('.ed-handle-menu-btn');
+      await page.evaluate((lbl) => {
+        const items = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === lbl);
+        items[items.length - 1].click();
+      }, label);
+    };
+
+    {
+      const ctx = await newPage('# Doc\n\n```\ncode line\n```\n\nAfter.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="code"]', '建立副本');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (建立副本/code)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (建立副本/code)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage('# Doc\n\n> quoted line\n\nAfter.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="blockquote"]', '建立副本');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (建立副本/blockquote)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (建立副本/blockquote)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage('# Doc\n\n> quoted line\n\nDelete me.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="paragraph"]', '刪除');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (刪除/blockquote 鄰居)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (刪除/blockquote 鄰居)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // Regression guard: the ACTUAL backlog #6 gesture must still work.
+    {
+      const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+      await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(ctx.page, '.ed-toolbar [data-ed-tb="quote"]', 80);
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(tag, 'TEXTAREA',
+        'I4 迴歸守衛：toolbar 的 quote 轉換仍必須開啟 raw editor，got ' + JSON.stringify({ tag }));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: the raw-editor rescue stays scoped to the toolbar quote/code conversion — OK');
+  }
+
   await browser.close();
 }
 
