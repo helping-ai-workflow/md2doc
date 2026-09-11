@@ -8205,6 +8205,84 @@ async function main() {
     console.log('journey: collapsing then reselecting by keyboard raises .ed-seltb again — OK');
   }
 
+  // ── Task 9 backlog #6: quote / code / line strand the caret on BODY after
+  // activation, with nothing to click into and (by keyboard) nowhere to Tab
+  // to; undo / redo / image do the same ONLY when there is an uncommitted
+  // edit (switchAwayFrom()'s own commit-and-render is what drops it). Every
+  // case below is driven through pressClick() (real press-hold-release,
+  // §0's own "dirty burst + real press timing" class of defect) rather than
+  // a synthetic .click(), since three of the six scenarios are dirty bursts.
+  {
+    const sel = '.ed-block[data-block-type="paragraph"] .ed-wys-armed';
+
+    // quote / code / line: a CLEAN burst (just a click, no typing) is enough
+    // — activateToolbarCursor()'s own comment: "quote, code and line end on
+    // BODY … with a clean burst and with a dirty one alike." Each id gets
+    // its own fresh page (converting/inserting once is enough per id).
+    for (const id of ['quote', 'code', 'line']) {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="' + id + '"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (' + id + ')：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      // The raw editor is quote/code/line's real (only) editing surface —
+      // prove it actually took the caret, not merely SOME element.
+      assert.strictEqual(tag, 'TEXTAREA',
+        'T9-6 (' + id + ')：caret 必須落在該 block 自己的 raw editor 裡，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (' + id + ')：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    // undo over a DIRTY burst: switchAwayFrom()'s own auto-commit-then-
+    // render is what drops the caret — see undoViaToolbar()'s own comment.
+    {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.keyboard.press('End');
+      await c.page.keyboard.type(' PRIMED');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="undo"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (undo/dirty)：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (undo/dirty)：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    // image over a DIRTY burst: imageViaToolbar()'s own await resolves right
+    // after switchAwayFrom(), well before any file is actually chosen — the
+    // native file dialog is swallowed so this probes the same caret-drop
+    // point without needing a real file chooser.
+    {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.keyboard.press('End');
+      await c.page.keyboard.type(' DIRTY');
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.evaluate(() => {
+        HTMLInputElement.prototype.click = function () {
+          if (this.type === 'file') return;
+          return HTMLElement.prototype.click.call(this);
+        };
+      });
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="image"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (image/dirty)：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (image/dirty)：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    console.log('journey: quote/code/line and undo/image over a dirty burst give the caret back — OK');
+  }
+
   // ── Task 9 backlog #7: the H▾ dropdown's six items must be reachable and
   // operable by keyboard, not mouse-only. ArrowDown/ArrowUp now move a
   // cursor INSIDE the open panel (own index, own attribute
