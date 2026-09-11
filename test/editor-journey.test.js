@@ -8205,6 +8205,56 @@ async function main() {
     console.log('journey: collapsing then reselecting by keyboard raises .ed-seltb again — OK');
   }
 
+  // ── Task 9 backlog #10: a stray key must not silently drop the toolbar's
+  // keyboard cursor. MEASURED (v3.3.0): ArrowUp / ArrowDown / Tab / Home /
+  // End / 'a' / Backspace all dropped [data-ed-tb-cursor] AND the bar's own
+  // data-ed-tb-keynav with nothing on screen marking it — the bar looked
+  // exactly as it did before Alt+F10 was pressed. The fix does BOTH halves
+  // of v3.3.0's own ruling ("一併處理，加上可見的信號"): Home/End now move
+  // the cursor to the first/last enabled button (a useful thing to do with
+  // them, not merely "harmless"), and every OTHER stray key still exits the
+  // mode but now raises a visible .ed-conflict banner saying so.
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const cursorState = () => ctx.page.evaluate(() => ({
+      cursor: !!document.querySelector('[data-ed-tb-cursor]'),
+      keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      banner: !!document.querySelector('.ed-conflict'),
+    }));
+    for (const key of ['ArrowUp', 'ArrowDown', 'Tab', 'Home', 'End', 'a', 'Backspace']) {
+      // Known clean slate: Escape exits keynav if a prior iteration left it
+      // on (Home/End no longer exit it), and dismiss any leftover banner —
+      // otherwise Alt+F10's own toggle semantics would turn THIS iteration's
+      // entry chord into an exit instead.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict button');
+        if (b) b.click();
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await enterKeynav();
+      const before = await cursorState();
+      assert.ok(before.cursor, key + '：前提失敗 —— Alt+F10 沒有點亮鍵盤游標，got ' +
+        JSON.stringify(before));
+      await ctx.page.keyboard.press(key);
+      await new Promise((r) => setTimeout(r, 200));
+      const after = await cursorState();
+      assert.ok(after.cursor || after.banner,
+        key + ' 不得靜靜丟掉鍵盤游標 —— 要嘛游標還在，要嘛有可見的信號，got ' +
+        JSON.stringify(after));
+    }
+    assert.strictEqual(ctx.errs.length, 0, 'T9-10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a stray key inside toolbar keynav says the cursor is going away — OK');
+  }
+
   await browser.close();
 }
 
