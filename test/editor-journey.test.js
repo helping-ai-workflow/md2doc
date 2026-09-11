@@ -3202,9 +3202,15 @@ async function main() {
     // future rewrite) WOULD snap the page back to the top when engaged, and
     // every assertion below resets to 0 before checking, so none of them
     // would ever notice that regression without this one.
-    // .sidebar-toggle 在 edit 模式下被 .ed-toolbar（z-index 101 > 100）蓋住，
-    // 滑鼠點不到它，用 DOM click 繞過（見上面那一列的同一段註解）。
-    await ctx.page.evaluate(() => document.querySelector('.sidebar-toggle').click());
+    // Final-review C1: `.sidebar-toggle` is `display: none` in edit mode
+    // (T11-2 ruling, MEASURED above at line ~3038-3040 — NOT merely occluded
+    // by `.ed-toolbar`'s higher z-index, an earlier draft of this comment's
+    // claim, now retracted). The toolbar's ☰ outline button
+    // (`.ed-toolbar [data-ed-tb="outline"]`) is the only entry point a real
+    // edit-mode user has to this drawer, so drive the real one instead of a
+    // DOM click on a button the user can never reach.
+    await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar [data-ed-tb="outline"]').click());
     await new Promise((r) => setTimeout(r, 450));
     const open = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
     assert.notStrictEqual(open, null, '前提失敗：抽屜沒有打開');
