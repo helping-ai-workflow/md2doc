@@ -79,6 +79,9 @@ async function setup() {
     'Link target paragraph text.', '',
     'A [existing link](https://example.com) here.', '',
     'Rerender reset target word here.', '',
+    // v3.4.0 / v3.3.0 backlog 4 (whitespace-only link selection) fixtures.
+    'Whitespace only link target text.', '',
+    'Whitespace mixed link bold word here.', '',
     // FIX 2 (strikethrough/underline selection-toolbar marks) fixtures.
     'Strike toggle target word here.', '',
     'Strike commit target word here.', '',
@@ -5949,6 +5952,84 @@ async function gutterGeometry(page, sel) {
       await page.keyboard.press('Escape');
       await page.close();
       console.log('sel-toolbar: link button on an existing link edits then clears it — OK');
+    }
+
+    // ── v3.4.0 / v3.3.0 backlog 4: a whitespace-only selection must not
+    //    become an <a>. applyMarkToggle()'s wrap branch has always guarded
+    //    on trimRangeToText() before wrapping; applyLinkToggleBody()'s
+    //    new-link branch never had the matching guard, so selecting just
+    //    the ONE space between two words and clicking 🔗 wrote
+    //    `<a href="..."> </a>` — an anchor whose entire content was that
+    //    space — to the surface. Also asserts the URL prompt is never even
+    //    opened (the guard now runs before window.prompt()) and that the
+    //    file on disk is untouched (no commit ever ran) ─────────────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => {
+        window.__promptCalls = 0;
+        window.prompt = () => { window.__promptCalls++; return 'https://probe.example/'; };
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Whitespace only link target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      // The single space right after "Whitespace" — a whitespace-only
+      // selection, same shape as the v3.3.0 repro ("Alpha bold text
+      // here.", the space after "Alpha").
+      await selectWordInEl(page, editEl, ' ');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-link');
+      await settleEditor(page);
+
+      const wsHtml = await page.evaluate((s) => document.querySelector(s).innerHTML, editEl);
+      assert.ok(!/<a[^>]*>\s*<\/a>/.test(wsHtml),
+        '純空白不得被包進 <a>。Got ' + wsHtml);
+      assert.strictEqual(await page.evaluate(() => window.__promptCalls), 0,
+        'a whitespace-only selection must not even open the URL prompt');
+      assert.strictEqual(fs.readFileSync(mdPath, 'utf8').includes('Whitespace only link target text.'), true,
+        '被拒絕的手勢不得改到磁碟');
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('sel-toolbar: a whitespace-only selection refuses the link button — OK');
+    }
+
+    // ── Same fix, mixed selection: trimRangeToText() TRIMS the range (it
+    //    does not refuse it outright unless the WHOLE selection is
+    //    whitespace), so a selection with leading/trailing whitespace
+    //    around real text must still create a link — just around the text,
+    //    with the surrounding whitespace left outside the <a> ───────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => { window.prompt = () => 'https://mixed.example/'; });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Whitespace mixed link bold');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      // " bold " — one leading space (after "link"), the word "bold", one
+      // trailing space (before "word") — trims to just "bold".
+      await selectWordInEl(page, editEl, ' bold ');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const a = document.querySelector(s + ' a');
+          return a ? a.getAttribute('href') + '|' + a.textContent : null;
+        }, editEl),
+        'https://mixed.example/|bold',
+        'a mixed whitespace+text+whitespace selection must wrap only the text in <a>, not the surrounding spaces'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl),
+        'Whitespace mixed link bold word here.',
+        'the surrounding whitespace must survive outside the <a>, unchanged'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('sel-toolbar: a mixed whitespace+text selection trims to the text before linking — OK');
     }
 
     // ── Task 4 regression fix (review finding): rerenderAll()'s
