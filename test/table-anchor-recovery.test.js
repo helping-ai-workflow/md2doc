@@ -21,7 +21,12 @@
 //       一版只有 startLine 這一個 handle，在這個形狀上它什麼都名不到，於是
 //       誤打誤撞地丟掉手勢。C 紅的是【A 的修正自己帶進來的】新危害：多了
 //       data-block-id 這個 handle 就多一次猜錯的機會。所以它釘的是「文件裡
-//       有兩張候選時一律拒絕猜」這條規則，沒有它，A 的修正是淨負的。
+//       有兩張候選時一律拒絕猜」這條規則。（⚠ 淨負的那一格是「複合錨點 ＋
+//       【舊的弱】identity」——亂數掃描 1,275 件改錯表，比 v3.3.0 的 302 件
+//       還糟；複合 ＋ 強 identity 但沒有唯一性閘門是 12 件，仍然是淨正。）
+//   D 與 A 同一份 fixture，手勢換成 ＋ 泡泡插列
+//     → 同一支 ensureTableBurstOpen()、不同入口。修正前：在第一張表按 ＋，
+//       新列插進第二張表。證明這個缺陷不是拖曳專屬的。
 
 const assert = require('assert');
 const path = require('path');
@@ -122,8 +127,14 @@ async function tableTexts(page) {
 }
 
 // 一次情境：把段落的 raw 編輯器改成 `replacement`（不提交），然後對第
-// `tableIndex` 張表格拉一列。回傳兩張表的最終內容、banner 與磁碟內容。
-async function runScenario(browser, lines, replacement, tableIndex) {
+// `tableIndex` 張表格下一個手勢——`gesture` 是 'drag'（拉第一個 body 列到第
+// 二個 body 列下面）或 'bubble'（在第一個 body 列下緣的 ＋ 泡泡上插一列）。
+// 兩者走的是同一支 ensureTableBurstOpen()，但入口不同：拖曳在 pointerup 才
+// 解析，泡泡在 click 才解析，而且【兩者的 mousedown 都不會提交】——grip 的
+// pointerdown 與 buildTableInsertBubble() 自己掛的 mousedown 監聽器都呼叫
+// e.preventDefault()，raw textarea 因此不失焦。回傳兩張表的最終內容、banner
+// 與磁碟內容。
+async function runScenario(browser, lines, replacement, tableIndex, gesture) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-anchor-'));
   const mdPath = path.join(dir, 'doc.md');
   fs.writeFileSync(mdPath, lines.join('\n'), 'utf8');
@@ -142,21 +153,35 @@ async function runScenario(browser, lines, replacement, tableIndex) {
     await page.keyboard.type(replacement);
     assert.strictEqual(
       await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), pSel), true,
-      'sanity: 拉列之前 raw 編輯器必須還開著而且是髒的');
+      'sanity: 下手勢之前 raw 編輯器必須還開著而且是髒的');
 
     const tblSel = await page.evaluate((i) => '.ed-block[data-block-id="' +
       document.querySelectorAll('.ed-block[data-block-type="table"]')[i].getAttribute('data-block-id') + '"]',
       tableIndex);
-    const from = await rowGripCoords(page, tblSel, 0);
-    const to = await page.evaluate((ts) => {
-      const t = document.querySelector(ts + ' table');
-      return { x: t.getBoundingClientRect().left, y: t.tBodies[0].rows[1].getBoundingClientRect().bottom };
-    }, tblSel);
-    await page.mouse.move(from.x, from.y);
-    await page.mouse.down();
-    await page.mouse.move(from.x + (to.x - from.x) / 2, from.y + (to.y - from.y) / 2, { steps: 5 });
-    await page.mouse.move(to.x, to.y, { steps: 5 });
-    await page.mouse.up();
+    if (gesture === 'bubble') {
+      const bnd = await page.evaluate((ts) => {
+        const t = document.querySelector(ts + ' table');
+        return { x: t.getBoundingClientRect().left,
+          y: t.tBodies[0].rows[0].getBoundingClientRect().bottom };
+      }, tblSel);
+      await page.mouse.move(bnd.x, bnd.y);
+      await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 5000 });
+      assert.strictEqual(
+        await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), pSel), true,
+        'sanity: 泡泡浮出來之後 raw 編輯器仍然必須是開著的');
+      await page.click('.ed-tb-insert-row');
+    } else {
+      const from = await rowGripCoords(page, tblSel, 0);
+      const to = await page.evaluate((ts) => {
+        const t = document.querySelector(ts + ' table');
+        return { x: t.getBoundingClientRect().left, y: t.tBodies[0].rows[1].getBoundingClientRect().bottom };
+      }, tblSel);
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(from.x + (to.x - from.x) / 2, from.y + (to.y - from.y) / 2, { steps: 5 });
+      await page.mouse.move(to.x, to.y, { steps: 5 });
+      await page.mouse.up();
+    }
     await settle(page);
     await new Promise((r) => setTimeout(r, 400));
 
@@ -230,6 +255,23 @@ async function main() {
       assert.ok(r.banner && r.banner.indexOf('請重試') !== -1,
         'C: 無法分辨雙胞胎時必須丟手勢並出 banner, got: ' + JSON.stringify(r.banner));
       console.log('  C 逐字相同的雙胞胎 → 拒絕猜，丟手勢 + banner — OK');
+    }
+    // D) 與 A 同一份 fixture、同一個復原分支，換成 ＋ 泡泡這個入口。泡泡的
+    //    mousedown 自己就 preventDefault()（buildTableInsertBubble()），所以
+    //    raw 編輯器同樣是在 click 自己的 ensureTableBurstOpen() 裡才被提交的。
+    //    修正前：使用者在第一張表按 ＋，新列插進【第二張表】。
+    {
+      const r = await runScenario(browser,
+        ['P1 line one', 'P1 line two', 'P1 line three', 'P1 line four', 'P1 line five', 'P1 line six', '']
+          .concat(TWIN).concat(['']).concat(OTHER).concat(['']),
+        'P1 edited', 0, 'bubble');
+      assert.deepStrictEqual(r.after[1], ['A|B', '5|6', '7|8'],
+        'D: ＋ 泡泡把新列插進了沒被碰過的鄰居: ' + JSON.stringify(r.after));
+      assert.deepStrictEqual(r.after[0], ['A|B', '1|2', '|', '3|4'],
+        'D: 新列沒有插進被按的那張表: ' + JSON.stringify(r.after));
+      assert.ok(r.disk.includes('| 5 | 6 |\n| 7 | 8 |'),
+        'D: 磁碟上鄰居表格被動過: ' + JSON.stringify(r.disk));
+      console.log('  D ＋ 泡泡（同一個復原分支、不同入口）→ 新列插在自己身上 — OK');
     }
   } finally {
     await browser.close();
