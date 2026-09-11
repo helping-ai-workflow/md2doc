@@ -1774,27 +1774,39 @@ async function main() {
     assert.strictEqual(ids.length, 23, '工具列應為 23 顆，got ' + ids.length);
 
     const TB_ROWS = [
-      // v3.4.0 §3: `save` is a deliberate standing exception to this whole
-      // matrix's own premise ("每一顆按鈕都在它真的 enabled 的狀態下被按").
-      // deriveState() (lib/editor/toolbar-model.js) only lights this button
-      // up when ctx.dirty is true, but toolbarContext() (lib/editor/
-      // client.js) does not forward a `dirty` field at all yet — Task 3
-      // scoped toolbar-model.js as a pure function module and left wiring
-      // the real `stack.dirtyDepth !== 0 || burstHasUncommittedEdit()` value
-      // into the client for a later task. Until that wiring lands, NO
-      // fixture this matrix can construct (v2Boot('sel') / v2Boot('nest'),
-      // both freshly-loaded clean documents, and nothing in `arrange` can
-      // change that — client.js never asks the model about dirtiness at
-      // all) can ever make this button clickable. `answer: 'disabled'` is
-      // the signal the loop below reads to accept "stayed disabled" as the
-      // row's actual required answer instead of failing it the way every
-      // other disabled-when-it-shouldn't-be button would. The day the
-      // client-wiring task ships, this row must go red (disabled turns
-      // clickable) and migrate to whatever real answer clicking Save
-      // produces — `effect` is a required-shape stub, never actually
-      // invoked while this row stays in the 'disabled' branch.
-      { id: 'save',         state: 'sel',  answer: 'disabled',
-        effect: () => null },
+      // v3.4.0 §3: `ctx.dirty` is wired now (lib/editor/client.js's
+      // toolbarContext()/documentIsDirty()) — this replaces the temporary
+      // 'disabled' tripwire that stood here through Task 3 (it warned this
+      // exact day would come: "this row must go red ... and migrate to
+      // whatever real answer clicking Save produces").
+      //
+      // The arrange deliberately leaves an UNCOMMITTED edit sitting in the
+      // open burst (typed, never blurred/committed) rather than reusing
+      // v2TypeAndCommit (the undo/redo rows below): that is the HARDER of
+      // the two paths into a dirty document. Pressing save must resolve
+      // (commit + re-render) this very burst before save() itself ever
+      // runs — same precondition Ctrl+S already has, see save()'s own
+      // dispatch comments — and that commit's render is exactly the class
+      // of render that strands the caret on BODY: unconditionally for
+      // quote/code/line (backlog #6, still open) and for undo/redo/image
+      // whenever a burst was left open (activateToolbarCursor()'s own
+      // comment). `save` must not become a fourth name on that list, and
+      // `answer: 'caret'` below is exactly the claim that it did not.
+      { id: 'save',         state: 'sel',  answer: 'caret',
+        arrange: async (ctx) => {
+          await ctx.page.keyboard.type('ZZ'); // replaces the pre-selected "Alpha"
+          await new Promise((r) => setTimeout(r, 250));
+        },
+        // The click must not itself change what is on screen — the
+        // uncommitted "ZZ" was already visible before the press, and a
+        // commit-then-save round-trip re-renders the same bytes. The real,
+        // load-bearing effect (uncommitted -> committed -> on disk) is the
+        // `disk` predicate below.
+        effect: (b, a) => same(b, a) ? null
+          : '按下 save 不應該改變畫面上的任何區塊內容，got before ' +
+            JSON.stringify(b) + ' after ' + JSON.stringify(a),
+        disk: (d) => d === '# H\n\nZZ bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '按下工具列的 save 必須先把還沒提交的編輯提交，再把結果存到磁碟' },
       { id: 'undo',         state: 'sel',  answer: 'caret',
         arrange: v2TypeAndCommit,
         effect: (b, a) => b.text !== V2_TEXT_ZZ
@@ -1951,11 +1963,14 @@ async function main() {
       const dis = await ctx.page.evaluate((i) =>
         document.querySelector('[data-ed-tb="' + i + '"]').disabled, row.id);
       if (dis) {
-        // v3.4.0 §3: `answer: 'disabled'` is the one legitimate reason a row
-        // may find its button disabled — see the `save` row's own comment
-        // above for why. Every other row still treats this branch as the
-        // bug it always was: a disabled button means the row clicked
-        // nothing and its whole verdict is a false green.
+        // `answer: 'disabled'` is the one legitimate reason a row may find
+        // its button disabled (the `save` row used it through Task 3, before
+        // ctx.dirty wiring landed — no row currently needs it, but the
+        // branch stays: a future button that is legitimately disabled on
+        // every fixture this matrix can construct has somewhere to say so).
+        // Every other row still treats this branch as the bug it always
+        // was: a disabled button means the row clicked nothing and its whole
+        // verdict is a false green.
         if (row.answer !== 'disabled') {
           bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
         }
@@ -2135,7 +2150,14 @@ async function main() {
         'V2c(dirty=' + dirty + '): 按到一顆停用的按鈕不得帶走游標，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2c(dirty=' + dirty + '): 游標必須還在原來那個編輯面上，got ' + JSON.stringify(st));
-      assert.strictEqual(st.enabled, 15,
+      // v3.4.0 §3: the base count shifts by exactly one, and only for the
+      // dirty=true iteration — `save` reads ctx.dirty, which typing 'XY'
+      // above already set to true regardless of this click (an uncommitted
+      // burst edit alone is enough, see documentIsDirty()). The invariant
+      // this assertion actually pins ("clicking a DISABLED button changes
+      // nothing") is untouched: it is still exactly the pre-click count in
+      // both branches, `save`'s own state included.
+      assert.strictEqual(st.enabled, dirty ? 16 : 15,
         'V2c(dirty=' + dirty + '): 工具列不得改變 —— 沒有 commit、沒有 render，' +
         'got ' + JSON.stringify(st));
       assert.strictEqual(ctx.errs.length, 0, 'V2c: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
@@ -2353,8 +2375,14 @@ async function main() {
       await ctx.page.keyboard.type('X');          // 髒 burst：switchAwayFrom() 會提交＋重繪
       await new Promise((r) => setTimeout(r, 250));
       const before = await readLeverage(ctx.page);
-      assert.strictEqual(before.enabled, 15,
-        'V2g(' + name + ') 前提：打字後工具列應是 15 顆，got ' + JSON.stringify(before));
+      // v3.4.0 §3: 16, not 15 — typing 'X' just made the document dirty
+      // (documentIsDirty()), and `save` reads exactly that, so it joins the
+      // 15 buttons a focused, no-selection burst already had enabled. Commit
+      // alone (this test never calls save()) does not clear dirtiness —
+      // only a real save does — so this stays 16 for the rest of the block
+      // too (the `st.enabled` check below, after Tab).
+      assert.strictEqual(before.enabled, 16,
+        'V2g(' + name + ') 前提：打字後工具列應是 16 顆（含 save 亮起），got ' + JSON.stringify(before));
       if (shift) await ctx.page.keyboard.down('Shift');
       await ctx.page.keyboard.press('Tab');
       if (shift) await ctx.page.keyboard.up('Shift');
@@ -2365,7 +2393,7 @@ async function main() {
         'V2g(' + name + ')：游標必須留在（或落到）' + wantTag + '，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2g(' + name + ')：而且必須是一個真的編輯面，got ' + JSON.stringify(st));
-      assert.strictEqual(st.enabled, 15,
+      assert.strictEqual(st.enabled, 16,
         'V2g(' + name + ')：工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
         '游標還在但整條工具列已經被 applyPatch() 的 resetToolbarBlock() 收掉了，got ' +
         JSON.stringify(st));
@@ -6253,7 +6281,11 @@ async function main() {
     await new Promise((r) => setTimeout(r, 150));
     const altOther = await f12Snap(ctx.page);
     await f12Enter(ctx.page);
-    for (let i = 0; i < 3; i++) {
+    // v3.4.0 §3: 4 hops, not 3 — the document is dirty here (' typed' is
+    // still an uncommitted burst edit), so `save` (BUTTON_DEFS' new first
+    // button) is enabled and is where entry now lands; undo/redo/headings/
+    // quote follow it in that order, one hop each.
+    for (let i = 0; i < 4; i++) {
       await ctx.page.keyboard.press('ArrowRight');
       await new Promise((r) => setTimeout(r, 90));
     }
@@ -6287,7 +6319,7 @@ async function main() {
         onScreen: atQuote.onScreen, clearOfSlot: atQuote.clearOfSlot },
       { at: 'quote', cursors: ['quote'], who: 'P.ed-wys-armed',
         onScreen: true, clearOfSlot: true },
-      'Alt+F10 之後三下 ArrowRight 必須停在 ❝ 上、那顆必須真的看得到、而且插入點' +
+      'Alt+F10 之後四下 ArrowRight 必須停在 ❝ 上、那顆必須真的看得到、而且插入點' +
       '不得離開編輯面，got ' + JSON.stringify(atQuote));
     assert.strictEqual(paint.on, 'solid 2px',
       '游標所在的按鈕必須畫出外框，got ' + JSON.stringify(paint));
@@ -6424,6 +6456,13 @@ async function main() {
     await ctx.page.keyboard.type('A');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
+    // v3.4.0 §3: 2 hops, not 1 — the document is dirty here ('A' is still an
+    // uncommitted burst edit), so entry now lands on `save` (BUTTON_DEFS'
+    // new first button) instead of `undo`; one more hop reaches `redo`,
+    // which is what this scenario actually needs to be "somewhere on the
+    // bar" for its own assertion below.
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 90));
     await ctx.page.keyboard.press('ArrowRight');
     await new Promise((r) => setTimeout(r, 120));
     const inBar = await f12Snap(ctx.page);
@@ -6459,6 +6498,11 @@ async function main() {
     await ctx.page.keyboard.type(' kept');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
+    // v3.4.0 §3: 3 hops, not 2 — the document is dirty here (' kept' is
+    // still an uncommitted burst edit), so entry now lands on `save`
+    // (BUTTON_DEFS' new first button); undo then redo then headings follow
+    // it one hop each, so one more ArrowRight than before reaches `headings`.
+    await ctx.page.keyboard.press('ArrowRight');
     await ctx.page.keyboard.press('ArrowRight');
     await ctx.page.keyboard.press('ArrowRight');
     await new Promise((r) => setTimeout(r, 150));
@@ -6765,6 +6809,45 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: a bare modifier press leaves the keyboard cursor alone — OK');
+
+  // K12 (v3.4.0 §3): `save` is now BUTTON_DEFS' own FIRST button (group
+  // 'file', listed ahead of 'history'), so it is the one moveToolbarCursor()
+  // would land the Alt+F10 roving cursor on first — UNLESS it is disabled,
+  // in which case the walk's existing skip-disabled logic must step past it
+  // exactly the way it already steps past any other disabled button. Two
+  // halves, same fixture: a clean document must skip it (landing on 'undo'
+  // instead, same as every pre-v3.4.0 F12 scenario above that opens on a
+  // clean doc), and a dirty one must actually reach it.
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    const clean = await f12Snap(ctx.page);
+    assert.notStrictEqual(clean.at, 'save',
+      '乾淨文件上，Alt+F10 的游標不得落在灰掉的 save 按鈕上，got ' + JSON.stringify(clean));
+    assert.strictEqual(clean.at, 'undo',
+      '乾淨文件上，Alt+F10 的游標必須落在第一顆還亮著的按鈕（undo）上，got ' +
+      JSON.stringify(clean));
+    // Escape only retires the virtual cursor — real DOM focus/caret never
+    // left the block this whole time (see this section's own opening
+    // comment: "沒有任何按鈕拿到 DOM 焦點，插入點原地不動"), so typing lands
+    // directly in the still-armed surface and dirties the document via the
+    // same uncommitted-burst path documentIsDirty() measures.
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.keyboard.type('Z');
+    await new Promise((r) => setTimeout(r, 250));
+    await f12Enter(ctx.page);
+    const dirty = await f12Snap(ctx.page);
+    assert.strictEqual(dirty.at, 'save',
+      '文件變髒之後，Alt+F10 的游標必須落在亮起來的 save 按鈕上（BUTTON_DEFS 排序第一），got ' +
+      JSON.stringify(dirty));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K12：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the keyboard cursor reaches save, and skips it when it is dead — OK');
 
   // ── F4: 轉換子選單的項目在矮視窗下都必須可達 ────────────────────────
   // 量測基礎：開 ⠿ + 轉換成整段手勢從未讀過 window.innerHeight/innerWidth

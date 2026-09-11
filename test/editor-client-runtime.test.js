@@ -24109,6 +24109,75 @@ async function gutterGeometry(page, sel) {
       } finally { tsrv.close(); }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 §3: 儲存按鈕的完整迴路 — starts disabled on a clean doc, lights
+    // up on an UNCOMMITTED edit (the harder of the two dirty paths:
+    // switchAwayFrom() must resolve/commit this very burst before save()
+    // itself ever runs — same precondition Ctrl+S already has, see save()'s
+    // own dispatch comment in lib/editor/client.js), persists exactly that
+    // edit to disk, goes back to disabled once saved, and — the point of
+    // this whole task — gives the caret back to the SAME text position it
+    // left, not BODY. quote/code/line already strand it there
+    // unconditionally (backlog #6, still open) and undo/redo/image do it
+    // whenever a burst was left open; `save` must not become a fourth name
+    // on that list.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: s4srv, url: s4url, mdPath: s4mdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4url, { waitUntil: 'networkidle0' });
+        const btn = '.ed-toolbar [data-ed-tb="save"]';
+
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), true,
+          '乾淨的文件上，儲存按鈕必須是灰的');
+
+        const sel = await paragraphSelByText(page, 'alpha');
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PROBE');
+        await settleEditor(page);
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), false,
+          '打字之後（即使還沒提交）儲存按鈕必須亮起');
+
+        const caretBefore = await page.evaluate(() => {
+          const s = getSelection();
+          return { node: s.anchorNode && s.anchorNode.textContent, off: s.anchorOffset };
+        });
+
+        await page.click(btn);
+        await settleEditor(page);
+        // Belt-and-braces grace beyond settleEditor()'s __edInflight wait —
+        // the caret-restore path runs synchronously after commitThenSave()
+        // resolves, so this is not waiting on anything unbounded; it is the
+        // same bounded "settle then read the actual value" shape every
+        // other scenario in this file uses, never an open-ended
+        // waitForFunction on a predicted value.
+        await new Promise((r) => setTimeout(r, 300));
+
+        assert.strictEqual(fs.readFileSync(s4mdPath, 'utf8'), '# Doc\n\nalpha PROBE\n',
+          '按下儲存之後，還沒提交的編輯必須先被提交、再落磁碟');
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), true,
+          '存檔成功之後按鈕必須變回灰的');
+
+        const caretAfter = await page.evaluate(() => {
+          const s = getSelection();
+          return { node: s.anchorNode && s.anchorNode.textContent, off: s.anchorOffset };
+        });
+        assert.deepStrictEqual(caretAfter, caretBefore,
+          'backlog #6：save 按鈕不得把 caret 丟在 BODY 或任何別的位置。Got ' +
+          JSON.stringify(caretAfter) + ' want ' + JSON.stringify(caretBefore));
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement === document.body), false,
+          'caret 不得停在 BODY');
+
+        await page.close();
+        console.log('save button (v3.4.0 §3): lights up on an uncommitted edit, ' +
+          'saves it, and gives the caret back — OK');
+      } finally { s4srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
