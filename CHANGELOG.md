@@ -8,8 +8,10 @@ All notable changes to this project will be documented here. This project adhere
 **這一版還沒發，而且下面列的只是它的第一批。** v3.4.0 的設計刻意把工作切成三批，
 任何一批做完停下來都是一個完整可發的狀態：批次 1 是「使用者回報的新缺陷 ＋ 儲存按鈕
 ＋ v3.3.0 留下的 13 項 backlog」，批次 2 是 drawio 內嵌檢視，批次 3 是 wavedrom 的
-GUI 波形編輯。**批次 2 與批次 3 一行都還沒寫**——下面所有內容只涵蓋批次 1 的 12 個
-task、39 顆 commit。
+GUI 波形編輯。**批次 2 與批次 3 一行都還沒寫**——下面所有內容只涵蓋批次 1 的 13 個
+task、40 顆 commit（分支上實際有 41 顆；口徑排除 `a499e30`，那是中途機器送修時為了讓
+進行中的 SDD 狀態跨機器存活而補的一顆 bookkeeping commit，記的是 spec／plan／進度檔，
+不是任何一個 task 的產出，見它自己的 commit message）。
 
 方法跟 v3.3.0 一樣不是重讀 diff，而是把每一條 backlog 重新驅動出來再修。過程中有
 **兩條 backlog 條目的形狀描述被證明是錯的**——一條連症狀本體都寫錯（記的是「會產生
@@ -323,6 +325,18 @@ task、39 顆 commit。
 - **`handleTableCellFocusIn()` 是「表格手勢落到隔壁那張表」的姊妹路徑，帶著同一個洞而且
   沒有唯一性閘門**——雙胞胎那一格會把 caret 放進別張表的同座標格。**沒有驅動出重現**，
   按這個 repo 的標準不算已證實的缺陷，所以列在這裡而不是上面。
+- **`.ed-seltb`（選取浮動工具列）在特定捲動位置會被 conflict/save-failed banner 蓋住
+  它的全部 6 顆按鈕。** backlog #8 把 `.ed-conflict` 移到 `top: var(--ed-toolbar-h)`
+  之後，實測掃 66 個捲動落點，**17 個落點上 `.ed-seltb` 的 top 落在那條帶子內（最低
+  14.75px）**——修前 `top: 0` 在同樣落點是 0 顆被蓋住，所以這是修法帶來的幾何殘留，
+  不是既有缺陷。根因是 `.ed-seltb` 的真正下限是 `positionSelToolbar()` 裡的
+  `margin = 4` 這個本地常數，跟 `--ed-toolbar-h` 無關（見 `lib/md2doc.js`
+  `.ed-conflict` 規則旁的 Final-review I1 修正註解），而 `showBanner()` 關掉的四個
+  動態浮層（`.ed-te-grip` / `.ed-tb-insert` / `.ed-te-menu` / `.ed-toolbar-menu`）
+  不含 `.ed-seltb`。**兩次嘗試都沒能驅動出「真 banner 與活著的 .ed-seltb 同框」**：
+  burst 內的粗體切換不打 `/api/render`（不會觸發 conflict/save-failed banner），
+  `Ctrl+S` 的 `switchAwayFrom()` 會先拆掉 seltb 才進 save。按這個 repo 的標準，未證實
+  的活缺陷不改行為，所以列在這裡而不是上面。
 - **工具列的 flex gap 現在是 3px。** 桌面滑鼠場景沒問題（整個 v3.3.0 的手勢本來就建立
   在 hover 上），觸控裝置上會偏擠。用 35px vs 5px 的安全邊際換的。
 - **v3.3.0 那六項原封不動**：F10 吞噬偵測的兩個沉默缺口、trim-to-EOF 那個逐位元組無法
