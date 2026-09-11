@@ -8283,6 +8283,59 @@ async function main() {
     console.log('journey: the H▾ dropdown items are keyboard-reachable — OK');
   }
 
+  // ── Task 9 backlog #9: the outline drawer had a keyboard route to OPEN
+  // it (the toolbar's `outline` button, reachable since F12 keynav shipped)
+  // but none to OPERATE what is inside it — TOC links and the search box.
+  // A bare Tab with nothing focused is deliberately swallowed elsewhere in
+  // this file (§3.5's block-indent contract), so a keyboard user who never
+  // clicked into a real control had no Tab destination once the drawer was
+  // open. Fix: activating `outline` BY KEYBOARD moves real DOM focus onto
+  // `#doc-search-input` (lib/md2doc.js's reader-sidebar markup) — scoped to
+  // the keyboard path only, so a mouse click on the same button still does
+  // not steal focus from whatever burst the mouse user had open.
+  {
+    const ctx = await newPage(
+      '# Doc\n\n## Section One\n\nAlpha paragraph.\n\n## Section Two\n\nBravo paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const activeInfo = () => ctx.page.evaluate(() => {
+      const ae = document.activeElement;
+      return { tag: ae ? ae.tagName : null, id: ae ? ae.id : null };
+    });
+
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'outline' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    assert.strictEqual(at, 'outline', 'T9-9 前提失敗：走不到 outline 按鈕，got ' + at);
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+    const afterOpen = await activeInfo();
+    assert.strictEqual(afterOpen.id, 'doc-search-input',
+      'T9-9：鍵盤打開抽屜後真實 DOM focus 必須落在 #doc-search-input，got ' + JSON.stringify(afterOpen));
+
+    await ctx.page.keyboard.type('Alpha');
+    await new Promise((r) => setTimeout(r, 200));
+    const searchVal = await ctx.page.evaluate(() =>
+      (document.getElementById('doc-search-input') || {}).value);
+    assert.strictEqual(searchVal, 'Alpha',
+      'T9-9：打開抽屜之後打字必須落進 search box，got ' + JSON.stringify(searchVal));
+    assert.strictEqual(ctx.errs.length, 0, 'T9-9：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: opening the outline drawer by keyboard lands inside it — OK');
+  }
+
   // ── Task 9 backlog #10: a stray key must not silently drop the toolbar's
   // keyboard cursor. MEASURED (v3.3.0): ArrowUp / ArrowDown / Tab / Home /
   // End / 'a' / Backspace all dropped [data-ed-tb-cursor] AND the bar's own
