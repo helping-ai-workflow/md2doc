@@ -24582,6 +24582,87 @@ async function gutterGeometry(page, sel) {
       } finally { s5srv.close(); }
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 Task 7 item 5: Escape out of a raw editor is recoverable with
+    // the very next Ctrl+Z. Same "discard, but not forever" contract v3.3.0
+    // already gave burst Escape (see `discardedBurst`'s own comment in
+    // client.js) — openRawEditor() cannot reuse that mechanism (it tears its
+    // OWN surface down on open, `blockEl.innerHTML = ''`), so client.js
+    // carries a separate, value-keyed twin (`discardedRawEdit`). Two
+    // surfaces, one each below: a WYSIWYG-eligible paragraph reached via
+    // ⠿ → MD 原始碼 (typed directly into the raw textarea — a WYSIWYG-armed
+    // paragraph's OWN Escape is the burst substrate, already covered
+    // elsewhere), and a degraded code block opened directly.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: t7srv, url: t7url, mdPath: t7mdPath } = await setupTableDoc([
+        '# Doc', '', 'Alpha bold text here.', '', '```js', "console.log('a');", '```', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t7url, { waitUntil: 'networkidle0' });
+
+        // Surface A: paragraph via ⠿ → MD 原始碼.
+        const paraSel = await paragraphSelByText(page, 'Alpha bold text here.');
+        await clickGutterMenuItem(page, paraSel, 'MD 原始碼');
+        await page.waitForSelector(paraSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(paraSel + ' textarea.ed-raw');
+        await page.keyboard.type(' MYWORDS');
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        const rawGoneA = await page.evaluate(
+          (s) => !document.querySelector(s + ' textarea.ed-raw'), paraSel);
+        assert.ok(rawGoneA, 'Escape 必須關掉 raw 編輯器');
+        const diskAfterEscapeA = fs.readFileSync(t7mdPath, 'utf8');
+        assert.ok(!diskAfterEscapeA.includes('MYWORDS'),
+          'Escape 語意不變：丟棄的文字不得落到磁碟。got:\n' + diskAfterEscapeA);
+
+        await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
+        await settleEditor(page);
+        const restoredA = await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          return ta ? ta.value : null;
+        }, paraSel);
+        assert.ok(restoredA !== null && restoredA.includes('MYWORDS'),
+          'Ctrl+Z 必須重開 raw 編輯器並把 Escape 丟掉的文字放回去。Got ' + JSON.stringify(restoredA));
+
+        // Leave this session cleanly (discard again, not restoring) before
+        // moving to the second surface.
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        // Surface B: a degraded code block, opened directly (no gutter menu
+        // needed — code blocks are never WYSIWYG-eligible).
+        const codeSel = '.ed-block[data-block-type="code"]';
+        await page.click(codeSel);
+        await settleEditor(page);
+        const codeHasRaw = await page.evaluate(
+          (s) => !!document.querySelector(s + ' textarea.ed-raw'), codeSel);
+        if (!codeHasRaw) await page.click(codeSel); // first click may only resolve surface A's leftover state
+        await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(codeSel + ' textarea.ed-raw');
+        await page.keyboard.type('RAWWORDS');
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        const diskAfterEscapeB = fs.readFileSync(t7mdPath, 'utf8');
+        assert.ok(!diskAfterEscapeB.includes('RAWWORDS'),
+          'code block 的 Escape 語意不變：丟棄的文字不得落到磁碟。got:\n' + diskAfterEscapeB);
+
+        await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
+        await settleEditor(page);
+        const restoredB = await page.evaluate(
+          (s) => { const ta = document.querySelector(s + ' textarea.ed-raw'); return ta ? ta.value : null; },
+          codeSel);
+        assert.ok(restoredB !== null && restoredB.includes('RAWWORDS'),
+          'code block 的 Ctrl+Z 也必須把丟掉的文字放回去。Got ' + JSON.stringify(restoredB));
+
+        await page.close();
+        console.log('Task 7 item 5: Escape out of the raw editor is recoverable with Ctrl+Z (paragraph via gutter + degraded code block) — OK');
+      } finally { t7srv.close(); }
+    }
+
     console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
