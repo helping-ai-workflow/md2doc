@@ -8464,6 +8464,65 @@ async function main() {
     console.log('journey: a stray key inside toolbar keynav says the cursor is going away — OK');
   }
 
+  // ── Task 9 review I2: #9 lands real focus in #doc-search-input while
+  // toolbarRovingIndex stays >= 0 (F12's cursor is virtual, so nothing
+  // clears it just because real focus moved) — and #10 taught Home/End to
+  // navigate the bar. Combined, a keyboard user who opens the drawer and
+  // immediately presses Home/End/ArrowLeft to edit their search text gets
+  // the BAR's cursor moving instead of the input's own text cursor. Fixed
+  // by toolbarKeynavBlockedByRealControl(): any keydown while a genuine
+  // standalone control (INPUT/TEXTAREA/SELECT) holds focus quietly ends
+  // keynav first, with no banner (this is legitimate control use, not a
+  // stray key with nowhere to go).
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const searchState = () => ctx.page.evaluate(() => {
+      const s = document.getElementById('doc-search-input');
+      return {
+        active: document.activeElement === s,
+        selectionStart: s ? s.selectionStart : null,
+        keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      };
+    });
+
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'outline' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+
+    await ctx.page.evaluate(() => {
+      const s = document.getElementById('doc-search-input');
+      s.value = 'needle';
+      s.setSelectionRange(6, 6);
+    });
+    await new Promise((r) => setTimeout(r, 150));
+
+    await ctx.page.keyboard.press('Home');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterHome = await searchState();
+    assert.strictEqual(afterHome.selectionStart, 0,
+      'I2：Home 必須移動搜尋框自己的文字游標，不得被工具列吃掉，got ' + JSON.stringify(afterHome));
+    assert.strictEqual(afterHome.active, true,
+      'I2：真實 focus 必須還在搜尋框上，got ' + JSON.stringify(afterHome));
+    assert.strictEqual(ctx.errs.length, 0, 'I2：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a real control focused inside the drawer keeps its own keys — OK');
+  }
+
   await browser.close();
 }
 
