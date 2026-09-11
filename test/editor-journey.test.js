@@ -8614,6 +8614,137 @@ async function main() {
     console.log('journey: Escape dismisses the keynav banner, Tab never raises it — OK');
   }
 
+  // ── Task 10 (backlog #8): "banner 升起時工具列整條打不到". `.ed-conflict`
+  // is `position:fixed; top:0; z-index:999`, and `.ed-toolbar` is
+  // `top:0; height:44px; z-index:101` — same band, banner wins the paint.
+  // MEASURED (task-10-toolbar-probe.js) before the fix: ALL 23 toolbar
+  // buttons' own centre points hit-tested to the banner, not the button,
+  // for BOTH the keynav-exit banner (Task 9's #10) and the real
+  // save-conflict banner (showConflictBanner()) — `.ed-conflict` has
+  // exactly one producer (showBanner()), shared by every banner family, so
+  // a fix scoped to one message would not have proven anything about the
+  // others. Fix: `.ed-conflict` now sits at `top: var(--ed-toolbar-h)`
+  // (lib/md2doc.js) — the same floor `.ed-te-menu`/`.ed-seltb` already use
+  // to stay out of that band — so it renders as a band directly BELOW the
+  // toolbar instead of on top of it. Not a z-index change: the banner is
+  // still the topmost thing on the page, it simply no longer shares the
+  // toolbar's own band to be on top OF.
+  {
+    const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    const BUTTON_IDS = [
+      'save', 'undo', 'redo', 'headings', 'quote', 'code', 'list', 'ordered-list',
+      'check', 'bold', 'italic', 'strike', 'inline-code', 'link', 'outdent',
+      'indent', 'table', 'insert-before', 'insert-after', 'line', 'image',
+      'outline', 'preview',
+    ];
+    const hitTestAllButtons = () => ctx.page.evaluate((ids) => {
+      const out = {};
+      for (const id of ids) {
+        const b = document.querySelector('.ed-toolbar [data-ed-tb="' + id + '"]');
+        if (!b) { out[id] = 'MISSING'; continue; }
+        const r = b.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        out[id] = (el === b) ? 'own-button'
+          : (el && el.closest && el.closest('.ed-conflict')) ? 'BANNER'
+          : (el ? el.tagName + '.' + (el.className || '') : 'null');
+      }
+      return out;
+    }, BUTTON_IDS);
+    const bannerCount = (hits) => Object.values(hits).filter((v) => v === 'BANNER').length;
+
+    // Trigger 1: the keynav-exit banner — Alt+F10 into keynav mode, then a
+    // stray key with nowhere to go (ArrowUp).
+    await ctx.page.keyboard.down('Alt');
+    await ctx.page.keyboard.press('F10');
+    await ctx.page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('ArrowUp');
+    await new Promise((r) => setTimeout(r, 250));
+    const bannerUp1 = await ctx.page.evaluate(() => !!document.querySelector('.ed-conflict'));
+    assert.strictEqual(bannerUp1, true,
+      'T10 前提失敗：keynav-exit banner 沒有升起');
+    const hits1 = await hitTestAllButtons();
+    assert.strictEqual(bannerCount(hits1), 0,
+      'T10：keynav-exit banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      JSON.stringify(hits1));
+
+    // Dismiss and switch to trigger 2: the real save-conflict banner
+    // (showConflictBanner(), via a closed server under an in-flight commit).
+    await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-conflict button');
+      if (b) b.click();
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' X');
+    ctx.srv.close();
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.waitForSelector('.ed-conflict', { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const hits2 = await hitTestAllButtons();
+    assert.strictEqual(bannerCount(hits2), 0,
+      'T10：真正的存檔衝突 banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      JSON.stringify(hits2));
+
+    assert.strictEqual(ctx.errs.length, 0, 'T10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close();
+    console.log('journey: the toolbar is still reachable under any banner — OK');
+  }
+
+  // ── Task 10 follow-up: moving `.ed-conflict` to `top: var(--ed-toolbar-h)`
+  // puts it in the SAME band `.ed-toolbar-menu` (the H▾ dropdown) already
+  // floats in (`top = r.bottom + 4`, i.e. right at that floor) — without a
+  // mitigation, raising a banner while the dropdown is open would reproduce
+  // backlog #8 one layer down. showBanner() now also closes
+  // hideTableGrips()/hideTableInsertBubbles()/hideTableEdgeMenu()/
+  // closeToolbarMenu() (the same bundle onAnyScroll() already uses)
+  // whenever a new banner appears, so the dropdown is gone, not painted
+  // over. MEASURED (task-10-menu-collision-probe.js) with those four calls
+  // temporarily removed: the dropdown stayed open (`.ed-toolbar-menu`
+  // present) while the banner covered it — a real regression this row pins.
+  {
+    const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+
+    // Arm the block and type into it FIRST (uncommitted) so committing
+    // later needs no second click on the block — a second click would
+    // itself go through wireToolbarTracking()'s own "click outside
+    // .ed-toolbar/.ed-toolbar-menu closes the menu" handler and pass this
+    // row for the wrong reason. Toolbar buttons preventDefault() on
+    // mousedown specifically so clicking one does not steal focus from the
+    // content (buildToolbar()'s own comment), so real DOM focus stays in
+    // this block through the dropdown click below.
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' X');
+    await new Promise((r) => setTimeout(r, 150));
+
+    await ctx.page.click('.ed-toolbar [data-ed-tb="headings"]');
+    await new Promise((r) => setTimeout(r, 200));
+    const menuOpenBefore = await ctx.page.evaluate(() => !!document.querySelector('.ed-toolbar-menu'));
+    assert.strictEqual(menuOpenBefore, true, 'T10 前提失敗：H▾ 選單沒有打開');
+
+    // Raise the real conflict banner via Enter (a keydown, not a click) —
+    // the only thing that can close the dropdown here is showBanner()'s
+    // own closeToolbarMenu() call.
+    ctx.srv.close();
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.waitForSelector('.ed-conflict', { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const after = await ctx.page.evaluate(() => ({
+      banner: !!document.querySelector('.ed-conflict'),
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+    }));
+    assert.strictEqual(after.banner, true, 'T10：banner 必須升起，got ' + JSON.stringify(after));
+    assert.strictEqual(after.menu, false,
+      'T10：showBanner() 必須收掉開著的 H▾ 選單，不是畫在它上面，got ' + JSON.stringify(after));
+
+    assert.strictEqual(ctx.errs.length, 0, 'T10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close();
+    console.log('journey: a banner closes an open H▾ dropdown instead of painting over it — OK');
+  }
+
   // ── Task 9 review I4: the backlog #6 raw-editor rescue in
   // restoreAfterStructuralOp() must stay scoped to convertBlockViaMenu()
   // (the toolbar's quote/code conversion, the one gesture backlog #6 names)
