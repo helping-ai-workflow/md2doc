@@ -1577,8 +1577,10 @@ assert.strictEqual(
   assert.strictEqual(C.renameLane(doc, 2, 'C').signal[2].name, 'C', '編號 2 是 c');
   const moved = C.moveLane(doc, 1, 0);
   assert.strictEqual(moved.signal[0].name, 'b', 'group 裡的 lane 可以被搬到最外層');
-  assert.deepStrictEqual(moved.signal[2], ['g'], '搬空的 group 留著標題，不自己刪掉');
-  assert.strictEqual(C.removeLane(doc, 1).signal[1].length, 1, 'removeLane 從它自己的容器裡拿掉');
+  assert.deepStrictEqual(moved.signal.map(function (l) { return l.name; }), ['b', 'a', 'c'],
+    '搬走之後 group 沒有 lane 了，跟著一起消失（見下方 N3）');
+  assert.deepStrictEqual(C.removeLane(doc, 1).signal.map(function (l) { return l.name; }),
+    ['a', 'c'], 'removeLane 從它自己的容器裡拿掉，空掉的 group 一起走');
 }
 
 // Q2 的邊界：插在 group 的第一個 lane 前面 = 進去；插在最後一個 lane 後面 = 在外面
@@ -1632,7 +1634,8 @@ assert.strictEqual(
     '  { name: "c", wave: "0." },',
     ']}'].join('\n');
   const r = C.parseSource(src);
-  const out = C.patchSource(src, r, [{ op: 'move', path: ['signal', 0], to: 1 }]);
+  const out = C.patchSource(src, r, [
+    { op: 'move', path: C.lanePath(r.doc, 0), to: C.laneInsertPath(r.doc, 2) }]);
   assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
   assert.ok(out.text.includes('// first'), '搬走的 lane 的註解要跟著它');
   assert.ok(out.text.includes('// second'), '別人的註解不得被動到');
@@ -1642,7 +1645,9 @@ assert.strictEqual(
     ['b', 'a', 'c']);
   // patch 的結果要跟 moveLane 算出來的 doc 說同一件事
   assert.deepStrictEqual(C.moveLane(r.doc, 0, 1).signal.map(function (l) { return l.name; }),
-    ['b', 'a', 'c'], 'moveLane 與 move patch 必須一致');
+    ['b', 'a', 'c'],
+    'moveLane 與 move patch 必須一致（這個 fixture 沒有 group，兩套編號在它上面重合，' +
+    '所以它只釘註解與順序；會紅的那一版在下面 N1 那一段，fixture 帶 group）');
 }
 
 // data 陣列改長度的時候，store 要逐格寫回去；整包 set 會被 patch 層擋下來
@@ -1665,6 +1670,288 @@ assert.strictEqual(
   const back = C.parseSource(ok.text);
   assert.strictEqual(back.doc.signal[0].wave, '210');
   assert.deepStrictEqual(back.doc.signal[0].data, ['A']);
+}
+
+// ---- 以下為 Task 3 fix round 2 釘住的合約 ----
+// 上一輪學到的教訓寫在這裡：一致性的釘子，fixture 必須是**兩邊會給出不同答案**的
+// 那一種。上一輪那條 `moveLane 與 move patch 必須一致` 用的是沒有 group 的 doc，
+// 兩套編號在那上面本來就重合，所以它永遠不會紅——等於沒測。底下每一條都帶 group。
+
+// 帶 group 的 fixture：扁平編號 a=0 b=1 c=2 d=3，而 naive 的 ['signal',k] 會是
+// a=0、整個 group=1、d=2、以及根本不存在的 3。四個編號沒有一個對得上。
+const GSRC = [
+  '{ signal: [',
+  '  { name: "a", wave: "01" },   // lane a',
+  '  ["grp",',
+  '    { name: "b", wave: "01" },   // lane b',
+  '    { name: "c", wave: "01" },   // lane c',
+  '  ],',
+  '  { name: "d", wave: "01" },   // lane d',
+  ']}',
+].join('\n');
+
+// 比的是整棵樹的形狀，不是攤平的名字順序。這一點是量出來的，不是想出來的：
+// 用名字順序比的時候，「插在 group 前面」與「插在 group 裡的第一條 lane 前面」
+// 會給出同一個順序，於是 add 的編號 1 又會變成一條永遠不會紅的斷言——
+// 跟上一輪那條沒有 group 的 fixture 是同一種毛病，只是低一層。
+const laneShape = function (doc) {
+  const walk = function (arr) {
+    const out = [];
+    for (const item of arr) {
+      if (Array.isArray(item)) out.push(walk(item));
+      else if (item !== null && typeof item === 'object') out.push(item.name);
+      else out.push(item);
+    }
+    return out;
+  };
+  return walk(doc.signal);
+};
+
+// N1：doc 層的扁平編號 → patch 層的容器路徑，必須有一座導出的橋
+{
+  const r = C.parseSource(GSRC);
+  assert.deepStrictEqual(C.lanePath(r.doc, 0), ['signal', 0]);
+  assert.deepStrictEqual(C.lanePath(r.doc, 1), ['signal', 1, 1],
+    '編號 1 是 group 裡的 b；naive 的 ["signal",1] 指到的是整個 group');
+  assert.deepStrictEqual(C.lanePath(r.doc, 2), ['signal', 1, 2]);
+  assert.deepStrictEqual(C.lanePath(r.doc, 3), ['signal', 2],
+    '編號 3 是 d；naive 的 ["signal",3] 根本不存在');
+  assert.strictEqual(C.lanePath(r.doc, 4), null, '超出範圍回 null，不是猜一個');
+  assert.strictEqual(C.lanePath(r.doc, -1), null);
+  assert.deepStrictEqual(C.laneInsertPath(r.doc, 1), ['signal', 1, 1],
+    '插在 b 前面 = 進到 group 裡');
+  assert.deepStrictEqual(C.laneInsertPath(r.doc, 3), ['signal', 2],
+    '插在 d 前面 = 落在 group 外面');
+  assert.deepStrictEqual(C.laneInsertPath(r.doc, 4), ['signal', 3],
+    '超過最後一條 lane = 接在最外層尾端');
+  assert.strictEqual(C.laneInsertPath(r.doc, 5), null);
+}
+
+// N1 一致性：renameLane 與用橋建出來的 set，必須改到同一條 lane
+{
+  for (let k = 0; k < 4; k++) {
+    const r = C.parseSource(GSRC);
+    const want = laneShape(C.renameLane(r.doc, k, 'Z'));
+    const out = C.patchSource(GSRC, r,
+      [{ path: C.lanePath(r.doc, k).concat(['name']), value: 'Z' }]);
+    assert.strictEqual(out.ok, true, 'rename ' + k + ' Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want,
+      'rename 編號 ' + k + '：doc 與 patch 必須改到同一條 lane');
+  }
+}
+
+// N1 一致性：removeLane 與用橋建出來的 remove
+{
+  for (let k = 0; k < 4; k++) {
+    const r = C.parseSource(GSRC);
+    const want = laneShape(C.removeLane(r.doc, k));
+    const out = C.patchSource(GSRC, r, [{ op: 'remove', path: C.laneRemovePath(r.doc, k) }]);
+    assert.strictEqual(out.ok, true, 'remove ' + k + ' Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want,
+      'remove 編號 ' + k + '：doc 與 patch 必須刪掉同一條 lane');
+  }
+}
+
+// N1 一致性：addLane 與用橋建出來的 insert
+{
+  for (let k = 0; k <= 4; k++) {
+    const r = C.parseSource(GSRC);
+    const want = laneShape(C.addLane(r.doc, k, { name: 'N', wave: '00' }));
+    const out = C.patchSource(GSRC, r,
+      [{ op: 'insert', path: C.laneInsertPath(r.doc, k), value: { name: 'N', wave: '00' } }]);
+    assert.strictEqual(out.ok, true, 'add ' + k + ' Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want,
+      'add 編號 ' + k + '：doc 與 patch 必須插在同一個位置');
+  }
+}
+
+// N1 一致性：moveLane 與用橋建出來的 move，全部 12 種排列
+{
+  for (let from = 0; from < 4; from++) {
+    for (let to = 0; to < 4; to++) {
+      if (from === to) continue;
+      const r = C.parseSource(GSRC);
+      const want = laneShape(C.moveLane(r.doc, from, to));
+      const out = C.patchSource(GSRC, r, [{
+        op: 'move',
+        path: C.lanePath(r.doc, from),
+        to: C.laneInsertPath(r.doc, to < from ? to : to + 1),
+      }]);
+      assert.strictEqual(out.ok, true,
+        'move ' + from + '->' + to + ' Got ' + JSON.stringify(out));
+      assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want,
+        'move ' + from + '->' + to + '：doc 與 patch 必須排出同一個順序');
+      assert.ok(out.text.includes('// lane a'), 'move ' + from + '->' + to + ' 註解要留著');
+      assert.ok(out.text.includes('// lane b'));
+      assert.ok(out.text.includes('// lane c'));
+      assert.ok(out.text.includes('// lane d'));
+    }
+  }
+}
+
+// N2：字串轉陣列的 data 要寫得回去，一次呼叫、註解與位置都留著
+{
+  const src = ['{ signal: [',
+    '  { name: "a", wave: "03", data: "A",   // about data',
+    '    phase: 0 },',
+    ']}'].join('\n');
+  const r = C.parseSource(src);
+  const next = C.setCell(r.doc, 0, 0, '2');
+  assert.strictEqual(next.signal[0].wave, '23');
+  assert.deepStrictEqual(next.signal[0].data, ['', 'A']);
+  const out = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: next.signal[0].wave },
+    { op: 'replace', path: ['signal', 0, 'data'], value: next.signal[0].data },
+  ]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.ok(out.text.includes('// about data'), 'data 旁邊的註解要留著');
+  const back = C.parseSource(out.text);
+  assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+  assert.deepStrictEqual(Object.keys(back.doc.signal[0]), ['name', 'wave', 'data', 'phase'],
+    'data 要留在原位，不得被搬到物件尾端');
+  assert.deepStrictEqual(back.doc.signal[0].data, ['', 'A']);
+  assert.strictEqual(back.doc.signal[0].wave, '23');
+}
+
+// replace 與 set 的分工：set 仍然擋住悄悄的型別變更
+{
+  const r = C.parseSource(SRC);
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ path: ['signal', 0, 'wave'], value: ['p'] }]).ok, false,
+    'set 不得默默改型別');
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ op: 'replace', path: ['signal', 0, 'wave'], value: ['p'] }]).ok, true,
+    'replace 的意思就是「我要整個換掉」，型別可以變');
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ op: 'replace', path: ['signal', 9, 'wave'], value: 'x' }]).ok, false,
+    '沒有解析到的路徑還是拒絕');
+}
+
+// N3：把 group 的最後一條 lane 拿掉，group 也要跟著走
+{
+  const doc = { signal: [['grp', { name: 'b', wave: '01' }], { name: 'd', wave: '01' }] };
+  const out = C.removeLane(doc, 0);
+  assert.deepStrictEqual(out.signal.map(function (l) { return l.name; }), ['d'],
+    '空掉的 group 要一起消失，否則那塊區域永遠再也定位不到');
+  assert.strictEqual(doc.signal.length, 2, '原本的 doc 不得被改到');
+}
+{
+  const doc = { signal: [['g1', ['g2', { name: 'x', wave: '01' }]], { name: 'd', wave: '01' }] };
+  assert.deepStrictEqual(C.removeLane(doc, 0).signal.map(function (l) { return l.name; }),
+    ['d'], '巢狀的空 group 要一路往上收');
+}
+{
+  const doc = { signal: [['grp', { name: 'b', wave: '01' }, { name: 'c', wave: '01' }]] };
+  const out = C.removeLane(doc, 0);
+  assert.strictEqual(out.signal[0].length, 2, 'grp 還有 c，不得被收掉');
+  assert.strictEqual(out.signal[0][1].name, 'c');
+}
+{
+  const src = '{ signal: [\n  ["grp",\n    { name: "b", wave: "01" },   // 只有這一條\n  ],\n  { name: "d", wave: "01" },\n]}';
+  const r = C.parseSource(src);
+  assert.deepStrictEqual(C.laneRemovePath(r.doc, 0), ['signal', 0],
+    '刪掉 b 實際上要刪掉整個 group');
+  const out = C.patchSource(src, r, [{ op: 'remove', path: C.laneRemovePath(r.doc, 0) }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  const back = C.parseSource(out.text);
+  assert.deepStrictEqual(back.doc.signal.map(function (l) { return l.name; }), ['d']);
+}
+
+// N3：把 group 裡唯一一條 lane 搬出去，group 也要跟著走，而且兩邊要一致
+{
+  const src = ['{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["grp",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '  ],',
+    ']}'].join('\n');
+  const r = C.parseSource(src);
+  const want = laneShape(C.moveLane(r.doc, 1, 0));
+  assert.deepStrictEqual(want, ['b', 'a'], '搬走之後 group 沒東西了，跟著消失');
+  const out = C.patchSource(src, r,
+    [{ op: 'move', path: C.lanePath(r.doc, 1), to: C.laneInsertPath(r.doc, 0) }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+  assert.ok(out.text.includes('// lane b'), '搬走的 lane 的註解要跟著它');
+  assert.strictEqual(out.text.includes('grp'), false, '空掉的 group 要從檔案裡消失');
+}
+
+// N4：data 只是比值字元少，不算「裝不下」，不得因此轉成陣列或補出空白標籤
+{
+  const doc = { signal: [{ name: 'a', wave: '222', data: 'A' }] };
+  const next = C.setCell(doc, 0, 2, '3');
+  assert.strictEqual(next.signal[0].wave, '223');
+  assert.strictEqual(next.signal[0].data, 'A',
+    '後面兩拍本來就沒有標籤，不得替使用者補兩個空白標籤出來');
+}
+{
+  const doc = { signal: [{ name: 'a', wave: '222', data: ['A'] }] };
+  assert.deepStrictEqual(C.setCell(doc, 0, 2, '3').signal[0].data, ['A'],
+    '陣列寫法同理，不得補成 ["A","",""]');
+}
+{
+  const doc = { signal: [{ name: 'a', wave: '2.2.', data: ['A'] }] };
+  assert.deepStrictEqual(C.insertCycles(doc, 1, 1).signal[0].data, ['A'],
+    '插一拍也不得補出空白標籤');
+}
+
+// N5：兩個 insert 落在同一個位置，順序沒有定義——要擋，不是默默倒著寫
+{
+  const src = '{ signal: [\n  { wave: "01" },\n]}';
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r, [
+    { op: 'insert', path: ['signal', 0, 'name'], value: 'a' },
+    { op: 'insert', path: ['signal', 0, 'phase'], value: 1 },
+  ]);
+  assert.strictEqual(out.ok, false, '同一個落點的兩個 insert 必須被擋下來');
+  assert.ok(/same place|同一個|one place/i.test(out.reason) || /order/i.test(out.reason),
+    'reason 要說明原因。Got ' + out.reason);
+}
+{
+  const src = '{ signal: [\n  { wave: "01" },\n]}';
+  const r1 = C.parseSource(src);
+  const t1 = C.patchSource(src, r1, [{ op: 'insert', path: ['signal', 0, 'name'], value: 'a' }]);
+  assert.strictEqual(t1.ok, true, 'Got ' + JSON.stringify(t1));
+  const r2 = C.parseSource(t1.text);
+  const t2 = C.patchSource(t1.text, r2,
+    [{ op: 'insert', path: ['signal', 0, 'phase'], value: 1 }]);
+  assert.strictEqual(t2.ok, true, 'Got ' + JSON.stringify(t2));
+  assert.deepStrictEqual(Object.keys(C.parseSource(t2.text).doc.signal[0]),
+    ['wave', 'name', 'phase'], '分兩次寫，順序就是呼叫端寫的那個');
+}
+
+// N6：手工做的 clip，第 0 拍是延續時它自己記得延續的是什麼 level，不得丟掉
+{
+  const clip = { kind: 'cycles', count: 2,
+    lanes: [{ chars: [{ ch: '0', held: true }, { ch: '1', held: false }], data: [] }] };
+  const out = C.pasteCycles({ signal: [{ name: 'b', wave: '111' }] }, 0, clip, 'overwrite');
+  assert.strictEqual(out.signal[0].wave, '011',
+    'clip 的第 0 拍記得它延續的是 0，寫出來就該是 0 而不是 x');
+}
+
+// serialize 不得寫出一個 __proto__ 鍵。
+// 實測（本 session，node 22）：在 eval 裡 { "__proto__": v }、{ '__proto__': v }
+// 與裸寫的 { __proto__: v } 三者效果完全相同，都會改掉載入後那個物件的 prototype
+// 而不是存成一個 key——所以「把它加上引號」擋不住任何東西。只有計算鍵
+// { ["__proto__"]: v } 才是存成資料，而那個寫法這個檔案自己的 parser 讀不回來。
+// 既然沒有一種寫法既存得成資料又讀得回來，就跟其他沒有 WaveJSON 寫法的值一樣拒絕。
+// wavedrom 3.5.0 的 loader 用的正是 eval，所以這不是理論問題。
+{
+  const r = C.parseSource(SRC);
+  const evil = { name: 'n', wave: '0' };
+  Object.defineProperty(evil, '__proto__',
+    { value: { polluted: 1 }, enumerable: true, writable: true, configurable: true });
+  const out = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: evil }]);
+  assert.strictEqual(out.ok, false, '__proto__ 沒有存得成資料又讀得回來的寫法，必須拒絕');
+  assert.ok(/__proto__/.test(out.reason), 'reason 要指出是哪個鍵。Got ' + out.reason);
+  const nested = { name: 'n', wave: '0', extra: {} };
+  Object.defineProperty(nested.extra, '__proto__',
+    { value: { polluted: 1 }, enumerable: true, writable: true, configurable: true });
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ op: 'insert', path: ['signal', 2], value: nested }]).ok, false, '巢狀的也要擋');
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ op: 'insert', path: ['signal', 2], value: { name: 'n', wave: '0' } }]).ok, true,
+    '普通的 lane 不得被誤殺');
 }
 
 console.log('wave-codec.test.js OK');
