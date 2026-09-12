@@ -373,5 +373,172 @@ function req(port, method, p, body) {
     }
   }
 
+  // v3.4.0 batch2 Task 6 (Ruling B2-2): the /api/ping heartbeat doubles as a
+  // staleness check for every `.drawio`/`.xml` file the currently open
+  // document references — see server.js's own comment on why this rides the
+  // existing heartbeat instead of a new transport.
+
+  // (a) A document with NO drawio references must not pay anything extra:
+  // the ping fast path must issue ZERO fs.statSync calls (not just "be fast"
+  // — a direct, mechanical proof of the "(a) 沒有 drawio 的文件，心跳不得變
+  // 重" requirement), and must still answer plain 204 exactly as before.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-none-'));
+    const mdPath = path.join(dir, 'plain.md');
+    fs.writeFileSync(mdPath, '# No drawio here\n\nJust a paragraph.\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+
+      const origStatSync = fs.statSync;
+      let statCalls = 0;
+      fs.statSync = function (...args) { statCalls++; return origStatSync.apply(fs, args); };
+      let t0, t1;
+      try {
+        t0 = process.hrtime.bigint();
+        for (let i = 0; i < 20; i++) {
+          const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+          assert.strictEqual(r.status, 204, 'a drawio-free doc must still get a bare 204');
+          assert.strictEqual(r.body, '', '204 must carry no body');
+        }
+        t1 = process.hrtime.bigint();
+      } finally {
+        fs.statSync = origStatSync;
+      }
+      assert.strictEqual(statCalls, 0,
+        '(a): a document with no drawio refs must trigger ZERO fs.statSync calls ' +
+        'from the ping handler — got ' + statCalls + ' over 20 pings');
+      const avgMs = Number(t1 - t0) / 1e6 / 20;
+      console.log('server: (a) no-drawio ping — statSync calls=0, avg ' +
+        avgMs.toFixed(3) + 'ms/ping over 20 pings — OK');
+    } finally {
+      srv.close();
+    }
+  }
+
+  // (main path) A referenced .drawio file changing on disk is picked up: the
+  // heartbeat reports {stale:true} once the mtime moves, and a re-render of
+  // the SAME markdown content (the existing /api/render path — no new
+  // endpoint) reflects the new file contents.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-live-'));
+    const mdPath = path.join(dir, 'diagram.md');
+    const drawioPath = path.join(dir, 'single.drawio');
+    const v1 = fs.readFileSync(path.join(__dirname, 'fixtures', 'single.drawio'), 'utf8');
+    const v2 = v1.replace('SINGLE_BOX', 'CHANGED_BOX');
+    assert.notStrictEqual(v1, v2, 'fixture must actually contain the string being replaced');
+    fs.writeFileSync(drawioPath, v1, 'utf8');
+    const mdSrc = '# Diagram\n\n![d](single.drawio)\n';
+    fs.writeFileSync(mdPath, mdSrc, 'utf8');
+
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+      assert.ok(page.body.includes('class="drawio'),
+        'initial page must have baked the referenced .drawio file');
+
+      // Nothing changed yet — must stay a bare 204.
+      const p0 = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(p0.status, 204, 'unchanged drawio file must not report stale');
+
+      const r0 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r0.status, 200);
+      const parts0 = JSON.parse(r0.body).parts.join('\n');
+      assert.ok(parts0.includes('class="drawio'), 'baseline render must contain the baked drawio block');
+
+      // External edit — a real editor writing over the file, not through
+      // this server. bumped mtime is what checkDrawioStale() compares
+      // against; writeFileSync always gives a fresh mtime.
+      fs.writeFileSync(drawioPath, v2, 'utf8');
+
+      const p1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(p1.status, 200, 'a changed drawio file must be reported, not 204');
+      assert.deepStrictEqual(JSON.parse(p1.body), { stale: true });
+
+      // The re-bake is available through the EXISTING /api/render path
+      // (Ruling B2-2: no new endpoint) — same content in, different bytes
+      // out, because renderMarkdown() always re-reads referenced files.
+      const r1 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r1.status, 200);
+      const parts1 = JSON.parse(r1.body).parts.join('\n');
+      assert.notStrictEqual(parts1, parts0,
+        're-rendering after the external edit must produce different baked output');
+
+      // A ping right after that render sees the baseline the render just
+      // advanced — no repeated stale signal for the same, already-applied
+      // change.
+      const p2 = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(p2.status, 204,
+        'the render that just re-baked the file must reset the staleness baseline');
+    } finally {
+      srv.close();
+    }
+    console.log('server: external .drawio edit is detected via /api/ping and re-baked via /api/render — OK');
+  }
+
+  // (b) Safe degrade: the referenced .drawio file disappears out from under
+  // an open session (deleted or renamed outside the editor). Must not throw
+  // anywhere in the request path, and the disappearance itself still counts
+  // as "changed" for staleness purposes.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-gone-'));
+    const mdPath = path.join(dir, 'diagram.md');
+    const drawioPath = path.join(dir, 'single.drawio');
+    fs.copyFileSync(path.join(__dirname, 'fixtures', 'single.drawio'), drawioPath);
+    const mdSrc = '# Diagram\n\n![d](single.drawio)\n';
+    fs.writeFileSync(mdPath, mdSrc, 'utf8');
+
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+
+      fs.unlinkSync(drawioPath);
+
+      const p1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(p1.status, 200,
+        '(b): a deleted drawio file must be reported as changed, not silently ignored');
+      assert.deepStrictEqual(JSON.parse(p1.body), { stale: true });
+
+      // Must not 500 — resolveAssetPath()/drawioPlaceholderFor() already
+      // degrade to "not a drawio reference" when the file cannot be found;
+      // this just asserts the whole request path survives that unharmed.
+      const r1 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r1.status, 200,
+        '(b): re-rendering after the referenced file vanished must not 500');
+      const parts1 = JSON.parse(r1.body).parts.join('\n');
+      assert.ok(!parts1.includes('class="drawio'),
+        '(b): a vanished reference must fall back to the ordinary (broken) image path, not a stale drawio block');
+
+      // Second ping after the degraded re-render must not keep reporting
+      // stale for a file that is consistently gone (mtime null -> null).
+      const p2 = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(p2.status, 204,
+        '(b): a consistently-missing file must not repeat the stale signal forever');
+    } finally {
+      srv.close();
+    }
+    console.log('server: a vanished .drawio reference degrades safely (no throw, no crash) — OK');
+  }
+
+  // Backward compatibility: a ping with no fileId at all (old client shape,
+  // and the very first assertion earlier in this file) must still work —
+  // no tracked state for `undefined` means the fast "no drawio" path.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-nofileid-'));
+    const mdPath = path.join(dir, 'plain.md');
+    fs.writeFileSync(mdPath, '# X\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      await req(srv.port, 'GET', '/edit/0');
+      const r = await req(srv.port, 'POST', '/api/ping', {});
+      assert.strictEqual(r.status, 204, 'a ping with no fileId must still bare-204');
+    } finally {
+      srv.close();
+    }
+  }
+
   console.log('editor-server.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });
