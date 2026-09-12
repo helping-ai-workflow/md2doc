@@ -1,7 +1,7 @@
 {
   "name": "@helping-ai-workflow/md2doc",
   "version": "3.3.0",
-  "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support",
+  "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, Graphviz, and draw.io support",
   "keywords": [
     "markdown",
     "html",
@@ -9,7 +9,9 @@
     "renderer",
     "wavedrom",
     "mermaid",
-    "graphviz"
+    "graphviz",
+    "drawio",
+    "diagrams.net"
   ],
   "main": "lib/md2doc.js",
   "bin": {
@@ -21,7 +23,8 @@
     "scripts/",
     "vendor/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "engines": {
     "node": ">=18"

@@ -1,6 +1,6 @@
 # @helping-ai-workflow/md2doc
 
-> Markdown → HTML / PDF renderer with WaveDrom, Mermaid, and Graphviz support.
+> Markdown → HTML / PDF renderer with WaveDrom, Mermaid, Graphviz, and draw.io support.
 
 A single global CLI (`md2doc`) you can call from any directory.
 
@@ -8,7 +8,9 @@ A single global CLI (`md2doc`) you can call from any directory.
 
 Requires Node.js 18 or higher. The first install pulls puppeteer (≈ 170 MB Chromium download); subsequent installs reuse it.
 
-Chromium is only needed for **PDF export** and the optional `--bake-svg` flag. HTML diagram rendering needs nothing extra — Graphviz runs in-process via WebAssembly, and Mermaid / WaveDrom are bundled and inlined, so diagrams render **offline with no system Graphviz and no CDN**.
+Chromium is needed for **PDF export**, for the optional `--bake-svg` flag, and for **`.drawio` diagrams**, which are always rendered to SVG at generation time. Everything else needs nothing extra — Graphviz runs in-process via WebAssembly, and Mermaid / WaveDrom are bundled and inlined.
+
+Nothing is fetched at render time or at read time: every engine, including the vendored draw.io viewer, runs locally, so documents render and read **offline with no system Graphviz, no draw.io install and no CDN**.
 
 ### Recommended: install via nvm
 
@@ -100,8 +102,8 @@ in several places grows the HTML accordingly. PDF output is unaffected.
 
 ### Viewing diagrams
 
-Click any image, Mermaid, Graphviz or WaveDrom graphic in the rendered HTML to open it
-full-screen.
+Click any image, Mermaid, Graphviz, draw.io or WaveDrom graphic in the rendered HTML to
+open it full-screen.
 
 | Input | Action |
 |---|---|
@@ -280,7 +282,7 @@ version-control-friendly.
 ### Degraded blocks: code, diagrams, images, math
 
 Blocks containing content WYSIWYG cannot represent (code fences, Mermaid/Graphviz/
-WaveDrom diagrams, images, LaTeX math, or unstyled HTML) automatically degrade to
+WaveDrom/draw.io diagrams, images, LaTeX math, or unstyled HTML) automatically degrade to
 raw-edit mode: click the block to open the raw Markdown source in a textarea, make
 your changes, then press `Ctrl+Enter` to commit or `Esc` to cancel.
 
@@ -372,9 +374,19 @@ digraph G { A -> B }
 ```
 ````
 
-All three render directly in the output (HTML or PDF), **offline and with no system dependencies**: Graphviz `dot` runs in-process via WebAssembly (no system `dot` binary required), and Mermaid / WaveDrom are bundled and inlined (no CDN). Each engine's runtime is embedded only when the document actually uses that diagram type.
+A fourth engine, **draw.io**, is referenced with image syntax rather than a code fence, because a `.drawio` file is an external artifact rather than inline source:
 
-By default, Mermaid and WaveDrom render in the browser when the HTML is opened; pass `--bake-svg` to pre-render them to inert SVG at generation time instead (Graphviz is always pre-rendered to SVG).
+```markdown
+![Architecture overview](arch.drawio)
+![Just the Flow sheet](arch.drawio#Flow)
+![Just the second sheet](arch.drawio#2)
+```
+
+A `.xml` file is treated as a diagram only when its root element really is `<mxfile>` or `<mxGraphModel>`; anything else falls through to the ordinary image path unchanged. `#Name` selects a sheet by name, `#N` by 1-based position (a name wins over a number). The alt text becomes the rendered box's accessible name. Multi-sheet files get a small sheet bar on hover — every sheet is baked into the output, so switching sheets involves no engine.
+
+All four render directly in the output (HTML or PDF), **offline and with no system dependencies**: Graphviz `dot` runs in-process via WebAssembly (no system `dot` binary required), Mermaid / WaveDrom are bundled and inlined (no CDN), and `.drawio` files are rendered by a vendored draw.io viewer running in a build-time headless Chromium. Each engine's runtime is embedded only when the document actually uses that diagram type — and the draw.io viewer never is, at any size, because `.drawio` diagrams are fully pre-rendered (a multi-sheet document carries only a few lines of sheet-switching script, not an engine).
+
+By default, Mermaid and WaveDrom render in the browser when the HTML is opened; pass `--bake-svg` to pre-render them to inert SVG at generation time instead (Graphviz and draw.io are always pre-rendered to SVG).
 
 ## Why a global CLI
 
@@ -382,4 +394,17 @@ Multiple repos used to ship copies of this script. They drifted. This package ce
 
 ## Licence
 
-MIT.
+md2doc's own source is **MIT** — see [`LICENSE`](LICENSE).
+
+The published package is not MIT-only, because it ships one vendored
+third-party file: `vendor/drawio/viewer-static.min.js`, the draw.io /
+diagrams.net viewer (v31.3.2, ~4 MB), under the **Apache License 2.0**.
+Its licence text and a per-component NOTICE travel with it, in
+[`vendor/drawio/LICENSE`](vendor/drawio/LICENSE) and
+[`vendor/drawio/NOTICE`](vendor/drawio/NOTICE).
+
+**Running a licence scan? Start at
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).** It lists everything
+redistributed inside the tarball, including the components bundled inside
+the draw.io viewer itself (DOMPurify, pako, spin.js, Rough.js), and says
+how each finding was established.
