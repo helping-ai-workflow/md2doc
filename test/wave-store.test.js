@@ -217,7 +217,9 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 // 因為 insert 寫的是值，值不帶註解）。
 // ---------------------------------------------------------------------------
 {
-  for (const pair of [[3, 1], [0, 3], [3, 0]]) {
+  // [1,0] / [0,1] / [2,1] / [1,2] 是**相鄰對調**，而且跨 group 邊界：fix1 之前
+  // 這四個全部靜默搬錯 lane（LIS 在相鄰對調上永遠有兩個等長解）。
+  for (const pair of [[3, 1], [0, 3], [3, 0], [1, 0], [0, 1], [2, 1], [1, 2], [2, 3], [3, 2]]) {
     const s = S.createStore(GSRC);
     s.apply('move-lane', (d) => C.moveLane(d, pair[0], pair[1]));
     const patch = s.toPatch();
@@ -385,6 +387,11 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
   assert.strictEqual(patch.ok, false, '讀不回來的來源不可能有最小 patch');
   assert.strictEqual(typeof patch.reason, 'string');
   assert.strictEqual(patch.text, undefined);
+  // 這一格的 rewroteRange 是 null，而且是**刻意**的：沒有 span 表、也沒有任何一筆
+  // edit，沒有東西可以框給使用者看；出問題的位置在 s.error.offset。
+  assert.strictEqual(patch.rewroteRange, null);
+  assert.strictEqual(typeof s.error.offset, 'number');
+  assert.ok(s.error.message.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +480,236 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
   assert.strictEqual(patch.ok, false, '兩條新 lane 插在同一個位置，誰先誰後沒有定義');
   assert.strictEqual(typeof patch.reason, 'string');
   assert.strictEqual(patch.text, undefined);
+}
+
+// ---------------------------------------------------------------------------
+// T17：把所有單一 move 掃過一遍。相鄰對調（t === f-1、t === f+1）是 lane list 上
+// 最常見的手勢，而它在攤平的顯示順序上**永遠有兩個等長的解**——「把 f 往上搬一格」
+// 與「把 f-1 往下搬一格」順序一模一樣、樹卻不一樣。只靠順序選不出來，所以 fix1
+// 改成逐個候選驗證：把 patch 寫出來、讀回去，跟 doc 比。這一段把兩個 fixture 的
+// 每一個有序對都釘住。
+// ---------------------------------------------------------------------------
+{
+  const SIX = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["g1",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '    { name: "c", wave: "01" },   // lane c',
+    '  ],',
+    '  { name: "d", wave: "01" },   // lane d',
+    '  ["g2",',
+    '    { name: "e", wave: "01" },   // lane e',
+    '    { name: "f", wave: "01" },   // lane f',
+    '  ],',
+    ']}',
+  ].join('\n');
+  for (const fixture of [{ src: GSRC, n: 4, tag: 'GSRC' }, { src: SIX, n: 6, tag: 'SIX' }]) {
+    for (let from = 0; from < fixture.n; from++) {
+      for (let to = 0; to < fixture.n; to++) {
+        if (from === to) continue;
+        const tag = fixture.tag + ' move ' + from + '->' + to;
+        const s = S.createStore(fixture.src);
+        s.apply('move-lane', (d) => C.moveLane(d, from, to));
+        const patch = s.toPatch();
+        assert.strictEqual(patch.ok, true, tag + ' 必須寫得回去。Got ' + JSON.stringify(patch));
+        const back = C.parseSource(patch.text);
+        assert.strictEqual(back.ok, true, tag + ' 寫出來的文字必須讀得回來');
+        assert.deepStrictEqual(laneShape(back.doc), laneShape(s.doc),
+          tag + '：patch 讀回來的樹必須就是 doc 的樹');
+        for (const note of ['// lane a', '// lane b', '// lane c', '// lane d']) {
+          assert.ok(patch.text.includes(note), tag + ' 之後 ' + note + ' 要還在');
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// T18：一條 lane 被刪、另一條 lane 搬出同一個 group，兩件事合起來把 group 掏空。
+// codec 的 move 只收「在**原文**裡就已經空掉」的容器，刪除那一側也只看得到自己那
+// 一條，於是舊版會在檔案裡留下 `["g1",]` —— 正是集合式刪除要防的那個空殼。
+// 現在「誰離開了容器」是從整份計畫算的；而這個組合沒有單一份 patch 寫得出來
+// （group 的位元組範圍含著要搬走的那條 lane），所以誠實拒絕，不是掉一個殼。
+// ---------------------------------------------------------------------------
+{
+  const ESRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["g1",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '    { name: "c", wave: "01" },   // lane c',
+    '  ],',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n');
+  const s = S.createStore(ESRC);
+  s.apply('remove-lane', (d) => C.removeLane(d, 2));   // 刪掉 c
+  s.apply('move-lane', (d) => C.moveLane(d, 1, 2));    // 把 b 拖到最後
+  assert.deepStrictEqual(laneShape(s.doc), ['a', 'd', 'b'],
+    '先確認 fixture：doc 這一側 g1 已經整個不見了');
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, false,
+    '刪除與搬移聯手掏空的 group，不准留殼、也不准假裝成功。Got ' + JSON.stringify(patch));
+  assert.strictEqual(patch.text, undefined, '拒絕就不准附文字');
+  assert.strictEqual(typeof patch.reason, 'string');
+  assert.ok(patch.reason.includes('deletion and a drag'),
+    '這一種要由 store 自己說清楚是哪兩件事撞在一起，不是退回 codec 的「範圍重疊」。' +
+    'Got ' + JSON.stringify(patch.reason));
+  assert.ok(patch.rewroteRange && typeof patch.rewroteRange.start === 'number',
+    '要給呼叫端一段可以框起來給使用者看的範圍');
+
+  // 單獨搬出去、group 因此空掉的那一種**必須照樣寫得出來**（codec 的 move 本來就
+  // 收這一種），不可以被上面那條規則誤殺
+  const one = S.createStore([
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["solo",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '  ],',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n'));
+  one.apply('move-lane', (d) => C.moveLane(d, 1, 2));
+  const p2 = one.toPatch();
+  assert.strictEqual(p2.ok, true, '只有 move 掏空的 group 要照樣寫得回去。Got ' +
+    JSON.stringify(p2));
+  assert.deepStrictEqual(laneShape(C.parseSource(p2.text).doc), laneShape(one.doc));
+  assert.ok(!p2.text.includes('solo'), '空掉的 group 連標題一起走');
+  assert.ok(p2.text.includes('// lane b'), 'move 要把註解一起帶走');
+}
+
+// ---------------------------------------------------------------------------
+// T19：交出去的文件是唯讀的。堆疊最底下那一份就是 baseDoc 本人，直接寫進去會
+// 同時改掉「現況」與「原點」，於是 isDirty() 說不髒、patch 逐字等於原文——編輯
+// 靜默蒸發。凍起來，讓它在犯錯的當下大聲壞掉。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(GSRC);
+  assert.strictEqual(Object.isFrozen(s.doc), true, 'doc 必須凍住');
+  assert.strictEqual(Object.isFrozen(s.doc.signal), true, 'signal 也要凍住');
+  assert.strictEqual(Object.isFrozen(s.doc.signal[1]), true, 'group 也要凍住');
+  assert.strictEqual(Object.isFrozen(s.doc.signal[1][1]), true, 'group 裡的 lane 也要凍住');
+  assert.throws(() => { s.doc.signal[0].name = 'HACKED'; }, TypeError,
+    '寫進交出去的文件要當場丟，不是靜默蒸發');
+  assert.strictEqual(s.doc.signal[0].name, 'a');
+  assert.strictEqual(s.isDirty(), false);
+  assert.strictEqual(s.toPatch().text, GSRC);
+
+  // apply 之後那一份也一樣（含 data 陣列這種可變的葉子）
+  s.apply('set-cell', (d) => C.setCell(d, 0, 1, 'x'));
+  assert.strictEqual(Object.isFrozen(s.doc), true);
+  assert.throws(() => { s.doc.signal[0].wave = 'zz'; }, TypeError);
+  const t = S.createStore(SRC);
+  assert.strictEqual(Object.isFrozen(t.doc.signal[1].data), true, 'data 陣列也要凍住');
+  assert.throws(() => { t.doc.signal[1].data.push('d'); }, TypeError);
+}
+
+// ---------------------------------------------------------------------------
+// T20：apply 收到的東西要像一份 WaveJSON 文件。`{}` 與 `[]` 不是 null、也不是
+// 純量，舊版會收下、佔一格堆疊，然後 toPatch() 回一個 ok:true、把整個 block
+// 清成 `{ }` 的 patch——對一個以「寧可拒絕也不重寫」為原則的層來說是最壞的形狀。
+// ---------------------------------------------------------------------------
+{
+  for (const junk of [{}, [], { signal: 'nope' }, { signal: null }]) {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(s.apply('junk', () => junk), false,
+      '不像文件的東西不准進堆疊：' + JSON.stringify(junk));
+    assert.strictEqual(s.canUndo(), false);
+    assert.strictEqual(s.isDirty(), false);
+    assert.strictEqual(s.toPatch().text, GSRC);
+  }
+  // 而原本就沒有 signal 的來源，照樣編輯得動（不是把「有 signal」當成硬性條件）
+  const nosig = S.createStore('{ head: { text: "hi" } }');
+  assert.strictEqual(nosig.ok, true);
+  assert.strictEqual(nosig.apply('hand', (d) => {
+    const next = clone(d);
+    next.head.text = 'bye';
+    return next;
+  }), true);
+  const p = nosig.toPatch();
+  assert.strictEqual(p.ok, true, 'Got ' + JSON.stringify(p));
+  assert.strictEqual(p.text, '{ head: { text: "bye" } }');
+}
+
+// ---------------------------------------------------------------------------
+// T21：apply 的 callback 丟例外時，例外往上走（呼叫端自己的 bug 不該被吞掉），
+// 而 store 自己一格都不動。Task 7 要知道這條合約，所以釘住它。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(GSRC);
+  s.apply('rename', (d) => C.renameLane(d, 0, 'A2'));
+  const before = s.doc;
+  assert.throws(() => {
+    s.apply('boom', () => { throw new Error('boom'); });
+  }, /boom/, '例外要往上傳，不是變成一個安靜的 false');
+  assert.strictEqual(s.doc, before, '丟完之後文件必須是同一個物件');
+  assert.strictEqual(s.canUndo(), true);
+  assert.strictEqual(s.canRedo(), false, '丟掉的那一步不准佔一格');
+  assert.strictEqual(s.undoName(), 'rename');
+  assert.strictEqual(s.toPatch().ok, true);
+}
+
+// ---------------------------------------------------------------------------
+// T22：store 自己的拒絕也要帶得出可以給使用者看的範圍，而 codec 的拒絕理由必須
+// 逐字就是 codec 說的那一句（控制器的裁示是「原封不動」，不是「意思到了」）。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(GSRC);
+  s.apply('move-lane', (d) => C.moveLane(d, 0, 3));
+  s.apply('move-lane', (d) => C.moveLane(d, 0, 3));
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, false);
+  assert.ok(patch.rewroteRange, '兩個 move 的拒絕要有範圍');
+  const r = patch.rewroteRange;
+  assert.ok(typeof r.start === 'number' && typeof r.end === 'number' && r.end > r.start);
+  assert.ok(GSRC.slice(r.start, r.end).includes('lane a'),
+    '範圍要真的框住被拖的那幾條 lane。Got ' + JSON.stringify(GSRC.slice(r.start, r.end)));
+  assert.ok(patch.reason.includes('more than one lane'),
+    '理由要說出是「不只一條 lane 要搬」，不是最後那道網的通用訊息。Got ' +
+    JSON.stringify(patch.reason));
+}
+{
+  const s = S.createStore(GSRC);
+  s.apply('hand', (d) => {
+    const next = clone(d);
+    next.signal[0].loop = next.signal[0];
+    return next;
+  });
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, false);
+  // 逐字比對 codec 自己會說的那一句
+  const r = C.parseSource(GSRC);
+  const direct = C.patchSource(GSRC, r, [{
+    op: 'insert', path: ['signal', 0, 'loop'], value: (function () {
+      const o = { name: 'a' }; o.self = o; return o;
+    }()),
+  }]);
+  assert.strictEqual(direct.ok, false);
+  assert.strictEqual(patch.reason, direct.reason,
+    'codec 的理由必須原封不動，不准換成自己的說法');
+}
+
+// ---------------------------------------------------------------------------
+// T23：最後一道網 —— 計畫寫出來、讀回去，跟 doc 不一樣就拒絕。
+// 手寫的 fn 可以做出結構性改動（這裡是把 group 拆掉、lane 留著），而計畫器只會
+// 產生「刪 lane／一個 move／插 lane／存活 lane 的欄位 diff」，表達不出來。
+// 舊版對這一種是 ok:true 而 group 原封不動留在檔案裡。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(GSRC);
+  s.apply('dissolve', (d) => {
+    const next = clone(C.removeLane(d, 3));
+    next.signal = [next.signal[0], next.signal[1][1], next.signal[1][2]];
+    return next;
+  });
+  assert.deepStrictEqual(laneShape(s.doc), ['a', 'b', 'c'], '先確認 fixture：group 被拆掉了');
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, false,
+    'group 被手動拆掉時要拒絕，不是把 group 原封不動留在檔案裡。Got ' +
+    JSON.stringify(patch));
+  assert.strictEqual(patch.text, undefined);
+  assert.ok(patch.rewroteRange && typeof patch.rewroteRange.start === 'number');
 }
 
 // ---------------------------------------------------------------------------

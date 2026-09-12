@@ -2233,4 +2233,66 @@ const RSRC = [
   assert.strictEqual(C.parseSource(out.text).doc.signal[0].data, '');
 }
 
+// ---- 以下為 Task 5 fix1 釘住的合約（一次刪一組 lane 的 removal path） ----
+
+// N3：整組一起算的刪除。逐條問 laneRemovePath 的答案永遠是「就這條 lane」——因為
+// 在那份文件裡同組的另一條還在——於是兩條都刪會在檔案裡留下一個空 group。
+{
+  const r = C.parseSource(GSRC);
+
+  // 單條時，兩扇門必須給同一個答案。兩套規則只要允許漂移，遲早會漂。
+  for (let k = 0; k < 4; k++) {
+    assert.deepStrictEqual(C.laneRemovePaths(r.doc, [k]), [C.laneRemovePath(r.doc, k)],
+      '單條的集合版必須跟 laneRemovePath 一模一樣（編號 ' + k + '）');
+  }
+
+  // 前提本身：逐條問的答案確實是「就這條 lane」
+  assert.deepStrictEqual(C.laneRemovePath(r.doc, 1), ['signal', 1, 1]);
+  assert.deepStrictEqual(C.laneRemovePath(r.doc, 2), ['signal', 1, 2]);
+  // 而整組一起算的時候，group 本身才是要拿掉的東西
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, [1, 2]), [['signal', 1]],
+    'group 裡的 lane 全刪 → 拿掉整個 group');
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, [2, 1]), [['signal', 1]],
+    '順序不影響答案');
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, [0, 1, 2, 3]),
+    [['signal', 0], ['signal', 1], ['signal', 2]],
+    '全刪光：signal 自己永遠不是答案');
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, []), [], '空集合什麼都不刪');
+  assert.strictEqual(C.laneRemovePaths(r.doc, [4]), null, '超出範圍回 null，不是猜一個');
+  assert.strictEqual(C.laneRemovePaths(r.doc, [0, -1]), null);
+  assert.strictEqual(C.laneRemovePaths(null, [0]), null);
+  assert.strictEqual(C.laneRemovePaths(r.doc, 'nope'), null);
+
+  // 回的路徑互不包含，所以可以一次全部丟給 patchSource
+  const out = C.patchSource(GSRC, r,
+    C.laneRemovePaths(r.doc, [1, 2]).map(function (p) { return { op: 'remove', path: p }; }));
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), ['a', 'd'],
+    '兩條一起刪，group 連標題一起走，不留空殼');
+  assert.ok(!out.text.includes('grp'), '空 group 不准留在檔案裡');
+}
+
+// N3b：巢狀與「作者自己寫的空 group」——後者是內容，會撐住父層（Task 3 的裁示）
+{
+  const src = ['{ signal: [',
+    '  ["outer",',
+    '    { name: "b", wave: "01" },',
+    '    ["inner",',
+    '      { name: "x", wave: "01" },',
+    '    ],',
+    '    ["author-empty"],',
+    '  ],',
+    ']}'].join('\n');
+  const r = C.parseSource(src);
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, [1]), [['signal', 0, 2]],
+    '只刪 inner 裡那條 → 收掉 inner');
+  assert.deepStrictEqual(C.laneRemovePaths(r.doc, [0, 1]), [['signal', 0, 1], ['signal', 0, 2]],
+    '兩層的 lane 都刪光，但 outer 裡還有作者自己寫的空 group，所以 outer 留著');
+  const out = C.patchSource(src, r,
+    C.laneRemovePaths(r.doc, [0, 1]).map(function (p) { return { op: 'remove', path: p }; }));
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(C.parseSource(out.text).doc.signal, [['outer', ['author-empty']]],
+    '作者自己的空 group 是他的，不准跟著被收掉');
+}
+
 console.log('wave-codec.test.js OK');
