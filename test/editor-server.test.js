@@ -568,18 +568,28 @@ function clientIdOf(pageBody) {
         'G5: and once it acks, it converges like any other tab — one redundant re-render, ' +
         'not an endless one');
 
-      // The re-registration is capped, because each new id is one heartbeat
-      // away from costing a headless-Chromium bake. Past the cap the route
-      // degrades to the old bare 204 rather than growing without bound.
-      let capped = null;
-      for (let n = 0; n < 80 && capped === null; n++) {
+      // ── Fix round 3, re-review2 H4: bounded, and it bounds by EVICTING ──
+      // Round 2 capped by REFUSING, which meant that once the map filled a
+      // genuinely live tab could never re-register and went silently deaf for
+      // the session — G5's own guard rail reproducing G5's symptom. The bound
+      // is now least-recently-seen eviction, so the map stays bounded AND no
+      // live tab is ever turned away.
+      //
+      // `ghost` has just acked, so it answers 204 while its entry survives.
+      // That makes it a probe: if minting more ids than the cap evicts it,
+      // its next ping re-registers with an empty baseline and answers 200
+      // again. 204 would mean the map grew instead of evicting.
+      for (let n = 0; n < 80; n++) {
         const id = ('c' + n).padEnd(24, '0');
         const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: id });
-        if (r.status === 204) capped = n;
+        assert.strictEqual(r.status, 200,
+          'H4: a well-formed client must never be turned away — refusing past a cap is ' +
+          'what made a swept live tab permanently deaf, got ' + r.status + ' at n=' + n);
       }
-      assert.notStrictEqual(capped, null,
-        'G5: unlimited re-registration would let a loopback script grow the client map ' +
-        'and the render load without bound — the cap must actually bite');
+      const evicted = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: ghost });
+      assert.strictEqual(evicted.status, 200,
+        'H4: the least-recently-seen entry must actually be evicted, so the map cannot grow ' +
+        'without bound — a 204 here would mean the oldest entry survived 80 new ones');
 
       // ── Fix round 1, review F8: the ping body is capped ─────────────────
       // readJson() refuses an over-limit body by destroying the socket, so

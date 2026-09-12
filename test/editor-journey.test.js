@@ -8902,6 +8902,11 @@ async function main() {
       '<div class="drawio" data-x="1"></div>\n```\n\nTail para two.\n';
     const CODE_SEL = '.ed-block[data-block-type="code"]';
     const TWO_DIAGRAM_MD = '# Doc\n\n![a](a.drawio)\n\n![b](b.drawio)\n\nTail para two.\n';
+    // Fix round 3 (re-review2 H2/H1): two diagrams in ONE block, and a diagram
+    // inside a TABLE cell. Both shapes are asserted in their own rows before
+    // anything else, because both were claimed impossible at some point.
+    const TWO_IN_ONE_MD = '# Doc\n\n![a](a.drawio) ![b](b.drawio)\n\nTail para two.\n';
+    const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
     // Scoped to these rows only (re-review G10). They sit still for a real
     // heartbeat (two of them for two), and createEditorServer()'s 30s default
@@ -8932,6 +8937,8 @@ async function main() {
                              diagram('Second', 'p2', 'SECOND_BOX'));
     const SINGLE_V2 = mxfile(diagram('Only', 'p1', 'CHANGED_BOX'),
                              diagram('Second', 'p2', 'SECOND_BOX'));
+    const OTHER_V1 = mxfile(diagram('Other', 'p9', 'OTHER_BOX'));
+    const OTHER_V2 = mxfile(diagram('Other', 'p9', 'OTHER_CHANGED'));
     const rewriteDrawio = (ctx, xml) =>
       fs.writeFileSync(path.join(ctx.dir, 'd.drawio'), xml, 'utf8');
     // Which mark the diagram on screen is actually painting. Returns a
@@ -8982,6 +8989,44 @@ async function main() {
       await new Promise((r) => setTimeout(r, 150));
       await page.click('.drawio-sheetbar button:nth-child(' + nth + ')');
       await new Promise((r) => setTimeout(r, 200));
+    };
+    // Every diagram on the page, in document order, by the mark its visible
+    // page paints. A string in every case, including the failure ones.
+    const bothMarks = (page) => page.evaluate(() =>
+      Array.from(document.querySelectorAll('.drawio')).map((box) => {
+        const vis = box.querySelector('.drawio-page:not([hidden])');
+        const t = ((vis || box).textContent || '');
+        const hits = ['ARCH_BOX', 'FLOW_BOX', 'TIMING_BOX', 'SINGLE_BOX', 'CHANGED_BOX',
+          'SECOND_BOX', 'OTHER_BOX', 'OTHER_CHANGED'].filter((m) => t.indexOf(m) !== -1);
+        return hits.length === 1 ? hits[0] : 'HITS:' + JSON.stringify(hits);
+      }).join('|'));
+    // Draw one rectangle over the SECOND diagram through the reader's own
+    // lightbox annotation tools, then Escape — which is what writes
+    // `.anno-inline-wrap` into that `.drawio-page` (lib/md2doc.js's
+    // annoSyncInline()). Uses only real gestures; no internal API is poked.
+    const annotateSecondDiagram = async (page) => {
+      const box = await page.evaluate(() => {
+        const b = document.querySelectorAll('.drawio')[1];
+        b.scrollIntoView({ block: 'center' });
+        const r = b.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.click(box.x, box.y);
+      await new Promise((r) => setTimeout(r, 600));
+      await page.evaluate(() => { document.querySelector('[data-anno-tool="r"]').click(); });
+      await new Promise((r) => setTimeout(r, 200));
+      const stage = await page.evaluate(() => {
+        const s = document.querySelector('.lightbox-stage');
+        const r = s.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(stage.x - 60, stage.y - 40);
+      await page.mouse.down();
+      await page.mouse.move(stage.x + 60, stage.y + 40, { steps: 8 });
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 300));
+      await page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 500));
     };
     const sheetTabs = (page) => page.evaluate(() =>
       Array.from(document.querySelectorAll('.drawio-sheetbar button')).map((b) => b.textContent).join('|'));
@@ -9258,6 +9303,130 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'G4：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: drawio/G4 one external write only re-swaps the diagram that changed — OK');
+    }
+
+
+    // H2 (fix round 3) — TWO diagrams in ONE block, and it is the SECOND one
+    // that changes. `![a](a.drawio) ![b](b.drawio)` on one markdown line is a
+    // single paragraph block holding two `.drawio` boxes (verified by render).
+    // Round 2 fingerprinted only `querySelector('.drawio')` — the first — so
+    // this comparison came back equal, the loop skipped the block, `applied`
+    // stayed true, the tab ACKED, and the server advanced its baseline past an
+    // update the DOM never took. Silent, permanent, and F2's invariant broken
+    // from the client side. Measured against both commits by the re-reviewer:
+    // bd22ec6 updated B on the first beat, 945ca23 never did.
+    {
+      const ctx = await newPage(TWO_IN_ONE_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': OTHER_V1 }, DRAWIO_SRV_OPTS);
+      const before = await bothMarks(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX|OTHER_BOX',
+        'H2 前提失敗：一個區塊裡必須真的有兩張圖，got ' + before);
+      const boxesPerBlock = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block'))
+          .map((b) => b.querySelectorAll('.drawio').length).join('|'));
+      assert.strictEqual(boxesPerBlock, '0|2|0',
+        'H2 前提失敗：兩張圖必須落在同一個區塊裡（否則測到的是已經會過的那一種），got ' + boxesPerBlock);
+      fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await bothMarks(ctx.page);
+      assert.strictEqual(after, 'SINGLE_BOX|OTHER_CHANGED',
+        'H2：同一個區塊裡的第二張圖改變時必須真的更新 —— 舊版把它當成「沒變」跳過、' +
+        '然後還 ack 回去，伺服器基準線越過了一個畫面從未顯示的版本，永久且無聲，got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'H2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H2 the second diagram in one block is not silently skipped — OK');
+    }
+
+    // H1 (fix round 3) — a `.drawio` in a table cell makes the whole TABLE
+    // block replaceable by this path. Round 2's report claimed 「一個 drawio
+    // 區塊永遠不是表格」 and skipped the table resets on that basis; rendering
+    // `| ![d](d.drawio) | x |` falsifies it, and this row pins the shape.
+    //
+    // It ALSO pins the reason the dangling-grip scenario that finding
+    // described is not reachable today, because that reason is an invariant
+    // somebody could change without noticing: the grips, the edge menu and
+    // the row/column drag all require `ed-wys-table`, and a table holding a
+    // baked diagram never gets it — `canWysiwygForTable()` is
+    // `serializeTable(...).unsupported.length === 0`, and the box is a DIV in
+    // a cell. If that ever changes, this row goes red and whoever changed it
+    // is pointed at the scoped resets in refreshStaleDrawio() that go live
+    // with it.
+    {
+      const ctx = await newPage(TABLE_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      const shape = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block'))
+          .map((b) => b.getAttribute('data-block-type') + ':' + b.querySelectorAll('.drawio').length)
+          .join('|'));
+      assert.strictEqual(shape, 'heading:0|table:1|paragraph:0',
+        'H1：表格儲存格裡的 drawio 真的會產生一個 table 區塊 —— 「drawio 區塊永遠不是表格」是錯的，got ' + shape);
+      const armed = await ctx.page.evaluate(() => {
+        const t = document.querySelector('.ed-block[data-block-type="table"] table');
+        return t ? (t.classList.contains('ed-wys-table') ? 'armed' : 'degraded') : 'NO_TABLE';
+      });
+      assert.strictEqual(armed, 'degraded',
+        'H1：帶 drawio 的表格必須是 degraded（DIV 在儲存格裡 ⇒ serializeTable 回報 unsupported）。' +
+        '這正是握把 / 邊選單 / 列拖曳在它身上永遠起不來的原因；一旦這裡變成 armed，' +
+        'refreshStaleDrawio() 裡那幾道 scoped reset 就從防禦性變成活的，got ' + armed);
+      // Hover the row band the way a reader would. MEASURED: nothing comes up.
+      const rowBox = await ctx.page.evaluate(() => {
+        const tr = document.querySelector('.ed-block[data-block-type="table"] tbody tr');
+        const r = tr.getBoundingClientRect();
+        return { x: r.left + 8, y: r.top + r.height / 2 };
+      });
+      await ctx.page.mouse.move(rowBox.x, rowBox.y);
+      await new Promise((r) => setTimeout(r, 300));
+      const gripsUp = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-te-grip-row, .ed-te-grip-col, .ed-te-menu'))
+          .filter((g) => !g.hidden).length);
+      assert.strictEqual(gripsUp, 0,
+        'H1：degraded 表格上滑過列不得升起任何握把 / 邊選單，got ' + gripsUp);
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'H1：表格區塊裡的 drawio 一樣要重烤 —— 這條路徑真的會整個換掉一個 table 區塊，got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'H1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H1 a diagram in a table cell re-bakes, and that table never arms — OK');
+    }
+
+    // H3 (fix round 3) — the reader's annotations are drawn INTO
+    // `.drawio-page`. An UNRELATED write must leave them alone; the annotated
+    // diagram's OWN change must still update AND say that the annotations went.
+    {
+      const ctx = await newPage(TWO_DIAGRAM_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': OTHER_V1 }, DRAWIO_SRV_OPTS);
+      await annotateSecondDiagram(ctx.page);
+      const annotated = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
+      assert.strictEqual(annotated, 1,
+        'H3 前提失敗：註記必須真的畫進 .drawio-page 裡，got ' + annotated);
+      // (1) unrelated write: a.drawio changes, b's annotations must survive.
+      fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const kept = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
+      assert.strictEqual(kept, 1,
+        'H3：改的是別的檔案，讀者自己畫的註記必須原封不動，got ' + kept);
+      const marksNow = await bothMarks(ctx.page);
+      assert.strictEqual(marksNow, 'CHANGED_BOX|OTHER_BOX',
+        'H3 前提失敗：而那次改動本身仍然要套用，got ' + marksNow);
+      const bannerNow = await visibleBannerText(ctx.page);
+      assert.strictEqual(bannerNow, null,
+        'H3：沒有東西被丟掉的時候不得升起「註記已移除」的訊息，got ' + JSON.stringify(bannerNow));
+      // (2) the annotated diagram's own bytes change: it updates, the
+      // annotations cannot follow, and the reader is told.
+      fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const marksAfter = await bothMarks(ctx.page);
+      assert.strictEqual(marksAfter, 'CHANGED_BOX|OTHER_CHANGED',
+        'H3：被註記的那張圖自己變了時仍然必須重烤，got ' + marksAfter);
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof banner === 'string' && banner.indexOf('註記') !== -1, true,
+        'H3：使用者自己畫的東西被丟掉不可以無聲 —— 必須看得見一條說明，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, 'H3：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H3 annotations survive an unrelated write and are announced when dropped — OK');
     }
 
     // F9 — the page navigation is rebuilt after an ORDINARY edit commit. It
