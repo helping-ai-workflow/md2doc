@@ -9347,10 +9347,23 @@ async function main() {
     // somebody could change without noticing: the grips, the edge menu and
     // the row/column drag all require `ed-wys-table`, and a table holding a
     // baked diagram never gets it — `canWysiwygForTable()` is
-    // `serializeTable(...).unsupported.length === 0`, and the box is a DIV in
-    // a cell. If that ever changes, this row goes red and whoever changed it
-    // is pointed at the scoped resets in refreshStaleDrawio() that go live
-    // with it.
+    // `serializeTable(...).unsupported.length === 0`.
+    //
+    // WHICH NODE is unsupported matters, because it is what a future change
+    // would have to move (fix round 4, re-review3 M1 — the earlier version of
+    // this comment named the wrong one). MEASURED, real page +
+    // `md2docTableMd.serializeTable()`:
+    //   the drawio table   unsupported ["svg"]   armed false
+    //   a plain neighbour  unsupported []        armed true
+    // It is the baked `<svg>`, NOT the `<div class="drawio">` wrapper:
+    // lib/editor/inline-md.js handles `DIV` explicitly and recurses into it,
+    // while `svg` reaches the fall-through that pushes onto `unsupported`.
+    // (A bake that FAILED emits `<div class="drawio drawio-failed"><p>…`, and
+    // `P` reaches the same fall-through, so that shape is degraded too.) So
+    // the trigger to watch for is inline-md.js learning to serialise inline
+    // `svg` — not anything about `<div>`. If that lands, this row goes red
+    // and whoever changed it is pointed at the scoped resets in
+    // refreshStaleDrawio() that go live with it.
     {
       const ctx = await newPage(TABLE_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
       const shape = await ctx.page.evaluate(() =>
@@ -9364,8 +9377,10 @@ async function main() {
         return t ? (t.classList.contains('ed-wys-table') ? 'armed' : 'degraded') : 'NO_TABLE';
       });
       assert.strictEqual(armed, 'degraded',
-        'H1：帶 drawio 的表格必須是 degraded（DIV 在儲存格裡 ⇒ serializeTable 回報 unsupported）。' +
-        '這正是握把 / 邊選單 / 列拖曳在它身上永遠起不來的原因；一旦這裡變成 armed，' +
+        'H1：帶 drawio 的表格必須是 degraded —— 實測 serializeTable() 的 unsupported 是 ' +
+        '["svg"]（烘焙出來的 <svg>，不是 .drawio 那個 <div>：inline-md.js 會遞迴進 DIV）。' +
+        '這正是握把 / 邊選單 / 列拖曳在它身上永遠起不來的原因；一旦這裡變成 armed ' +
+        '（最可能的來源是 inline-md.js 學會序列化行內 svg），' +
         'refreshStaleDrawio() 裡那幾道 scoped reset 就從防禦性變成活的，got ' + armed);
       // Hover the row band the way a reader would. MEASURED: nothing comes up.
       const rowBox = await ctx.page.evaluate(() => {
