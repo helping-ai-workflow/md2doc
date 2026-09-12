@@ -473,6 +473,13 @@ function clientIdOf(pageBody) {
       const p1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
       assert.strictEqual(p1.status, 200, 'a changed drawio file must be reported, not 204');
       const j1 = JSON.parse(p1.body);
+      // Fix round 2 (re-review G9): the EXACT response shape is pinned again.
+      // Round 1 replaced `deepStrictEqual(body, {stale:true})` with two field
+      // assertions, which accept any number of extra fields — stronger on the
+      // token's content, weaker on the shape, and the fix report claimed
+      // otherwise. Both halves are asserted now.
+      assert.deepStrictEqual(Object.keys(j1).sort(), ['stale', 'token'],
+        'the stale response must carry exactly {stale, token}, got ' + p1.body);
       assert.strictEqual(j1.stale, true, 'the stale signal must still say stale, got ' + p1.body);
       assert.ok(typeof j1.token === 'string' && j1.token.length > 0,
         'fix round 1 (F2): the stale signal must carry the token the client acks with, got ' + p1.body);
@@ -500,6 +507,8 @@ function clientIdOf(pageBody) {
       assert.strictEqual(p2.status, 200,
         'F2: a render the client never confirmed applying must NOT advance the baseline');
       const j2 = JSON.parse(p2.body);
+      assert.deepStrictEqual(Object.keys(j2).sort(), ['stale', 'token'],
+        'G9: every stale response carries exactly {stale, token}, got ' + p2.body);
       assert.strictEqual(j2.stale, true, 'F2: the second heartbeat must report the same staleness again');
       assert.strictEqual(j2.token, j1.token,
         'F2: the token identifies a CONTENT VERSION, not a ping — a refresh slower than one ' +
@@ -537,6 +546,40 @@ function clientIdOf(pageBody) {
       assert.strictEqual(b1.status, 200,
         'F3: tab B must be told too — the first tab to ping used to eat the one signal, ' +
         'leaving the second on a stale diagram that looked perfectly healthy');
+
+      // ── Fix round 2, re-review G5: a live tab that was swept re-registers ──
+      // The eviction path itself is not directly drivable here (it needs a
+      // >10-minute gap), but the state it produces IS: a well-formed clientId
+      // with no server-side entry. Round 1 answered that with a bare 204
+      // forever — a tab that looked perfectly healthy and silently never
+      // re-baked again for the life of the session, recoverable only by
+      // reload, with nothing telling the user to reload.
+      const ghost = 'ffffffffffffffffffffffff';
+      const g1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: ghost });
+      assert.strictEqual(g1.status, 200,
+        'G5: a client that is still talking to us is alive by definition — it must get a ' +
+        'baseline back (seeded empty, so it re-syncs once) rather than be permanently deaf');
+      const gj = JSON.parse(g1.body);
+      assert.deepStrictEqual(Object.keys(gj).sort(), ['stale', 'token'],
+        'G5/G9: the re-registered client gets the ordinary stale shape, got ' + g1.body);
+      const g2 = await req(srv.port, 'POST', '/api/ping',
+        { fileId: 0, drawioClientId: ghost, drawioAck: gj.token });
+      assert.strictEqual(g2.status, 204,
+        'G5: and once it acks, it converges like any other tab — one redundant re-render, ' +
+        'not an endless one');
+
+      // The re-registration is capped, because each new id is one heartbeat
+      // away from costing a headless-Chromium bake. Past the cap the route
+      // degrades to the old bare 204 rather than growing without bound.
+      let capped = null;
+      for (let n = 0; n < 80 && capped === null; n++) {
+        const id = ('c' + n).padEnd(24, '0');
+        const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: id });
+        if (r.status === 204) capped = n;
+      }
+      assert.notStrictEqual(capped, null,
+        'G5: unlimited re-registration would let a loopback script grow the client map ' +
+        'and the render load without bound — the cap must actually bite');
 
       // ── Fix round 1, review F8: the ping body is capped ─────────────────
       // readJson() refuses an over-limit body by destroying the socket, so
@@ -589,6 +632,8 @@ function clientIdOf(pageBody) {
       assert.strictEqual(p1.status, 200,
         '(b): a deleted drawio file must be reported as changed, not silently ignored');
       const j1 = JSON.parse(p1.body);
+      assert.deepStrictEqual(Object.keys(j1).sort(), ['stale', 'token'],
+        '(b) G9: the stale response must carry exactly {stale, token}, got ' + p1.body);
       assert.strictEqual(j1.stale, true, '(b): got ' + p1.body);
       assert.ok(typeof j1.token === 'string' && j1.token.length > 0, '(b): got ' + p1.body);
 

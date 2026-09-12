@@ -20,7 +20,7 @@ let browser;
 // end of this file, which need a real referenced file on disk to rewrite from
 // outside the editor. Every existing call site passes one argument and is
 // unaffected.
-async function boot(mdText, extraFiles) {
+async function boot(mdText, extraFiles, srvOpts) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-journey-'));
   const mdPath = path.join(dir, 'doc.md');
   if (extraFiles) {
@@ -35,20 +35,22 @@ async function boot(mdText, extraFiles) {
   // { server, port, urlFor(absPath), close() }, no bare `.url`/`.port`
   // shortcut on the caller's side; the URL for a given file comes from
   // urlFor(), which maps the resolved path back to its /edit/:id index.
-  // An explicit idle timeout: the Task 6 rows below deliberately sit still
-  // for two real 10s heartbeats in a row, and createEditorServer()'s 30s
-  // default is close enough to that to turn a slow bake into a mystery
-  // ERR_CONNECTION_REFUSED. (The heartbeat itself keeps the default alive in
-  // practice; this removes the dependency on that.)
-  const srv = await createEditorServer({
-    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 10 * 60 * 1000,
-  });
+  // `srvOpts` is merged LAST and is opt-in per scenario. Fix round 2
+  // (re-review G10): the Task 6 rows at the end of this file want a longer
+  // idle timeout (they deliberately sit still for two real 10s heartbeats),
+  // and round 1 put that straight into this shared helper — silently
+  // reconfiguring the server for ~60 pre-existing scenarios that had been
+  // running against the production 30s default. Every other scenario now gets
+  // exactly the server it got before.
+  const srv = await createEditorServer(Object.assign({
+    files: [mdPath], clientJs: CLIENT_SRC,
+  }, srvOpts || {}));
   const url = srv.urlFor(mdPath);
   return { srv, url, mdPath, dir };
 }
 
-async function newPage(mdText, extraFiles) {
-  const b = await boot(mdText, extraFiles);
+async function newPage(mdText, extraFiles, srvOpts) {
+  const b = await boot(mdText, extraFiles, srvOpts);
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e)));
@@ -8892,7 +8894,20 @@ async function main() {
   // have predicted.
   {
     const DRAWIO_MD = '# Doc\n\n![d](d.drawio)\n\nTail para two.\n';
+    // A ```html fence whose CONTENT quotes `class="drawio"`. MEASURED: marked
+    // escapes the angle brackets but not the quotes, so the literal survives
+    // verbatim into this block's part — which is what made round 1's text
+    // regex select it as a diagram block (G1/G3).
+    const FENCE_MD = '# Doc\n\n![d](d.drawio)\n\n```html\n' +
+      '<div class="drawio" data-x="1"></div>\n```\n\nTail para two.\n';
+    const CODE_SEL = '.ed-block[data-block-type="code"]';
+    const TWO_DIAGRAM_MD = '# Doc\n\n![a](a.drawio)\n\n![b](b.drawio)\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
+    // Scoped to these rows only (re-review G10). They sit still for a real
+    // heartbeat (two of them for two), and createEditorServer()'s 30s default
+    // is close enough to that to turn a slow bake into a mystery
+    // ERR_CONNECTION_REFUSED. No other scenario in this file is affected.
+    const DRAWIO_SRV_OPTS = { idleTimeoutMs: 10 * 60 * 1000 };
     const diagram = (name, id, value) =>
       '  <diagram name="' + name + '" id="' + id + '">\n' +
       '    <mxGraphModel dx="800" dy="600" grid="0" page="1" pageWidth="850" pageHeight="1100">\n' +
@@ -8977,7 +8992,7 @@ async function main() {
     // re-bake was fetched, paid for and discarded while the server's baseline
     // advanced past it — the diagram stayed wrong for the whole session.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
       const before = await shownMark(ctx.page);
       assert.strictEqual(before, 'SINGLE_BOX',
         'F1 前提失敗：初始頁面必須已經烤出原始的 .drawio 內容');
@@ -8994,7 +9009,7 @@ async function main() {
     // (c) / F6 — the reader's open page survives a re-bake that REORDERED the
     // pages, and no banner is raised for an outcome that is not a loss.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       await pickPage(ctx.page, 2);
       const picked = await shownPage(ctx.page);
       assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
@@ -9017,7 +9032,7 @@ async function main() {
     // (c) / Ruling B2-P1 — the page really was deleted: fall back to the
     // first page AND say so visibly. Both outcomes must not be silent.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       await pickPage(ctx.page, 2);
       assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
       rewriteDrawio(ctx, ARCH_TIMING);
@@ -9038,7 +9053,7 @@ async function main() {
 
     // A refresh arriving while the user is editing must not move the caret.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
       await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type('TYPED');
@@ -9077,7 +9092,7 @@ async function main() {
     // real bail paths, at client.js's `catch (e) { return; }`), and the
     // second heartbeat must still be told.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
       await ctx.page.evaluate(() => {
         window.__renderCalls = 0;
         const orig = window.fetch;
@@ -9097,7 +9112,12 @@ async function main() {
         'F2 前提失敗：第一拍必須真的送出過 /api/render（否則注入的失敗根本沒發生），got ' + midCalls);
       assert.strictEqual(midMark, 'SINGLE_BOX',
         'F2 前提失敗：那一發被注入的網路失敗必須真的讓這輪放棄，got ' + midMark);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      // Longer than one beat ON PURPOSE. Fix round 2 (re-review G1b) backs off
+      // after a bail that already PAID for a fetch — the first one waits
+      // DRAWIO_BACKOFF_BASE_MS * 2 = 20s — so the retry lands on a later tick
+      // than the next one. That delay is the whole point of the backoff; what
+      // this row pins is that the update is DELAYED, never dropped.
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT + 25000));
       const finalMark = await shownMark(ctx.page);
       assert.strictEqual(finalMark, 'CHANGED_BOX',
         'F2：用戶端放棄了一輪之後，下一次心跳必須再報一次 stale 並且這次成功 —— ' +
@@ -9112,7 +9132,7 @@ async function main() {
     // conflict banner is the user's only route to resolving a conflict on the
     // one data-safety-critical path this editor has (it carries Reload).
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       await pickPage(ctx.page, 2);
       assert.strictEqual(await shownPage(ctx.page), 'Flow', 'F5 前提失敗：必須先切到 Flow');
       // An external write to the MARKDOWN moves its mtime, so the next save
@@ -9144,13 +9164,109 @@ async function main() {
       console.log('journey: drawio/F5 a background notice never clobbers the conflict banner — OK');
     }
 
+
+    // G1 / G3 (fix round 2) — a block whose rendered markup merely QUOTES
+    // `class="drawio"` must not be treated as a diagram block by anything.
+    //
+    // MEASURED on this renderer: marked escapes `<`/`>` inside a fenced code
+    // block but leaves `"` alone, so a ```html fence containing
+    // `<div class="drawio" …>` really does emit the literal verbatim into its
+    // part — the false positive is reachable, not theoretical. Round 1's loop
+    // selected that block by a text regex while the pre-fetch guard asked the
+    // DOM, and the two disagreeing is what turned an editing surface parked in
+    // that block into a full /api/render + headless-Chromium bake every 10
+    // seconds forever, with the diagram never updating.
+    {
+      const ctx = await newPage(FENCE_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      const before = await shownMark(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX', 'G1 前提失敗：初始頁面必須已經烤好');
+      // Park a real editing surface inside the quoting block, via the same
+      // ⠿ → MD 原始碼 route a user takes.
+      await ctx.page.hover(CODE_SEL);
+      await pressClick(ctx.page, CODE_SEL + ' .ed-handle', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const opened = await ctx.page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === 'MD 原始碼');
+        if (!items.length) return 'NO_MENU_ITEM';
+        items[items.length - 1].click();
+        return 'clicked';
+      });
+      assert.strictEqual(opened, 'clicked',
+        'G1 前提失敗：⠿ 選單必須真的開著而且有「MD 原始碼」這一項，got ' + opened);
+      await new Promise((r) => setTimeout(r, 400));
+      const surface = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(surface, 'TEXTAREA',
+        'G1 前提失敗：必須真的有一個原始碼編輯面獲得焦點，got ' + surface);
+      // Tag the quoting block's NODE. An expando does not survive
+      // replaceWith(), so this is how "was it swapped" is read back.
+      await ctx.page.evaluate((sel) => {
+        document.querySelector(sel).__drawioProbe = 'kept';
+      }, CODE_SEL);
+
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'G1：引用了這段標記文字的區塊不得讓整輪刷新放棄 —— 舊版會每 10 秒重跑一次 ' +
+        '完整 render + headless 烘焙，而圖永遠不更新');
+      const stillOpen = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(stillOpen, 'TEXTAREA',
+        'G1：而且那個原始碼編輯面必須原封不動，got ' + stillOpen);
+      const probe = await ctx.page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        return el ? String(el.__drawioProbe) : 'NO_BLOCK';
+      }, CODE_SEL);
+      assert.strictEqual(probe, 'kept',
+        'G3：只是文字上含有這段標記的區塊不得被整個換掉，got ' + probe);
+      assert.strictEqual(ctx.errs.length, 0, 'G1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/G1 a block that merely quotes the markup is not a diagram block — OK');
+    }
+
+    // G4 (fix round 2) — one external write must not re-swap every OTHER
+    // diagram on the page. The bootstrap seed is the HTML parser's
+    // re-serialisation, so the cheap `parts[i] === lastParts[i]` equality
+    // never fires on an unedited tab; without a bake-level comparison, a
+    // change to a.drawio replaced the block holding b.drawio too.
+    {
+      const ctx = await newPage(TWO_DIAGRAM_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      const marks = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.drawio')).map((box) => {
+          const vis = box.querySelector('.drawio-page:not([hidden])');
+          return ((vis || box).textContent || '').trim();
+        }).join('|'));
+      assert.strictEqual(marks, 'SINGLE_BOX|ARCH_BOX',
+        'G4 前提失敗：兩張圖都必須先烤出來，got ' + marks);
+      await ctx.page.evaluate(() => {
+        const boxes = Array.from(document.querySelectorAll('.drawio'));
+        boxes.forEach((b, i) => { b.closest('.ed-block').__drawioProbe = 'block' + i; });
+      });
+      fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.drawio')).map((box) => {
+          const vis = box.querySelector('.drawio-page:not([hidden])');
+          const blk = box.closest('.ed-block');
+          return ((vis || box).textContent || '').trim() + '/' + String(blk && blk.__drawioProbe);
+        }).join('|'));
+      assert.strictEqual(after, 'CHANGED_BOX/undefined|ARCH_BOX/block1',
+        'G4：改了 a.drawio 只能換掉 a 那個區塊（所以它的標記不見了）；' +
+        'b.drawio 那個區塊必須原封不動（標記還在），got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'G4：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/G4 one external write only re-swaps the diagram that changed — OK');
+    }
+
     // F9 — the page navigation is rebuilt after an ORDINARY edit commit. It
     // used to be created once at page load and destroyed by the first
     // innerHTML swap, so a user who typed one character lost it for the rest
     // of the session — which made preserving the open page across a
     // background re-bake largely academic.
     {
-      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       const tabsBefore = await sheetTabs(ctx.page);
       assert.strictEqual(tabsBefore, 'Architecture|Flow',
         'F9 前提失敗：載入時必須先有切頁列，got ' + tabsBefore);
