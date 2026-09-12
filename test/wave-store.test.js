@@ -713,6 +713,222 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 }
 
 // ---------------------------------------------------------------------------
+// T24：凍結只有在 strict mode 下才會丟。這個模組自己是 strict，但寫進 store.doc 的
+// 那一行在**呼叫端**的檔案裡，所以有牙齒的是呼叫端的 'use strict'。今天帶著這個
+// 模組進瀏覽器的是 client.js（第一行就是 prologue），而 server.js 是原樣內嵌它。
+// 實測（本 session，non-strict 探針）：對凍住的文件寫五次，四次是**靜默**的，只有
+// push 會丟——也就是說這個前提一旦破掉，F3 的症狀會原封不動回來，只是不再連 baseline
+// 一起壞掉，所以更難發現。把前提釘住。
+// ---------------------------------------------------------------------------
+{
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', f), 'utf8');
+  // prologue 的定義是「檔案的第一個 statement」，兩種引號都算數
+  const prologue = (text) => /^(?:'use strict';|"use strict";)/.test(text);
+  for (const f of ['client.js', 'wave-store.js', 'wave-codec.js']) {
+    assert.strictEqual(prologue(read(f)), true,
+      f + ' 的第一件事必須是 strict prologue（凍結的牙齒靠它）');
+  }
+  // server 把 client 原樣塞進 <script>，中間不准夾任何東西——夾了就不是 prologue 了
+  assert.ok(read('server.js').includes('<script>${clientJs}</script>'),
+    'client.js 必須原樣內嵌，prologue 才會留在最前面');
+
+  // 守衛自己的牙齒：這幾種「看起來有 strict、其實不是 prologue」都必須被抓到
+  for (const bite of ['/* md2doc */\n\'use strict\';\n',
+    '(function () {\n\'use strict\';\n',
+    '\n\'use strict\';',
+    'const x = 1;\n\'use strict\';']) {
+    assert.strictEqual(prologue(bite), false, '守衛必須抓到 ' + JSON.stringify(bite));
+  }
+  // 而兩種引號的真 prologue 都不准誤傷
+  assert.strictEqual(prologue("'use strict';\nconst x = 1;"), true);
+  assert.strictEqual(prologue('"use strict";\nconst x = 1;'), true);
+}
+
+// ---------------------------------------------------------------------------
+// T25：凍結不准蔓延到呼叫端還握著的物件。手寫的 fn 可能把一個重複使用的 lane 範本
+// 或剪貼簿的一列直接放進文件裡；如果那個物件被就地凍住，呼叫端下一次 push 會在離
+// 現場很遠的地方丟。所以是 copy-on-accept：沒凍住的節點抄一份、凍我們自己的那份，
+// 已經凍住的（＝上一版文件裡的）照原樣共用，結構共享與 lane 的物件識別都不受影響。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(GSRC);
+  const before = s.doc;
+  const clipboard = ['A', 'B'];
+  const template = { name: 'T', wave: '23', data: clipboard };
+  assert.strictEqual(s.apply('hand', (d) => ({ signal: d.signal.concat([template]) })), true);
+
+  assert.strictEqual(Object.isFrozen(template), false, '交進來的物件不准被凍住');
+  assert.strictEqual(Object.isFrozen(clipboard), false, '連裡面的陣列也不准');
+  clipboard.push('C');          // 不准丟
+  template.name = 'T2';         // 不准丟
+  assert.deepStrictEqual(clipboard, ['A', 'B', 'C']);
+
+  const lane = s.doc.signal[s.doc.signal.length - 1];
+  assert.notStrictEqual(lane, template, 'store 拿的是自己的副本');
+  assert.strictEqual(lane.name, 'T', '呼叫端後來改自己的物件，改不到 store 裡');
+  assert.deepStrictEqual(lane.data, ['A', 'B'], 'data 也是自己的副本');
+  assert.strictEqual(Object.isFrozen(lane), true);
+  assert.strictEqual(Object.isFrozen(lane.data), true);
+
+  // 而沒被碰過的 lane 仍然是**同一個物件**——抄的是新的那些，不是整份文件
+  assert.strictEqual(s.doc.signal[0], before.signal[0], '沒動到的 lane 必須原樣共用');
+  assert.strictEqual(s.doc.signal[1], before.signal[1], 'group 也是');
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, true, 'Got ' + JSON.stringify(patch));
+  assert.ok(patch.text.includes('name: "T"'));
+
+  // 抄的是**結構**不是樹：同一個節點被指到兩次，抄完還是同一個節點（含自己指到自己
+  // 的那種——T9/T22 靠它，codec 才會說「這個值含著自己」而不是說「太深了」）
+  const shared = ['S'];
+  const two = S.createStore(GSRC);
+  two.apply('hand', (d) => ({
+    signal: d.signal.concat([{ name: 'P', wave: '3', data: shared },
+      { name: 'Q', wave: '3', data: shared }]),
+  }));
+  const lanes = two.doc.signal;
+  assert.strictEqual(lanes[lanes.length - 1].data, lanes[lanes.length - 2].data,
+    '被指到兩次的節點，抄完還是同一個');
+  assert.strictEqual(Object.isFrozen(shared), false, '而呼叫端那一份還是活的');
+}
+
+// ---------------------------------------------------------------------------
+// T26：兩個候選都重現得出來時，它們必須是**同一份文字**——否則「取第一個」就變成
+// 一個沒有人看得到的偏好（T17 比的是樹與註解有沒有活著，比不出註解落在哪一行）。
+// 候選是用 codec 直接手搭的，所以 codec 哪天讓兩種寫法的註解落點不一樣，這裡會紅。
+// ---------------------------------------------------------------------------
+{
+  const CSRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  { name: "b", wave: "01" },   // lane b',
+    '  ["grp",',
+    '    { name: "c", wave: "01" },   // lane c',
+    '    { name: "d", wave: "01" },   // lane d',
+    '    { name: "x", wave: "01" },   // lane x',
+    '  ],',
+    '  { name: "e", wave: "01" },   // lane e',
+    ']}',
+  ].join('\n');
+  // 每一行上「名字 → 同一行的註解」的對應，用來檢查註解有沒有跟著它的 lane 走
+  const notes = function (text) {
+    const out = {};
+    for (const line of text.split('\n')) {
+      const m = /name:\s*"([^"]+)"/.exec(line);
+      const c = /\/\/\s*(.+)$/.exec(line);
+      if (m) out[m[1]] = c === null ? null : c[1].trim();
+    }
+    return out;
+  };
+  const want = notes(CSRC);
+  const r0 = C.parseSource(CSRC);
+  const n = C.lanePaths(r0.doc).length;
+  let bothReproduced = 0;
+  for (let f = 0; f + 1 < n; f++) {
+    const s = S.createStore(CSRC);
+    s.apply('mv', (d) => C.moveLane(d, f, f + 1));
+    const patch = s.toPatch();
+    assert.strictEqual(patch.ok, true, 'pair ' + f + ' Got ' + JSON.stringify(patch));
+    assert.deepStrictEqual(notes(patch.text), want,
+      'pair ' + f + '：每一條註解都要留在它自己那條 lane 的那一行');
+
+    // 手搭兩個候選：「上面那條被拖下來」與「下面那條被拖上去」
+    const r = C.parseSource(CSRC);
+    const shape = (t) => JSON.stringify(C.parseSource(t).doc);
+    const built = [
+      C.patchSource(CSRC, r, [{ op: 'move', path: C.lanePath(r.doc, f),
+        to: C.laneInsertPath(r.doc, f + 2) }]),
+      C.patchSource(CSRC, r, [{ op: 'move', path: C.lanePath(r.doc, f + 1),
+        to: C.laneInsertPath(r.doc, f) }]),
+    ];
+    const good = built.filter(function (b) {
+      return b.ok === true && shape(b.text) === JSON.stringify(s.doc);
+    });
+    assert.ok(good.length >= 1, 'pair ' + f + '：至少要有一個候選重現得出 doc');
+    assert.strictEqual(patch.text, good[0].text,
+      'pair ' + f + '：store 交出來的必須就是重現得出 doc 的那個候選');
+    if (good.length === 2) {
+      bothReproduced++;
+      assert.strictEqual(good[0].text, good[1].text,
+        'pair ' + f + '：兩個候選都重現得出來時，它們必須逐字相同——不然「取第一個」' +
+        '就是一個沒人看得到的偏好');
+    }
+  }
+  assert.ok(bothReproduced >= 1,
+    '這個 fixture 必須真的含有「兩個候選都成立」的那一格，否則上面那條斷言是空的。' +
+    'Got ' + bothReproduced);
+}
+
+// ---------------------------------------------------------------------------
+// T27：拒絕的話要對得起使用者做過的事。相鄰對調有兩個讀法，兩個都寫不出來的時候，
+// 贏的那個拒絕**可能**在描述使用者沒做過的那個拖曳——所以訊息要先說「這個重排有
+// 不只一個讀法」，再說被拒絕的那個讀法為什麼不行。只有一個讀法時不准加這句。
+// ---------------------------------------------------------------------------
+{
+  // 兩個候選：刪掉 c、把 b 拖到最後（「d 被拖到中間」同樣解釋得了這個順序）
+  const ESRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["g1",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '    { name: "c", wave: "01" },   // lane c',
+    '  ],',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n');
+  const s = S.createStore(ESRC);
+  s.apply('remove-lane', (d) => C.removeLane(d, 2));
+  s.apply('move-lane', (d) => C.moveLane(d, 1, 2));
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, false);
+  assert.ok(patch.reason.includes('more than one reading'),
+    '有兩個讀法時要先說出來。Got ' + JSON.stringify(patch.reason));
+  assert.ok(patch.reason.includes('deletion and a drag'),
+    '而且還是要說出被拒絕的那個讀法為什麼不行');
+
+  // 只有一個讀法的同一種衝突：訊息不准假裝有歧義
+  const LSRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  ["g1",',
+    '    { name: "b", wave: "01" },   // lane b',
+    '    { name: "c", wave: "01" },   // lane c',
+    '  ],',
+    '  { name: "d", wave: "01" },   // lane d',
+    '  { name: "e", wave: "01" },   // lane e',
+    ']}',
+  ].join('\n');
+  const one = S.createStore(LSRC);
+  one.apply('remove-lane', (d) => C.removeLane(d, 2));
+  one.apply('move-lane', (d) => C.moveLane(d, 1, 3));
+  assert.deepStrictEqual(laneShape(one.doc), ['a', 'd', 'e', 'b'],
+    '先確認 fixture：只有「b 被拖到最後」解釋得了這個順序');
+  const p2 = one.toPatch();
+  assert.strictEqual(p2.ok, false);
+  assert.ok(p2.reason.includes('deletion and a drag'));
+  assert.ok(!p2.reason.includes('more than one reading'),
+    '只有一個讀法時不准說有歧義。Got ' + JSON.stringify(p2.reason));
+}
+
+// ---------------------------------------------------------------------------
+// T28：巢狀有多深才會撞到天花板——量出來釘住。61 層還存得起來，62 層在 parseSource
+// 就被擋下，所以 store 自己那條「太深」的拒絕從任何**讀得回來的**來源都到不了；
+// fix2 把那條死碼刪掉，這一格是它的依據，將來 codec 的天花板動了這裡會紅。
+// ---------------------------------------------------------------------------
+{
+  const deep = (n) => '{ signal: [\n  { name: "a", wave: "01", deep: ' +
+    '['.repeat(n) + '1' + ']'.repeat(n) + ' },\n]}';
+  const s = S.createStore(deep(61));
+  assert.strictEqual(s.ok, true, '61 層必須讀得回來');
+  s.apply('set-cell', (d) => C.setCell(d, 0, 1, 'x'));
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, true, '61 層必須存得起來。Got ' + JSON.stringify(patch));
+  assert.ok(patch.text.includes('wave: "0x"'));
+  const tooDeep = S.createStore(deep(62));
+  assert.strictEqual(tooDeep.ok, false, '62 層在 parseSource 就被擋下');
+  assert.strictEqual(tooDeep.toPatch().ok, false);
+}
+
+// ---------------------------------------------------------------------------
 // T15：守衛要有牙齒 —— 不碰 DOM、不執行字串。
 // 清單跟 wave-codec.test.js 同一份，只少掉 `require(`（本檔正當地 require codec）。
 // 樣式與咬痕 copy 自 test/wave-geometry.test.js：散文讓路給守衛，不是反過來。

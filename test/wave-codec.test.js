@@ -2272,6 +2272,53 @@ const RSRC = [
   assert.ok(!out.text.includes('grp'), '空 group 不准留在檔案裡');
 }
 
+// N3c：防漂移的釘子要蓋過它守的那條規則。單條等價只在 GSRC 的四個位置上比過，
+// 而 holdsContent 真正可能分歧的地方是**巢狀**與**作者自己寫的空 group**：那正是
+// F2 證明過「漂移很貴」的地形。這裡把每一種形狀的每一條 lane 都比一遍。
+{
+  const SHAPES = [
+    // 巢狀兩層
+    ['{ signal: [', '  ["outer",', '    { name: "b", wave: "01" },',
+      '    ["inner",', '      { name: "x", wave: "01" },', '    ],', '  ],', ']}'],
+    // 巢狀 + 作者自己寫的空 group（同層）
+    ['{ signal: [', '  ["outer",', '    { name: "b", wave: "01" },',
+      '    ["author-empty"],', '  ],', '  { name: "z", wave: "01" },', ']}'],
+    // 最上層就有一個作者自己寫的空 group
+    ['{ signal: [', '  ["author-empty"],', '  { name: "a", wave: "01" },',
+      '  ["g", { name: "b", wave: "01" }],', ']}'],
+    // 三層，最裡面只有一條
+    ['{ signal: [', '  ["l1",', '    ["l2",', '      ["l3",',
+      '        { name: "deep", wave: "01" },', '      ],', '    ],',
+      '    { name: "side", wave: "01" },', '  ],', ']}'],
+    // 一個 group 裡兩條、外面兩條
+    ['{ signal: [', '  { name: "a", wave: "01" },',
+      '  ["g", { name: "b", wave: "01" }, { name: "c", wave: "01" }],',
+      '  { name: "d", wave: "01" },', ']}'],
+    // 沒有 group
+    ['{ signal: [', '  { name: "a", wave: "01" },', '  { name: "b", wave: "01" },', ']}'],
+  ];
+  for (const lines of SHAPES) {
+    const src = lines.join('\n');
+    const rr = C.parseSource(src);
+    assert.strictEqual(rr.ok, true, 'fixture 必須解析得出來：' + src);
+    const n = C.lanePaths(rr.doc).length;
+    assert.ok(n > 0, 'fixture 必須有 lane：' + src);
+    for (let k = 0; k < n; k++) {
+      assert.deepStrictEqual(C.laneRemovePaths(rr.doc, [k]), [C.laneRemovePath(rr.doc, k)],
+        '單條的兩扇門必須一致（編號 ' + k + '）於：' + src);
+      // 而且兩扇門寫回去之後的樹也要一樣
+      const one = C.patchSource(src, C.parseSource(src),
+        [{ op: 'remove', path: C.laneRemovePath(rr.doc, k) }]);
+      const set = C.patchSource(src, C.parseSource(src),
+        C.laneRemovePaths(rr.doc, [k]).map(function (q) { return { op: 'remove', path: q }; }));
+      assert.strictEqual(one.ok, true, 'Got ' + JSON.stringify(one));
+      assert.strictEqual(set.ok, true, 'Got ' + JSON.stringify(set));
+      assert.strictEqual(set.text, one.text,
+        '兩扇門寫出來的位元組也要一樣（編號 ' + k + '）於：' + src);
+    }
+  }
+}
+
 // N3b：巢狀與「作者自己寫的空 group」——後者是內容，會撐住父層（Task 3 的裁示）
 {
   const src = ['{ signal: [',
