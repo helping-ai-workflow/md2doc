@@ -50,7 +50,7 @@
   "homepage": "https://github.com/helping-ai-workflow/md2doc#readme",
   "bugs": "https://github.com/helping-ai-workflow/md2doc/issues",
   "author": "helping-ai-workflow",
-  "license": "MIT",
+  "license": "MIT AND Apache-2.0",
   "publishConfig": {
     "access": "public"
   }

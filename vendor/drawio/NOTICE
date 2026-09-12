@@ -19,7 +19,7 @@ The vendored file
 
   path      vendor/drawio/viewer-static.min.js
   project   draw.io (diagrams.net) — https://github.com/jgraph/drawio
-  version   v31.3.2  (the file also carries mxClient.VERSION="31.3.2")
+  version   v31.3.2  (the bytes carry `mxClient={VERSION:"31.3.2"`)
   upstream  src/main/webapp/js/viewer-static.min.js at tag v31.3.2
   size      4,151,717 bytes
   sha256    2fabaaa3e28d5f80f943285a2ce19c22cf870857203255f1e0347ef93693a297

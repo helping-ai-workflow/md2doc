@@ -5,7 +5,7 @@
 - 來源：https://github.com/jgraph/drawio （`src/main/webapp/js/viewer-static.min.js`）
 - 取得日期：2026-09-10
 - sha256：`2fabaaa3e28d5f80f943285a2ce19c22cf870857203255f1e0347ef93693a297`
-- 版本：上游 tag `v31.3.2`（檔案內也嵌著 `mxClient.VERSION="31.3.2"`）。
+- 版本：上游 tag `v31.3.2`（檔案內嵌的實際位元組是 `mxClient={VERSION:"31.3.2"`）。
   **檔案本身沒有嵌入授權標頭**（開頭是 `window.PROXY_URL=...` 等直接可執行的
   minified code，沒有 license banner 註解）——授權依據是 provenance，不是檔案
   內文字。

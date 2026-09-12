@@ -422,9 +422,10 @@ GUI 波形編輯。**批次 3 一行都還沒寫。**
 的根本差異**：擴充套件活在一個永遠有 editor host 的環境裡，md2doc 的輸出沒有 host，
 只有一個檔案。
 
-**代價說清楚：這 4 MB 進的是每一次安裝。** `package.json` 的 `files` 收了 `vendor/`，
-所以 `npm install @helping-ai-workflow/md2doc` 會多下載約 4 MB，**包括從來不碰 `.drawio`
-的人**。替代方案是 postinstall 去下載，但那會打破「離線裝得起來」這件事，所以不換。
+**代價說清楚：這顆 viewer 進的是每一次安裝。** `package.json` 的 `files` 收了 `vendor/`，
+所以 `npm install @helping-ai-workflow/md2doc` 每個人都會拿到它，**包括從來不碰 `.drawio`
+的人**。數字分兩種、不要混：**下載**是壓縮後的量，viewer 自己 gzip 後 854 KB（整包
+`npm pack` 1.4 MB）；**磁碟**上解開才是 4,151,717 bytes。替代方案是 postinstall 去下載，但那會打破「離線裝得起來」這件事，所以不換。
 那份 viewer 是 Apache-2.0 的第三方程式碼，不是 md2doc 自己的 MIT 原始碼：授權全文與逐項
 的第三方清單跟著它一起進 tarball（`vendor/drawio/LICENSE`、`vendor/drawio/NOTICE`），
 根目錄另有一份 `THIRD-PARTY-NOTICES.md` 當作授權掃描的入口。
