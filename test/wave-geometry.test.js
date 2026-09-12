@@ -295,19 +295,24 @@ const FLAT = {
 // ---------------------------------------------------------------------------
 // F2：守衛要有牙齒 —— 不碰 DOM、不執行字串
 //
-// 上一輪我把這條守衛放寬到只剩四個字串，理由是「`document` 這個字會出現在散文裡」。
-// review 用三個插入證明放寬後它一個都抓不到：冷分支裡的 `document.body.clientWidth`、
-// module scope 的 `typeof window !== 'undefined' && window.devicePixelRatio`、
-// 以及 `Function('return 40')()`。repo 對這個狀況已經有白紙黑字的判例
-// （`test/editor-client.test.js` 那段「不要為了散文去放寬守衛」），所以這裡改成
-// 「窄到跳過散文、但跳不過呼叫」的樣式：屬性存取與 `typeof` 檢查抓得到，
-// 句子裡的 "document" 抓不到。守衛自己的牙齒也在下面釘住，不然它壞了沒人知道。
+// repo 的判例（`test/editor-client.test.js` 那段「不要為了散文去放寬守衛」）是：
+// 散文讓路給守衛，不是反過來。所以這條樣式往寬的方向站：屬性存取可以夾空白、可以
+// 換行、可以是 optional chaining，`typeof` 偵測、`window["x"]` 下標、以及
+// `const { devicePixelRatio } = window;` 這種「把全域物件當值傳出去」的寫法都抓。
+// 上一輪為了自己散文裡的 `document` 把它收窄，re-review 量過：收窄換來的誤傷是 0
+// （這個檔案沒有任何一行以 `document.` 結尾），代價卻是換行與 optional chaining
+// 兩種寫法逃掉。**如果將來它誤傷了散文，去改散文，不要改這條樣式。**
+// 守衛自己的牙齒也在下面釘住，不然它壞了沒人知道。
 // ---------------------------------------------------------------------------
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'wave-geometry.js'),
     'utf8');
 
-  const DOM = /\b(?:document|window|navigator|globalThis|screen|location)(?:\.[A-Za-z_$]|\[)|typeof\s+(?:window|document|navigator|globalThis)\b/;
+  const HOSTS = 'document|window|navigator|globalThis|screen|location|self';
+  const DOM = new RegExp(
+    '\\b(?:' + HOSTS + ')\\s*\\??\\s*(?:\\.\\s*[A-Za-z_$]|\\[)' +   // 屬性存取（可夾空白／換行／?.）
+    '|\\btypeof\\s+(?:' + HOSTS + ')\\b' +                          // 特性偵測
+    '|[=(,]\\s*(?:' + HOSTS + ')\\s*[;,)]');                        // 當成值傳出去／解構來源
   assert.strictEqual(DOM.test(src), false,
     'wave-geometry.js 不得碰 DOM。Got ' + JSON.stringify((DOM.exec(src) || [])[0]));
 
@@ -317,6 +322,12 @@ const FLAT = {
     "const SCALE = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;",
     'const w = window["innerWidth"];',
     'navigator.userAgent',
+    // re-review 量到會從舊樣式底下溜過去的四種：
+    'const w = window?.innerWidth;',
+    'const { devicePixelRatio } = window;',
+    'const x = window\n  .innerWidth;',
+    'const dpr = self.devicePixelRatio;',
+    'if (typeof self !== "undefined") {}',
   ];
   for (const bite of BITES) {
     assert.strictEqual(DOM.test(bite), true, '守衛必須抓到 ' + JSON.stringify(bite));
@@ -416,12 +427,16 @@ const FLAT = {
           // 另一個算式（先乘再加 vs 先加再乘），在小數尺寸下可能差最後一個 ulp，
           // 落在邊界的左邊一點點 —— 那時候它**真的**還在這一格裡，回這一格才對。
           // 所以那個點只釘「不准差到第三格去」。
-          const nxt = G.cellAt(L, G.cellRect(L, lane, cyc + 1).x, r.y + r.height / 2);
+          const nextX = G.cellRect(L, lane, cyc + 1).x;
+          const nxt = G.cellAt(L, nextX, r.y + r.height / 2);
           if (bad(nxt, lane, cyc + 1)) nextMiss++;
+          // `r.x + r.width` 落在下一格左緣的左邊時答案就是**這一格**，否則是下一格。
+          // 上一輪這裡寫成「cyc 或 cyc+1 都算對」，等於兩個答案都收——那個寬容剛好
+          // 把 indexAt 的**往下貼齊**那一圈變成測不到的死碼（它只改這個點的答案）。
+          // 這裡改成照算式判定，兩邊都是精確值。
+          const want = (r.x + r.width < nextX) ? cyc : cyc + 1;
           const far = G.cellAt(L, r.x + r.width, r.y + r.height / 2);
-          if (!far || far.laneIndex !== lane || (far.cycle !== cyc && far.cycle !== cyc + 1)) {
-            farMiss++;
-          }
+          if (bad(far, lane, want)) farMiss++;
         }
         if (firstBad === null && (bad(centre, lane, cyc) || bad(left, lane, cyc))) {
           firstBad = { opts: opts, lane: lane, cyc: cyc, rect: r, left: left, centre: centre };
@@ -434,7 +449,7 @@ const FLAT = {
   assert.strictEqual(leftEdgeMiss, 0, '小數尺寸：左緣必須屬於自己。' + JSON.stringify(firstBad));
   assert.strictEqual(topEdgeMiss, 0, '小數尺寸：上緣必須屬於自己。' + JSON.stringify(firstBad));
   assert.strictEqual(nextMiss, 0, '小數尺寸：下一格的左緣必須屬於下一格');
-  assert.strictEqual(farMiss, 0, '小數尺寸：rect 的右緣最多只能差一格，不准差兩格');
+  assert.strictEqual(farMiss, 0, '小數尺寸：rect 的右緣要落在算式說的那一格（沒到下一格的左緣就還是這一格）');
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +528,70 @@ const FLAT = {
   const empty = G.layoutOf({ signal: [] }, opts);
   assert.strictEqual(empty.cycles, 0);
   assert.strictEqual(empty.width, 60);
+}
+
+// ---------------------------------------------------------------------------
+// MUST-FIX 1：整份文件只問 codec 一次
+//
+// `lanePath` 每被問一次就走一次樹，所以逐條問是 O(N²)，而且那個成本跟**文件**的
+// 長度走、不是跟上限走 —— 上一輪把上限從 4096 降到 1024 並不會擋住它（20000 條
+// 的文件照樣要 2 秒以上）。改成問一次 `lanePaths`。
+//
+// 這裡不用計時來釘（會飄），直接數呼叫次數：geometry 是透過模組物件的屬性呼叫
+// codec 的，所以把屬性換掉就數得到。
+// ---------------------------------------------------------------------------
+{
+  const realPaths = C.lanePaths;
+  const realPath = C.lanePath;
+  let nPaths = 0, nPath = 0;
+  C.lanePaths = function (d) { nPaths++; return realPaths.call(C, d); };
+  C.lanePath = function (d, i) { nPath++; return realPath.call(C, d, i); };
+  let lanes = -1;
+  try {
+    lanes = G.layoutOf(GROUPED).lanes.length;
+  } finally {
+    C.lanePaths = realPaths;
+    C.lanePath = realPath;
+  }
+  assert.strictEqual(lanes, 4, '換掉屬性之後答案要不變');
+  assert.strictEqual(nPaths, 1, '整份文件只准問一次 lanePaths');
+  assert.strictEqual(nPath, 0, '不准再逐條問 lanePath：那是 O(N²)，而且成本跟文件長度走');
+}
+
+// ---------------------------------------------------------------------------
+// R2：hit test 不准回 -0
+//
+// `Math.round(-0.2)` 是 -0，呼叫端拿它當座標傳進來，回來的 laneIndex 也會是 -0；
+// 數值與索引都沒差，但 `deepStrictEqual(hit, {laneIndex: 0})` 會失敗，下一棒會為了
+// 一個算得正確的答案debug 一小時。
+// ---------------------------------------------------------------------------
+{
+  const L = G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 0 });
+  const hit = G.cellAt(L, -0, -0);
+  assert.deepStrictEqual(hit, { laneIndex: 0, cycle: 0 });
+  assert.strictEqual(Object.is(hit.laneIndex, -0), false, 'laneIndex 不准是 -0');
+  assert.strictEqual(Object.is(hit.cycle, -0), false, 'cycle 不准是 -0');
+  const hit2 = G.cellAt(G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 }),
+    60, -0);
+  assert.strictEqual(Object.is(hit2.laneIndex, -0), false);
+}
+
+// ---------------------------------------------------------------------------
+// R4：opts 必須是「物件字面值那種物件」
+//
+// F5 擋掉了 42 / '40' / [] / function / true，但 `new Date()`、`new Map()` 還是
+// 默默用預設尺寸畫出來 —— 正是 F5 要擋的那個結果，只是換了一種拼法。
+// 判別式跟 codec 的 isPlainObject 同一條：prototype 是 Object.prototype 或 null。
+// ---------------------------------------------------------------------------
+{
+  for (const bad of [new Date(), new Map(), new Set(), /re/, new Error('x')]) {
+    assert.throws(function () { G.layoutOf(FLAT, bad); }, TypeError,
+      String(bad) + ' 不是設定物件，不能默默用預設尺寸');
+  }
+  const bare = Object.create(null);
+  bare.laneHeight = 7;
+  assert.strictEqual(G.layoutOf(FLAT, bare).laneHeight, 7,
+    'prototype 是 null 的物件是合法的設定物件（跟 codec 的 isPlainObject 同一條線）');
 }
 
 console.log('wave-geometry.test.js OK');

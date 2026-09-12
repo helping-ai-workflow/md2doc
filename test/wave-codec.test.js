@@ -1721,6 +1721,26 @@ const laneShape = function (doc) {
     '編號 3 是 d；naive 的 ["signal",3] 根本不存在');
   assert.strictEqual(C.lanePath(r.doc, 4), null, '超出範圍回 null，不是猜一個');
   assert.strictEqual(C.lanePath(r.doc, -1), null);
+
+  // N1b：一次問完所有 lane 的路徑。lanePath 每問一條就走一次樹，逐條問是 O(N²)；
+  // 幾何層要的是整份文件的列，所以橋這一側補一個「同一次走訪、同一個順序」的出口。
+  // 它不是第二種順序：逐項比對 lanePath，任何一格不一樣都是 bug。
+  {
+    const all = C.lanePaths(r.doc);
+    assert.strictEqual(Array.isArray(all), true, 'lanePaths 必須回陣列');
+    assert.strictEqual(all.length, 4, 'GSRC 攤平後是四條 lane');
+    for (let i = 0; i < all.length; i++) {
+      assert.deepStrictEqual(all[i], C.lanePath(r.doc, i),
+        '第 ' + i + ' 條的路徑必須跟 lanePath 一模一樣');
+    }
+    assert.deepStrictEqual(C.lanePaths({ signal: [] }), [], '沒有 lane 就是空陣列');
+    assert.deepStrictEqual(C.lanePaths(null), [], '不是文件也回空陣列，不丟');
+    assert.deepStrictEqual(C.lanePaths({}), []);
+    // 回的陣列是新的：呼叫端改它不得影響下一次
+    const once = C.lanePaths(r.doc);
+    once.length = 0;
+    assert.strictEqual(C.lanePaths(r.doc).length, 4, '回的是新陣列，不是內部狀態');
+  }
   assert.deepStrictEqual(C.laneInsertPath(r.doc, 1), ['signal', 1, 1],
     '插在 b 前面 = 進到 group 裡');
   assert.deepStrictEqual(C.laneInsertPath(r.doc, 3), ['signal', 2],
