@@ -844,4 +844,228 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   assert.deepStrictEqual(C.parseSource(firstOne.text).doc.signal.map((x) => x.name), ['b']);
 }
 
+// ---- 以下為 fix round 2（re-review N1-N7）釘住的合約 ----
+
+// N1：註解歸屬的邊界對兩種註解寫法、兩個方向都要一樣
+//
+// 邊界（程式與測試共用的那一句）：一則註解屬於「它在同一行上所接續的那個成員」；
+// 當它自己獨佔一行或數行時，屬於「緊接在它下面的那個成員」，中間沒有空行為限。
+{
+  const LINE = ['{ signal: [',
+                '  // 這段',
+                '  // 說明',
+                '  { name: "a", wave: "0" },',
+                '  { name: "b", wave: "1" },',
+                ']}'].join('\n');
+  const BLOCK = ['{ signal: [',
+                 '  /* 這段',
+                 '     說明 */',
+                 '  { name: "a", wave: "0" },',
+                 '  { name: "b", wave: "1" },',
+                 ']}'].join('\n');
+  const MARK = '說明';
+
+  for (const [style, SRCX] of [['line', LINE], ['block', BLOCK]]) {
+    const r = C.parseSource(SRCX);
+    assert.strictEqual(r.ok, true, style + ' fixture 必須解析得出來。Got ' + JSON.stringify(r));
+
+    // 方向一：刪掉 a，它的註解要跟著走，不得留下來壓在 b 頭上
+    const rm = C.patchSource(SRCX, r, [{ op: 'remove', path: ['signal', 0] }]);
+    assert.strictEqual(rm.ok, true, style + ' remove: Got ' + JSON.stringify(rm));
+    assert.strictEqual(rm.text.indexOf(MARK), -1,
+      style + ' 樣式：上方註解必須跟著被刪的 lane 走。Got ' + JSON.stringify(rm.text));
+    const rmp = C.parseSource(rm.text);
+    assert.strictEqual(rmp.ok, true, style + ' remove 後必須還能解析。Got ' + JSON.stringify(rmp));
+    assert.deepStrictEqual(rmp.doc.signal.map((x) => x.name), ['b']);
+
+    // 方向二：插在 a 前面，新 lane 不得偷走 a 的註解
+    const ins = C.patchSource(SRCX, r, [
+      { op: 'insert', path: ['signal', 0], value: { name: 'N', wave: '1' } },
+    ]);
+    assert.strictEqual(ins.ok, true, style + ' insert: Got ' + JSON.stringify(ins));
+    const insp = C.parseSource(ins.text);
+    assert.strictEqual(insp.ok, true, style + ' insert 後必須還能解析。Got ' + JSON.stringify(insp));
+    assert.deepStrictEqual(insp.doc.signal.map((x) => x.name), ['N', 'a', 'b']);
+    const lines = ins.text.split('\n');
+    const mark = lines.findIndex((l) => l.indexOf(MARK) !== -1);
+    assert.ok(mark !== -1, style + ' 樣式：註解必須還在');
+    assert.ok(lines[mark + 1].indexOf('"a"') !== -1,
+      style + ' 樣式：註解必須還貼在 a 上面，不得變成新 lane 的。Got ' + JSON.stringify(ins.text));
+    assert.ok(ins.text.indexOf('{ name: "N"') < ins.text.indexOf(MARK),
+      style + ' 樣式：新 lane 要落在那串註解之前。Got ' + JSON.stringify(ins.text));
+  }
+
+  // 空行照樣切斷歸屬，兩種寫法都一樣
+  for (const [style, head] of [['line', '  // 整張圖的標題'], ['block', '  /* 整張圖\n     的標題 */']]) {
+    const SRCX = ['{ signal: [', head, '',
+                  '  { name: "a", wave: "0" },',
+                  '  { name: "b", wave: "1" },',
+                  ']}'].join('\n');
+    const r = C.parseSource(SRCX);
+    assert.strictEqual(r.ok, true, style + ' Got ' + JSON.stringify(r));
+    const rm = C.patchSource(SRCX, r, [{ op: 'remove', path: ['signal', 0] }]);
+    assert.strictEqual(rm.ok, true, 'Got ' + JSON.stringify(rm));
+    assert.ok(rm.text.indexOf('標題') !== -1,
+      style + ' 樣式：隔著空行的標題不屬於任何 lane，必須留著。Got ' + JSON.stringify(rm.text));
+  }
+
+  // 同一行上接續某個成員的註解屬於那個成員 —— 跨行的區塊註解也是
+  {
+    const T = ['{ signal: [',
+               '  { name: "a", wave: "0" },  /* 這條的',
+               '     長註解 */',
+               '  { name: "b", wave: "1" },',
+               ']}'].join('\n');
+    const r = C.parseSource(T);
+    assert.strictEqual(r.ok, true, 'Got ' + JSON.stringify(r));
+
+    const rm = C.patchSource(T, r, [{ op: 'remove', path: ['signal', 0] }]);
+    assert.strictEqual(rm.ok, true, 'Got ' + JSON.stringify(rm));
+    assert.strictEqual(rm.text.indexOf('長註解'), -1,
+      '接在 a 後面的跨行註解屬於 a，刪 a 要一起帶走。Got ' + JSON.stringify(rm.text));
+    assert.deepStrictEqual(C.parseSource(rm.text).doc.signal.map((x) => x.name), ['b']);
+
+    // 刪 b 不得動到 a 的註解
+    const rb = C.patchSource(T, r, [{ op: 'remove', path: ['signal', 1] }]);
+    assert.strictEqual(rb.ok, true, 'Got ' + JSON.stringify(rb));
+    assert.ok(rb.text.indexOf('長註解') !== -1, '別人的註解不得被牽連');
+
+    // 插在 b 前面也不得偷走那段跨行註解
+    const ins = C.patchSource(T, r, [
+      { op: 'insert', path: ['signal', 1], value: { name: 'N', wave: '1' } },
+    ]);
+    assert.strictEqual(ins.ok, true, 'Got ' + JSON.stringify(ins));
+    assert.ok(ins.text.indexOf('長註解') < ins.text.indexOf('{ name: "N"'),
+      '新 lane 要落在 a 的跨行註解之後。Got ' + JSON.stringify(ins.text));
+    assert.deepStrictEqual(C.parseSource(ins.text).doc.signal.map((x) => x.name),
+      ['a', 'N', 'b']);
+  }
+
+  // 寫在中括號那一行的註解不屬於第一個成員（它接續的是中括號）
+  {
+    const T = ['{ signal: [ // 整個 signal 的說明',
+               '  { name: "a", wave: "0" },',
+               ']}'].join('\n');
+    const r = C.parseSource(T);
+    const rm = C.patchSource(T, r, [{ op: 'remove', path: ['signal', 0] }]);
+    assert.strictEqual(rm.ok, true, 'Got ' + JSON.stringify(rm));
+    assert.ok(rm.text.indexOf('整個 signal 的說明') !== -1,
+      '中括號那一行的註解不屬於第一個成員。Got ' + JSON.stringify(rm.text));
+  }
+}
+
+// N2：一個 doc block 上面不得再疊一個 doc block（F11 與 N2 是同一個形狀，這條擋掉第三次）
+{
+  const fs = require('fs');
+  const src = fs.readFileSync(require.resolve('../lib/editor/wave-codec.js'), 'utf8');
+  const srcLines = src.split('\n');
+  // Collect every doc block. The first one is the file's own header, which is
+  // allowed to be followed by another — it documents the module, not a function.
+  const blocks = [];
+  for (let i = 0; i < srcLines.length; i++) {
+    if (srcLines[i].trim() !== '/**') continue;
+    let j = i;
+    while (j < srcLines.length && srcLines[j].trim() !== '*/') j++;
+    blocks.push([i, j]);
+    i = j;
+  }
+  assert.ok(blocks.length > 5, '應該找得到好幾個 doc block，否則這條守衛是空的');
+  const stacked = [];
+  for (const [openLine, closeLine] of blocks.slice(1)) {
+    let j = closeLine + 1;
+    while (j < srcLines.length && srcLines[j].trim() === '') j++;
+    if (j < srcLines.length && srcLines[j].trim().startsWith('/**')) {
+      stacked.push('block opening at line ' + (openLine + 1) + ' is followed at line ' +
+        (j + 1) + ' by another doc block，所以它底下那個東西穿的是別人的說明');
+    }
+  }
+  assert.deepStrictEqual(stacked, [],
+    '有 doc block 直接疊在另一個 doc block 上面，代表某個函式穿著別人的說明：\n  ' +
+    stacked.join('\n  '));
+}
+
+// N4：深度拒絕的訊息要講「這個位置真正剩下的額度」，不是講總上限
+{
+  const r = C.parseSource(SRC);
+  const nest = (depth) => { let v = 'leaf'; for (let i = 0; i < depth; i++) v = [v]; return v; };
+
+  const over = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: nest(63) }]);
+  assert.strictEqual(over.ok, false, '63 層在這個位置必須被拒絕');
+  assert.ok(over.reason.indexOf('62') !== -1,
+    '訊息要講這個位置剩下的 62，而不是只講 64。Got ' + JSON.stringify(over.reason));
+
+  // 路徑更深，訊息裡的數字要跟著變
+  const deeper = C.patchSource(SRC, r,
+    [{ op: 'insert', path: ['signal', 1, 'data', 3], value: nest(61) }]);
+  assert.strictEqual(deeper.ok, false, '這個位置只剩 60 層');
+  assert.ok(deeper.reason.indexOf('60') !== -1,
+    '訊息裡的額度要跟著路徑深度走。Got ' + JSON.stringify(deeper.reason));
+}
+
+// N5：一批 edit 會不會因為交疊而被拒絕，只能看這批的「形狀」，不得看值剛好等不等
+{
+  const r = C.parseSource(SRC);
+  const differs = C.patchSource(SRC, r, [
+    { op: 'remove', path: ['signal', 0] },
+    { path: ['signal', 0, 'wave'], value: '1' },
+  ]);
+  assert.strictEqual(differs.ok, false, '值不同時是交疊，必須拒絕');
+
+  const equal = C.patchSource(SRC, r, [
+    { op: 'remove', path: ['signal', 0] },
+    { path: ['signal', 0, 'wave'], value: 'p......' },   // 與原值相同
+  ]);
+  assert.strictEqual(equal.ok, false,
+    '值剛好相同不該讓同一批 edit 從「被拒絕」變成「通過」。Got ' + JSON.stringify(equal));
+  assert.ok(/overlap|交疊/i.test(equal.reason), 'reason 要說明是交疊。Got ' + equal.reason);
+
+  // 值相同的 edit 單獨送仍然是合法的，而且逐位元組不變
+  const alone = C.patchSource(SRC, r, [{ path: ['signal', 0, 'wave'], value: 'p......' }]);
+  assert.strictEqual(alone.ok, true, 'Got ' + JSON.stringify(alone));
+  assert.strictEqual(alone.text, SRC);
+}
+
+// N6：不是 plain object 的值（Date / Map / Set / RegExp / class 實例）必須拒絕，
+//     不得靜默寫成 {}
+{
+  const r = C.parseSource(SRC);
+  class Lane { constructor() { this.name = 'x'; } }
+  const cases = [
+    ['Date', new Date(0)],
+    ['Map', new Map([['a', 1]])],
+    ['Set', new Set([1])],
+    ['RegExp', /x/g],
+    ['class instance', new Lane()],
+  ];
+  for (const [label, value] of cases) {
+    const out = C.patchSource(SRC, r, [
+      { op: 'insert', path: ['signal', 2], value: { name: 'n', extra: value } },
+    ]);
+    assert.strictEqual(out.ok, false,
+      label + ' 沒有 WaveJSON 寫法，必須拒絕而不是靜默寫成 {}。Got ' + JSON.stringify(out));
+    assert.ok(/plain object|WaveJSON/i.test(out.reason),
+      label + ' 的 reason 要說明原因。Got ' + out.reason);
+  }
+
+  // 值本身就是這種東西的時候也一樣
+  assert.strictEqual(C.patchSource(SRC, r,
+    [{ op: 'insert', path: ['signal', 2], value: new Date(0) }]).ok, false);
+
+  // 普通的物件與陣列不得被誤殺
+  const ok = C.patchSource(SRC, r, [
+    { op: 'insert', path: ['signal', 2],
+      value: { name: 'n', wave: '0', data: ['a', 'b'], node: null, n: 1, b: true } },
+  ]);
+  assert.strictEqual(ok.ok, true, '普通的值不得被誤殺。Got ' + JSON.stringify(ok));
+  assert.strictEqual(C.parseSource(ok.text).ok, true);
+
+  // Object.create(null) 做出來的裸物件也算 plain
+  const bare = Object.create(null);
+  bare.name = 'bare';
+  bare.wave = '0';
+  assert.strictEqual(C.patchSource(SRC, r, [
+    { op: 'insert', path: ['signal', 2], value: bare },
+  ]).ok, true, 'Object.create(null) 也是 plain object');
+}
+
 console.log('wave-codec.test.js OK');
