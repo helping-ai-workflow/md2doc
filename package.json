@@ -19,6 +19,7 @@
     "lib/",
     "bin/",
     "scripts/",
+    "vendor/",
     "README.md",
     "LICENSE"
   ],
