@@ -153,8 +153,11 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   const fs = require('fs');
   const BANNED = ['eval', 'Function', 'constructor', 'runInNewContext',
     'setTimeout', 'setInterval', 'require(', 'import('];
-  // 之後 wave-geometry.js 落地時把它加進這個陣列即可；wave-store / wave-ui
-  // 會有正當的 require / setTimeout，那兩個檔案要由它們自己的測試用較窄的清單守。
+  // 這個陣列只收「連 require 都沒有」的檔案。wave-geometry.js 已經落地，但它
+  // **不能**加進來：它正當地 require 了本檔（lane 的順序只能有一份），會撞到
+  // 下面的 `require(`。它由 test/wave-geometry.test.js 用同一份 BANNED 減掉
+  // `require(`、外加一條 DOM 樣式與一份 require 白名單來守。wave-store / wave-ui
+  // 之後也會有正當的 require / setTimeout，同樣各自用較窄的清單守，別加到這裡。
   const PURE = ['../lib/editor/wave-codec.js'];
   for (const rel of PURE) {
     const src = fs.readFileSync(require.resolve(rel), 'utf8');

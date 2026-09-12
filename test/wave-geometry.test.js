@@ -293,23 +293,226 @@ const FLAT = {
 }
 
 // ---------------------------------------------------------------------------
-// 不執行字串；只 require codec 一個
+// F2：守衛要有牙齒 —— 不碰 DOM、不執行字串
 //
-// 「不碰 DOM」這半刻意不用字串 grep：那個 repo 早就被「散文提到某個退休名字就
-// 整套變紅」燙過一次，而 `document` 這個字在講 WaveJSON 文件的註解裡本來就會出現。
-// 真的碰了 DOM 的話，node 底下第一次呼叫就是 ReferenceError —— 上面每一個測試
-// 都在替這件事作證，比 grep 可靠。
+// 上一輪我把這條守衛放寬到只剩四個字串，理由是「`document` 這個字會出現在散文裡」。
+// review 用三個插入證明放寬後它一個都抓不到：冷分支裡的 `document.body.clientWidth`、
+// module scope 的 `typeof window !== 'undefined' && window.devicePixelRatio`、
+// 以及 `Function('return 40')()`。repo 對這個狀況已經有白紙黑字的判例
+// （`test/editor-client.test.js` 那段「不要為了散文去放寬守衛」），所以這裡改成
+// 「窄到跳過散文、但跳不過呼叫」的樣式：屬性存取與 `typeof` 檢查抓得到，
+// 句子裡的 "document" 抓不到。守衛自己的牙齒也在下面釘住，不然它壞了沒人知道。
 // ---------------------------------------------------------------------------
 {
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'wave-geometry.js'),
     'utf8');
-  for (const bad of ['ev' + 'al(', 'new Function', 'setTimeout(', 'setInterval(']) {
-    assert.strictEqual(src.includes(bad), false,
+
+  const DOM = /\b(?:document|window|navigator|globalThis|screen|location)(?:\.[A-Za-z_$]|\[)|typeof\s+(?:window|document|navigator|globalThis)\b/;
+  assert.strictEqual(DOM.test(src), false,
+    'wave-geometry.js 不得碰 DOM。Got ' + JSON.stringify((DOM.exec(src) || [])[0]));
+
+  // 守衛的牙齒：review 那三個插入，逐一必須被抓到
+  const BITES = [
+    'if (depth > MAX_DEPTH) { return document.body.clientWidth; }',
+    "const SCALE = (typeof window !== 'undefined' && window.devicePixelRatio) || 1;",
+    'const w = window["innerWidth"];',
+    'navigator.userAgent',
+  ];
+  for (const bite of BITES) {
+    assert.strictEqual(DOM.test(bite), true, '守衛必須抓到 ' + JSON.stringify(bite));
+  }
+  // 而散文抓不到 —— 這是放寬守衛的那個藉口，現在它不成立了
+  for (const prose of [
+    ' * WaveJSON document, not strict JSON.',
+    ' * a broken document comes back as an empty layout.',
+    ' * Every size arrives as a parameter. The document is user data.',
+  ]) {
+    assert.strictEqual(DOM.test(prose), false, '散文不得誤傷：' + JSON.stringify(prose));
+  }
+
+  // 會執行字串的拼法：跟 wave-codec.test.js 的 BANNED 同一份，只少掉 `require(`
+  const BANNED = ['eval', 'Function', 'constructor', 'runInNewContext',
+    'setTimeout', 'setInterval', 'import('];
+  for (const bad of BANNED) {
+    assert.strictEqual(src.indexOf(bad), -1,
       'wave-geometry.js 不得出現 ' + JSON.stringify(bad));
   }
+  // 這份清單也要有牙齒：review 的第三個插入必須被它抓到
+  for (const bite of ["const SNEAK = Function('return 40')();",
+    "({}).constructor.constructor('return 30')()"]) {
+    assert.ok(BANNED.some(function (bad) { return bite.indexOf(bad) !== -1; }),
+      'BANNED 必須抓到 ' + JSON.stringify(bite));
+  }
+
+  // `require(` 只准有一個，而且只准是 codec：lane 的順序只能有一份
   const requires = src.match(/require\(([^)]*)\)/g) || [];
   assert.deepStrictEqual(requires, ["require('./wave-codec.js')"],
     '只准 require codec 一個：lane 的順序只能有一份');
+}
+
+// ---------------------------------------------------------------------------
+// F1：邊界規則在**小數**尺寸底下也必須精確
+//
+// `cellRect` 算的是 `nameColWidth + cycle*cycleWidth`，`cellAt` 用
+// `floor((x - nameColWidth)/cycleWidth)` 反推。減法與除法各自會捨入，兩邊捨到
+// 不同的地方，格子自己的左緣就會掉進左邊那一格。整數尺寸看不到這件事（乘加與
+// 除法都是精確的），所以上一輪 40/20/60、30/40/40、10/8/30 三組整數 fixture
+// 結構上就表達不出這個缺陷 —— 這裡改用小數。
+//
+// Task 6 的尺寸是從渲染結果量的，`getBoundingClientRect()` 在瀏覽器縮放下回的
+// 就是小數 CSS px，所以這不是刻意construct 出來的輸入。
+// ---------------------------------------------------------------------------
+{
+  // review 點名的那一組：cellRect(L,0,1).x === 49.199999999999996
+  const L = G.layoutOf(FLAT, { laneHeight: 13.7, cycleWidth: 7.3, nameColWidth: 41.9 });
+  const r = G.cellRect(L, 0, 1);
+  assert.strictEqual(r.x, 49.199999999999996, '浮點數本身沒有變，變的是 hit test');
+  assert.deepStrictEqual(G.cellAt(L, r.x, r.y), { laneIndex: 0, cycle: 1 },
+    '小數尺寸下，格子的左緣仍然屬於自己');
+  assert.deepStrictEqual(G.cellAt(L, r.x, r.y + r.height / 2), { laneIndex: 0, cycle: 1 });
+
+  // 列的方向同理：lane 2 的上緣
+  const r2 = G.cellRect(L, 2, 0);
+  assert.deepStrictEqual(G.cellAt(L, r2.x + r2.width / 2, r2.y), { laneIndex: 2, cycle: 0 },
+    '小數尺寸下，列的上緣仍然屬於自己');
+}
+{
+  // 決定性的小數 fuzz：6 lane × 8 cycle × 200 組尺寸 = 9600 格，
+  // 每一格都檢查中心、左上角、以及右緣屬於下一格。
+  let seed = 20260912;
+  const rnd = function () {
+    seed ^= seed << 13; seed |= 0;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5; seed |= 0;
+    return ((seed >>> 0) % 1000000) / 1000000;
+  };
+  const doc = { signal: [] };
+  for (let i = 0; i < 6; i++) doc.signal.push({ name: 'l' + i, wave: '01010101' });
+
+  let cells = 0, centreMiss = 0, leftEdgeMiss = 0, topEdgeMiss = 0, nextMiss = 0, farMiss = 0;
+  let firstBad = null;
+  for (let t = 0; t < 200; t++) {
+    const opts = {
+      laneHeight: 1 + rnd() * 40,
+      cycleWidth: 1 + rnd() * 40,
+      nameColWidth: 1 + rnd() * 40,
+    };
+    const L = G.layoutOf(doc, opts);
+    for (let lane = 0; lane < L.lanes.length; lane++) {
+      for (let cyc = 0; cyc < L.cycles; cyc++) {
+        cells++;
+        const r = G.cellRect(L, lane, cyc);
+        const centre = G.cellAt(L, r.x + r.width / 2, r.y + r.height / 2);
+        const left = G.cellAt(L, r.x, r.y + r.height / 2);
+        const top = G.cellAt(L, r.x + r.width / 2, r.y);
+        const bad = function (hit, wantLane, wantCycle) {
+          return !hit || hit.laneIndex !== wantLane || hit.cycle !== wantCycle;
+        };
+        if (bad(centre, lane, cyc)) centreMiss++;
+        if (bad(left, lane, cyc)) leftEdgeMiss++;
+        if (bad(top, lane, cyc)) topEdgeMiss++;
+        if (cyc + 1 < L.cycles) {
+          // 「右緣屬於下一格」的標準說法：下一格自己的左緣。`r.x + r.width` 是
+          // 另一個算式（先乘再加 vs 先加再乘），在小數尺寸下可能差最後一個 ulp，
+          // 落在邊界的左邊一點點 —— 那時候它**真的**還在這一格裡，回這一格才對。
+          // 所以那個點只釘「不准差到第三格去」。
+          const nxt = G.cellAt(L, G.cellRect(L, lane, cyc + 1).x, r.y + r.height / 2);
+          if (bad(nxt, lane, cyc + 1)) nextMiss++;
+          const far = G.cellAt(L, r.x + r.width, r.y + r.height / 2);
+          if (!far || far.laneIndex !== lane || (far.cycle !== cyc && far.cycle !== cyc + 1)) {
+            farMiss++;
+          }
+        }
+        if (firstBad === null && (bad(centre, lane, cyc) || bad(left, lane, cyc))) {
+          firstBad = { opts: opts, lane: lane, cyc: cyc, rect: r, left: left, centre: centre };
+        }
+      }
+    }
+  }
+  assert.strictEqual(cells, 9600, 'fuzz 的規模本身也釘住，免得它悄悄縮水');
+  assert.strictEqual(centreMiss, 0, '小數尺寸：中心必須 hit 回同一格。' + JSON.stringify(firstBad));
+  assert.strictEqual(leftEdgeMiss, 0, '小數尺寸：左緣必須屬於自己。' + JSON.stringify(firstBad));
+  assert.strictEqual(topEdgeMiss, 0, '小數尺寸：上緣必須屬於自己。' + JSON.stringify(firstBad));
+  assert.strictEqual(nextMiss, 0, '小數尺寸：下一格的左緣必須屬於下一格');
+  assert.strictEqual(farMiss, 0, '小數尺寸：rect 的右緣最多只能差一格，不准差兩格');
+}
+
+// ---------------------------------------------------------------------------
+// F3：parser 接受得了的文件，layoutOf 不准丟
+//
+// 上一輪 lane 數超過上限是 throw，跟自己寫的「文件壞掉回空版面、只有尺寸壞掉才丟」
+// 互相矛盾，而 Task 6 每次 render 都會呼叫 layoutOf。改成截斷並且說出來。
+// 上限 1024 的理由是量到的成本：這一層的列舉是 O(N²)（逐一問 codec 的 lanePath），
+// 本 session 量到 1000 條 95ms、2000 條 337ms、4096 條 1259ms。
+// ---------------------------------------------------------------------------
+{
+  const mk = function (n) {
+    const doc = { signal: [] };
+    for (let i = 0; i < n; i++) doc.signal.push({ name: 'l' + i, wave: '01' });
+    return doc;
+  };
+  const full = G.layoutOf(mk(1024));
+  assert.strictEqual(full.lanes.length, 1024);
+  assert.strictEqual(full.truncated, false, '剛好在上限上不算截斷');
+
+  const big = mk(1025);
+  const over = G.layoutOf(big);
+  assert.strictEqual(over.lanes.length, 1024, '超過上限就截斷，不丟');
+  assert.strictEqual(over.truncated, true, '而且說得出來，讓呼叫端可以顯示警告');
+  assert.strictEqual(over.height, 1024 * over.laneHeight);
+  assert.deepStrictEqual(over.lanes[1023].path, C.lanePath(big, 1023),
+    '截斷後最後一條仍然是 codec 的第 1023 條，不是別的');
+  assert.strictEqual(over.lanes[1023].lane.name, 'l1023');
+
+  // 端到端：parser 收得下的來源，幾何層不准炸
+  const src = '{signal:[' + Array.from({ length: 1025 }, function (_, i) {
+    return '{name:"l' + i + '",wave:"01"}';
+  }).join(',') + ']}';
+  const parsed = C.parseSource(src);
+  assert.strictEqual(parsed.ok, true, 'parser 收得下 1025 條');
+  const fromSource = G.layoutOf(parsed.doc);
+  assert.strictEqual(fromSource.truncated, true);
+  assert.strictEqual(fromSource.lanes.length, 1024);
+}
+
+// ---------------------------------------------------------------------------
+// F5：opts 不是物件就是呼叫端的程式錯誤，跟 {laneHeight:'40'} 同一類
+// ---------------------------------------------------------------------------
+{
+  for (const bad of [42, '40', [], function () {}, true]) {
+    assert.throws(function () { G.layoutOf(FLAT, bad); }, TypeError,
+      'opts=' + JSON.stringify(bad) + ' 必須丟，不能默默用預設尺寸畫在錯的比例上');
+  }
+  // null / undefined 是「沒給」，用預設
+  assert.strictEqual(G.layoutOf(FLAT, null).laneHeight, 30);
+  assert.strictEqual(G.layoutOf(FLAT, undefined).laneHeight, 30);
+}
+
+// ---------------------------------------------------------------------------
+// Q1 的裁決：有 lane 的文件，cycles 至少是 1
+//
+// 量到的（本 session）：`{signal:[{name:'a',wave:''}]}` 的 svg 寬度是 100、
+// lane.xmax=2（＝一個 cycle 的兩塊 brick），跟 `wave:'0'` 一模一樣 —— 引擎替空的
+// wave 保留了一拍。`{signal:[]}` 則是寬 40、xmax=0，一拍都不保留。
+// 所以「有 lane 就至少一拍、沒有 lane 就 0 拍」跟引擎畫的是同一件事。
+// ---------------------------------------------------------------------------
+{
+  const opts = { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 };
+  for (const doc of [{ signal: [{ name: 'a', wave: '' }] }, { signal: [{}] },
+    { signal: [{ name: 'a' }] }]) {
+    const L = G.layoutOf(doc, opts);
+    assert.strictEqual(L.cycles, 1, '有 lane 的文件至少要有一拍可以畫：' + JSON.stringify(doc));
+    assert.strictEqual(L.lanes[0].cycles, 0, '但那條 lane 自己仍然是 0 拍');
+    assert.strictEqual(L.width, 60 + 20);
+    assert.deepStrictEqual(G.cellAt(L, 60, 0), { laneIndex: 0, cycle: 0 },
+      '空文件也要有一個座標可以放第一拍');
+    assert.deepStrictEqual(G.cellRect(L, 0, 0), { x: 60, y: 0, width: 20, height: 40 });
+    assert.strictEqual(G.cellRect(L, 0, 1), null, '但只有一拍');
+  }
+  // 沒有 lane 就沒有拍：引擎也一樣（寬 40 vs 100）
+  const empty = G.layoutOf({ signal: [] }, opts);
+  assert.strictEqual(empty.cycles, 0);
+  assert.strictEqual(empty.width, 60);
 }
 
 console.log('wave-geometry.test.js OK');
