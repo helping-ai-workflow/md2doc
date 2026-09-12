@@ -30,7 +30,12 @@ async function renderMdToHtml(md, opts) {
 // page. Extract by tracking div-nesting depth instead.
 function extractDrawioBlocks(html) {
   const out = [];
-  const openRe = /<div class="drawio" data-drawio-pages="[^"]*">/g;
+  // `[^>]*` after the pages attribute, not `>`: the box also carries
+  // role/aria-label when the markdown image had alt text (final review R5),
+  // and pinning the open tag to one exact attribute list here would make this
+  // helper silently return zero blocks — which reads as "the render produced
+  // nothing", not "the helper is out of date".
+  const openRe = /<div class="drawio" data-drawio-pages="[^"]*"[^>]*>/g;
   let m;
   while ((m = openRe.exec(html)) !== null) {
     const tagRe = /<div\b[^>]*>|<\/div>/g;
@@ -258,6 +263,97 @@ assert.strictEqual(D.resolvePageIndex(names, '0'), 0,
     { srcDir: path.join(__dirname, 'fixtures') });
   assert.ok(!html.includes('drawio-sheetbar'),
     '單頁檔不得出現 sheet bar');
+}
+
+
+// ── 最終審查 B2：SVG 內文裡的 $$ / $& / $' / $` 不得被當成替換樣式 ─────────
+//
+// bakeDrawio() 把烤好的 SVG 套回 htmlStr 時用的是 String.prototype.replace。
+// 只要「替換字串」是產生出來的內容（而不是字面常數），replace 就會去解讀
+// 裡面的 $$ / $& / $` / $'：$$ 變成單一個 $（標籤靜默錯字）、$& 會把整個
+// 佔位元素 —— 連同整份 .drawio 的 base64 —— 塞回輸出中間。bakeGraphviz()
+// 兩百行之上用的是 callback 形式，所以沒有這個問題。
+{
+  const html = await renderMdToHtml('![money](drawio-dollar.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+
+  assert.ok(!html.includes('data-drawio-src'),
+    '$& 不得把佔位元素（含整份 .drawio 的 base64）重新塞回輸出');
+  assert.ok(html.includes('DOLLARDOLLAR$$END'),
+    '標籤裡的 $$ 必須原樣留著，不得被 replace 收斂成單一個 $');
+  assert.ok(html.includes('AMP$&amp;END'),
+    '標籤裡的 $& 必須原樣留著');
+  assert.ok(html.includes('TICK$`END'),
+    '標籤裡的 $` 必須原樣留著');
+  assert.ok(html.includes("QUOTE$'END"),
+    "標籤裡的 $' 必須原樣留著");
+}
+
+// ── 最終審查 R5：![alt](x.drawio) 的 alt 必須變成烤好那顆盒子的無障礙名稱 ──
+{
+  const html = await renderMdToHtml('![Architecture overview](single.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.ok(!html.includes('data-drawio-alt'),
+    '烤完之後不得留下未處理的 alt 佔位屬性');
+  assert.match(html, /<div class="drawio"[^>]*\srole="img"[^>]*>/,
+    '單頁（沒有 sheet bar）的盒子用 role="img"');
+  assert.match(html, /<div class="drawio"[^>]*\saria-label="Architecture overview"[^>]*>/,
+    'alt 文字必須變成 aria-label');
+}
+// 多頁的盒子裡面還有 sheet bar 的按鈕，role="img" 會把它們從無障礙樹上藏掉，
+// 所以多頁用 role="group"（一樣可以有名字，但子節點仍然看得到）。
+{
+  const html = await renderMdToHtml('![Two sheets](drawio-two-pages.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.match(html, /<div class="drawio"[^>]*\srole="group"[^>]*aria-label="Two sheets"[^>]*>/,
+    '多頁的盒子用 role="group" 並帶 aria-label');
+}
+// alt 是空的就不要生出空的 aria-label —— 沒有名字比有一個空名字好。
+{
+  const html = await renderMdToHtml('![](single.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  // 斷言必須只看那顆盒子：整份 HTML 裡本來就有 aria-label（側欄開關按鈕、
+  // lightbox runtime 生出來的按鈕），拿整份字串來斷言會永遠是紅的。
+  const box = (html.match(/<div class="drawio"[^>]*>/) || [])[0];
+  assert.ok(box, '應該要有一顆烤好的 drawio 盒子');
+  assert.ok(!/aria-label/.test(box),
+    '沒有 alt 時不得生出 aria-label，got ' + box);
+  assert.ok(!/\srole=/.test(box),
+    '沒有 alt 時不得生出 role，got ' + box);
+}
+// alt 走的是 marked already-escaped 的字串（跟 <img alt="..."> 同一份），
+// 所以引號 / & / < 都已經是 HTML 實體，可以原樣進屬性。
+{
+  const html = await renderMdToHtml('![A "q" & <b>](single.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.ok(html.includes('aria-label="A &quot;q&quot; &amp; &lt;b&gt;"'),
+    'alt 裡的引號 / & / < 必須以 HTML 實體進屬性，不得破壞屬性');
+}
+
+// ── 最終審查 R9：佔位元素的形狀只能有一份來源 ───────────────────────────
+//
+// 產出端與比對端相距約四千行，只靠逐字元相同的屬性順序達成一致。它們漂開
+// 的後果是靜默的（jobs 收到 0 筆，整份 .drawio 的 base64 原樣出貨在一顆空
+// div 裡），所以這裡守的是「不得再有第二份手寫的形狀」。
+{
+  const libSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'lib', 'md2doc.js'), 'utf8');
+  for (const lit of ['<div class="drawio" data-drawio-src=',
+                     '<div class="graphviz" data-graphviz-src=']) {
+    assert.strictEqual(libSrc.split(lit).length - 1, 0,
+      '佔位元素的開頭標籤不得再被手寫出來一次：' + lit);
+  }
+}
+// 兩種引擎的佔位元素同時出現在一份文件裡時，兩邊都必須被吃乾淨。
+{
+  const html = await renderMdToHtml(
+    '# Both\n\n![d](single.drawio)\n\n```dot\ndigraph { a -> b }\n```\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.ok(!html.includes('data-drawio-src') && !html.includes('data-drawio-alt'),
+    'drawio 佔位元素必須被 bakeDrawio() 全部吃掉');
+  assert.ok(!html.includes('data-graphviz-src'),
+    'graphviz 佔位元素必須被 bakeGraphviz() 全部吃掉');
+  assert.ok(/<div class="graphviz"><svg/.test(html), 'dot 必須真的烤成 SVG');
 }
 
 console.log('drawio.test.js OK');
