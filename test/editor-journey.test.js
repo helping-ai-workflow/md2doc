@@ -11512,6 +11512,137 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T7h a session that comes back to the bytes it started from stops claiming to be dirty — OK');
     }
+
+    // ── fix round 2 ────────────────────────────────────────────────────────
+
+    // T7i — MUST-FIX 1. The same hole as T7e, reached from a NEGATIVE baseline.
+    //
+    // Fix round 1 decided "did a save land inside this session?" by arithmetic:
+    // `dirtyDepth === baseDirtyDepth + ops`. That implication only runs the way
+    // it was used when the baseline is non-negative, and a user reaches a
+    // negative one by pressing Ctrl+Z once after a save. MEASURED against the
+    // real stack: the predicate read `1 === -1 + 2`, answered「沒有存檔」, popped
+    // blind, and reproduced F1's original outcome straight through the fixed
+    // code. The predicate is now two POSITION comparisons against the session's
+    // own baseline, which have no sign to get wrong.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tail = '.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed';
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' ONE');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const disk1 = await saveAndRead(ctx);
+      assert.ok(disk1.indexOf('ONE') !== -1, 'T7i 前提失敗：第一筆要真的存進磁碟');
+
+      // 一發普通的 Ctrl+Z，退到存檔點【之前】—— 這就是負的基準點。
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const rewound = await ctx.page.evaluate(() => ({
+        dirty: window.__edTestWaveState().dirty,
+        text: document.querySelector('.content').textContent || '',
+      }));
+      assert.strictEqual(rewound.text.indexOf('ONE'), -1,
+        'T7i 前提失敗：Ctrl+Z 要真的退掉那一筆');
+      assert.strictEqual(rewound.dirty, true,
+        'T7i 前提失敗：退到存檔點之前，記憶體跟磁碟不一樣');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const midSession = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(midSession.dirty, true,
+        'T7i: 編輯器開著、剛畫了一筆，文件不得回報成乾淨的（負基準點上，' +
+        '舊的深度算術在這一步就已經讀成 0 了）');
+
+      await saveAndRead(ctx);                 // 存檔【發生在 session 中間】
+      await paintCell(ctx.page, 0, 3, '1');
+      const before = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(before.seam.ops, 2, 'T7i 前提失敗：兩筆都要寫得回去');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+      const afterEsc = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(afterEsc.open, false, 'T7i 前提失敗：Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.dirty, true,
+        'T7i 前提失敗：Escape 把畫的東西丟掉了，磁碟上還留著，所以是髒的');
+
+      // 一筆普通的編輯 —— 舊的算術就是在這裡把髒度走回 0 的。
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' TWO');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const after = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        text: document.querySelector('.content').textContent || '',
+      }));
+      assert.ok(after.text.indexOf('TWO') !== -1, 'T7i 前提失敗：第二筆要在畫面上');
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8').indexOf('TWO'), -1,
+        'T7i 前提失敗：第二筆還沒落磁碟');
+      assert.strictEqual(after.s.dirty, true,
+        'T7i: 從負的基準點開始的 session 一樣不得讓後面的編輯讀成乾淨的');
+      assert.strictEqual(after.title.indexOf('●'), 0,
+        'T7i: ● 也不得熄掉，got ' + JSON.stringify(after.title));
+
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7i: 所以 Reload 必須被攔 —— 這一列跟 T7e 的差別只有一發 Ctrl+Z');
+      assert.strictEqual(ctx.errs.length, 0, 'T7i: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7i a session opened from a negative baseline still cannot make a later edit read clean — OK');
+    }
+
+    // T7j — R1. Escape 的【另一條】分支也要把 redo 還回去。
+    //
+    // T7g 走的是「可以直接把 op 收掉」那條；session 中間存過檔就會走 revert
+    // commit 那條，而它原本什麼都沒還。兩條結束時 `lines` 都跟 `seam.baseLines`
+    // 逐位元組相同，所以使用者在這裡的處境跟 F3 一模一樣：一份沒有變的文件，
+    // 加上一個被默默吃掉的 redo。差別只在中間那一發 Ctrl+S。
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tail = '.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed';
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1),
+        false, 'T7j 前提失敗：Ctrl+Z 要先真的退掉那筆編輯');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await saveAndRead(ctx);                 // 這一發就是讓 Escape 走另一條分支的東西
+      await paintCell(ctx.page, 0, 3, '1');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('EDITED') !== -1,
+        'T7j: session 中間存過檔的 Escape 一樣不得吃掉使用者原本的 redo。Got:\n' + md);
+      assert.ok(md.indexOf("wave: 'p....'") !== -1,
+        'T7j: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7j the revert-commit Escape hands back the redo branch too — OK');
+    }
   }
 
   await browser.close();

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -277,9 +277,17 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
     'and it must pop the ops it is reversing');
   assert.ok(unwind.includes('stack.setRedoTail(seam.baseRedoTail)'),
     'and hand back the redo branch its own first commit cleared (F3)');
-  assert.ok(unwind.includes('stack.dirtyDepth !== seam.baseDirtyDepth + seam.ops'),
-    'and it must DERIVE whether a save landed inside the session rather than ' +
-    'popping blind — see the driven F1 fixture below for what popping blind costs');
+  // fix 2 / R6: this used to pin the SPELLING of the predicate
+  // (`stack.dirtyDepth !== seam.baseDirtyDepth + seam.ops`), and a semantically
+  // wrong predicate keeping that spelling passed — which is exactly how
+  // MUST-FIX 1 slipped through. What is pinned here now is only that the
+  // decision is delegated to one named, exported, PURE function; the function's
+  // BEHAVIOUR is driven below against a real UndoStack, including from the
+  // negative baseline the old arithmetic could not see.
+  assert.ok(unwind.includes('if (!waveDiscardIsSafe(stack, seam)) return false;'),
+    'the discard must ask waveDiscardIsSafe() and nothing else');
+  assert.ok(!unwind.includes('dirtyDepth'),
+    'and it must not re-derive the answer from a distance that can be negative');
 
   // fix 1 / F2 — the close render is allowed to fail and the work is allowed to
   // stay, but `blocks` may not be left addressing the pre-session document. The
@@ -306,6 +314,24 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.deepStrictEqual(finishAssigns, ['if (result.op !== null) lines = result.lines;'],
     'the session close may only write `lines` through commitRangeEdit(). Got ' +
     JSON.stringify(finishAssigns));
+
+  // fix 2 / R2 — `switchAwayFrom()` answers false when it could NOT resolve what
+  // was open (a commit whose render failed), and an editor then stays live
+  // BEHIND the overlay. The session's own Ctrl+S runs
+  // `switchAwayFrom().then(ok => ok && save())`, which commits it and pushes a
+  // NON-wave op inside the session — whose line delta settleWaveBlocks() would
+  // attribute to the wave block, i.e. F2's failure shape through a door F2 did
+  // not close. waveDiscardIsSafe()'s depth question catches the discard half of
+  // that (driven above); this pins the half that prevents it happening at all.
+  // Every other caller of switchAwayFrom() in this file already treats false as
+  // "do not proceed".
+  const openFn = src.slice(src.indexOf('async function openWaveEditor'),
+                           src.indexOf('function writeWaveGestureBack'));
+  assert.ok(openFn.length > 0, 'openWaveEditor() must exist');
+  assert.ok(openFn.includes('if (!(await switchAwayFrom())) return;'),
+    'openWaveEditor() must not open over an editor it could not resolve');
+  assert.ok(!/^\s*await switchAwayFrom\(\);\s*$/m.test(openFn),
+    'and must not call it for its side effect alone');
 
   // The CALL, not the name: the comment right beside the failure branch says
   // 「Deliberately NOT rollbackFailedRender()」, and a bare-substring test here
@@ -470,6 +496,85 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
         'edit ' + i + ' must not be able to make the document read clean');
     }
   }
+}
+
+// fix 2 / MUST-FIX 1 — may a wave session's commits be popped? DRIVEN against a
+// real UndoStack, from the baseline the old arithmetic could not see.
+//
+// The previous answer derived "no save landed" from
+// `dirtyDepth === baseDirtyDepth + ops`. That implication only runs the way it
+// was used when `baseDirtyDepth >= 0`; it is equally satisfied when
+// `baseDirtyDepth === -(ops taken before the save)`, and an ordinary user
+// reaches a negative baseline by pressing Ctrl+Z once after a save. The
+// scenario below is the measured one, and the FIRST assertion in it is the
+// control: the old arithmetic, recomputed here, answers "safe to pop" on
+// exactly this stack. Without that control the row would be pinning a `false`
+// that any predicate could produce.
+{
+  const anOp = () => ({ startLine: 1, endLine: 1, before: ['a'], after: ['b'] });
+
+  // 1. an ordinary edit, saved. 2. an ordinary Ctrl+Z past the save point.
+  const stack = new UndoStack();
+  stack.push(anOp());
+  stack.markSaved();
+  stack.undo(['b']);
+  assert.strictEqual(stack.dirtyDepth, -1,
+    'fixture: the baseline really is negative — this is the state the old ' +
+    'predicate had no way to distinguish');
+  assert.strictEqual(stack.isDirty(), true, 'fixture: and it is genuinely dirty');
+
+  // 3. the wave editor opens here.
+  const seam = { baseDepth: stack.depth, baseDirtyDepth: stack.dirtyDepth, ops: 0 };
+  // 4. paint. 5. Ctrl+S mid-session — the gesture the modal does not swallow.
+  //    6. paint again.
+  stack.push(anOp()); seam.ops++;
+  stack.markSaved();
+  stack.push(anOp()); seam.ops++;
+
+  // 7. Escape. THE CONTROL FIRST: the arithmetic this replaces says yes.
+  assert.strictEqual(stack.dirtyDepth, seam.baseDirtyDepth + seam.ops,
+    'control: the OLD predicate reads `1 === -1 + 2` on this stack and answers ' +
+    '"no save landed" — a save very much landed. If this control ever stops ' +
+    'holding, the fixture has stopped expressing the defect');
+  assert.strictEqual(waveDiscardIsSafe(stack, seam), false,
+    'a save landed inside the session, so its commits may NOT be popped — ' +
+    'popping them destroys the state disk was written from and walks the ' +
+    'document back to reading clean over bytes it never held');
+
+  // The positive control: the same shape with no save inside is still poppable,
+  // so the guard is not simply refusing everything.
+  const clean = new UndoStack();
+  clean.push(anOp());
+  clean.markSaved();
+  clean.undo(['b']);
+  const cleanSeam = { baseDepth: clean.depth, ops: 0 };
+  clean.push(anOp()); cleanSeam.ops++;
+  clean.push(anOp()); cleanSeam.ops++;
+  assert.strictEqual(waveDiscardIsSafe(clean, cleanSeam), true,
+    'no save inside the session — from the SAME negative baseline — is still ' +
+    'safe to pop');
+
+  // …and the other question, which the save-epoch one cannot answer: something
+  // that is not this session pushed. Popping `ops` entries would then reverse
+  // somebody else's edit (RESIDUE 2's shape).
+  const intruded = new UndoStack();
+  const intrudedSeam = { baseDepth: intruded.depth, ops: 0 };
+  intruded.push(anOp()); intrudedSeam.ops++;
+  intruded.push(anOp());                       // not ours
+  assert.strictEqual(intruded.savedDepth, 0,
+    'control: the save marker is at 0, i.e. not above the baseline, so the ' +
+    'save question says yes here');
+  assert.strictEqual(waveDiscardIsSafe(intruded, intrudedSeam), false,
+    'and the depth question is what catches it — the two are separate on ' +
+    'purpose, because neither can see the other’s case');
+
+  // The ordinary session, start to finish: nothing moved, so the pop runs.
+  const plain = new UndoStack();
+  const plainSeam = { baseDepth: plain.depth, ops: 0 };
+  for (let i = 0; i < 3; i++) { plain.push(anOp()); plainSeam.ops++; }
+  assert.strictEqual(waveDiscardIsSafe(plain, plainSeam), true,
+    'the common case must still be poppable, or Escape stops putting the dirty ' +
+    'dot out over a byte-identical document');
 }
 
 // fix 1 / F2 — the block map after a body edit that changed the line count.
