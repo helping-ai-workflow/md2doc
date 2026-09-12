@@ -264,8 +264,14 @@ async function pressSaveAndLand(ctx) {
     }
   }
   // The paint/settle grace the old fixed sleep also provided, kept because some
-  // rows read the DOM straight after the save.
-  await new Promise((r) => setTimeout(r, 150));
+  // rows read the DOM — a banner, a title — straight after the save rather than
+  // the file. The old shape slept a flat 400 ms from the KEYPRESS, so on a
+  // landing measured at 181 ms it left ~220 ms of post-response settle; 150 ms
+  // would have been a small regression for exactly those rows, on exactly the
+  // loaded box this whole change is about. 250 ms restores that margin and the
+  // helper is still event-driven overall (it leaves as soon as the save lands
+  // plus this, instead of always sleeping 400 ms).
+  await new Promise((r) => setTimeout(r, 250));
 }
 
 async function saveAndRead(ctx) {
@@ -9829,8 +9835,11 @@ async function main() {
               y0: b.y, y1: b.y + b.height };
           });
           const painted = [];
+          const paintedCounts = [];
           for (let i = 0; i < engineLaneCount; i++) {
             const top = i * rowH;
+            paintedCounts.push(shapes.filter(
+              (sh) => sh.cy >= top && sh.cy < top + rowH).length);
             const row = [];
             for (let c = 0; c + 1 < gridXs.length; c++) {
               const mx = (gridXs[c] + gridXs[c + 1]) / 2;
@@ -9849,7 +9858,8 @@ async function main() {
             painted.push(row.join(' '));
           }
           return { drawn: drawn, engine: engine, missing: missing,
-            painted: painted, shapeCount: shapes.length,
+            painted: painted, paintedCounts: paintedCounts,
+            shapeCount: shapes.length,
             gridCount: gridXs.length,
             lanes: lanes,
             engineLanes: document.querySelectorAll(
@@ -9929,6 +9939,39 @@ async function main() {
           'T6b: cycle 格線必須真的畫出來了，否則下面是拿空格線在分格。Got ' + got.gridCount);
         assert.ok(got.shapeCount > 0,
           'T6b: 畫布上必須真的有形狀，不只是屬性。Got ' + got.shapeCount);
+
+        // …and EXACTLY as many shapes per lane as the engine's bricks call for,
+        // not merely "at least one per cycle". `painted` samples one point per
+        // cycle, so a drawing that leaks an extra shape between two correct ones
+        // reads as correct — measured on a mutant that appends one stray rect
+        // per run: `shapeCount` went 16 → 32 and every other assertion here
+        // stayed green.
+        //
+        // The expected count is the number of RUNS in the engine's own row:
+        // `drawLane` emits one shape per run of equal bricks, and clocks never
+        // merge because each `p` cycle is a whole clock period. Edges, gap
+        // markers and bus labels are excluded from `shapes` by class, so the
+        // two sides count the same things.
+        const runsOf = (row) => {
+          const bricks = row === '' ? [] : row.split(' ');
+          let n = 0;
+          for (let k = 0; k < bricks.length; k++) {
+            const clock = bricks[k] === 'nclk' || bricks[k] === 'pclk';
+            if (k === 0 || clock || bricks[k] !== bricks[k - 1]) n++;
+          }
+          return n;
+        };
+        const expectedCounts = got.engine.map(runsOf);
+        assert.deepStrictEqual(got.paintedCounts, expectedCounts,
+          'T6b: 每一條 lane 畫出來的形狀【數量】必須剛好等於引擎那一列的 run 數\n' +
+          'painted : ' + JSON.stringify(got.paintedCounts) + '\n' +
+          'expected: ' + JSON.stringify(expectedCounts));
+        // …and nothing painted outside every row band, which the per-lane sums
+        // above cannot see on their own.
+        assert.strictEqual(got.shapeCount,
+          expectedCounts.reduce((a, b) => a + b, 0),
+          'T6b: 不得有形狀畫在所有 lane 的範圍之外。Got ' + got.shapeCount +
+          ' vs ' + expectedCounts.reduce((a, b) => a + b, 0));
         assert.deepStrictEqual(got.painted, expected,
           'T6b: 畫出來的【形狀】必須跟引擎逐格對上（不是只有 data-bricks 屬性對上）\n' +
           'painted : ' + JSON.stringify(got.painted) + '\n' +
@@ -10514,14 +10557,14 @@ async function main() {
 
       // …and now a scroll that the lock does NOT block, because the `live`
       // half of this census row is only meaningful across a page that really
-      // moved. A previous version of this row deleted the scroll when it added
-      // the lock, and then compared `top` before and after a scroll the line
-      // above asserts did not happen — measured on a sandbox whose only change
-      // was `.ed-wave-overlay { position: absolute }`, the shipped shape passed
-      // and the pre-change shape failed at `top -900 === 0`. That is the class
-      // this row exists for and the one this branch already paid for once.
-      // `scrollBy` moves while a wheel does not: that is what `overflow: hidden`
-      // means, measured both ways in this session.
+      // moved. The version this comment replaced deleted the scroll when it
+      // added the lock, and then compared `top` before and after a scroll the
+      // line above asserts did not happen. Measured on a sandbox whose only
+      // change was `.ed-wave-overlay { position: absolute }`: THE VERSION THIS
+      // REPLACED passed — it missed the defect — while this shape fails it at
+      // `top -900 === 0`. That is the class this row exists for and the one this
+      // branch already paid for once. `scrollBy` moves while a wheel does not:
+      // that is what `overflow: hidden` means, measured both ways.
       await scrollBy(ctx.page, 900);
       const ovAfter = await overlayState(ctx.page, '.ed-wave-overlay');
       assert.ok(isLive(ovAfter),

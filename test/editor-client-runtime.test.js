@@ -180,14 +180,23 @@ async function newPage(browser) {
     // what saveAndRead() actually needs to wait on.
     //
     // A COUNT is not enough, and that gap is measured rather than argued: with
-    // the dispatch of /api/save deferred 1800 ms, an un-awaited Ctrl+S followed
-    // by a second edit and a wait-for-the-counter released after 1193 ms on the
-    // FIRST save and read a file that did not contain the second marker. So each
-    // request takes an id off `__edSaveSeq` when it is sent and pushes that id
-    // onto `__edSaveLanded` when it completes; a waiter snapshots the sequence
-    // before the keypress and waits for an id GREATER than its snapshot, which
-    // is a save that was started after it pressed and cannot be somebody else's.
-    window.__edSaveDone = 0;
+    // one /api/save already in flight and only that one ever issued, a
+    // wait-for-the-counter released on it after 1522 ms while an id-based wait
+    // refused to release at all. So each request takes an id off `__edSaveSeq`
+    // when it is dispatched and pushes that id onto `__edSaveLanded` when it
+    // completes; a waiter snapshots the sequence before the keypress and waits
+    // for an id GREATER than its snapshot, which is a save that started after it
+    // pressed and cannot be somebody else's.
+    //
+    // KNOWN NARROWING, recorded rather than closed: the id is taken at DISPATCH,
+    // not at the keypress. A Ctrl+S pressed but not yet dispatched — the client
+    // issues the save only in `switchAwayFrom()`'s `.then`, so a pending render
+    // can hold it back — leaves the page completely idle, and a waiter that
+    // snapshots there can still be released by that earlier press (measured:
+    // 2231 ms, with the render's dispatch deferred 2500 ms). Unreachable today
+    // because every Ctrl+S in both suites is awaited, which is a property of the
+    // call sites and not of this instrumentation. Closing it costs a token the
+    // helper allocates at the keypress and this wrapper claims.
     window.__edSaveSeq = 0;
     window.__edSaveLanded = [];
     const origFetch = window.fetch;
@@ -205,7 +214,7 @@ async function newPage(browser) {
         // Recorded on the SAME event the in-flight counter is released on — the
         // body having been read, or the safety net below — so a completed save
         // and a quiet page are decided at one moment and cannot disagree.
-        if (isSave) { window.__edSaveDone++; window.__edSaveLanded.push(saveId); }
+        if (isSave) window.__edSaveLanded.push(saveId);
       };
       return origFetch.call(this, input, init).then(
         (res) => {
@@ -1717,11 +1726,20 @@ async function gutterGeometry(page, sel) {
       const dirtyBeforeSave = await page.title();
       assert.ok(dirtyBeforeSave.startsWith('●'), 'sanity: title is dirty after a successful commit');
 
-      // Deliberately NOT pressSaveAndLand(): this scenario stubs the save
-      // endpoint to fail, so no /api/save ever completes and the thing being
-      // waited for is the banner, not the write. Waiting for a save that cannot
-      // land would spend 15 s and then throw the helper's own "no banner
-      // explains why" error — with a banner right there on screen.
+      // Deliberately NOT pressSaveAndLand(), and NOT because the helper would
+      // fail here. MEASURED on exactly this setup (newPage()'s instrumentation
+      // plus the 500 stub): the helper's wait condition is satisfied after 24 ms
+      // with `__edSaveLanded = [1]`, because a 500 IS a completed fetch — the
+      // instrumentation settles when the body is read or, failing that, on the
+      // clone-armed net, and neither looks at the status. Do not "fix" the
+      // instrumentation to make a failed save not land: that net is what the
+      // 409 path depends on (save()'s 409 branch answers off the status and
+      // never touches the body), and without it `__edInflight` stays pinned and
+      // every settleEditor() after a conflict times out.
+      //
+      // The reason to press directly is that this row's SUBJECT is the banner,
+      // not the write. Waiting for the save first would make the observation
+      // depend on the mechanism being observed.
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
