@@ -498,6 +498,43 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   }
 }
 
+// fix 3 — a save marks the bytes it SENT.
+//
+// The behaviour lives in `UndoStack.saveToken()`/`markSaved(token)` and is
+// driven in test/lineops.test.js against a real stack, including the
+// neighbouring races (undo-then-re-edit, redo, 409, two saves outstanding).
+// What can only be pinned here is that `save()` actually takes the receipt on
+// the way OUT rather than on the way back — the whole defect was an ordering
+// one, and a correct UndoStack used in the wrong order reproduces it exactly.
+{
+  const save = src.slice(src.indexOf('async function save() {'),
+                         src.indexOf('async function commitThenSave'));
+  assert.ok(save.length > 0, 'save() must exist');
+  const tokenAt = save.indexOf('const token = stack.saveToken();');
+  const fetchAt = save.indexOf("fetch('/api/save'");
+  const markAt = save.indexOf('stack.markSaved(token);');
+  assert.notStrictEqual(tokenAt, -1, 'save() must take a receipt for the bytes it sends');
+  assert.notStrictEqual(fetchAt, -1, 'save() must still post');
+  assert.notStrictEqual(markAt, -1, 'and mark the receipt, not the moment');
+  assert.ok(tokenAt < fetchAt,
+    'the receipt must be taken BEFORE the request leaves — taking it after the ' +
+    'await is the defect: a Ctrl+Z inside the round trip then gets marked as saved');
+  assert.ok(fetchAt < markAt, 'and marked after the reply lands');
+  assert.ok(!/stack\.markSaved\(\)/.test(save),
+    'save() must never mark "wherever the stack happens to be now"');
+
+  // The other half of the same ordering problem: two requests can be
+  // outstanding (Ctrl+S is not debounced and the modal deliberately does not
+  // swallow it), and an older reply landing last would re-baseline over the
+  // newer one's bytes and hand back an older mtimeMs with it.
+  const seqAt = save.indexOf('const seq = ++saveSeq;');
+  assert.notStrictEqual(seqAt, -1, 'save() must number its requests');
+  assert.ok(seqAt < fetchAt, 'before it sends');
+  assert.ok(save.indexOf('seq !== saveSeq') !== -1 &&
+            save.indexOf('seq !== saveSeq') < markAt,
+    'and drop a superseded reply before it touches mtimeMs or the save marker');
+}
+
 // fix 2 / MUST-FIX 1 — may a wave session's commits be popped? DRIVEN against a
 // real UndoStack, from the baseline the old arithmetic could not see.
 //

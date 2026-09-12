@@ -276,4 +276,151 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
   assert.strictEqual(stack.isDirty(), true, 'which is what isDirty() says outright');
 }
 
+// ---------------------------------------------------------------------------
+// v3.4.0 batch3 Task 7 fix 3 — a save marks the bytes it SENT, not the depth
+// its reply happened to find.
+//
+// Also pre-existing, also nothing to do with the wave editor. `markSaved()` ran
+// on the 200 and read `_done.length` at that later moment; a save round trip is
+// hundreds of milliseconds, so a Ctrl+Z inside one is ordinary. MEASURED before
+// the receipt existed: the reply marked the post-undo depth as saved, and all
+// three nets failed together — title dot out, `beforeunload` silent, and
+// `mtimeMs` freshly advanced so the conflict check would not catch it either.
+//
+// The driver below carries the document and a `disk` snapshot alongside the real
+// stack, exactly as the fix-2 block does, and models a save as
+// `token = saveToken()` → (gestures land here) → `disk = sent; markSaved(token)`,
+// which is the order `save()`'s own body executes.
+// ---------------------------------------------------------------------------
+{
+  const mk = () => {
+    const st = { stack: new UndoStack(), lines: ['# H', '', 'para'], disk: null };
+    st.edit = (text) => {
+      st.stack.push({ startLine: 3, endLine: 3, before: [st.lines[2]], after: [text] });
+      st.lines = replaceLines(st.lines, 3, 3, [text]).lines;
+    };
+    st.agree = () => st.disk === st.lines.join('\n');
+    return st;
+  };
+
+  // THE RACE. Send, undo inside the round trip, then let the reply land.
+  {
+    const st = mk();
+    st.edit('para EDITED');
+    const sent = st.lines.join('\n');
+    const token = st.stack.saveToken();       // the request leaves here
+    st.lines = st.stack.undo(st.lines).lines; // …and Ctrl+S is not debounced
+    st.disk = sent;                           // the write really did happen
+    const ok = st.stack.markSaved(token);     // …and the 200 lands here
+    assert.strictEqual(ok, true,
+      'the timeline at the receipt is unchanged — the op was only undone, and a ' +
+      'redo puts it straight back — so the marker is established, not refused');
+    assert.strictEqual(st.agree(), false,
+      'fixture: disk holds the edit and memory does not');
+    assert.strictEqual(st.stack.isDirty(), true,
+      '存檔途中按 Ctrl+Z：回覆到達時不得把「撤銷之後」的深度當成存檔點 —— ' +
+      '修之前這裡三道網同時失效（● 熄掉、beforeunload 不攔、mtimeMs 已經前進' +
+      '所以衝突檢查也不會擋），關掉分頁就把使用者親手撤銷掉的編輯留在磁碟上');
+    // …and redoing back onto the saved bytes reads clean again, which is what
+    // makes the receipt an identity check rather than a blanket refusal.
+    st.lines = st.stack.redo(st.lines).lines;
+    assert.strictEqual(st.agree(), true, 'fixture: the redo lands back on disk');
+    assert.strictEqual(st.stack.isDirty(), false,
+      '重做回到存檔的那一份，就必須重新變回乾淨');
+  }
+
+  // NEIGHBOUR 1 — undo AND re-edit inside the round trip. Now the timeline at
+  // the receipt really has diverged: same depth, different op.
+  {
+    const st = mk();
+    st.edit('para A');
+    const sent = st.lines.join('\n');
+    const token = st.stack.saveToken();
+    st.lines = st.stack.undo(st.lines).lines;
+    st.edit('para B');
+    assert.strictEqual(st.stack.depth, token.depth,
+      'fixture: the DEPTH is identical — which is why a depth-only receipt is ' +
+      'not enough and the op identity is load-bearing');
+    st.disk = sent;
+    const ok = st.stack.markSaved(token);
+    assert.strictEqual(ok, false, 'the receipt must be refused');
+    assert.strictEqual(st.stack.savedDepth, null,
+      'and the marker invalidated — disk holds bytes this stack cannot reach');
+    assert.strictEqual(st.agree(), false, 'fixture: memory really is B, disk is A');
+    assert.strictEqual(st.stack.isDirty(), true, 'so it is dirty');
+  }
+
+  // NEIGHBOUR 2 — a redo inside the round trip, landing ABOVE the sent depth.
+  {
+    const st = mk();
+    st.edit('para A');
+    st.edit('para B');
+    st.lines = st.stack.undo(st.lines).lines;   // back to A
+    const sent = st.lines.join('\n');
+    const token = st.stack.saveToken();
+    st.lines = st.stack.redo(st.lines).lines;   // forward to B again, mid-flight
+    st.disk = sent;
+    assert.strictEqual(st.stack.markSaved(token), true, 'the timeline is unchanged');
+    assert.strictEqual(st.agree(), false, 'fixture: disk holds A, memory holds B');
+    assert.strictEqual(st.stack.isDirty(), true,
+      '存檔途中按 Ctrl+Y：磁碟上是送出去的那一份，記憶體已經往前了，所以是髒的');
+  }
+
+  // NEIGHBOUR 3 — a 409. `save()` never calls markSaved() on that path, so the
+  // marker is whatever the undo left it as, and nothing is claimed about disk.
+  {
+    const st = mk();
+    st.edit('para A');
+    st.disk = '# H\n\npara';                 // someone else owns the file
+    st.stack.saveToken();                    // sent…
+    st.lines = st.stack.undo(st.lines).lines;
+    // …409: no markSaved, no mtime update.
+    assert.strictEqual(st.stack.savedDepth, 0, 'the marker did not move');
+    assert.strictEqual(st.agree(), true,
+      'fixture: the undo happens to have put memory back on the disk bytes');
+    assert.strictEqual(st.stack.isDirty(), false, 'and it reads clean, correctly');
+  }
+
+  // NEIGHBOUR 4 — two saves outstanding. Each carries its own receipt, so the
+  // later reply establishes the later depth and an earlier reply arriving after
+  // it would establish the earlier one. client.js drops the superseded reply
+  // (see its `saveSeq`); this pins that the receipts themselves do not collide.
+  {
+    const st = mk();
+    st.edit('para A');
+    const t1 = st.stack.saveToken();
+    st.edit('para B');
+    const t2 = st.stack.saveToken();
+    assert.notDeepStrictEqual(t1, t2, 'fixture: two distinct receipts');
+    st.disk = st.lines.join('\n');
+    assert.strictEqual(st.stack.markSaved(t2), true, 'the newer receipt is accepted');
+    assert.strictEqual(st.stack.isDirty(), false, 'and memory matches disk');
+    // The older reply landing afterwards would rewind the marker to A's depth.
+    // It is not wrong about the past, it is wrong about NOW — which is what the
+    // sequence guard in save() exists to prevent.
+    st.stack.markSaved(t1);
+    assert.strictEqual(st.stack.isDirty(), true,
+      'a stale receipt applied late reads dirty, not clean — the failure of the ' +
+      'sequence guard would be over-warning, never under-warning');
+  }
+
+  // The no-argument form is unchanged: "right here, right now".
+  {
+    const st = mk();
+    st.edit('para A');
+    st.stack.markSaved();
+    assert.strictEqual(st.stack.savedDepth, 1);
+    assert.strictEqual(st.stack.isDirty(), false);
+  }
+  // A receipt taken on an untouched document has no boundary op, and saving an
+  // untouched document must still work.
+  {
+    const st = mk();
+    const token = st.stack.saveToken();
+    assert.deepStrictEqual(token, { depth: 0, op: null });
+    assert.strictEqual(st.stack.markSaved(token), true);
+    assert.strictEqual(st.stack.isDirty(), false);
+  }
+}
+
 console.log('lineops.test.js OK');

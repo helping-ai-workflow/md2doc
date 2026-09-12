@@ -6079,10 +6079,10 @@ async function main() {
   }
 
   // ── N5: 打了字還沒離開 block 時，關掉分頁必須被攔 ──────────────────
-  // burst 把使用者打的字留在 DOM 裡直到它自己收掉，而 `stack.dirtyDepth`
-  // 是 `_done.length - _savedDepth`（lineops.js），要等 undo stack 被推入／
-  // 彈出一個 op、或存檔重訂基準，它才會動 —— 打字當下這些都還沒發生，所以
-  // 「打了字、還沒離開這個 block」在它眼中是乾淨的。
+  // burst 把使用者打的字留在 DOM 裡直到它自己收掉，而 `stack.isDirty()`
+  // （lineops.js）問的是 undo stack 現在站的位置是不是上一次存檔寫出去的那個，
+  // 要等 undo stack 被推入／彈出一個 op、或存檔重訂基準，它才會動 —— 打字當下
+  // 這些都還沒發生，所以「打了字、還沒離開這個 block」在它眼中是乾淨的。
   // MEASURED at 2519204（這一列還沒進去的時候）：
   //   mid-burst   title "doc"    navBlocked false   page.url() "about:blank"
   //   blur 之後    title "● doc"  navBlocked true    page.url() 沒有變
@@ -6269,6 +6269,89 @@ async function main() {
       'N5-undo：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: N5-undo an undo past a save point cannot make a later edit read clean — OK');
+  }
+  // ── N5-inflight: 存檔來回途中按 Ctrl+Z，回覆到達時不得把文件標成已存檔 ──
+  //
+  // v3.4.0 batch3 Task 7 fix 3。也是【既有】缺陷：`markSaved()` 以前是在 200
+  // 到達那一刻才去讀 undo stack 的深度，而一次存檔來回是好幾百毫秒 —— 中間按
+  // Ctrl+Z 是很平常的事。MEASURED（修之前）：回覆把「撤銷之後」的深度當成存檔
+  // 點，三道網同時失效 —— ● 熄掉、beforeunload 不再攔、而且 `mtimeMs` 才剛被
+  // 更新，所以連衝突檢查也不會擋。關掉分頁就把使用者親手撤銷掉的那筆編輯留在
+  // 磁碟上。
+  //
+  // 窗口是用「延後 /api/save 的【回覆】」做出來的，不是靠時間賽跑：請求照常
+  // 立刻送出（送出去的位元組因此是撤銷【之前】那一份，這正是本列的前提），
+  // 只有 resolve 被押後。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const orig = window.fetch;
+      window.__heldSave = 0;
+      window.fetch = function (input, init) {
+        const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+        if (/\/api\/save\b/.test(url) && window.__heldSave === 0) {
+          window.__heldSave = 1;
+          // 送出是立刻的；只有回覆被押後。
+          return orig.call(this, input, init).then((res) => new Promise((r) => {
+            window.__heldSave = 2;
+            setTimeout(() => r(res), 2500);
+          }));
+        }
+        return orig.call(this, input, init);
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' INFLIGHT');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyS');
+    await ctx.page.keyboard.up('Control');
+    // 等到請求真的送出去了（而回覆還被押著）再按 Ctrl+Z。
+    await ctx.page.waitForFunction(() => window.__heldSave === 2, { timeout: 8000 });
+    const onDisk = fs.readFileSync(ctx.mdPath, 'utf8');
+    assert.strictEqual(onDisk, '# Doc\n\nAlpha paragraph. INFLIGHT\n',
+      'N5-inflight 前提失敗：送出去的那一份必須是撤銷【之前】的位元組，而且已經' +
+      '落到磁碟上了，got ' + JSON.stringify(onDisk));
+
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 1000));
+    const mid = await ctx.page.evaluate(() => ({
+      text: document.querySelector('.content').textContent || '',
+      held: window.__heldSave,
+    }));
+    assert.strictEqual(mid.text.indexOf('INFLIGHT'), -1,
+      'N5-inflight 前提失敗：Ctrl+Z 要真的退掉那一筆');
+
+    // 讓押著的 200 到達。
+    await new Promise((r) => setTimeout(r, 3000));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.strictEqual(after.text.indexOf('INFLIGHT'), -1,
+      'N5-inflight 前提失敗：回覆到達不得把文字變回來');
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), onDisk,
+      'N5-inflight 前提失敗：磁碟上還是送出去的那一份 —— 記憶體跟磁碟真的不一樣');
+    assert.strictEqual(after.title.indexOf('●'), 0,
+      'N5-inflight：回覆到達時要標的是【送出去那一刻】的深度，不是回覆到達時的' +
+      '深度 —— 磁碟上有一筆使用者已經撤銷掉的編輯，所以 ● 必須亮著，got ' +
+      JSON.stringify(after.title));
+
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(navBlocked, true,
+      'N5-inflight：離站也必須被攔 —— 修之前這是本任務唯一一個三道網同時失效的' +
+      '序列（連 mtimeMs 都已經前進，衝突檢查也擋不住）');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-inflight：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-inflight a Ctrl+Z inside a save round-trip is not marked as saved — OK');
   }
   // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
   // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
