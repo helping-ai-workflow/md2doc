@@ -92,4 +92,58 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
     '回傳的 op 本身仍是正向的——直接拿它當 editRange 會算出相反的方向');
 }
 
+// ---------------------------------------------------------------------------
+// v3.4.0 batch3 Task 7 fix 1 (F3): the redo tail is a value a caller can take
+// and hand back.
+//
+// `push()` clears `_undone` — correct for an edit the document keeps, wrong for
+// one that is later withdrawn as if it had never happened. `discardTop()` puts
+// the bytes and the depth back and CANNOT put the branch back, so without these
+// two accessors a caller that discards its own ops silently eats a redo the
+// user had before it started.
+// ---------------------------------------------------------------------------
+{
+  const stack = new UndoStack();
+  let lines = ['# H', '', 'para'];
+  // One ordinary edit, then undo it: there is now a redo branch.
+  stack.push({ startLine: 3, endLine: 3, before: ['para'], after: ['para EDITED'] });
+  lines = ['# H', '', 'para EDITED'];
+  lines = stack.undo(lines).lines;
+  assert.deepStrictEqual(lines, ['# H', '', 'para'], 'fixture: the undo landed');
+  assert.strictEqual(stack.redoTail().length, 1, 'fixture: there is a redo branch');
+  const saved = stack.redoTail();
+
+  // A session that commits and then withdraws its own commits.
+  stack.push({ startLine: 3, endLine: 3, before: ['para'], after: ['para WAVE'] });
+  lines = ['# H', '', 'para WAVE'];
+  assert.strictEqual(stack.redoTail().length, 0,
+    'fixture: pushing cleared the branch, which is exactly the defect');
+  lines = stack.discardTop(lines).lines;
+  assert.deepStrictEqual(lines, ['# H', '', 'para'],
+    'discardTop put the bytes back');
+  assert.strictEqual(stack.redoTail().length, 0,
+    'discardTop CANNOT put the branch back on its own — that is why these exist');
+
+  stack.setRedoTail(saved);
+  const r = stack.redo(lines);
+  assert.notStrictEqual(r, null,
+    'after setRedoTail the pre-session redo must be reachable again');
+  assert.deepStrictEqual(r.lines, ['# H', '', 'para EDITED'],
+    'and it must redo the edit the user actually had. Got ' + JSON.stringify(r.lines));
+}
+{
+  // The copies are copies: a caller holding a tail cannot be mutated from under
+  // it, and handing one back cannot alias the stack's own array.
+  const stack = new UndoStack();
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['b'] });
+  stack.undo(['b']);
+  const tail = stack.redoTail();
+  stack.setRedoTail(tail);
+  tail.length = 0;
+  assert.strictEqual(stack.redoTail().length, 1,
+    'setRedoTail must copy — a caller clearing its own array may not empty the stack');
+  stack.setRedoTail(undefined);
+  assert.strictEqual(stack.redoTail().length, 0, 'a non-array reads as no branch');
+}
+
 console.log('lineops.test.js OK');

@@ -11169,6 +11169,283 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T7d a refusal is raised by name, waits to be acknowledged, and never rewrites the block — OK');
     }
+
+    // ── fix round 1 ────────────────────────────────────────────────────────
+
+    // T7e — F1. Ctrl+S is the one gesture the modal deliberately does not
+    // swallow, and the Escape arithmetic did not keep up with it.
+    //
+    // `markSaved()` sets `_savedDepth` to an ABSOLUTE index, so popping this
+    // session's ops below it makes `dirtyDepth` NEGATIVE — which still reads as
+    // dirty, so nothing looks wrong — and the next ordinary commit walks it back
+    // up through exactly zero. MEASURED before this fix, on this very sequence:
+    // documentIsDirty() answered false, the title dropped its ●, and the real
+    // conflict banner's real Reload raised no dialog at all and destroyed the
+    // typed edit while the disk still held the waveform the user had Escaped
+    // away. One gesture is enough; the row drives the minimal form.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const saved = await saveAndRead(ctx);
+      assert.ok(saved.indexOf("wave: 'p.1p.'") !== -1,
+        'T7e 前提失敗：這一發 Ctrl+S 必須真的把波形寫進磁碟。Got:\n' + saved);
+      const afterSave = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(afterSave.dirty, false,
+        'T7e 前提失敗：存完檔之後文件應該是乾淨的');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      const afterEsc = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(afterEsc.s.open, false, 'T7e 前提失敗：Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.s.dirty, true,
+        'T7e 前提失敗：Escape 把記憶體裡的波形丟掉了，磁碟上還留著 —— 兩邊不一樣，' +
+        '這時候文件本來就是髒的');
+
+      // 一筆普通的編輯。舊版就是在這一步把髒度走回 0 的。
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' IMPORTANT');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const afterEdit = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        onScreen: (document.querySelector('.content').textContent || '')
+          .indexOf('IMPORTANT') !== -1,
+      }));
+      assert.strictEqual(afterEdit.onScreen, true,
+        'T7e 前提失敗：那一筆編輯要真的在畫面上');
+      assert.strictEqual(afterEdit.s.dirty, true,
+        'T7e: 一筆普通的編輯不得把文件變回「乾淨」—— 螢幕上有 IMPORTANT，磁碟上沒有');
+      assert.strictEqual(afterEdit.title.indexOf('●'), 0,
+        'T7e: ● 也不得熄掉，got ' + JSON.stringify(afterEdit.title));
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8').indexOf('IMPORTANT'), -1,
+        'T7e 前提失敗：那一筆編輯還沒有落到磁碟');
+
+      // …所以真正的 Reload 必須被攔下來。
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7e: 存檔發生在 session 中間，之後的普通編輯一樣不得無聲地被 Reload 丟掉');
+      const survived = await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('IMPORTANT') !== -1);
+      assert.strictEqual(survived, true, 'T7e: 取消離站之後那筆編輯要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T7e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7e a save taken inside a wave session cannot make a later edit read clean — OK');
+    }
+
+    // T7f — F2. 關閉時那一次 render 失敗，文件不得因此變成一份 block map 指不到
+    // 的東西。
+    //
+    // 保住使用者畫的東西（不 rollback）是對的判斷，但 `blocks` 原本只有在
+    // render【成功】時才會被結算。MEASURED：+1 行的 session 配上一次失敗的
+    // render，下一筆普通段落編輯就提交到收尾圍欄後面那一行空白上，分隔行被吃掉、
+    // 段落被複製，完全沒有警告。這一列用 +2 行，因為那時候陳舊的 block map 指到
+    // 的是【收尾圍欄本身】。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const two = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(two.seam === null ? null : two.seam.ops, 2,
+        'T7f 前提失敗：兩次插入都要寫得回去（各加一行）。Got ' + JSON.stringify(two.seam));
+
+      // 讓【下一次】 /api/render 失敗，其餘照常。
+      await ctx.page.evaluate(() => {
+        const orig = window.fetch;
+        window.__failNextRender = true;
+        window.fetch = function (input, init) {
+          const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+          if (window.__failNextRender && /\/api\/render\b/.test(url)) {
+            window.__failNextRender = false;
+            return Promise.reject(new TypeError('probe: render aborted'));
+          }
+          return orig.call(this, input, init);
+        };
+      });
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 900));
+
+      const failed = await ctx.page.evaluate(() => ({
+        banner: (document.querySelector('.ed-conflict') || {}).textContent || null,
+        code: window.__edTestBlockSpan(1),
+        para: window.__edTestBlockSpan(2),
+        stillFailing: window.__failNextRender,
+      }));
+      assert.strictEqual(failed.stillFailing, false,
+        'T7f 前提失敗：那一次 render 真的要被擋掉（否則這一列什麼都沒測到）');
+      assert.ok(failed.banner !== null && failed.banner.indexOf('畫面沒有重畫成功') !== -1,
+        'T7f 前提失敗：失敗的 render 要升起「東西還在文件裡」那條 banner。Got ' +
+        JSON.stringify(failed.banner));
+      // 直接斷言那條不變式：每個 block 還是指得到自己的文字。
+      assert.strictEqual(failed.para.text, 'Tail para two.',
+        'T7f: render 失敗之後，block map 仍然必須指得到那個段落自己 —— 舊版指到的' +
+        '是收尾圍欄。Got ' + JSON.stringify(failed.para));
+      assert.deepStrictEqual(
+        { s: failed.code.startLine, e: failed.code.endLine }, { s: 3, e: 16 },
+        'T7f: 被編輯的那個區塊保留 startLine、由 endLine 吸收行數變化。Got ' +
+        JSON.stringify(failed.code));
+
+      // …而「下一筆普通編輯不得落在錯的地方」是這一切真正的判準。
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' ZZZ');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      const dupes = md.split('Tail para two.').length - 1;
+      assert.strictEqual(dupes, 1,
+        'T7f: 那個段落只能出現一次 —— 出現兩次就是提交落在分隔行上、把段落複製了。' +
+        'Got:\n' + md);
+      assert.ok(md.indexOf('```\n\nTail para two. ZZZ') !== -1,
+        'T7f: 收尾圍欄後面那一行空白也必須還在。Got:\n' + md);
+      assert.ok(md.indexOf(' ZZZ') !== -1, 'T7f 前提失敗：那一筆編輯要真的存進去');
+      assert.strictEqual(ctx.errs.length, 0, 'T7f: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7f a failed close render keeps the drawing and still leaves a block map the next edit can trust — OK');
+    }
+
+    // T7f2 — F2 的第二個症狀：失敗的 render 之後再打開編輯器，拿到的必須是完整
+    // 的 block body。MEASURED（舊版）：seam 回報 4..14，真正的 body 是 4..16，
+    // store 被餵了一份被截斷的來源，`.ed-wave-canvas` 根本沒有建出來。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await ctx.page.evaluate(() => {
+        const orig = window.fetch;
+        window.__failNextRender = true;
+        window.fetch = function (input, init) {
+          const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+          if (window.__failNextRender && /\/api\/render\b/.test(url)) {
+            window.__failNextRender = false;
+            return Promise.reject(new TypeError('probe: render aborted'));
+          }
+          return orig.call(this, input, init);
+        };
+      });
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 900));
+
+      // `.content` 還停在 session 之前那一次 render，所以那張圖還畫得出 hover，
+      // 開啟手勢跟平常一樣。
+      await openWave(ctx.page);
+      const reopened = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(),
+        canvas: document.querySelector('.ed-wave-canvas') !== null,
+        lanes: document.querySelector('.ed-wave-overlay')
+          ? document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes') : null,
+      }));
+      assert.strictEqual(reopened.canvas, true,
+        'T7f2: 重新打開必須拿到完整的 body，畫布要建得出來。Got ' +
+        JSON.stringify(reopened));
+      assert.deepStrictEqual(
+        { s: reopened.s.seam.startLine, e: reopened.s.seam.endLine }, { s: 4, e: 15 },
+        'T7f2: seam 要涵蓋真正的 body（原本 10 行 + 2 條新 lane）。Got ' +
+        JSON.stringify(reopened.s.seam));
+      assert.strictEqual(reopened.lanes, '8',
+        'T7f2: 六條原本的 lane 加兩條新的都要在。Got ' + JSON.stringify(reopened.lanes));
+      assert.strictEqual(ctx.errs.length, 0, 'T7f2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7f2 re-opening after a failed close render reads the whole block body — OK');
+    }
+
+    // T7g — F3. 一個被丟掉的 wave session 不得吃掉使用者原本就有的 redo。
+    //
+    // `push()` 會清掉 `_undone`，而 `discardTop()` 沒辦法把它放回去。MEASURED
+    // （舊版，含控制組）：打字、提交、Ctrl+Z，然後開 wave 畫一筆再 Escape ——
+    // Ctrl+Y 什麼都回不來；沒有中間那段 wave session 的話它會回來。文件在
+    // session 前後是逐位元組相同的，使用者沒有理由預期 redo 被吃掉。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const undone = await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(undone, false, 'T7g 前提失敗：Ctrl+Z 要先真的退掉那筆編輯');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('EDITED') !== -1,
+        'T7g: 被丟掉的 wave session 不得連使用者原本的 redo 一起吃掉。Got:\n' + md);
+      assert.ok(md.indexOf("wave: 'p....'") !== -1,
+        'T7g: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7g: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7g a discarded wave session hands back the redo branch it cleared — OK');
+    }
+
+    // T7h — F5. 在編輯器裡把自己畫的東西撤銷回原樣，● 要熄掉。
+    //
+    // MEASURED（舊版）：塗一格再按編輯器自己的「復原」，文件的位元組回到原狀，
+    // 但 `ops` 從 1 變 2、`dirty` 一直是 true、● 在這個 session 剩下的時間裡再也
+    // 沒有熄過。偏安全的方向，但那是在告訴使用者有一筆他沒有的未存檔改動。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const painted = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(painted.s.dirty, true, 'T7h 前提失敗：畫完要是髒的');
+      assert.strictEqual(painted.title.indexOf('●'), 0, 'T7h 前提失敗：● 要亮著');
+
+      await pressClick(ctx.page, '.ed-wave-undo');
+      await new Promise((r) => setTimeout(r, 500));
+      const undone = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        wave0: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+      }));
+      assert.strictEqual(undone.wave0, 'p....',
+        'T7h 前提失敗：編輯器自己的復原要真的退回原樣。Got ' + JSON.stringify(undone.wave0));
+      assert.strictEqual(undone.s.seam.ops, 0,
+        'T7h: 回到原樣的 session 要把自己的 op 從 undo stack 上收回去。Got ' +
+        JSON.stringify(undone.s.seam));
+      assert.strictEqual(undone.s.dirty, false,
+        'T7h: 位元組跟原檔一樣的時候文件不得還說自己是髒的');
+      assert.strictEqual(undone.title.indexOf('●'), -1,
+        'T7h: ● 要熄掉，got ' + JSON.stringify(undone.title));
+
+      // 而且收回去之後還能繼續畫 —— 收的是 op，不是 session。
+      await paintCell(ctx.page, 0, 3, '1');
+      const again = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(again.seam.ops, 1,
+        'T7h: 收回去之後再畫一筆仍然是一次 commit。Got ' + JSON.stringify(again.seam));
+      assert.strictEqual(again.dirty, true, 'T7h: 而且又髒起來了');
+      assert.strictEqual(ctx.errs.length, 0, 'T7h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7h a session that comes back to the bytes it started from stops claiming to be dirty — OK');
+    }
   }
 
   await browser.close();

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender } = require('../lib/editor/client.js');
+const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -251,7 +251,7 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // that assigned `lines` from anywhere else would leave the dot, the save
   // button, the unload guard AND undo all blind at once.
   const body = src.slice(src.indexOf('function writeWaveGestureBack'),
-                         src.indexOf('function showWaveRefusal'));
+                         src.indexOf('function bodyNow'));
   assert.ok(body.length > 0, 'writeWaveGestureBack() must exist');
   assert.ok(body.includes('commitRangeEdit({ lines, blocks, stack }'),
     'the wave write-back must commit through commitRangeEdit() like every other ' +
@@ -260,6 +260,59 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.deepStrictEqual(assigns.map((l) => l.trim()), ['lines = result.lines;'],
     'the only `lines =` in the wave write-back must be commitRangeEdit()\'s own ' +
     'result. Got ' + JSON.stringify(assigns));
+
+  // The one OTHER place in the wave path that writes `lines`, and the pairing
+  // that makes it legitimate: it is a restore BY VALUE of the snapshot taken at
+  // session open, and it only ever runs alongside the pops that take the same
+  // ops off the stack. A `lines =` here without the discardTop() beside it
+  // would be a document rewind the history never heard about.
+  const unwind = src.slice(src.indexOf('function unwindWaveOps'),
+                           src.indexOf('function settleWaveBlocks'));
+  assert.ok(unwind.length > 0, 'unwindWaveOps() must exist');
+  const unwindAssigns = (unwind.match(/^\s*lines = .*$/gm) || []).map((l) => l.trim());
+  assert.deepStrictEqual(unwindAssigns, ['lines = seam.baseLines;'],
+    'the discard may only put back the snapshot it took. Got ' +
+    JSON.stringify(unwindAssigns));
+  assert.ok(unwind.includes('stack.discardTop(lines)'),
+    'and it must pop the ops it is reversing');
+  assert.ok(unwind.includes('stack.setRedoTail(seam.baseRedoTail)'),
+    'and hand back the redo branch its own first commit cleared (F3)');
+  assert.ok(unwind.includes('stack.dirtyDepth !== seam.baseDirtyDepth + seam.ops'),
+    'and it must DERIVE whether a save landed inside the session rather than ' +
+    'popping blind — see the driven F1 fixture below for what popping blind costs');
+
+  // fix 1 / F2 — the close render is allowed to fail and the work is allowed to
+  // stay, but `blocks` may not be left addressing the pre-session document. The
+  // settle has to happen BEFORE the render rather than on its failure branch,
+  // so it also covers the window in which the overlay is re-opened while the
+  // settling render is still in flight.
+  const finish = src.slice(src.indexOf('async function finishWaveSession'),
+                           src.indexOf('async function restoreDiscardedWaveEdit'));
+  assert.ok(finish.length > 0, 'finishWaveSession() must exist');
+  const settleAt = finish.indexOf('settleWaveBlocks(seam);');
+  const renderAt = finish.indexOf('await safeRerenderAll(');
+  assert.notStrictEqual(settleAt, -1,
+    'the commit close must settle `blocks` from the session\'s own arithmetic — ' +
+    'a failed render leaves nothing else to do it');
+  assert.notStrictEqual(renderAt, -1, 'and it must still render');
+  assert.ok(settleAt < renderAt,
+    'and the settle must come BEFORE the render, not on its failure branch');
+  // And the third and last `lines =` in the whole wave segment: the revert
+  // commit the Escape branch falls back to when a save landed inside the
+  // session. Same rule as the other two — it is commitRangeEdit()'s own result
+  // and nothing else, so the history hears about every byte this feature moves.
+  const finishAssigns = (finish.match(/^\s*(?:if \(result\.op !== null\) )?lines = .*$/gm) || [])
+    .map((l) => l.trim());
+  assert.deepStrictEqual(finishAssigns, ['if (result.op !== null) lines = result.lines;'],
+    'the session close may only write `lines` through commitRangeEdit(). Got ' +
+    JSON.stringify(finishAssigns));
+
+  // The CALL, not the name: the comment right beside the failure branch says
+  // 「Deliberately NOT rollbackFailedRender()」, and a bare-substring test here
+  // would be tripped by the sentence that explains the decision.
+  assert.ok(!finish.includes('rollbackFailedRender({'),
+    'the commit close deliberately keeps the work on a failed render (deviation ' +
+    '1) — if that ever changes, the settle above stops being what makes it safe');
 
   // Half two: a REFUSED gesture reaches no `lines` at all by definition, so
   // dirtyDepth cannot see it. documentIsDirty() carries a third term for it.
@@ -312,6 +365,154 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.strictEqual(st.stack.redo(st.lines), null,
     'Escape must leave nothing to REDO either — a discarded wave session may ' +
     'not come back through Ctrl+Y');
+}
+
+// fix 1 / F1 — the case the block above cannot express, and the reason the
+// Escape branch has two halves.
+//
+// Ctrl+S is the ONE gesture the wave modal deliberately does not swallow, and
+// `markSaved()` sets `_savedDepth` to an ABSOLUTE index. Popping below that
+// index makes `dirtyDepth` negative — which still reads as dirty, so nothing
+// looks wrong — and the next few ordinary commits then walk it back up THROUGH
+// zero, at which point documentIsDirty() answers false over a document that
+// differs from disk and the conflict banner's Reload destroys it without a
+// dialog. MEASURED end to end on the real page before this fix.
+//
+// Both halves are DRIVEN here: first that the blind pop really does go clean
+// (so the branch is guarding something real), then that the revert-commit
+// answer never can.
+{
+  const body = (w) => "{ signal: [{ name: 'a', wave: '" + w + "' }] }";
+  const fresh = () => ({
+    lines: ['# W', '', '```wavedrom', body('01'), '```'],
+    blocks: [{ id: 0, type: 'heading', startLine: 1, endLine: 1 },
+             { id: 1, type: 'code', startLine: 3, endLine: 5 }],
+    stack: new UndoStack(),
+  });
+  const paint = (st, w) => {
+    const r = commitRangeEdit(st, 4, 4, body(w));
+    assert.notStrictEqual(r.op, null, 'fixture: each gesture must really commit');
+    st.lines = r.lines;
+  };
+  const tailEdit = (st, n) => {
+    // An ordinary edit somewhere else in the document, one op each.
+    const r = commitRangeEdit(st, 1, 1, '# W' + n);
+    assert.notStrictEqual(r.op, null, 'fixture: the ordinary edit must commit');
+    st.lines = r.lines;
+  };
+
+  // The derived predicate the implementation uses to tell the two apart.
+  {
+    const st = fresh();
+    const baseDepth = st.stack.dirtyDepth;
+    paint(st, '0.1'); paint(st, '0.11');
+    assert.strictEqual(st.stack.dirtyDepth, baseDepth + 2,
+      'with no save inside the session, dirtyDepth is exactly base + ops — this ' +
+      'equality IS the predicate, not a second copy of the stack kept by hand');
+    st.stack.markSaved();
+    paint(st, '0.111');
+    assert.notStrictEqual(st.stack.dirtyDepth, baseDepth + 3,
+      'and a save inside the session breaks it, which is how the session knows');
+  }
+
+  // THE TRAP — the blind pop, driven to the point where it goes clean.
+  {
+    const st = fresh();
+    const baseLines = st.lines;
+    paint(st, '0.1'); paint(st, '0.11');
+    st.stack.markSaved();                   // disk now holds the 2-gesture state
+    paint(st, '0.111');
+    for (let i = 0; i < 3; i++) st.lines = st.stack.discardTop(st.lines).lines;
+    assert.deepStrictEqual(st.lines, baseLines, 'the bytes did go back');
+    assert.strictEqual(st.stack.dirtyDepth, -2,
+      'and the depth went NEGATIVE, which still reads dirty — this is the part ' +
+      'that hides the defect');
+    tailEdit(st, 'A');
+    assert.notStrictEqual(st.stack.dirtyDepth, 0, 'one edit back: still dirty');
+    tailEdit(st, 'B');
+    assert.strictEqual(st.stack.dirtyDepth, 0,
+      'TWO edits back it reads CLEAN — over a document that differs from disk ' +
+      'in the waveform AND in both of those edits. This is the measured ' +
+      'data-loss path; the branch under test exists to make it unreachable');
+  }
+
+  // THE ANSWER — a revert COMMIT when a save landed inside the session.
+  {
+    const st = fresh();
+    const baseLines = st.lines;
+    paint(st, '0.1'); paint(st, '0.11');
+    st.stack.markSaved();
+    paint(st, '0.111');
+    const r = commitRangeEdit(st, 4, 4, baseLines[3]);
+    assert.notStrictEqual(r.op, null, 'the revert must be a real op');
+    st.lines = r.lines;
+    assert.deepStrictEqual(st.lines, baseLines,
+      'the bytes go back the same way. Got ' + JSON.stringify(st.lines));
+    assert.ok(st.stack.dirtyDepth > 0,
+      'and the depth is POSITIVE — disk really does still hold the drawing');
+    // The property, not one sample of it: the stack only grows from here, so
+    // there is no number of later edits that can walk it back to zero.
+    for (let i = 0; i < 6; i++) {
+      tailEdit(st, 'E' + i);
+      assert.notStrictEqual(st.stack.dirtyDepth, 0,
+        'edit ' + i + ' must not be able to make the document read clean');
+    }
+  }
+}
+
+// fix 1 / F2 — the block map after a body edit that changed the line count.
+//
+// The wave editor defers `blocks` to one render at the end of a session, and a
+// render can FAIL. Before this, a failed close render left `blocks` addressing
+// the pre-session document while `lines` carried the delta — MEASURED, the next
+// ordinary paragraph edit then committed over the blank line after the closing
+// fence, eating the separator and duplicating the paragraph, silently.
+{
+  const lines0 = ['# W', '', '```wavedrom', '{ signal: [', "  { name: 'a', wave: '01' }",
+                  '] }', '```', '', 'Tail para two.'];
+  const blocks0 = [{ id: 0, type: 'heading',   startLine: 1, endLine: 1 },
+                   { id: 1, type: 'code',      startLine: 3, endLine: 7 },
+                   { id: 2, type: 'paragraph', startLine: 9, endLine: 9 }];
+  const st = { lines: lines0, blocks: blocks0, stack: new UndoStack() };
+  // One lane added: the fence BODY (4..6) grows by one line.
+  const r = commitRangeEdit(st, 4, 6,
+    ['{ signal: [', '  { name: "", wave: "x" },', "  { name: 'a', wave: '01' }", '] }'].join('\n'));
+  assert.notStrictEqual(r.op, null, 'fixture: the body edit must really commit');
+  st.lines = r.lines;
+  assert.strictEqual(st.lines.length, 10, 'fixture: the document grew by one line');
+  assert.strictEqual(st.lines[9], 'Tail para two.',
+    'fixture: the tail paragraph is now at line 10. Got ' + JSON.stringify(st.lines));
+
+  // What commitRangeEdit's OWN anchor says — the value deviation 2 is right to
+  // refuse, kept here so the difference is driven rather than described.
+  const wrong = r.blocks.find((b) => b.id === 1);
+  assert.deepStrictEqual({ s: wrong.startLine, e: wrong.endLine }, { s: 4, e: 8 },
+    'commitRangeEdit anchors on the block BEFORE the fence, so it moves the ' +
+    "fenced block's own startLine, which did not move. Got " + JSON.stringify(wrong));
+
+  const settled = shiftBlocksAfterBodyEdit(blocks0, 1, st.lines.length - lines0.length);
+  const code = settled.find((b) => b.id === 1);
+  const tail = settled.find((b) => b.id === 2);
+  const head = settled.find((b) => b.id === 0);
+  assert.deepStrictEqual({ s: code.startLine, e: code.endLine }, { s: 3, e: 8 },
+    'the edited block keeps its startLine and absorbs the delta in endLine. Got ' +
+    JSON.stringify(code));
+  assert.deepStrictEqual({ s: tail.startLine, e: tail.endLine }, { s: 10, e: 10 },
+    'everything after it moves by the delta. Got ' + JSON.stringify(tail));
+  assert.deepStrictEqual({ s: head.startLine, e: head.endLine }, { s: 1, e: 1 },
+    'and everything before it does not move');
+  // The property that actually matters: every block still addresses its own
+  // text. This is what "no ordinary edit may land against an unconfirmed
+  // blocks" reduces to, and it is what the stale map failed.
+  assert.strictEqual(st.lines.slice(tail.startLine - 1, tail.endLine).join('\n'),
+    'Tail para two.',
+    'the settled map must address the paragraph itself — the stale map addressed ' +
+    'the blank separator, which is how the separator got eaten');
+  assert.strictEqual(st.lines[blocks0[2].startLine - 1], '',
+    'control: the STALE map really does point at the blank separator, so this ' +
+    'fixture can express the defect');
+  assert.deepStrictEqual(shiftBlocksAfterBodyEdit(blocks0, 1, 0), blocks0,
+    'a zero delta is the identity, object included');
 }
 
 // -- Task 5 review fix: suppressTableFocusout must be exception-safe -------
