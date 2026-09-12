@@ -9703,7 +9703,71 @@ async function main() {
               });
             engineGaps.push(at.join(' '));
           }
+          // ── what was actually PAINTED ───────────────────────────────────
+          //
+          // Everything above reads `data-bricks-<i>` — the canvas's own
+          // description of itself, written at the top of `drawLane` BEFORE it
+          // paints anything. Measured with a mutant that returns straight after
+          // that attribute block: the canvas paints 0 non-gridline shapes
+          // (pristine: 25) and every assertion in this row still passes,
+          // `lanes === engineLanes` included. An editor that draws nothing is
+          // indistinguishable from a correct one when both halves of the
+          // comparison come from the same source.
+          //
+          // So this reads the SHAPES. The cycle grid comes from the painted
+          // `.ed-wave-grid` lines rather than from any attribute, the row height
+          // comes from that grid's own extent divided by the ENGINE's lane
+          // count, and each cycle is classified by what is painted over its
+          // midpoint — a rect is x, a polygon is a bus, a clock path is a clock,
+          // and a plain line is read as high/mid/low by which third of its row
+          // it sits in. Transition edges are vertical and sit ON a boundary, so
+          // a cycle's midpoint never falls inside one; gap markers and bus
+          // labels are excluded by class (gaps have their own per-cycle
+          // comparison above).
+          const gridXs = Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('x1')))
+            .sort((a, b) => a - b);
+          const gridBottom = Math.max.apply(null, Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('y2'))));
+          const engineLaneCount = document.querySelectorAll(
+            '[id^="wavelane_draw_"][id$="_9000"]').length;
+          const rowH = engineLaneCount > 0 ? gridBottom / engineLaneCount : 0;
+          const shapes = Array.prototype.filter.call(svg.children, (el) => {
+            const cls = el.getAttribute('class') || '';
+            return cls.indexOf('ed-wave-grid') === -1 &&
+              cls.indexOf('ed-wave-selection') === -1 &&
+              cls.indexOf('ed-wave-gap') === -1 &&
+              cls.indexOf('ed-wave-buslabel') === -1 &&
+              cls.indexOf('ed-wave-edge') === -1;
+          }).map((el) => {
+            const b = el.getBBox();
+            return { tag: el.tagName, cls: el.getAttribute('class') || '',
+              x0: b.x, x1: b.x + b.width, cy: b.y + b.height / 2,
+              y0: b.y, y1: b.y + b.height };
+          });
+          const painted = [];
+          for (let i = 0; i < engineLaneCount; i++) {
+            const top = i * rowH;
+            const row = [];
+            for (let c = 0; c + 1 < gridXs.length; c++) {
+              const mx = (gridXs[c] + gridXs[c + 1]) / 2;
+              const hit = shapes.find((sh) => sh.x0 <= mx && mx <= sh.x1 &&
+                sh.cy >= top && sh.cy < top + rowH);
+              if (hit === undefined) { row.push(''); continue; }
+              if (hit.tag === 'rect') { row.push('x'); continue; }
+              if (hit.tag === 'polygon') { row.push('bus'); continue; }
+              if (hit.tag === 'path') {
+                row.push(hit.cls.indexOf('ed-wave-clock') !== -1 ? 'clock' : '?');
+                continue;
+              }
+              const third = (hit.cy - top) / rowH;
+              row.push(third < 1 / 3 ? 'hi' : (third < 2 / 3 ? 'mid' : 'lo'));
+            }
+            painted.push(row.join(' '));
+          }
           return { drawn: drawn, engine: engine, missing: missing,
+            painted: painted, shapeCount: shapes.length,
+            gridCount: gridXs.length,
             lanes: lanes,
             engineLanes: document.querySelectorAll(
               '[id^="wavelane_draw_"][id$="_9000"]').length,
@@ -9752,6 +9816,40 @@ async function main() {
         assert.deepStrictEqual(got.drawnGaps, got.engineGaps,
           'T6b: 斷點記號必須逐 lane、逐 cycle 對上\ndrawn : ' +
           JSON.stringify(got.drawnGaps) + '\nengine: ' + JSON.stringify(got.engineGaps));
+
+        // The painted half. `expected` is derived from the ENGINE's own bricks,
+        // so neither side of this comparison comes from the canvas's attributes.
+        const familyOf = (brick) => {
+          if (brick === '') return '';
+          if (brick === 'xxx') return 'x';
+          if (brick.slice(0, 4) === 'vvv-') return 'bus';
+          if (brick === 'nclk' || brick === 'pclk') return 'clock';
+          if (brick === '111' || brick === 'uuu') return 'hi';
+          if (brick === '000' || brick === 'ddd') return 'lo';
+          if (brick === 'zzz') return 'mid';
+          return '?' + brick;
+        };
+        // Both sides are padded to the number of cycle COLUMNS the drawing has,
+        // so the comparison stays positional: a lane the engine gives three
+        // bricks on must be painted on exactly those three columns and blank on
+        // the rest, and a lane it gives none on (the `{}` spacer) must be blank
+        // everywhere rather than merely "not compared".
+        const columns = got.gridCount - 1;
+        const padTo = (arr) => {
+          const out = arr.slice(0, columns);
+          while (out.length < columns) out.push('');
+          return out.join(' ');
+        };
+        const expected = got.engine.map((row) =>
+          padTo((row === '' ? [] : row.split(' ')).map(familyOf)));
+        assert.ok(got.gridCount > 1,
+          'T6b: cycle 格線必須真的畫出來了，否則下面是拿空格線在分格。Got ' + got.gridCount);
+        assert.ok(got.shapeCount > 0,
+          'T6b: 畫布上必須真的有形狀，不只是屬性。Got ' + got.shapeCount);
+        assert.deepStrictEqual(got.painted, expected,
+          'T6b: 畫出來的【形狀】必須跟引擎逐格對上（不是只有 data-bricks 屬性對上）\n' +
+          'painted : ' + JSON.stringify(got.painted) + '\n' +
+          'expected: ' + JSON.stringify(expected));
         return got;
       };
 
@@ -10330,11 +10428,25 @@ async function main() {
       const lockedY = await ctx.page.evaluate(() => window.scrollY);
       assert.strictEqual(lockedY, 0,
         'T6j: modal 開著時滾輪不得捲動後面那份文件。Got ' + lockedY);
+
+      // …and now a scroll that the lock does NOT block, because the `live`
+      // half of this census row is only meaningful across a page that really
+      // moved. A previous version of this row deleted the scroll when it added
+      // the lock, and then compared `top` before and after a scroll the line
+      // above asserts did not happen — measured on a sandbox whose only change
+      // was `.ed-wave-overlay { position: absolute }`, the shipped shape passed
+      // and the pre-change shape failed at `top -900 === 0`. That is the class
+      // this row exists for and the one this branch already paid for once.
+      // `scrollBy` moves while a wheel does not: that is what `overflow: hidden`
+      // means, measured both ways in this session.
+      await scrollBy(ctx.page, 900);
       const ovAfter = await overlayState(ctx.page, '.ed-wave-overlay');
       assert.ok(isLive(ovAfter),
-        '.ed-wave-overlay 必須仍然可見，got ' + JSON.stringify(ovAfter));
+        '.ed-wave-overlay 捲動後必須仍然可見，got ' + JSON.stringify(ovAfter));
       assert.strictEqual(ovAfter.top, ovBefore.top,
-        '.ed-wave-overlay 必須留在同一個視窗座標，got top=' + ovAfter.top);
+        '.ed-wave-overlay 捲動後必須留在同一個視窗座標，got top=' + ovAfter.top);
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 250));
 
       // A file dropped on the panel. Before the state-based gate this reached
       // the document's own `drop` listener and inserted an image into `.content`
