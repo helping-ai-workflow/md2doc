@@ -154,15 +154,20 @@ async function newPage(browser) {
   // window is closed by construction rather than merely made narrower.
   await page.evaluateOnNewDocument(() => {
     window.__edInflight = 0;
-    // How many /api/save requests have COMPLETED, ever, on this page.
+    // Which /api/save requests have COMPLETED, and which have been STARTED.
     //
     // `__edInflight` answers "is anything happening right now", which is a
     // different question from "has the save I just asked for landed" — and the
     // gap between them is real, not theoretical. Ctrl+S does not issue the save
-    // directly: it goes through commitThenSave()'s `await switchAwayFrom()`
-    // first, so between the keypress and the request ever being sent there is a
+    // directly: it resolves whatever is open with `switchAwayFrom()` and calls
+    // `save()` only in that promise's `.then`, so between the keypress and the
+    // request ever being sent there is a
     // window in which nothing is in flight and every quiescence-based wait
-    // releases. Measured by deferring only the DISPATCH of /api/save by 300 ms:
+    // releases. (That branch is `switchAwayFrom().then((ok) => { if (ok) save(); })`
+    // spelled inline — deliberately NOT `commitThenSave()`, which is the toolbar
+    // button's path; a source-shape check in test/editor-client.test.js pins the
+    // inline spelling.) Measured by deferring only the DISPATCH of /api/save by
+    // 300 ms:
     // the S2 T8 cell `li(ol, sole run member) → ul` reported the file as
     // byte-identical with no banner — a dropped gesture — while the DOM said
     // `data-list-type="ul"` and the file did change 1.5 s later. The write
@@ -173,22 +178,34 @@ async function newPage(browser) {
     // in flight" instead of "the thing I asked for is done". A monotonic
     // counter of completed saves is a question about the save itself, which is
     // what saveAndRead() actually needs to wait on.
+    //
+    // A COUNT is not enough, and that gap is measured rather than argued: with
+    // the dispatch of /api/save deferred 1800 ms, an un-awaited Ctrl+S followed
+    // by a second edit and a wait-for-the-counter released after 1193 ms on the
+    // FIRST save and read a file that did not contain the second marker. So each
+    // request takes an id off `__edSaveSeq` when it is sent and pushes that id
+    // onto `__edSaveLanded` when it completes; a waiter snapshots the sequence
+    // before the keypress and waits for an id GREATER than its snapshot, which
+    // is a save that was started after it pressed and cannot be somebody else's.
     window.__edSaveDone = 0;
+    window.__edSaveSeq = 0;
+    window.__edSaveLanded = [];
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
       const url = String(typeof input === 'string' ? input : (input && input.url) || '');
       if (!/\/api\/(render|save)\b/.test(url)) return origFetch.call(this, input, init);
       const isSave = /\/api\/save\b/.test(url);
+      const saveId = isSave ? ++window.__edSaveSeq : 0;
       window.__edInflight++;
       let settled = false;
       const settle = () => {
         if (settled) return;
         settled = true;
         window.__edInflight--;
-        // Bumped on the SAME event the in-flight counter is released on — the
+        // Recorded on the SAME event the in-flight counter is released on — the
         // body having been read, or the safety net below — so a completed save
         // and a quiet page are decided at one moment and cannot disagree.
-        if (isSave) window.__edSaveDone++;
+        if (isSave) { window.__edSaveDone++; window.__edSaveLanded.push(saveId); }
       };
       return origFetch.call(this, input, init).then(
         (res) => {
@@ -1325,32 +1342,46 @@ async function dragRow(page, tableSel, fromIndex, toIndex) {
 // Ctrl+S then re-read the file from disk — used by the Task 5/6 scenarios
 // below to assert the committed source after a structure op, same
 // keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
-async function saveAndRead(page, mdPath) {
-  // Wait for THIS save, not for a quiet page. See `__edSaveDone`'s own comment
-  // in newPage() for the measurement: the quiescence wait can release in the
-  // window between the keypress and the request being sent, and then this
-  // function reads a file the editor has not written yet and the scenario
-  // reports a dropped gesture that never happened.
-  const before = await page.evaluate(() => window.__edSaveDone || 0);
+/**
+ * Press Ctrl+S and return once THAT save has landed.
+ *
+ * Every Ctrl+S in this file goes through here. Waiting for a quiet page instead
+ * is what produced this repo's intermittent "the gesture did nothing" reds: the
+ * client's Ctrl+S branch does not issue the save directly — it is
+ * `switchAwayFrom().then((ok) => { if (ok) save(); })` spelled inline (NOT
+ * `commitThenSave()`, which is the toolbar button's path), and `save()`'s own
+ * `fetch` is its first statement — so between the keypress and the request
+ * being sent there is a window in which nothing is in flight and every
+ * quiescence-based wait releases. Measured by deferring only the DISPATCH of
+ * /api/save: the old wait released at 233-249 ms and the caller then read a file
+ * the editor had not written, while the file did change 1.5 s later. Same family
+ * as the v3.3.0 counter bug one layer up — that one released on the response
+ * headers instead of the body, this one on "nothing in flight" instead of "the
+ * thing I asked for is done".
+ *
+ * Never passes silently on a timeout: the ONE documented path where Ctrl+S
+ * issues no save is a commit that failed (`switchAwayFrom()` answering false —
+ * again the inline spelling, not `commitThenSave()`),
+ * and that path has already put a banner on screen. Anything else is a real
+ * defect, and returning past it would turn it into "the gesture did nothing",
+ * which is the misdiagnosis this exists to stop.
+ */
+async function pressSaveAndLand(page) {
+  const startedBefore = await page.evaluate(() => window.__edSaveSeq || 0);
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyS');
   await page.keyboard.up('Control');
   try {
     await page.waitForFunction(
-      (n) => (window.__edSaveDone || 0) > n, { timeout: 15000 }, before);
+      (n) => (window.__edSaveLanded || []).some((id) => id > n),
+      { timeout: 15000 }, startedBefore);
   } catch (e) {
-    // No /api/save ever completed. There is exactly one documented reason for
-    // that: commitThenSave() skips save() when switchAwayFrom() returns false,
-    // i.e. the commit failed — and that path has already put a banner on screen.
-    // Anything else is a real defect, and reading the file past it would turn it
-    // into "the gesture did nothing", which is the misdiagnosis this whole
-    // change exists to stop.
     const banner = await page.evaluate(() => {
       const el = document.querySelector('.ed-conflict');
       return el ? (el.textContent || '') : null;
     });
     if (banner === null) {
-      throw new Error('saveAndRead: Ctrl+S produced no completed /api/save in 15s, ' +
+      throw new Error('pressSaveAndLand: Ctrl+S produced no completed /api/save in 15s, ' +
         'and no banner explains why — the save really did not happen. ' +
         'Original: ' + (e && e.message));
     }
@@ -1358,6 +1389,10 @@ async function saveAndRead(page, mdPath) {
   // The save has landed; this is now only the paint/settle grace, and it also
   // covers any follow-on render the commit issued.
   await awaitSaveSettled(page);
+}
+
+async function saveAndRead(page, mdPath) {
+  await pressSaveAndLand(page);
   return fs.readFileSync(mdPath, 'utf8');
 }
 
@@ -1682,6 +1717,11 @@ async function gutterGeometry(page, sel) {
       const dirtyBeforeSave = await page.title();
       assert.ok(dirtyBeforeSave.startsWith('●'), 'sanity: title is dirty after a successful commit');
 
+      // Deliberately NOT pressSaveAndLand(): this scenario stubs the save
+      // endpoint to fail, so no /api/save ever completes and the thing being
+      // waited for is the banner, not the write. Waiting for a save that cannot
+      // land would spend 15 s and then throw the helper's own "no banner
+      // explains why" error — with a banner right there on screen.
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
@@ -4666,10 +4706,7 @@ async function gutterGeometry(page, sel) {
         'commit must not stringify undefined into the DOM'
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText1 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
         'WYSIWYG: Enter-commit + save must update the file on disk');
@@ -4826,10 +4863,7 @@ async function gutterGeometry(page, sel) {
         true,
         'the ⠿ menu must close itself once a conversion is clicked'
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText2 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/^## Heading/m.test(fileText2),
         '轉換成 › 標題 2 must rewrite the heading depth in the source (# -> ##)');
@@ -4884,10 +4918,7 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('SECOND-LINE'),
         { timeout: 5000 }
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText3 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
         'Shift+Enter\'s <br> must round-trip into the saved markdown source');
@@ -5176,10 +5207,7 @@ async function gutterGeometry(page, sel) {
         'CRITICAL regression: exactly ONE /api/render request for the commit — stale cancel() ' +
         'listeners from earlier open/Esc cycles must not fire a second one');
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextLeak = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLeak.includes('LISTENER-LEAK-REGRESSION-TEXT'),
         'CRITICAL regression: the typed text must persist to disk, not be silently reverted ' +
@@ -5464,10 +5492,7 @@ async function gutterGeometry(page, sel) {
       );
 
       await page.keyboard.press('Escape'); // end the OTHER block's own burst (never committed)
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText.includes('Blur commit target text here. BLUR-COMMITTED'),
         'focus-edit-blur must commit to `lines` and persist to disk on save, got:\n' + fileText);
@@ -5724,10 +5749,7 @@ async function gutterGeometry(page, sel) {
         'the selection toolbar must be gone after commit'
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextBold = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/Bold \*\*commit\*\* target word here\./.test(fileTextBold),
         'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
@@ -5805,10 +5827,7 @@ async function gutterGeometry(page, sel) {
         { timeout: 5000 }
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextStrike = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextStrike.includes('Strike ~~commit~~ target word here.'),
         'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
@@ -5846,10 +5865,7 @@ async function gutterGeometry(page, sel) {
         { timeout: 5000 }
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextU = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextU.includes('Underline <u>commit</u> target word here.'),
         'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
@@ -5894,10 +5910,7 @@ async function gutterGeometry(page, sel) {
 
       await page.keyboard.press('Enter');
       await page.waitForFunction((s) => !!document.querySelector(s + ' code'), {}, sel);
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextCode = fs.readFileSync(mdPath, 'utf8');
       const expectedFence = '`` Backtick target has a ` mark inside. ``';
       assert.ok(fileTextCode.includes(expectedFence),
@@ -5939,10 +5952,7 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('href="https://example.org"'),
         { timeout: 5000 }
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextLink = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLink.includes('[target](https://example.org)'),
         'sel-toolbar link: the saved source must contain [target](https://example.org), got: ' + fileTextLink);
@@ -6290,10 +6300,7 @@ async function gutterGeometry(page, sel) {
           'no cell must remain focused after the burst commits (cells stay permanently contenteditable, just not focused)'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
 
         assert.ok(fileText.includes('| Name | Note |'), 'header row unchanged, got:\n' + fileText);
@@ -6370,10 +6377,7 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| one<br>two |'),
           'a cell newline must be emitted as the literal <br>, got:\n' + fileText);
@@ -6433,10 +6437,7 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| xline1<br>line2 |'),
           'the pasted multi-line cell must commit as ONE physical row containing <br>, got:\n' + fileText);
@@ -6499,10 +6500,7 @@ async function gutterGeometry(page, sel) {
           'every cell must still be contenteditable after Esc — Task 5 arms the whole table once, a burst reverting is not un-arming it'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.strictEqual(fileText, torig,
           'Esc must never have touched `lines` — the saved file must be byte-identical to the original, got:\n' + fileText);
@@ -12022,10 +12020,7 @@ async function gutterGeometry(page, sel) {
           'sanity: the burst must still be open (never blurred) right before Ctrl+S'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f1mdPath, 'utf8');
         assert.ok(fileText.includes('EDITED without a blur.'),
@@ -12074,10 +12069,7 @@ async function gutterGeometry(page, sel) {
         const otherSel = await paragraphSelByText(page, 'Trailing paragraph text.');
         await page.click(otherSel); // click OUT of the table — a real blur, no typing anywhere
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f2mdPath, 'utf8');
         assert.strictEqual(fileText, f2orig,
@@ -12229,10 +12221,7 @@ async function gutterGeometry(page, sel) {
         await page.evaluate(() => document.activeElement && document.activeElement.blur());
         await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f4mdPath, 'utf8');
         assert.ok(!fileText.includes('DISCARDED_TYPING'), 'the discarded typing must never reach the saved file, got:\n' + fileText);
@@ -12356,10 +12345,7 @@ async function gutterGeometry(page, sel) {
           'committed — a dropped gesture leaves the heading at H1'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f5mdPath, 'utf8');
         assert.strictEqual(fileText, '## Heading depth target text EDITED\n',
@@ -12431,10 +12417,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the table op'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f6aMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -12498,10 +12481,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the row drop'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f6bMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -12628,10 +12608,7 @@ async function gutterGeometry(page, sel) {
         );
 
         await page.click('.ed-conflict button[aria-label="Dismiss"]');
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f7MdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -12751,10 +12728,7 @@ async function gutterGeometry(page, sel) {
         );
 
         await page.click('.ed-conflict button[aria-label="Dismiss"]');
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f8MdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -16909,10 +16883,7 @@ async function gutterGeometry(page, sel) {
           await armKeyRecorder(page);
           const alpha = await liBlockSelByText(page, 'alpha');
           await openWysiwyg(page, alpha);
-          await page.keyboard.down('Control');
-          await page.keyboard.press('KeyS');
-          await page.keyboard.up('Control');
-          await awaitSaveSettled(page);
+          await pressSaveAndLand(page);
           const state = await page.evaluate((s) => {
             const surf = document.querySelector(s + ' > .ed-li-text');
             return {
@@ -23564,10 +23535,7 @@ async function gutterGeometry(page, sel) {
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
           { timeout: 5000 });
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/Toolbar bold \*\*target\*\* word here\./.test(fileText),
           'toolbar Bold must reach the saved source as **target**, got: ' + fileText);
@@ -23682,10 +23650,7 @@ async function gutterGeometry(page, sel) {
           'the block that was pasted INTO must be left byte-identical — structure lands below it, never inside it');
 
         await settleEditor(page);
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/\n## x\n/.test(fileText),
           'the converted markdown must reach the saved source as `## x`, got: ' + JSON.stringify(fileText));
@@ -23747,10 +23712,7 @@ async function gutterGeometry(page, sel) {
           'the re-render must have resolved assets/dropped.png off the disk and inlined those exact bytes');
 
         await settleEditor(page);
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/\n!\[\]\(assets\/dropped\.png\)\n/.test(fileText),
           'the drop must reach the saved source as ![](assets/dropped.png), got: ' + JSON.stringify(fileText));
@@ -24777,8 +24739,7 @@ async function gutterGeometry(page, sel) {
         await page.keyboard.down('Control'); await page.keyboard.press('Enter'); await page.keyboard.up('Control');
         await settleEditor(page);
 
-        await page.keyboard.down('Control'); await page.keyboard.press('s'); await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const after = fs.readFileSync(t7bmdPath, 'utf8');
         const tailOccurrences = after.split('Trailing paragraph text.').length - 1;

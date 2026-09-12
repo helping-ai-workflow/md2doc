@@ -88,6 +88,57 @@ async function newPage(mdText, extraFiles, srvOpts) {
   // scenario here already waits after its gesture, so in practice it lands;
   // this is a net, not a barrier.
   await page.exposeFunction('__journeyRejection', (msg) => { errs.push(msg); });
+  // Which /api/save requests have been STARTED and which have COMPLETED.
+  //
+  // `saveAndRead()` below used to be a flat `setTimeout(400)`, which is weaker
+  // than the quiescence wait that test/editor-client-runtime.test.js's R10 fix
+  // condemned: Ctrl+S does not issue the save directly — the client resolves
+  // whatever is open with `switchAwayFrom()` and calls `save()` only in that
+  // promise's `.then` — so the 400 ms covers the dispatch only while the box is
+  // idle. MEASURED in this session on the sibling suite: an unloaded save takes
+  // ~249 ms end to end, so 400 ms is ~150 ms of margin for a commit, a render
+  // and a save, and under load the read lands before the write. A positive
+  // assertion then reds on correct product code; the assertions that pin a file
+  // as UNCHANGED pass vacuously, which is worse.
+  //
+  // Ids rather than a count: a `/api/save` already in flight when the snapshot
+  // is taken would satisfy a counter (measured on the sibling suite — released
+  // after 1193 ms on the wrong save), so a waiter asks for an id GREATER than
+  // the sequence it saw before it pressed.
+  //
+  // Only /api/save is wrapped. The render counter this suite never had is not
+  // needed for this, and wrapping less keeps the page's own timing untouched.
+  await page.evaluateOnNewDocument(() => {
+    window.__edSaveSeq = 0;
+    window.__edSaveLanded = [];
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+      if (!/\/api\/save\b/.test(url)) return origFetch.call(this, input, init);
+      const id = ++window.__edSaveSeq;
+      let settled = false;
+      const settle = () => { if (!settled) { settled = true; window.__edSaveLanded.push(id); } };
+      return origFetch.call(this, input, init).then((res) => {
+        // Released when the BODY has been read — or, for the 409 branch that
+        // answers off the status alone and never touches the body, by a clone
+        // armed alongside it. Both are strictly after the server has answered.
+        let asked = false;
+        ['json', 'text', 'arrayBuffer', 'blob', 'formData'].forEach((m) => {
+          if (typeof res[m] !== 'function') return;
+          const orig = res[m].bind(res);
+          res[m] = function () {
+            asked = true;
+            return orig().then((v) => { settle(); return v; }, (e) => { settle(); throw e; });
+          };
+        });
+        try {
+          const arm = () => { if (!asked) settle(); };
+          res.clone().arrayBuffer().then(() => setTimeout(arm, 0), () => setTimeout(arm, 0));
+        } catch (e) { settle(); }
+        return res;
+      }, (err) => { settle(); throw err; });
+    };
+  });
   await page.evaluateOnNewDocument(() => {
     window.addEventListener('unhandledrejection', (e) => {
       const r = e && e.reason;
@@ -183,11 +234,42 @@ const assertRoute = (r, primed, where) => {
   }
 };
 
-async function saveAndRead(ctx) {
+/**
+ * Press Ctrl+S and return once THAT save has landed.
+ *
+ * See the instrumentation in `newPage()` for why a fixed sleep was the wrong
+ * shape. Never returns silently on a timeout: the one documented path where
+ * Ctrl+S issues no save at all is a commit that failed, and that path has
+ * already put a banner on screen — anything else is a real defect and reading
+ * the file past it would report it as "the gesture did nothing".
+ */
+async function pressSaveAndLand(ctx) {
+  const startedBefore = await ctx.page.evaluate(() => window.__edSaveSeq || 0);
   await ctx.page.keyboard.down('Control');
   await ctx.page.keyboard.press('KeyS');
   await ctx.page.keyboard.up('Control');
-  await new Promise((r) => setTimeout(r, 400));
+  try {
+    await ctx.page.waitForFunction(
+      (n) => (window.__edSaveLanded || []).some((id) => id > n),
+      { timeout: 15000 }, startedBefore);
+  } catch (e) {
+    const banner = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-conflict');
+      return el ? (el.textContent || '') : null;
+    });
+    if (banner === null) {
+      throw new Error('pressSaveAndLand: Ctrl+S produced no completed /api/save in 15s, ' +
+        'and no banner explains why — the save really did not happen. ' +
+        'Original: ' + (e && e.message));
+    }
+  }
+  // The paint/settle grace the old fixed sleep also provided, kept because some
+  // rows read the DOM straight after the save.
+  await new Promise((r) => setTimeout(r, 150));
+}
+
+async function saveAndRead(ctx) {
+  await pressSaveAndLand(ctx);
   return fs.readFileSync(ctx.mdPath, 'utf8');
 }
 
@@ -9209,10 +9291,11 @@ async function main() {
       // An external write to the MARKDOWN moves its mtime, so the next save
       // fails the mtime guard and raises the conflict banner for real.
       fs.writeFileSync(ctx.mdPath, DRAWIO_MD + '\nAppended outside the editor.\n', 'utf8');
-      await ctx.page.keyboard.down('Control');
-      await ctx.page.keyboard.press('KeyS');
-      await ctx.page.keyboard.up('Control');
-      await new Promise((r) => setTimeout(r, 600));
+      // A 409 is a COMPLETED save — `save()` answers off the status alone and
+      // never reads the body, which is exactly what the clone-armed net in
+      // newPage()'s instrumentation is for — so this waits for the save like
+      // every other site rather than guessing 600 ms.
+      await pressSaveAndLand(ctx);
       const conflict = await visibleBannerText(ctx.page);
       assert.strictEqual(typeof conflict === 'string' && conflict.indexOf('File changed on disk') !== -1, true,
         'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
@@ -10664,6 +10747,10 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       const disk = () => fs.readFileSync(ctx.mdPath, 'utf8');
+      // Deliberately NOT pressSaveAndLand(): this row's whole subject is
+      // whether the keystroke reaches disk at all, so it watches the DISK and
+      // must not be handed a helper that waits for the save first — that would
+      // make the observation depend on the thing being observed.
       const ctrlS = async () => {
         await ctx.page.keyboard.down('Control');
         await ctx.page.keyboard.press('KeyS');
