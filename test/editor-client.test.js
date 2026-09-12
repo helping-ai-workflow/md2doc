@@ -1523,4 +1523,63 @@ function countInCode(source, needle) {
     + 'the whole guard has gone vacuous');
 }
 
+// ── v3.4.0 batch2 Task 6 fix round 1 (review F6): page identity ────────────
+// The old code was `newNames.indexOf(keepName)`, and page names are not
+// identities: lib/drawio.js's pageNamesOf() returns '' for any <diagram>
+// without a name attribute and nothing de-duplicates the list.
+{
+  const { resolveDrawioLanding } = require('../lib/editor/client.js');
+
+  // Unique, non-empty names: the name IS the identity, so a reorder resolves
+  // exactly and no notice is owed.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Arch', 'Flow', 'Timing'], 1, ['Timing', 'Arch', 'Flow']),
+    { landOn: 2, gone: false }, 'F6: a reordered, uniquely named page follows its name');
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Arch', 'Flow'], 1, ['Arch', 'Flow']),
+    { landOn: 1, gone: false }, 'F6: an unchanged page stays put');
+
+  // Unique name, now absent: this is the ONE case a deletion/rename can
+  // actually be established, and the only one allowed to raise the notice.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Arch', 'Flow'], 1, ['Arch', 'Timing']),
+    { landOn: 0, gone: true }, 'F6: a once-unique name that is now absent IS a deletion');
+
+  // ALL-UNNAMED file (normal in hand-written / tool-exported .drawio). The old
+  // code resolved indexOf('') to 0 and silently moved the reader back to page
+  // 1 with no banner — a jump indistinguishable on screen from the correct
+  // outcome, which Ruling B2-P1 forbids. Position is the only sound identity.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['', ''], 1, ['', '']),
+    { landOn: 1, gone: false }, 'F6: an all-unnamed file keeps the reader on their page');
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['', '', ''], 2, ['', '']),
+    { landOn: 0, gone: true }, 'F6: a position the document no longer reaches IS a deletion');
+
+  // Duplicate names behave like unnamed ones: the name stopped being an
+  // identity, so position carries it and no deletion may be claimed.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Page', 'Page'], 1, ['Page', 'Page']),
+    { landOn: 1, gone: false }, 'F6: duplicate names fall back to position');
+
+  // Nothing identifiable was open (no visible .drawio-page at all). The old
+  // code computed indexOf(null) === -1 and raised a banner claiming a
+  // deletion that never happened — a false banner is what teaches a user to
+  // ignore the true one.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Arch', 'Flow'], -1, ['Arch', 'Flow']),
+    { landOn: 0, gone: false }, 'F6: an unidentifiable page must NOT claim a deletion');
+
+  // A name that became ambiguous between the two bakes: land on the first
+  // bearer, claim nothing.
+  assert.deepStrictEqual(
+    resolveDrawioLanding(['Arch', 'Flow'], 0, ['Flow', 'Arch', 'Arch']),
+    { landOn: 1, gone: false }, 'F6: a newly ambiguous name must not claim a deletion');
+
+  // Degenerate input must never produce an out-of-range landing.
+  assert.deepStrictEqual(resolveDrawioLanding(['Arch'], 0, []), { landOn: 0, gone: false });
+  assert.deepStrictEqual(resolveDrawioLanding(null, 0, null), { landOn: 0, gone: false });
+  console.log('editor-client: F6 drawio page identity (name only where it IS one) — OK');
+}
+
 console.log('editor-client.test.js OK');

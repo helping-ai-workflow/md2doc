@@ -15,9 +15,19 @@ const CLIENT_SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', '
 
 let browser;
 
-async function boot(mdText) {
+// `extraFiles` (optional): { 'name.drawio': '<xml…>' } written next to doc.md
+// BEFORE the server renders it. Added for the v3.4.0 batch2 Task 6 rows at the
+// end of this file, which need a real referenced file on disk to rewrite from
+// outside the editor. Every existing call site passes one argument and is
+// unaffected.
+async function boot(mdText, extraFiles) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-journey-'));
   const mdPath = path.join(dir, 'doc.md');
+  if (extraFiles) {
+    for (const name of Object.keys(extraFiles)) {
+      fs.writeFileSync(path.join(dir, name), extraFiles[name], 'utf8');
+    }
+  }
   fs.writeFileSync(mdPath, mdText, 'utf8');
   // createEditorServer() takes a single options object ({ files, clientJs,
   // idleTimeoutMs, listenPort }), not the (paths, opts) shape the original
@@ -25,13 +35,20 @@ async function boot(mdText) {
   // { server, port, urlFor(absPath), close() }, no bare `.url`/`.port`
   // shortcut on the caller's side; the URL for a given file comes from
   // urlFor(), which maps the resolved path back to its /edit/:id index.
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  // An explicit idle timeout: the Task 6 rows below deliberately sit still
+  // for two real 10s heartbeats in a row, and createEditorServer()'s 30s
+  // default is close enough to that to turn a slow bake into a mystery
+  // ERR_CONNECTION_REFUSED. (The heartbeat itself keeps the default alive in
+  // practice; this removes the dependency on that.)
+  const srv = await createEditorServer({
+    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 10 * 60 * 1000,
+  });
   const url = srv.urlFor(mdPath);
-  return { srv, url, mdPath };
+  return { srv, url, mdPath, dir };
 }
 
-async function newPage(mdText) {
-  const b = await boot(mdText);
+async function newPage(mdText, extraFiles) {
+  const b = await boot(mdText, extraFiles);
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e)));
@@ -8860,6 +8877,296 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'M3：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: a mouse click on outline never steals focus, even with keynav still on — OK');
+  }
+
+
+  // ── v3.4.0 batch2 Task 6 fix round 1 — the .drawio background re-bake ────
+  //
+  // Ruling B2-6: the previous round shipped requirement (c) verified by code
+  // reading alone, and review finding F1 is the proof that reading is not
+  // enough — a mechanism that never fired on its main path read perfectly
+  // fine. Every row below drives the REAL 10s heartbeat (no test-only
+  // trigger hook exists in client.js, deliberately: a test that drives a
+  // different path from the shipped one proves nothing) and reads the actual
+  // value before asserting, never a bare waitForFunction on a value it could
+  // have predicted.
+  {
+    const DRAWIO_MD = '# Doc\n\n![d](d.drawio)\n\nTail para two.\n';
+    const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
+    const diagram = (name, id, value) =>
+      '  <diagram name="' + name + '" id="' + id + '">\n' +
+      '    <mxGraphModel dx="800" dy="600" grid="0" page="1" pageWidth="850" pageHeight="1100">\n' +
+      '      <root>\n' +
+      '        <mxCell id="0" /><mxCell id="1" parent="0" />\n' +
+      '        <mxCell id="' + id + '-c" value="' + value + '" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">\n' +
+      '          <mxGeometry x="80" y="80" width="160" height="60" as="geometry" />\n' +
+      '        </mxCell>\n' +
+      '      </root>\n' +
+      '    </mxGraphModel>\n' +
+      '  </diagram>\n';
+    const mxfile = (...ds) =>
+      '<mxfile host="app.diagrams.net" modified="2026-09-10T00:00:00.000Z" version="24.0.0">\n' +
+      ds.join('') + '</mxfile>\n';
+    const ARCH_FLOW = mxfile(diagram('Architecture', 'p1', 'ARCH_BOX'),
+                             diagram('Flow', 'p2', 'FLOW_BOX'));
+    const FLOW_ARCH = mxfile(diagram('Flow', 'p2', 'FLOW_BOX'),
+                             diagram('Architecture', 'p1', 'ARCH_BOX'));
+    const ARCH_TIMING = mxfile(diagram('Architecture', 'p1', 'ARCH_BOX'),
+                               diagram('Timing', 'p3', 'TIMING_BOX'));
+    const SINGLE_V1 = mxfile(diagram('Only', 'p1', 'SINGLE_BOX'),
+                             diagram('Second', 'p2', 'SECOND_BOX'));
+    const SINGLE_V2 = mxfile(diagram('Only', 'p1', 'CHANGED_BOX'),
+                             diagram('Second', 'p2', 'SECOND_BOX'));
+    const rewriteDrawio = (ctx, xml) =>
+      fs.writeFileSync(path.join(ctx.dir, 'd.drawio'), xml, 'utf8');
+    // Which mark the diagram on screen is actually painting. Returns a
+    // STRING in every case (including the failure cases) so a wrong answer
+    // prints what it really was instead of a timeout.
+    // MEASURED: every page's baked SVG is in the DOM at once (the hidden ones
+    // carry `hidden`, not `display:none` from a parent that is absent), and
+    // textContent reads hidden text too — so this has to read the VISIBLE
+    // page's subtree or it reports two marks at once and can never tell a
+    // page switch from a re-bake.
+    const shownMark = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio');
+      if (!box) return 'NO_DRAWIO_BOX';
+      const vis = box.querySelector('.drawio-page:not([hidden])');
+      const t = (vis || box).textContent || '';
+      const hits = ['ARCH_BOX', 'FLOW_BOX', 'TIMING_BOX', 'SINGLE_BOX', 'CHANGED_BOX', 'SECOND_BOX']
+        .filter((m) => t.indexOf(m) !== -1);
+      return hits.length === 1 ? hits[0] : 'HITS:' + JSON.stringify(hits);
+    });
+    // The NAME of the single visible page, by the same rule.
+    const shownPage = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio[data-drawio-pages]');
+      if (!box) return 'NO_PAGED_BOX';
+      let names;
+      try { names = JSON.parse(atob(box.getAttribute('data-drawio-pages') || '')); }
+      catch (e) { return 'BAD_PAGES_ATTR'; }
+      const pages = box.querySelectorAll('.drawio-page');
+      const vis = [];
+      for (let i = 0; i < pages.length; i++) if (!pages[i].hidden) vis.push(names[i]);
+      return vis.length === 1 ? String(vis[0]) : 'VISIBLE:' + JSON.stringify(vis);
+    });
+    // The page-name list the CURRENT box carries. The discriminator that tells
+    // "the re-bake landed and the reader stayed on their page" apart from
+    // "nothing happened at all" — on a reorder those two look identical if
+    // you only read the visible page's name.
+    const pagesAttr = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio[data-drawio-pages]');
+      if (!box) return 'NO_PAGED_BOX';
+      try { return JSON.parse(atob(box.getAttribute('data-drawio-pages') || '')).join('|'); }
+      catch (e) { return 'BAD_PAGES_ATTR'; }
+    });
+    // The navigation is `display: none` until `.drawio:hover` (lib/md2doc.js),
+    // so a bare page.click() on a button fails with "Node is either not
+    // clickable or not an Element". Hover the box first, exactly as a reader
+    // does; the pointer stays inside `.drawio` on the way to the button.
+    const pickPage = async (page, nth) => {
+      await page.hover('.drawio');
+      await new Promise((r) => setTimeout(r, 150));
+      await page.click('.drawio-sheetbar button:nth-child(' + nth + ')');
+      await new Promise((r) => setTimeout(r, 200));
+    };
+    const sheetTabs = (page) => page.evaluate(() =>
+      Array.from(document.querySelectorAll('.drawio-sheetbar button')).map((b) => b.textContent).join('|'));
+
+    // F1 (BLOCKING) — the headline user story, and the one the shipped code
+    // could not do: open a document, DO NOT edit it, change the .drawio in
+    // Draw.io. `lastParts` was null until this tab's first commit, so the
+    // re-bake was fetched, paid for and discarded while the server's baseline
+    // advanced past it — the diagram stayed wrong for the whole session.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      const before = await shownMark(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX',
+        'F1 前提失敗：初始頁面必須已經烤出原始的 .drawio 內容');
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'F1：開著文件、完全不編輯、外部改掉 .drawio —— 這條主路徑必須真的更新畫面');
+      assert.strictEqual(ctx.errs.length, 0, 'F1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F1 an untouched tab really does re-bake a changed .drawio — OK');
+    }
+
+    // (c) / F6 — the reader's open page survives a re-bake that REORDERED the
+    // pages, and no banner is raised for an outcome that is not a loss.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      await pickPage(ctx.page, 2);
+      const picked = await shownPage(ctx.page);
+      assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
+      rewriteDrawio(ctx, FLOW_ARCH);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const attr = await pagesAttr(ctx.page);
+      assert.strictEqual(attr, 'Flow|Architecture',
+        '(c) 前提失敗：重烤必須真的套用到畫面上（否則「還在同一頁」只是因為什麼都沒發生）');
+      const kept = await shownPage(ctx.page);
+      assert.strictEqual(kept, 'Flow',
+        '(c)：重烤之後頁序變了，但使用者開著的那一頁還在 —— 必須留在同一頁');
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(banner, null,
+        '(c)：頁還在的時候不得升起「分頁已不存在」的 banner，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, '(c)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/(c) a reordered re-bake keeps the reader on the same page — OK');
+    }
+
+    // (c) / Ruling B2-P1 — the page really was deleted: fall back to the
+    // first page AND say so visibly. Both outcomes must not be silent.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      await pickPage(ctx.page, 2);
+      assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
+      rewriteDrawio(ctx, ARCH_TIMING);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const attr = await pagesAttr(ctx.page);
+      assert.strictEqual(attr, 'Architecture|Timing',
+        'B2-P1 前提失敗：重烤必須真的套用到畫面上');
+      const landed = await shownPage(ctx.page);
+      assert.strictEqual(landed, 'Architecture',
+        'B2-P1：使用者開著的那一頁被刪掉時必須退回第一頁');
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof banner === 'string' && banner.indexOf('分頁已不存在') !== -1, true,
+        'B2-P1：而且必須看得見一條說明 —— 靜默跳頁正是這條規則禁止的，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, 'B2-P1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/(c) a deleted page falls back to page 1 with a visible banner — OK');
+    }
+
+    // A refresh arriving while the user is editing must not move the caret.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type('TYPED');
+      await new Promise((r) => setTimeout(r, 200));
+      const beforeFocus = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const blk = ae && ae.closest ? ae.closest('.ed-block') : null;
+        return (ae ? ae.className : 'NONE') + '@' +
+          (blk ? blk.getAttribute('data-block-id') : 'NONE');
+      });
+      assert.strictEqual(beforeFocus.indexOf('ed-wys-armed') !== -1, true,
+        '前提失敗：必須真的有一個 WYSIWYG 編輯面獲得焦點，got ' + beforeFocus);
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const afterFocus = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const blk = ae && ae.closest ? ae.closest('.ed-block') : null;
+        return (ae ? ae.className : 'NONE') + '@' +
+          (blk ? blk.getAttribute('data-block-id') : 'NONE');
+      });
+      assert.strictEqual(afterFocus, beforeFocus,
+        '背景刷新絕不可以把使用者手上的焦點搬走');
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        '而且刷新本身仍然要發生 —— 使用者在別的區塊打字不是跳過整輪的理由');
+      assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio a background refresh never moves document.activeElement — OK');
+    }
+
+    // F2 — the retry. The old server advanced the staleness baseline on the
+    // ping that REPORTED stale, before any client had acted on it, so every
+    // one of the client's bail paths lost the change permanently while the
+    // client comment promised "the next 10s tick tries again". Here the first
+    // /api/render after the signal is failed at the network layer (one of the
+    // real bail paths, at client.js's `catch (e) { return; }`), and the
+    // second heartbeat must still be told.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 });
+      await ctx.page.evaluate(() => {
+        window.__renderCalls = 0;
+        const orig = window.fetch;
+        window.fetch = function (u, o) {
+          if (String(u).indexOf('/api/render') !== -1) {
+            window.__renderCalls++;
+            if (window.__renderCalls === 1) return Promise.reject(new Error('INJECTED_NETWORK_FAILURE'));
+          }
+          return orig.apply(this, arguments);
+        };
+      });
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const midMark = await shownMark(ctx.page);
+      const midCalls = await ctx.page.evaluate(() => window.__renderCalls);
+      assert.strictEqual(midCalls >= 1, true,
+        'F2 前提失敗：第一拍必須真的送出過 /api/render（否則注入的失敗根本沒發生），got ' + midCalls);
+      assert.strictEqual(midMark, 'SINGLE_BOX',
+        'F2 前提失敗：那一發被注入的網路失敗必須真的讓這輪放棄，got ' + midMark);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const finalMark = await shownMark(ctx.page);
+      assert.strictEqual(finalMark, 'CHANGED_BOX',
+        'F2：用戶端放棄了一輪之後，下一次心跳必須再報一次 stale 並且這次成功 —— ' +
+        '基準線只能在用戶端確認套用之後才前進');
+      assert.strictEqual(ctx.errs.length, 0, 'F2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F2 a bailed refresh is genuinely retried on the next heartbeat — OK');
+    }
+
+    // F5 — the background notice must never destroy the disk-conflict banner.
+    // showBanner()'s first statement removes whatever banner is up, and the
+    // conflict banner is the user's only route to resolving a conflict on the
+    // one data-safety-critical path this editor has (it carries Reload).
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      await pickPage(ctx.page, 2);
+      assert.strictEqual(await shownPage(ctx.page), 'Flow', 'F5 前提失敗：必須先切到 Flow');
+      // An external write to the MARKDOWN moves its mtime, so the next save
+      // fails the mtime guard and raises the conflict banner for real.
+      fs.writeFileSync(ctx.mdPath, DRAWIO_MD + '\nAppended outside the editor.\n', 'utf8');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyS');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 600));
+      const conflict = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof conflict === 'string' && conflict.indexOf('File changed on disk') !== -1, true,
+        'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
+      // Now make the background path WANT to raise its own notice.
+      rewriteDrawio(ctx, ARCH_TIMING);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const stillConflict = await visibleBannerText(ctx.page);
+      assert.strictEqual(
+        typeof stillConflict === 'string' && stillConflict.indexOf('File changed on disk') !== -1, true,
+        'F5：背景刷新不得把磁碟衝突 banner（連同它的 Reload 按鈕）換掉，got ' + JSON.stringify(stillConflict));
+      const reloadBtns = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-conflict button')).map((b) => b.textContent).join('|'));
+      assert.strictEqual(reloadBtns.indexOf('Reload') !== -1, true,
+        'F5：Reload 按鈕必須還在 —— 那是使用者解衝突的唯一入口，got ' + reloadBtns);
+      // And the DOM update itself still happened underneath it.
+      const landed = await shownPage(ctx.page);
+      assert.strictEqual(landed, 'Architecture',
+        'F5：延後的只是那條訊息，重烤本身仍然要套用');
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F5 a background notice never clobbers the conflict banner — OK');
+    }
+
+    // F9 — the page navigation is rebuilt after an ORDINARY edit commit. It
+    // used to be created once at page load and destroyed by the first
+    // innerHTML swap, so a user who typed one character lost it for the rest
+    // of the session — which made preserving the open page across a
+    // background re-bake largely academic.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW });
+      const tabsBefore = await sheetTabs(ctx.page);
+      assert.strictEqual(tabsBefore, 'Architecture|Flow',
+        'F9 前提失敗：載入時必須先有切頁列，got ' + tabsBefore);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1500));
+      const tabsAfter = await sheetTabs(ctx.page);
+      assert.strictEqual(tabsAfter, 'Architecture|Flow',
+        'F9：一次普通的編輯提交之後切頁列必須還在（舊版是永久消失），got ' + tabsAfter);
+      assert.strictEqual(ctx.errs.length, 0, 'F9：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F9 the page navigation survives an ordinary edit commit — OK');
+    }
   }
 
   await browser.close();
