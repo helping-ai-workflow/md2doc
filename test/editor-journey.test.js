@@ -9469,6 +9469,302 @@ async function main() {
     }
   }
 
+  // ── v3.4.0 batch3 Task 6: the wavedrom editing surface ─────────────────
+  //
+  // EVERY fixture below has a GROUP in it. That is not decoration: the flattened
+  // lane index and the group tree are the two things this batch's silent
+  // defects have lived between, and a group-free fixture cannot express any of
+  // them — it reads as coverage and proves nothing.
+  {
+    const WAVE_MD = [
+      '# W', '',
+      '```wavedrom',
+      '{ signal: [',
+      "  { name: 'clk', wave: 'p....' },  // 主時脈",
+      "  ['bus',",
+      "    { name: 'req', wave: '0.1.0' },",
+      "    { name: 'dat', wave: 'x.3.x', data: ['D'] }",
+      '  ],',
+      // A lane whose FIRST cycle is a bare repeater. The engine draws it as x
+      // until the run recovers — `levelsOf` models exactly that — so a drawing
+      // that painted the wave characters instead would show 0 here and the
+      // preview beside it would show x. That disagreement is the whole reason
+      // the preview is on screen, and this is the lane that can express it.
+      "  { name: 'ack', wave: '.0..1' }",
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // Open the editor the way a person does: hover the rendered diagram, then
+    // press the affordance that appears. Real pointer events throughout —
+    // v3.3.0's entire discovery mechanism was the difference between these and
+    // a synthetic .click().
+    const openWave = async (page) => {
+      await page.waitForSelector('.wavedrom-diagram');
+      const box = await page.$eval('.wavedrom-diagram', (el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(box.x, box.y);
+      await page.waitForSelector('.ed-wave-edit-btn:not([hidden])');
+      await pressClick(page, '.ed-wave-edit-btn');
+      await page.waitForSelector('.ed-wave-overlay');
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // The centre of one cell, in viewport coordinates, plus whether that point
+    // is actually ON the drawing. The canvas is a scroll container inside a
+    // fixed-width column: MEASURED in this session, a press 116px past its clip
+    // landed on the preview column instead, the mousedown listener never fired,
+    // and the result was indistinguishable from "the paint refused". Without
+    // this flag that is a silently green scenario.
+    const cellPoint = async (page, lane, cycle) => {
+      const at = await page.evaluate((l, c) => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const wrap = document.querySelector('.ed-wave-canvas-wrap');
+        if (!svg || !wrap) return null;
+        const r = svg.getBoundingClientRect();
+        const w = wrap.getBoundingClientRect();
+        const lh = r.height / Number(svg.getAttribute('data-lane-count'));
+        const cw = r.width / Number(svg.getAttribute('data-cycle-count'));
+        const x = r.left + c * cw + cw / 2;
+        const y = r.top + l * lh + lh / 2;
+        return { x: x, y: y,
+          visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
+      }, lane, cycle);
+      assert.ok(at, 'cellPoint: 畫布不在畫面上');
+      assert.strictEqual(at.visible, true,
+        'cellPoint: lane ' + lane + ' cycle ' + cycle +
+        ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
+      return at;
+    };
+
+    const paintCell = async (page, lane, cycle, ch) => {
+      await pressClick(page, '.ed-wave-brush[data-brush="' + ch + '"]');
+      const at = await cellPoint(page, lane, cycle);
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // T6a — it opens, it opens on document.body, and a painted cell reaches the
+    // state the file is written from.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      assert.ok(await ctx.page.$('.ed-wave-overlay'), 'T6a: 編輯器必須開起來');
+
+      // The overlay may not live inside .content: everything in there is read
+      // back as this tab's own render and serialised into the user's markdown.
+      const where = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        parent: el.parentElement.tagName,
+        inContent: document.querySelector('.content').contains(el),
+      }));
+      assert.strictEqual(where.parent, 'BODY',
+        'T6a: overlay 必須掛在 document.body 上。Got ' + where.parent);
+      assert.strictEqual(where.inContent, false,
+        'T6a: overlay 不得在 .content 裡面（.content 會被序列化回使用者的 markdown）');
+
+      await paintCell(ctx.page, 0, 2, '1');
+      const wave = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.ok(wave && wave[2] === '1',
+        'T6a: 塗過的那一格必須反映在狀態上。Got ' + JSON.stringify(wave));
+      // One gesture, one write-back — not a session's worth saved up. Task 5
+      // measured the store's refusal rate climbing with the number of
+      // structural operations stacked before a patch (8.0% at 1-3 ops, 17.0%
+      // at 1-6), so a patch that only happens at the end makes refusal the
+      // normal path.
+      const per = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        gestures: el.getAttribute('data-wave-gestures'),
+        patch: el.getAttribute('data-wave-patch'),
+      }));
+      assert.strictEqual(per.gestures, '1',
+        'T6a: 一個手勢就是一次 apply。Got ' + per.gestures);
+      assert.strictEqual(per.patch, 'ok',
+        'T6a: 那個手勢自己就要產出 patch，不是留到最後才算。Got ' + per.patch);
+      assert.strictEqual(ctx.errs.length, 0, 'T6a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6a the overlay opens on document.body and a painted cell reaches the state — OK');
+    }
+
+    // T6b — the hand-drawn waveform and the engine's own preview agree, cycle by
+    // cycle, before AND after an edit.
+    //
+    // The comparison is against the preview's own brick ids (its
+    // `<use xlink:href="#…">` list, two half-bricks per cycle, the second of
+    // which carries the level). `data-bricks-N` is what this editor decided to
+    // draw. If the two ever disagree the user has two pictures on screen and no
+    // way to tell which one the file means.
+    {
+      const bricks = async (page) => {
+        const got = await page.evaluate(() => {
+          const svg = document.querySelector('.ed-wave-canvas');
+          const lanes = Number(svg.getAttribute('data-lane-count'));
+          const cycles = Number(svg.getAttribute('data-cycle-count'));
+          const uses = Array.from(document.querySelectorAll('.ed-wave-preview-host use'))
+            .map((u) => (u.getAttribute('xlink:href') || u.getAttribute('href') || '').slice(1))
+            .filter((id) => id !== 'gap');
+          const drawn = [];
+          const engine = [];
+          for (let i = 0; i < lanes; i++) {
+            drawn.push(svg.getAttribute('data-bricks-' + i));
+            const row = [];
+            for (let c = 0; c < cycles; c++) row.push(uses[(i * cycles + c) * 2 + 1]);
+            engine.push(row.join(' '));
+          }
+          return { drawn: drawn, engine: engine, uses: uses.length,
+            expect: lanes * cycles * 2,
+            levels: svg.getAttribute('data-levels-3'),
+            wave: svg.getAttribute('data-wave-3'),
+            preview: document.querySelector('.ed-wave-preview')
+              .getAttribute('data-wave-preview') };
+        });
+        // Without this the indexing below is meaningless and every comparison
+        // is vacuously true against a preview that rendered nothing.
+        assert.strictEqual(got.preview, 'ok',
+          'T6b: 預覽必須真的畫出來了。Got ' + got.preview);
+        assert.strictEqual(got.uses, got.expect,
+          'T6b: 預覽的 brick 數必須剛好是 lane×cycle×2，否則下面的比對是在比空氣。Got ' +
+          got.uses + ' vs ' + got.expect);
+        return got;
+      };
+
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const before = await bricks(ctx.page);
+      // The fixture can express the defect: `ack` is written `.0..1` and the
+      // engine draws it x x x x 1. A drawing that painted the characters would
+      // read 0 here and this row would catch it.
+      assert.strictEqual(before.wave, '.0..1', 'T6b 前提失敗：fixture 的 ack 必須是 .0..1');
+      assert.strictEqual(before.levels, 'xxxx1',
+        'T6b: 開頭是 repeater 的 lane，引擎畫的是 x 直到恢復。Got ' + before.levels);
+      assert.deepStrictEqual(before.drawn, before.engine,
+        'T6b: 自己畫的波形必須跟旁邊的 WaveDrom 預覽逐格一致\ndrawn : ' +
+        JSON.stringify(before.drawn) + '\nengine: ' + JSON.stringify(before.engine));
+
+      // …and it still agrees after an edit. `=` on a lane INSIDE the group, so
+      // the lane index that got painted had to survive the flattening.
+      await paintCell(ctx.page, 1, 4, '=');
+      const after = await bricks(ctx.page);
+      assert.notDeepStrictEqual(after.drawn, before.drawn,
+        'T6b 前提失敗：那一筆編輯必須真的改到畫面，否則「編輯後仍一致」是空的');
+      assert.deepStrictEqual(after.drawn, after.engine,
+        'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
+        '\nengine: ' + JSON.stringify(after.engine));
+      assert.strictEqual(ctx.errs.length, 0, 'T6b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6b the hand-drawn waveform and the WaveDrom preview agree cycle by cycle — OK');
+    }
+
+    // T6c — a group can be joined at its HEAD and never at its TAIL, and the UI
+    // says which before the button is pressed.
+    //
+    // The asymmetry is `laneInsertPath`'s and is a consequence of flattened
+    // indexing, not a bug to paper over. What can be got wrong is letting the
+    // two look the same — this batch has already shipped one comparison that
+    // made two different insert positions indistinguishable — so this row
+    // asserts the DIFFERENCE first and only then what each one does.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const labels = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-wave-lane-add')).map((b) => ({
+          at: b.getAttribute('data-insert-at'),
+          lands: b.getAttribute('data-lands-in'),
+          title: b.title,
+        })));
+      const head = labels.find((l) => l.at === '1');
+      const tail = labels.find((l) => l.at === '3');
+      assert.ok(head && tail, 'T6c 前提失敗：群組的頭與尾都要有一顆 ＋。Got ' +
+        JSON.stringify(labels));
+      assert.notStrictEqual(head.lands, tail.lands,
+        'T6c: 群組的頭與尾必須指向不同的落點，否則這個案例分辨不出任何東西。Got ' +
+        JSON.stringify([head, tail]));
+      assert.strictEqual(head.lands, 'bus',
+        'T6c: 群組第一條 lane 前面插入會進群組。Got ' + JSON.stringify(head));
+      assert.strictEqual(tail.lands, '',
+        'T6c: 群組最後一條 lane 後面插入會落在群組外。Got ' + JSON.stringify(tail));
+      assert.ok(tail.title.indexOf('群組外') !== -1,
+        'T6c: 按下之前就要說清楚會落在群組外。Got ' + JSON.stringify(tail.title));
+
+      const span = () => ctx.page.evaluate(() => {
+        const g = document.querySelector('.ed-wave-group');
+        return g === null ? null : g.getAttribute('data-group-from') + '-' +
+          g.getAttribute('data-group-to');
+      });
+      assert.strictEqual(await span(), '1-2', 'T6c 前提失敗：群組一開始蓋住 row 1-2');
+
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="3"]');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await span(), '1-2',
+        'T6c: 在群組尾巴新增的 lane 不得被吸進群組裡');
+      const said = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      assert.ok(said.indexOf('群組外') !== -1,
+        'T6c: 新增之後也要說它落在哪裡。Got ' + JSON.stringify(said));
+
+      // And the head really does join, so the pair above is a real asymmetry
+      // and not two spellings of the same behaviour.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await span(), '1-3',
+        'T6c: 在群組頭插入的 lane 必須真的進群組（群組因此多蓋一列）');
+      assert.strictEqual(ctx.errs.length, 0, 'T6c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6c a lane joins a group at its head and never at its tail, and says so first — OK');
+    }
+
+    // T6d — a block whose WaveJSON cannot be read still opens, and says what the
+    // parser said and WHERE. A button that silently does nothing is the worst
+    // outcome available here: the block looks editable and simply is not.
+    {
+      const BROKEN_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "  { name: 'clk', wave: 'p....' },",
+        "  ['bus',",
+        "    { name: 'req', wave: '0.1.0' }",
+        '  ',            // the group is never closed
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(BROKEN_MD);
+      await openWave(ctx.page);
+      const got = await ctx.page.evaluate(() => {
+        const o = document.querySelector('.ed-wave-overlay');
+        const w = document.querySelector('.ed-wave-parse-where');
+        return {
+          state: o.getAttribute('data-wave-state'),
+          msg: (document.querySelector('.ed-wave-parse-message') || {}).textContent || '',
+          offset: w === null ? null : w.getAttribute('data-wave-offset'),
+          where: w === null ? '' : w.textContent,
+          excerpt: (document.querySelector('.ed-wave-parse-excerpt') || {}).textContent || '',
+          hasCanvas: !!document.querySelector('.ed-wave-canvas'),
+        };
+      });
+      assert.strictEqual(got.state, 'unreadable',
+        'T6d: 讀不回來的區塊必須開出一個說明用的編輯器。Got ' + got.state);
+      assert.strictEqual(got.hasCanvas, false,
+        'T6d: 讀不回來的時候不得假裝有東西可以編輯');
+      assert.ok(got.msg.length > 0 && got.msg.indexOf('讀不回來') !== -1,
+        'T6d: 必須把 parser 的話原樣說出來。Got ' + JSON.stringify(got.msg));
+      assert.ok(got.offset !== null && /^[0-9]+$/.test(got.offset),
+        'T6d: offset 必須說出來。Got ' + JSON.stringify(got.offset));
+      assert.ok(got.where.indexOf('offset ' + got.offset) !== -1,
+        'T6d: 畫面上要看得到那個 offset。Got ' + JSON.stringify(got.where));
+      assert.ok(got.excerpt.length > 0,
+        'T6d: 只有 offset 對人沒有用，必須連那一行一起給。Got ' + JSON.stringify(got.excerpt));
+      assert.strictEqual(ctx.errs.length, 0, 'T6d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6d an unreadable wavedrom block opens an editor that says why and where — OK');
+    }
+  }
+
   await browser.close();
 }
 
