@@ -1954,4 +1954,260 @@ const laneShape = function (doc) {
     '普通的 lane 不得被誤殺');
 }
 
+// ---- 以下為 Task 3 fix round 3 釘住的合約 ----
+
+// R1：五條寫回去的配方，全部做成**會跑的測試**，fixture 帶 group，而且裡面有一條
+// 沒有名字的 lane（就在 group 裡）。散文不會紅；這一段會。Tasks 5-8 照抄這裡。
+const RSRC = [
+  '{ signal: [',
+  '  { name: "a", wave: "01" },   // lane a',
+  '  ["grp",',
+  '    { wave: "01" },   // 沒有名字，而且在 group 裡面',
+  '    { name: "c", wave: "01" },   // lane c',
+  '  ],',
+  '  { name: "d", wave: "01" },   // lane d',
+  ']}',
+].join('\n');
+// 扁平編號：a=0、沒名字的那條=1、c=2、d=3
+
+// 配方 1：改名（lane 本來就有 name）→ set
+{
+  const r = C.parseSource(RSRC);
+  const want = laneShape(C.renameLane(r.doc, 2, 'C'));
+  const out = C.patchSource(RSRC, r,
+    [{ path: C.lanePath(r.doc, 2).concat(['name']), value: 'C' }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+  assert.ok(out.text.includes('// lane c'), '註解要留著');
+}
+
+// 配方 2：改名（lane 沒有 name）→ insert。F6 就是為了這一條存在的，
+// 而它到現在都還沒有一個帶 group 的測試釘住。
+{
+  const r = C.parseSource(RSRC);
+  const want = laneShape(C.renameLane(r.doc, 1, 'B'));
+  const out = C.patchSource(RSRC, r,
+    [{ op: 'insert', path: C.lanePath(r.doc, 1).concat(['name']), value: 'B' }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+  assert.ok(out.text.includes('// 沒有名字，而且在 group 裡面'), '註解要留著');
+  assert.deepStrictEqual(Object.keys(C.parseSource(out.text).doc.signal[1][1]),
+    ['wave', 'name'], 'name 接在原有的 key 後面');
+}
+
+// 配方 2 的分岔選錯的時候必須**大聲**拒絕，不是默默做錯事——
+// 這是「散文不會紅」的補償：兩個方向都拒絕，所以 store 選錯不會沒人發現。
+{
+  const r = C.parseSource(RSRC);
+  const wrongSet = C.patchSource(RSRC, r,
+    [{ path: C.lanePath(r.doc, 1).concat(['name']), value: 'B' }]);
+  assert.strictEqual(wrongSet.ok, false, '沒有 name 的 lane 用 set 必須被擋');
+  const wrongInsert = C.patchSource(RSRC, r,
+    [{ op: 'insert', path: C.lanePath(r.doc, 2).concat(['name']), value: 'C' }]);
+  assert.strictEqual(wrongInsert.ok, false, '已經有 name 的 lane 用 insert 必須被擋');
+}
+
+// 配方 3：新增 lane → insert 到 laneInsertPath
+{
+  const r = C.parseSource(RSRC);
+  const lane = { name: 'N', wave: '00' };
+  const want = laneShape(C.addLane(r.doc, 1, lane));
+  const out = C.patchSource(RSRC, r,
+    [{ op: 'insert', path: C.laneInsertPath(r.doc, 1), value: lane }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+}
+
+// 配方 4：刪 lane → remove 到 laneRemovePath
+{
+  const r = C.parseSource(RSRC);
+  const want = laneShape(C.removeLane(r.doc, 2));
+  const out = C.patchSource(RSRC, r, [{ op: 'remove', path: C.laneRemovePath(r.doc, 2) }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+  assert.ok(out.text.includes('// lane a'), '別人的註解不得被動到');
+}
+
+// 配方 5：搬 lane → move，兩端都問橋
+{
+  const r = C.parseSource(RSRC);
+  const want = laneShape(C.moveLane(r.doc, 1, 3));
+  const out = C.patchSource(RSRC, r, [{
+    op: 'move',
+    path: C.lanePath(r.doc, 1),
+    to: C.laneInsertPath(r.doc, 3 < 1 ? 3 : 3 + 1),
+  }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), want);
+  assert.ok(out.text.includes('// 沒有名字，而且在 group 裡面'), '搬走的那條的註解跟著它');
+}
+
+// R2：replace 的範圍。它是「就地換掉一個值」，不是結構改寫的後門。
+{
+  const r = C.parseSource(GSRC);
+  assert.strictEqual(C.patchSource(GSRC, r,
+    [{ op: 'replace', path: ['signal'], value: [{ name: 'x', wave: '0' }] }]).ok, false,
+    'replace 不得把整個 lane 清單換掉');
+  assert.strictEqual(C.patchSource(GSRC, r,
+    [{ op: 'replace', path: ['signal', 1], value: ['grp', { name: 'x', wave: '0' }] }]).ok,
+    false, 'replace 不得把一整個 group 換掉');
+  assert.strictEqual(C.patchSource(GSRC, r,
+    [{ op: 'replace', path: ['signal', 0], value: { name: 'x', wave: '0' } }]).ok, false,
+    'replace 不得把一整條 lane 換掉');
+}
+
+// R2 的另一半：多行／帶註解的值也不行——那正是逐格編輯保得住、replace 保不住的東西
+{
+  const src = ['{ signal: [',
+    '  { name: "a", wave: "22",',
+    '    data: [',
+    '      "A",   // the first label',
+    '      "B",   // the second label',
+    '    ] },',
+    ']}'].join('\n');
+  const r = C.parseSource(src);
+  const bad = C.patchSource(src, r,
+    [{ op: 'replace', path: ['signal', 0, 'data'], value: ['A', '', 'B'] }]);
+  assert.strictEqual(bad.ok, false,
+    '跨行或帶註解的值不得整包換掉——那會把每個標籤旁邊的註解一起帶走');
+  const ok = C.patchSource(src, r,
+    [{ op: 'insert', path: ['signal', 0, 'data', 1], value: '' }]);
+  assert.strictEqual(ok.ok, true, '逐格才是這種情況對的路。Got ' + JSON.stringify(ok));
+  assert.ok(ok.text.includes('// the first label'), '兩個標籤註解都要留著');
+  assert.ok(ok.text.includes('// the second label'));
+}
+
+// R2 不得誤殺 N2 要的那個用法：單行、沒有註解的值
+{
+  const src = '{ signal: [\n  { name: "a", wave: "03", data: "A" },   // 旁邊的註解\n]}';
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r,
+    [{ op: 'replace', path: ['signal', 0, 'data'], value: ['', 'A'] }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.ok(out.text.includes('// 旁邊的註解'), '值之外的註解本來就不在 span 裡');
+  assert.deepStrictEqual(C.parseSource(out.text).doc.signal[0].data, ['', 'A']);
+}
+
+// R4：作者自己寫的空 group 是他的內容，不是我們清出來的空位，不得被順手掃掉
+{
+  const doc = { signal: [['g1', { name: 'b', wave: '01' }, ['g2']], { name: 'd', wave: '01' }] };
+  const out = C.removeLane(doc, 0);
+  assert.deepStrictEqual(out.signal[0], ['g1', ['g2']],
+    'g1 裡還有作者寫的 g2，所以 g1 與 g2 都留著');
+  assert.strictEqual(out.signal[1].name, 'd');
+}
+{
+  const doc = { signal: [['grp', { name: 'b', wave: '01' }], { name: 'd', wave: '01' }] };
+  assert.deepStrictEqual(C.removeLane(doc, 0).signal.map(function (l) { return l.name; }),
+    ['d'], '只剩標題的 group 還是要走（N3 沒變）');
+}
+
+// R5-1：巢狀 group 裡的 lane 不得被連坐刪掉
+{
+  const doc = { signal: [['g1', { name: 'b', wave: '01' }, ['g2', { name: 'c', wave: '01' }]]] };
+  const out = C.removeLane(doc, 0);
+  assert.deepStrictEqual(out.signal[0], ['g1', ['g2', { name: 'c', wave: '01' }]],
+    'g2 裡面的 c 不得被連坐刪掉');
+  assert.deepStrictEqual(C.lanePath(out, 0), ['signal', 0, 1, 1], 'c 還定位得到');
+}
+
+// R5-2：move 的落點不得掉進它自己要切掉的那段位元組裡
+{
+  const src = ['{ signal: [', '  ["g1",', '    { name: "b", wave: "01" },', '  ],',
+    '  { name: "d", wave: "01" },', ']}'].join('\n');
+  const r = C.parseSource(src);
+  // 落在 g1 的標題前面：g1 只剩標題，所以切掉的是整個 g1，而落點在它的位元組裡面
+  const out = C.patchSource(src, r,
+    [{ op: 'move', path: ['signal', 0, 1], to: ['signal', 0, 0] }]);
+  assert.strictEqual(out.ok, false, '搬進自己要被切掉的那段裡面，必須拒絕');
+  assert.ok(/inside/.test(out.reason), 'Got ' + out.reason);
+  // 而搬到它自己後面那一格是貨真價實的原地不動，那個要成功
+  const noop = C.patchSource(src, r,
+    [{ op: 'move', path: ['signal', 0, 1], to: ['signal', 0, 2] }]);
+  assert.strictEqual(noop.ok, true, '原地不動要成功。Got ' + JSON.stringify(noop));
+  assert.strictEqual(noop.text, src, '原地不動就一個位元組都不動');
+}
+
+// R5-3：落點是一個空陣列
+{
+  const src = ['{', '  signal: [', '    { name: "a", wave: "01" },   // lane a',
+    '    { name: "b", wave: "10" },   // lane b', '  ],', '  spare: [', '  ],', '}'].join('\n');
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r, [{ op: 'move', path: ['signal', 1], to: ['spare', 0] }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  const back = C.parseSource(out.text);
+  assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+  assert.deepStrictEqual(back.doc.signal.map(function (l) { return l.name; }), ['a']);
+  assert.deepStrictEqual(back.doc.spare.map(function (l) { return l.name; }), ['b']);
+  assert.ok(out.text.includes('// lane b'), '搬進空陣列，註解一樣跟著');
+}
+
+// R5-4：落點超出範圍 / 根本不是陣列
+{
+  const r = C.parseSource(GSRC);
+  assert.strictEqual(C.patchSource(GSRC, r,
+    [{ op: 'move', path: C.lanePath(r.doc, 0), to: ['signal', 9] }]).ok, false,
+    '超出範圍的落點要拒絕');
+  assert.strictEqual(C.patchSource(GSRC, r,
+    [{ op: 'move', path: C.lanePath(r.doc, 0), to: ['signal', 0, 9] }]).ok, false,
+    '落點的父層不是陣列也要拒絕');
+}
+
+// R5-5：copyCycles 不得把「沒有標籤」變成一個空字串標籤
+{
+  const clip = C.copyCycles({ signal: [{ name: 'x', wave: '22', data: ['A'] }] }, 0, 2);
+  assert.strictEqual(clip.lanes[0].data.length, 2);
+  assert.strictEqual(clip.lanes[0].data[1], undefined, '沒有標籤就是沒有，不是空字串');
+  const out = C.pasteCycles({ signal: [{ name: 'y', wave: '00', data: [] }] },
+    0, clip, 'overwrite');
+  assert.deepStrictEqual(out.signal[0].data, ['A'],
+    '第二拍沒有標籤，就不得替它補一個空字串出來');
+}
+// 順帶把「備用標籤」的行為也釘住：wave 用不到的標籤原樣留著，接在後面
+{
+  const clip = C.copyCycles({ signal: [{ name: 'x', wave: '22', data: ['A'] }] }, 0, 2);
+  const out = C.pasteCycles({ signal: [{ name: 'y', wave: '00', data: 'P' }] },
+    0, clip, 'overwrite');
+  assert.strictEqual(out.signal[0].data, 'A P',
+    'P 是原本那條 lane 用不到的備用標籤，照既有規矩原樣留著；重點是中間沒有空格位');
+}
+
+// R8：最後一個標籤離開之後，data 留著空的形狀（不刪 key），而且兩種寫法都寫得回去
+{
+  const doc = { signal: [{ name: 'a', wave: '23', data: ['A', 'B'] }] };
+  const gone = C.setCellRange(doc, 0, 0, 1, '0');
+  assert.strictEqual(gone.signal[0].wave, '0.');
+  assert.deepStrictEqual(gone.signal[0].data, [],
+    '沒有值字元了，data 空掉但 key 留著——刪掉作者寫的 key 比清空它動得更多');
+}
+{
+  const doc = { signal: [{ name: 'a', wave: '23', data: 'A B' }] };
+  assert.strictEqual(C.setCellRange(doc, 0, 0, 1, '0').signal[0].data, '',
+    '字串寫法就留一個空字串');
+}
+{
+  const src = '{ signal: [\n  { name: "a", wave: "23", data: ["A","B"] },\n]}';
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: '0.' },
+    { op: 'remove', path: ['signal', 0, 'data', 0] },
+    { op: 'remove', path: ['signal', 0, 'data', 1] },
+  ]);
+  assert.strictEqual(out.ok, true, '空掉的陣列走逐格 remove，不需要 replace。Got ' +
+    JSON.stringify(out));
+  const back = C.parseSource(out.text);
+  assert.deepStrictEqual(back.doc.signal[0].data, []);
+  assert.strictEqual(back.doc.signal[0].wave, '0.');
+}
+{
+  const src = '{ signal: [\n  { name: "a", wave: "23", data: "A B" },\n]}';
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: '0.' },
+    { path: ['signal', 0, 'data'], value: '' },
+  ]);
+  assert.strictEqual(out.ok, true, '空掉的字串是一個普通的 set。Got ' + JSON.stringify(out));
+  assert.strictEqual(C.parseSource(out.text).doc.signal[0].data, '');
+}
+
 console.log('wave-codec.test.js OK');
