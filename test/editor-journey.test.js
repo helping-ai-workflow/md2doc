@@ -10335,10 +10335,19 @@ async function main() {
         'T6g: 拖到一半 Escape 再放開，不得有 pageerror: ' + ctx.errs.join(' | '));
 
       // The release must not have run the paint. Re-opening the block cannot
-      // show that on its own — nothing writes back to the document yet, so the
-      // reopened editor reads the same source either way and the comparison
-      // below is true whatever happened. What DOES separate the two is whether
-      // a gesture ever reached the caller after the overlay came down.
+      // show that on its own: a gesture that arrives after the overlay came
+      // down has no seam to write through (it is COUNTED as stray and returns
+      // before commitRangeEdit), so the reopened editor reads the same source
+      // either way and the comparison below is true whatever happened. What
+      // DOES separate the two is whether a gesture ever reached the caller
+      // after the overlay came down.
+      //
+      // v3.4.0 batch3 Task 7 correction: the sentence that stood here said
+      // 「nothing writes back to the document yet」, which was a statement about
+      // the FEATURE and is no longer true — an ordinary gesture now commits.
+      // What makes this particular comparison toothless is narrower and
+      // survives Task 7: no seam, no write. The `stray` assertion below is
+      // still the one with teeth.
       const stray = await ctx.page.evaluate(() => window.__edTestWaveState());
       assert.strictEqual(stray.open, false, 'T6g: overlay 已經關掉了');
       assert.strictEqual(stray.stray, 0,
@@ -10917,6 +10926,248 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T6m: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T6m Escape on the conflict banner is the banner\'s, not the dialog\'s — OK');
+    }
+
+    // ── v3.4.0 batch3 Task 7: the write-back ───────────────────────────────
+    //
+    // Tasks 1-6 built a store that can turn a drawing into a minimal patch and
+    // a modal that computes one per gesture. Nothing wrote it anywhere. These
+    // rows are that seam: one gesture is one commit on the document's own undo
+    // stack, Ctrl+S is still the only thing that touches disk, Escape takes the
+    // session back off again and one Ctrl+Z puts it back, a refusal is raised
+    // by name instead of being papered over, and — the one that had no net at
+    // all before — the conflict banner's Reload cannot throw a drawing away in
+    // silence.
+
+    // T7a — one gesture, one commit; Ctrl+S is what reaches disk, and the
+    // comment beside the lane survives the round trip.
+    //
+    // The comment is the point of the whole codec layer, not decoration: a
+    // write-back that re-serialised the block would take `// 主時脈` with it,
+    // and the block would still parse, so nothing downstream would notice.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const before = fs.readFileSync(ctx.mdPath, 'utf8');
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+
+      const mid = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(mid.seam === null ? null : mid.seam.ops, 1,
+        'T7a: 一個手勢就是一次 commit。Got ' + JSON.stringify(mid.seam));
+      assert.strictEqual(mid.unwritten, false,
+        'T7a: 這個 patch 是寫得回去的，不該被記成「沒寫回去」');
+      assert.strictEqual(mid.dirty, true,
+        'T7a: 畫下去的那一刻文件就必須是髒的 —— 這是 Reload／關分頁那道網的依據');
+
+      // 還沒有人叫它存檔，所以磁碟不得動。
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), before,
+        'T7a: 寫回是寫進記憶體裡的文件，不是寫進磁碟');
+
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 800));
+      // 關掉編輯器本身也不得落磁碟 —— 這一半是 brief 的第二條。
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), before,
+        'T7a: 關閉編輯器不得自己落磁碟 —— 只有 Ctrl+S 才可以');
+
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('// 主時脈') !== -1,
+        'T7a: 註解必須存活（最小 patch 的整個理由）。Got:\n' + md);
+      // 'p....' 的第 2 格塗成 1，第 3 格的重複符號因此失去它在重複的東西，
+      // codec 把它展開回 p —— 這個值是本 session 直接跑 wave-store 量到的，
+      // 不是推算的。
+      assert.ok(md.indexOf("wave: 'p.1p.'") !== -1,
+        'T7a: 改動必須落到磁碟，而且是就地改那一個字串。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7a one gesture is one commit, Ctrl+S is what reaches disk, and the lane comment survives — OK');
+    }
+
+    // T7b — Escape 丟棄，而且丟乾淨：文件回到原樣、● 熄掉。然後 Ctrl+Z 把它
+    // 拿回來，連編輯器一起。
+    //
+    // 「拿回來」這一半刻意不只斷言 overlay 又出現：一個什麼都沒放回去、只是
+    // 重開一個空編輯器的實作也會讓那條斷言變綠。所以最後是去讀磁碟。
+    {
+      const ctx = await newPage(WAVE_MD);
+      const before = fs.readFileSync(ctx.mdPath, 'utf8');
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const during = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(during.s.dirty, true, 'T7b 前提失敗：畫完就該是髒的');
+      assert.strictEqual(during.title.indexOf('●'), 0,
+        'T7b 前提失敗：畫完標題就該亮 ●，got ' + JSON.stringify(during.title));
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      const afterEsc = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(afterEsc.s.open, false, 'T7b: Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.s.stashed, true,
+        'T7b: Escape 丟掉的東西必須停放起來，否則 Ctrl+Z 沒有東西可以拿');
+      assert.strictEqual(afterEsc.s.dirty, false,
+        'T7b: Escape 要把這一整段 session 從 undo stack 上拿掉，文件回到原樣');
+      assert.strictEqual(afterEsc.title.indexOf('●'), -1,
+        'T7b: 回到原樣之後 ● 必須熄掉，got ' + JSON.stringify(afterEsc.title));
+
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await ctx.page.waitForSelector('.ed-wave-overlay', { timeout: 8000 });
+      await new Promise((r) => setTimeout(r, 400));
+      const back = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(back.open, true,
+        'T7b: Escape 之後的 Ctrl+Z 必須把丟掉的編輯拿回來（重開編輯器）');
+      assert.strictEqual(back.stashed, false,
+        'T7b: 停放是一次性的 —— 拿回來之後不得再留著');
+      assert.strictEqual(back.dirty, true,
+        'T7b: 拿回來的編輯是一筆真的、還沒存檔的改動');
+
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf("wave: 'p.1p.'") !== -1,
+        'T7b: 拿回來的必須是【畫過的那份】，不是一個空編輯器。Got:\n' + md);
+      assert.ok(md.indexOf('// 主時脈') !== -1, 'T7b: 註解一樣要活著');
+      assert.notStrictEqual(md, before, 'T7b: 而且它真的跟原檔不一樣');
+      assert.strictEqual(ctx.errs.length, 0, 'T7b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7b Escape takes the session back off the document and one Ctrl+Z puts it back with the editor — OK');
+    }
+
+    // T7c — 衝突 banner 上的 Reload 不得無聲丟掉畫好的波形。
+    //
+    // 這是 Task 6 量到的洞：真的畫完之後文件【不是】髒的、磁碟 byte-identical、
+    // 按 Reload 連一個 beforeunload 對話框都不會跳 —— 因為那道網問的是 `lines`，
+    // 而波形從來沒有進過 `lines`。寫回一落地它就自己補上了，這兩列是去證明它
+    // 真的補上了，而且【沒畫東西的時候不會亂攔】。
+    //
+    // 控制組先跑，而且是分開的一顆 page：沒有被攔的那一次，頁面是真的會重新
+    // 載入的。
+    const raiseConflict = async (ctx) => {
+      // 讓下一次存檔變成 409：那是 showConflictBanner() 唯一的產生點。
+      await new Promise((r) => setTimeout(r, 1100));
+      fs.writeFileSync(ctx.mdPath,
+        fs.readFileSync(ctx.mdPath, 'utf8') + '\nEXTERNAL EDIT\n', 'utf8');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyS');
+      await ctx.page.keyboard.up('Control');
+      await ctx.page.waitForSelector('.ed-conflict', { timeout: 10000 });
+    };
+    const pressReload = async (ctx) => {
+      // 按的是 banner 上那顆真的按鈕，不是直接呼叫 location.reload()：這一列
+      // 的主詞就是那顆按鈕。
+      await ctx.page.evaluate(() => {
+        const bs = document.querySelectorAll('.ed-conflict button');
+        for (const b of bs) if (b.textContent === 'Reload') { b.click(); return; }
+        throw new Error('no Reload button on the banner');
+      }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1200));
+    };
+    {
+      // 控制組：編輯器開著，但一筆都沒畫 —— 按 Reload 不得被攔。
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      const cleanBefore = await ctx.page.evaluate(() => window.__edTestWaveState().dirty);
+      await pressReload(ctx);
+      assert.strictEqual(cleanBefore, false,
+        'T7c 控制組前提失敗：什麼都沒畫的時候文件不該是髒的');
+      assert.strictEqual(blocked, false,
+        'T7c 控制組：什麼都沒畫就不得攔 Reload —— 那是一個關不掉的對話框');
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await raiseConflict(ctx);
+      const armed = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(armed.dirty, true,
+        'T7c 前提失敗：畫過之後文件必須是髒的，否則下面那道網沒有依據');
+      assert.strictEqual(armed.open, true,
+        'T7c 前提失敗：banner 升起來不得把編輯器關掉（T6l 已經釘過）');
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7c: 畫過波形之後按 Reload 必須被攔下來 —— 使用者不得在沒有被告知的' +
+        '情況下失去畫好的東西');
+      // 取消之後東西還在原地：被攔住而失去現場，跟沒被攔住一樣糟。
+      const after = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(after.open, true, 'T7c: 取消離站之後編輯器要還在');
+      assert.strictEqual(after.dirty, true, 'T7c: 畫的東西也要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T7c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7c the conflict banner\'s Reload cannot silently discard a drawn waveform — OK');
+    }
+
+    // T7d — 寫不回去的那一步：升起可見的說明、指名行號、等使用者確認，而且
+    // 【不得】偷偷把整個區塊重寫掉。
+    //
+    // 驅動方式是同一個位置連按兩次「＋」。第二次之所以一定被拒絕，是因為兩條
+    // 新 lane 插在來源的同一個位元組位置上，誰先誰後沒有定義 —— 本 session
+    // 直接跑 wave-store 確認過這個 fixture 會回 ok:false，理由是
+    // 「the same path ["signal",1,1] appears in two edits」。而且那個位置在
+    // 群組 bus 裡面，所以它同時也是「插入點會落進群組」那條不對稱規則的現場。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const one = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(one.seam === null ? null : one.seam.ops, 1,
+        'T7d 前提失敗：第一次插入必須是寫得回去的。Got ' + JSON.stringify(one.seam));
+      assert.strictEqual(one.unwritten, false, 'T7d 前提失敗：第一次不該被拒絕');
+
+      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const two = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(two.seam === null ? null : two.seam.ops, 1,
+        'T7d: 第二次寫不回去，就不得多出一次 commit —— 那會是偷偷重寫整個區塊');
+      assert.strictEqual(two.unwritten, true,
+        'T7d: 寫不回去這件事必須被記住，它就是 beforeunload 那道網的另一半');
+      assert.strictEqual(two.dirty, true,
+        'T7d: 螢幕上有一步是檔案沒有的，這時候離站必須被攔');
+
+      const banner = await visibleBannerText(ctx.page);
+      assert.ok(banner !== null, 'T7d: 拒絕必須升起看得見的說明，不是只寫在狀態列');
+      assert.ok(banner.indexOf('沒有') !== -1 && banner.indexOf('寫回') !== -1,
+        'T7d: 說明要講清楚它【沒有】寫回去。Got ' + JSON.stringify(banner));
+      assert.ok(/第 \d+–\d+ 行/.test(banner),
+        'T7d: 說明要指名是哪一段行號。Got ' + JSON.stringify(banner));
+      assert.ok(banner.indexOf('appears in two edits') !== -1,
+        'T7d: store 的拒絕理由要原封不動傳到使用者面前。Got ' + JSON.stringify(banner));
+      assert.ok(banner.indexOf('知道了') !== -1,
+        'T7d: 要有一顆確認鈕可以按。Got ' + JSON.stringify(banner));
+
+      // 按下確認只收掉那條 banner，不收掉「還有一步沒寫回去」這個事實。
+      await ctx.page.evaluate(() => {
+        const bs = document.querySelectorAll('.ed-conflict button');
+        for (const b of bs) if (b.textContent === '知道了') { b.click(); return; }
+        throw new Error('no 知道了 button');
+      });
+      await new Promise((r) => setTimeout(r, 250));
+      const acked = await ctx.page.evaluate(() => ({
+        banner: document.querySelector('.ed-conflict') !== null,
+        s: window.__edTestWaveState(),
+      }));
+      assert.strictEqual(acked.banner, false, 'T7d: 按了知道了，banner 要收掉');
+      assert.strictEqual(acked.s.unwritten, true,
+        'T7d: 但「有一步沒寫回去」不會因為讀過說明就消失');
+      assert.strictEqual(acked.s.dirty, true, 'T7d: 所以離站也還是要被攔');
+
+      // 磁碟上只能有寫得回去的那一步。
+      const md = await saveAndRead(ctx);
+      const added = md.match(/name: ""/g) || [];
+      assert.strictEqual(added.length, 1,
+        'T7d: 檔案裡只能有第一次插入的那一條 lane。Got:\n' + md);
+      assert.ok(md.indexOf('// 主時脈') !== -1, 'T7d: 註解一樣要活著');
+      assert.strictEqual(ctx.errs.length, 0, 'T7d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7d a refusal is raised by name, waits to be acknowledged, and never rewrites the block — OK');
     }
   }
 

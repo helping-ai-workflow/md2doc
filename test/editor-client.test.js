@@ -232,6 +232,88 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
 }
 
+// -- v3.4.0 batch3 Task 7: the Reload gate, and the arithmetic under Escape --
+//
+// Task 6 MEASURED the hole this closes: with the wave editor open over a real
+// paint, `document.title` was 'doc', the file on disk was byte-identical, and
+// the conflict banner's Reload — its only way forward — raised no beforeunload
+// dialog at all. The reason was structural, not a missing call: the unload
+// guard asks documentIsDirty(), documentIsDirty() is about `lines`, and a
+// waveform had never been in `lines`.
+//
+// Two halves close it, and each one has a guard here because each fails
+// silently on its own. test/editor-journey.test.js's wave/T7c drives the real
+// button through a real browser; these are the cheap structural twins that red
+// in one second instead of ten minutes.
+{
+  // Half one: every wave write-back goes through commitRangeEdit(), so the
+  // ordinary `stack.dirtyDepth` term already counts a drawing. A write-back
+  // that assigned `lines` from anywhere else would leave the dot, the save
+  // button, the unload guard AND undo all blind at once.
+  const body = src.slice(src.indexOf('function writeWaveGestureBack'),
+                         src.indexOf('function showWaveRefusal'));
+  assert.ok(body.length > 0, 'writeWaveGestureBack() must exist');
+  assert.ok(body.includes('commitRangeEdit({ lines, blocks, stack }'),
+    'the wave write-back must commit through commitRangeEdit() like every other ' +
+    'structural gesture — never by assigning `lines` itself');
+  const assigns = body.match(/^\s*lines = .*$/gm) || [];
+  assert.deepStrictEqual(assigns.map((l) => l.trim()), ['lines = result.lines;'],
+    'the only `lines =` in the wave write-back must be commitRangeEdit()\'s own ' +
+    'result. Got ' + JSON.stringify(assigns));
+
+  // Half two: a REFUSED gesture reaches no `lines` at all by definition, so
+  // dirtyDepth cannot see it. documentIsDirty() carries a third term for it.
+  const dirtyFn = src.slice(src.indexOf('function documentIsDirty()'));
+  const dirtyBody = dirtyFn.slice(0, dirtyFn.indexOf('}') + 1);
+  assert.ok(dirtyBody.includes('waveUnwrittenEdit'),
+    'documentIsDirty() must count a wave gesture the file could not hold — it is ' +
+    'the one kind of unsaved work `stack.dirtyDepth` cannot see. Got: ' + dirtyBody);
+}
+
+// The arithmetic Escape depends on, driven rather than asserted about.
+//
+// The wave editor commits on every gesture, so by the time Escape is pressed
+// the session is N ops deep on the document stack. Escape must leave BOTH the
+// bytes and the dirty depth exactly where the session found them — a revert
+// COMMIT would restore the bytes and leave the depth at N+1, i.e. a ● and an
+// unload prompt over a document that is byte-identical to what it was.
+{
+  const st = { lines: ['# W', '', '```wavedrom', "{ signal: [{ name: 'a', wave: '01' }] }", '```'],
+               blocks: [{ id: 0, type: 'heading', startLine: 1, endLine: 1 },
+                        { id: 1, type: 'code', startLine: 3, endLine: 5 }],
+               stack: new UndoStack() };
+  const baseLines = st.lines;
+  const baseDepth = st.stack.dirtyDepth;
+  assert.strictEqual(baseDepth, 0, 'fixture: a fresh stack is clean');
+  // Three gestures, each one a whole-body rewrite at the fence's body range.
+  for (const wave of ['0.1', '0.11', '0.111']) {
+    const r = commitRangeEdit(st, 4, 4, "{ signal: [{ name: 'a', wave: '" + wave + "' }] }");
+    assert.notStrictEqual(r.op, null, 'fixture: each gesture must really commit');
+    st.lines = r.lines;
+  }
+  assert.strictEqual(st.stack.dirtyDepth, 3, '三個手勢就是三筆 op');
+  assert.notDeepStrictEqual(st.lines, baseLines, 'fixture: the document really moved');
+  // …and Escape takes all three back off.
+  for (let i = 0; i < 3; i++) st.lines = st.stack.discardTop(st.lines).lines;
+  assert.deepStrictEqual(st.lines, baseLines,
+    'Escape must put the bytes back exactly. Got ' + JSON.stringify(st.lines));
+  assert.strictEqual(st.stack.dirtyDepth, baseDepth,
+    'Escape must put the DIRTY DEPTH back too — discardTop() leaves no redo entry, ' +
+    'which is what separates it from a revert commit');
+  assert.strictEqual(st.stack.undo(st.lines), null,
+    'and nothing of the session may be left on the stack for a later Ctrl+Z');
+  // The half that separates discardTop() from undo(), and the ONLY half that
+  // does: undo() also lands the bytes and the depth back at base here, so a
+  // test that stopped one line above would pass against an Escape built out of
+  // undo() — driven, not reasoned about. What undo() leaves behind is a REDO
+  // tail, and a Ctrl+Y over it would resurrect the very session the user just
+  // threw away (and then double-apply it against the Ctrl+Z restore, which
+  // commits the drawing again).
+  assert.strictEqual(st.stack.redo(st.lines), null,
+    'Escape must leave nothing to REDO either — a discarded wave session may ' +
+    'not come back through Ctrl+Y');
+}
+
 // -- Task 5 review fix: suppressTableFocusout must be exception-safe -------
 // The flag is checked at the TOP of the document-level `focusout` listener
 // (before any block-type branch), so a bare `suppressTableFocusout = true;
@@ -847,9 +929,22 @@ function countInCode(source, needle) {
   // indentCaretLi() commits through commitListStructure()'s existing site,
   // the toolbar's convert/heading buttons call functions that already owned
   // theirs, and the image/paste paths go through insertBlockBelow()'s.
-  // The expected total is therefore 1 declaration + 15 call sites = 16.
-  assert.strictEqual(helperCalls, 16,
-    'the helper must be DECLARED once and used at all fifteen ' +
+  // MIGRATED by v3.4.0 batch3 Task 7 (16 -> 17). ONE genuinely new
+  // commit-then-render site:
+  //   * restoreDiscardedWaveEdit() — the Ctrl+Z that puts an Escaped wave
+  //     session back. It commits the stashed drawing over the block's body
+  //     range with its own commitRangeEdit(), so it owns that range outright
+  //     and cannot borrow another site's rollback.
+  // The REST of Task 7 adds none, and that was checked rather than assumed:
+  // writeWaveGestureBack() commits per gesture but deliberately does not
+  // render at all (the overlay covers `.content`; see its own comment), and
+  // finishWaveSession()'s commit-close render deliberately does NOT roll back
+  // — a failed /api/render there would throw away a whole drawing session
+  // rather than one keystroke, so the work stays in `lines` and the banner is
+  // corrected instead. That exception is recorded at the call site.
+  // The expected total is therefore 1 declaration + 16 call sites = 17.
+  assert.strictEqual(helperCalls, 17,
+    'the helper must be DECLARED once and used at all sixteen ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
