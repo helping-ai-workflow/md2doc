@@ -9,6 +9,8 @@ const twoPages = fs.readFileSync(
 const notDrawio = fs.readFileSync(
   path.join(__dirname, 'fixtures', 'not-drawio.xml'), 'utf8');
 
+(async () => {
+
 // 判別
 assert.strictEqual(D.isDrawioXml(twoPages), true, '<mxfile> 必須被認出來');
 assert.strictEqual(D.isDrawioXml(notDrawio), false,
@@ -80,4 +82,33 @@ assert.strictEqual(D.resolvePageIndex(names, '99'), 0,
 assert.strictEqual(D.resolvePageIndex(names, '0'), 0,
   '0 不是合法的 1-based 頁碼，退回第一頁');
 
+// 烤 SVG（需要 Chromium，比上面的純函式慢，放在檔案最後）
+{
+  const svgs = await D.bakeDrawioSvg(twoPages);
+  assert.strictEqual(svgs.length, 2, '兩頁必須各得到一份 SVG');
+  assert.ok(/^<svg[\s>]/.test(svgs[0].trim()), '第一頁必須是 <svg> 開頭');
+  assert.ok(svgs[0].includes('ARCH_BOX'),
+    '第一頁的 SVG 必須含第一頁的內容。Got: ' + svgs[0].slice(0, 200));
+  assert.ok(svgs[1].includes('FLOW_BOX'),
+    '第二頁的 SVG 必須含第二頁的內容。Got: ' + svgs[1].slice(0, 200));
+  assert.ok(!svgs[0].includes('FLOW_BOX'),
+    '第一頁不得混進第二頁的內容');
+
+  for (const svg of svgs) {
+    assert.ok(!/viewer\.diagrams\.net/.test(svg),
+      '烤出來的 SVG 不得含任何 viewer.diagrams.net 的 URL —— 那會讓離線破圖');
+    assert.ok(!/<script/i.test(svg),
+      '烤出來的 SVG 不得含 <script>');
+  }
+}
+
+// 壞掉的來源：回報而不是靜默給空白
+{
+  let threw = null;
+  try { await D.bakeDrawioSvg('<mxfile><diagram>NOT XML</diagram></mxfile>'); }
+  catch (e) { threw = e; }
+  assert.ok(threw, '壞掉的來源必須丟出可辨識的錯誤，不得靜默回空白');
+}
+
 console.log('drawio.test.js OK');
+})().catch((e) => { console.error(e); process.exit(1); });
