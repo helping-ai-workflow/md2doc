@@ -101,12 +101,68 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   assert.strictEqual(r.doc.name, 'a"bA\n', '跳脫必須解開。Got ' + JSON.stringify(r.doc.name));
 }
 
-// 不得用 eval / new Function
+// 巢狀深度：超過上限要「回報」，不得丟 RangeError（Task 2-4 有權不包 try 就呼叫）
+{
+  const deepOk = C.parseSource('['.repeat(64) + ']'.repeat(64));
+  assert.strictEqual(deepOk.ok, true,
+    '64 層必須解析得出來。Got ' + JSON.stringify(deepOk.message));
+
+  const tooDeep = C.parseSource('['.repeat(65) + ']'.repeat(65));
+  assert.strictEqual(tooDeep.ok, false, '65 層必須被拒絕');
+  assert.strictEqual(typeof tooDeep.offset, 'number', '深度錯誤也要指出位置');
+  assert.ok(/deep/i.test(tooDeep.message),
+    '訊息要說明是巢狀太深。Got ' + JSON.stringify(tooDeep.message));
+
+  const runaway = C.parseSource('['.repeat(10000));
+  assert.strictEqual(runaway.ok, false, '一萬個左括號必須回報而不是丟例外');
+  assert.strictEqual(typeof runaway.offset, 'number');
+
+  const objects = C.parseSource('{"a":'.repeat(300) + '1' + '}'.repeat(300));
+  assert.strictEqual(objects.ok, false, '物件巢狀吃同一條上限');
+}
+
+// Unicode 空白不得被吃進裸鍵——吃進去的話 Task 2 查不到 span，改名會靜默失敗
+{
+  const NBSP = '{ name\u00a0: "clk" }';
+  const r1 = C.parseSource(NBSP);
+  assert.strictEqual(r1.ok, true, 'Got ' + JSON.stringify(r1));
+  assert.deepStrictEqual(Object.keys(r1.doc), ['name'],
+    'NBSP 不得成為鍵的一部分。Got ' + JSON.stringify(Object.keys(r1.doc)));
+  assert.ok(r1.spans.get(JSON.stringify(['name'])), "spans 必須含 ['name']");
+
+  const IDEO = '{ name\u3000: "clk" }';
+  const r2 = C.parseSource(IDEO);
+  assert.strictEqual(r2.ok, true, 'Got ' + JSON.stringify(r2));
+  assert.deepStrictEqual(Object.keys(r2.doc), ['name'],
+    'U+3000 不得成為鍵的一部分。Got ' + JSON.stringify(Object.keys(r2.doc)));
+
+  // 值的位置也一樣當空白——JS 自己就是這樣算的
+  const r3 = C.parseSource('{ a:\u00a01, b:\u30002 }');
+  assert.strictEqual(r3.ok, true, 'Got ' + JSON.stringify(r3));
+  assert.strictEqual(r3.doc.a, 1);
+  assert.strictEqual(r3.doc.b, 2);
+
+  // zero-width space 既不是 JS 空白也不是識別字：要響亮地失敗
+  const r4 = C.parseSource('{ name\u200b: "clk" }');
+  assert.strictEqual(r4.ok, false, 'ZWSP 必須被拒絕，不得併進鍵裡');
+  assert.strictEqual(typeof r4.offset, 'number');
+}
+
+// 不得出現任何會執行程式碼的 API（使用者的 markdown 不可以變成可執行程式碼）
 {
   const fs = require('fs');
-  const src = fs.readFileSync(require.resolve('../lib/editor/wave-codec.js'), 'utf8');
-  assert.ok(!/\beval\s*\(/.test(src), '不得使用 eval');
-  assert.ok(!/new\s+Function\b/.test(src), '不得使用 new Function');
+  const BANNED = ['eval', 'Function', 'constructor', 'runInNewContext',
+    'setTimeout', 'setInterval', 'require(', 'import('];
+  // 之後 wave-geometry.js 落地時把它加進這個陣列即可；wave-store / wave-ui
+  // 會有正當的 require / setTimeout，那兩個檔案要由它們自己的測試用較窄的清單守。
+  const PURE = ['../lib/editor/wave-codec.js'];
+  for (const rel of PURE) {
+    const src = fs.readFileSync(require.resolve(rel), 'utf8');
+    for (const bad of BANNED) {
+      assert.strictEqual(src.indexOf(bad), -1,
+        rel + ' 不得出現 ' + JSON.stringify(bad) + '（會執行程式碼的拼法一律擋）');
+    }
+  }
 }
 
 console.log('wave-codec.test.js OK');
