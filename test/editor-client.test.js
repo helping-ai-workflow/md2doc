@@ -415,7 +415,17 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
       'and a save inside the session breaks it, which is how the session knows');
   }
 
-  // THE TRAP — the blind pop, driven to the point where it goes clean.
+  // THE TRAP, and what now stops it.
+  //
+  // MIGRATED by fix 2. This block used to end by asserting that two ordinary
+  // edits after a blind pop made `dirtyDepth` read exactly 0 — the measured
+  // data-loss path, pinned as the thing the branch existed to avoid. That
+  // number is no longer reachable: `UndoStack` now invalidates the save marker
+  // the moment a push lands below it, because the branch that produced the
+  // saved bytes has been replaced and no undo/redo can get back to it. The
+  // sequence is kept, and every step now asserts the invariant itself —
+  // `isDirty()` over a document that genuinely differs from disk — instead of
+  // the distance that used to pass through zero.
   {
     const st = fresh();
     const baseLines = st.lines;
@@ -425,15 +435,17 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
     for (let i = 0; i < 3; i++) st.lines = st.stack.discardTop(st.lines).lines;
     assert.deepStrictEqual(st.lines, baseLines, 'the bytes did go back');
     assert.strictEqual(st.stack.dirtyDepth, -2,
-      'and the depth went NEGATIVE, which still reads dirty — this is the part ' +
-      'that hides the defect');
-    tailEdit(st, 'A');
-    assert.notStrictEqual(st.stack.dirtyDepth, 0, 'one edit back: still dirty');
-    tailEdit(st, 'B');
-    assert.strictEqual(st.stack.dirtyDepth, 0,
-      'TWO edits back it reads CLEAN — over a document that differs from disk ' +
-      'in the waveform AND in both of those edits. This is the measured ' +
-      'data-loss path; the branch under test exists to make it unreachable');
+      'and the depth is NEGATIVE — the pop went below the save point, which is ' +
+      'the state the old arithmetic could climb back out of');
+    assert.strictEqual(st.stack.isDirty(), true,
+      'memory is at the base and disk holds two gestures, so it is dirty');
+    for (const tag of ['A', 'B', 'C', 'D']) {
+      tailEdit(st, tag);
+      assert.strictEqual(st.stack.isDirty(), true,
+        'edit ' + tag + ': no number of ordinary edits may make this read clean — ' +
+        'disk still holds a waveform memory does not, plus every one of these ' +
+        'edits. Before fix 2 the SECOND one landed on exactly 0');
+    }
   }
 
   // THE ANSWER — a revert COMMIT when a save landed inside the session.

@@ -6204,6 +6204,72 @@ async function main() {
       'N5 存檔：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
+  // ── N5-undo: 撤銷到存檔點【之前】，再打一筆，不得讓文件回報成乾淨的 ────
+  //
+  // v3.4.0 batch3 Task 7 fix 2。這是一個【既有】缺陷，v3.3.0 就在線上，而且
+  // 整條路徑跟波形編輯器一點關係都沒有 —— `_savedDepth` 是一個指向 undo stack
+  // 的絕對索引，歷史一旦倒退到它前面再長出別的分支，深度算術就會從下面走回 0。
+  // MEASURED（修之前）：打字、提交、Ctrl+S、Ctrl+Z、再打一筆普通的編輯 ——
+  // `documentIsDirty()` 回 false、● 熄掉、存檔鈕變灰、beforeunload 不再攔，
+  // 衝突 banner 的 Reload 會把「被撤銷掉的那次存檔」跟「新打的這一筆」一起丟掉。
+  //
+  // 這一列走的是離站對話框，跟 N5 家族其他列同一支觀測器。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' ONE');
+    await new Promise((r) => setTimeout(r, 200));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph. ONE\n',
+      'N5-undo 前提失敗：第一筆必須真的存進磁碟，got ' + JSON.stringify(disk));
+    assert.strictEqual((await ctx.page.title()).indexOf('●'), -1,
+      'N5-undo 前提失敗：存完之後 ● 要先熄掉');
+
+    // 撤銷到存檔點之前。記憶體從此跟磁碟不一樣。
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 1200));
+    const undone = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.strictEqual(undone.text.indexOf('ONE'), -1,
+      'N5-undo 前提失敗：Ctrl+Z 要真的退掉那一筆');
+    assert.strictEqual(undone.title.indexOf('●'), 0,
+      'N5-undo 前提失敗：退到存檔點之前就必須是髒的，got ' + JSON.stringify(undone.title));
+
+    // 一筆普通的編輯 —— 修之前就是這一發把髒度從 -1 走回 0 的。
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.type(' TWO');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.ok(after.text.indexOf('TWO') !== -1,
+      'N5-undo 前提失敗：第二筆要真的在畫面上');
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), disk,
+      'N5-undo 前提失敗：磁碟上還是第一筆那一份 —— 記憶體跟磁碟真的不一樣');
+    assert.strictEqual(after.title.indexOf('●'), 0,
+      'N5-undo：記憶體跟磁碟不一樣的時候 ● 不得熄掉，got ' + JSON.stringify(after.title));
+
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(navBlocked, true,
+      'N5-undo：離站必須被攔 —— 修之前這裡連一個對話框都不會跳，Reload 直接把' +
+      '兩筆都丟掉');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-undo：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-undo an undo past a save point cannot make a later edit read clean — OK');
+  }
   // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
   // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
   // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提

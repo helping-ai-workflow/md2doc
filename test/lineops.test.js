@@ -146,4 +146,134 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
   assert.strictEqual(stack.redoTail().length, 0, 'a non-array reads as no branch');
 }
 
+// ---------------------------------------------------------------------------
+// v3.4.0 batch3 Task 7 fix 2 — "not dirty" must mean "memory equals disk".
+//
+// This is a PRE-EXISTING defect, live in v3.3.0 and reachable with no wave
+// editor anywhere near it. `_savedDepth` was an unconditional index into a
+// stack that can be rewound, so once history diverged past the save point the
+// depth arithmetic could walk back onto zero from below and report a document
+// that differs from disk as clean — title dot out, save button grey,
+// `beforeunload` silent, and the conflict banner's Reload discarding the lot.
+//
+// The fixture carries the DOCUMENT alongside the stack and asserts against
+// `memory === disk` at every step, so it cannot agree with a stack that merely
+// keeps a tidy-looking counter.
+// ---------------------------------------------------------------------------
+{
+  const stack = new UndoStack();
+  let lines = ['# H', '', 'para'];
+  let disk = null;                       // what the last save wrote
+  const save = () => { disk = lines.join('\n'); stack.markSaved(); };
+  const edit = (text) => {
+    const op = { startLine: 3, endLine: 3, before: [lines[2]], after: [text] };
+    stack.push(op);
+    lines = replaceLines(lines, 3, 3, [text]).lines;
+  };
+  const agree = () => disk === lines.join('\n');
+
+  edit('para EDITED');
+  save();
+  assert.strictEqual(agree(), true, 'fixture: the save really did land');
+  assert.strictEqual(stack.isDirty(), false, '剛存完就是乾淨的');
+
+  lines = stack.undo(lines).lines;        // ordinary Ctrl+Z, past the save point
+  assert.strictEqual(agree(), false, 'fixture: the undo moved memory off disk');
+  assert.strictEqual(stack.isDirty(), true,
+    '撤銷到存檔點之前，記憶體跟磁碟不一樣，就必須是髒的');
+
+  // …and here is the whole defect: ONE more ordinary edit.
+  edit('para SOMETHING ELSE');
+  assert.strictEqual(agree(), false,
+    'fixture: memory still differs from disk — in the undone save AND in this edit');
+  assert.strictEqual(stack.isDirty(), true,
+    '一筆普通的編輯不得讓文件回報成乾淨的 —— 這就是那個實測到的資料遺失路徑：' +
+    '● 熄掉、beforeunload 不再攔、衝突 banner 的 Reload 把兩筆都丟掉');
+  // And it must stay that way however many more edits happen: the saved state
+  // is not on this stack any more, and no amount of pushing puts it back.
+  for (let i = 0; i < 5; i++) {
+    edit('para ' + i);
+    assert.strictEqual(stack.isDirty(), true,
+      'edit ' + i + '：存檔點已經不在這個 stack 上了，之後每一筆都還是髒的');
+  }
+  // The only thing that makes it clean again is actually saving.
+  save();
+  assert.strictEqual(stack.isDirty(), false, '真的存檔才會乾淨');
+  assert.strictEqual(agree(), true, '而那時候記憶體跟磁碟真的一樣');
+}
+{
+  // The CONTROL, and the reason the invalidation is on `push()` and not on
+  // `undo()`: an undo that is redone lands back on the very state that was
+  // saved, so the marker still names something real and the document IS clean.
+  // An implementation that invalidated on the rewind itself would over-warn
+  // here for the rest of the session.
+  const stack = new UndoStack();
+  let lines = ['# H', '', 'para'];
+  stack.push({ startLine: 3, endLine: 3, before: ['para'], after: ['para EDITED'] });
+  lines = ['# H', '', 'para EDITED'];
+  const disk = lines.join('\n');
+  stack.markSaved();
+  lines = stack.undo(lines).lines;
+  assert.strictEqual(stack.isDirty(), true, 'control: 撤銷之後是髒的');
+  lines = stack.redo(lines).lines;
+  assert.strictEqual(lines.join('\n'), disk, 'control: redo 把位元組帶回存檔的那一份');
+  assert.strictEqual(stack.isDirty(), false,
+    'control: 撤銷再重做回到存檔的狀態，就必須重新變回乾淨 —— 失效要綁在' +
+    '【分岔的那一發 push】上，不是綁在撤銷上');
+  assert.strictEqual(stack.dirtyDepth, 0, 'control: 距離也回到 0');
+}
+{
+  // `savedDepth` is WHERE the marker is, or null once the saved state is not on
+  // this stack any more. A caller reasoning about a RANGE of the stack — "would
+  // removing my own N ops destroy the state disk was written from?" — needs the
+  // position, and needs `null` to be loud rather than a number it can subtract.
+  const stack = new UndoStack();
+  assert.strictEqual(stack.savedDepth, 0, 'a fresh stack is saved at 0');
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['b'] });
+  assert.strictEqual(stack.savedDepth, 0, 'an ordinary push does not move it');
+  stack.markSaved();
+  assert.strictEqual(stack.savedDepth, 1, 'markSaved does');
+  stack.undo(['b']);
+  assert.strictEqual(stack.savedDepth, 1,
+    'an undo alone does not — the marker still names a state redo can reach');
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['c'] });
+  assert.strictEqual(stack.savedDepth, null,
+    'a push past the marker does: the state it named is gone from this stack');
+  stack.markSaved();
+  assert.strictEqual(stack.savedDepth, 1,
+    'and saving again establishes a new one — note the VALUE is back to what it ' +
+    'was, which is why a caller must compare POSITIONS against its own baseline ' +
+    'rather than watch this number for change');
+}
+{
+  // `depth` is the other half — a question about the STACK with no premise
+  // about the marker, so a caller that pushed N ops can check the top N are
+  // still its own.
+  const stack = new UndoStack();
+  assert.strictEqual(stack.depth, 0);
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['b'] });
+  stack.push({ startLine: 1, endLine: 1, before: ['b'], after: ['c'] });
+  assert.strictEqual(stack.depth, 2);
+  stack.discardTop(['c']);
+  assert.strictEqual(stack.depth, 1, 'discardTop takes one off');
+  stack.markSaved();
+  assert.strictEqual(stack.depth, 1, 'markSaved moves the marker, not the stack');
+}
+{
+  // `dirtyDepth` keeps working as a distance while there IS one, and is
+  // deliberately never 0 once there is not.
+  const stack = new UndoStack();
+  assert.strictEqual(stack.dirtyDepth, 0, 'a fresh stack is at its save point');
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['b'] });
+  assert.strictEqual(stack.dirtyDepth, 1);
+  stack.markSaved();
+  stack.undo(['b']);
+  assert.strictEqual(stack.dirtyDepth, -1, 'below the marker it is still a distance');
+  stack.push({ startLine: 1, endLine: 1, before: ['a'], after: ['c'] });
+  assert.notStrictEqual(stack.dirtyDepth, 0,
+    'and once the marker is gone it must never read 0 — that is the number the ' +
+    'old predicate walked onto');
+  assert.strictEqual(stack.isDirty(), true, 'which is what isDirty() says outright');
+}
+
 console.log('lineops.test.js OK');
