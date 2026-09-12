@@ -367,12 +367,14 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   assert.strictEqual(again.doc.signal.length, 1);
   assert.strictEqual(again.doc.signal[0].wave, 'p......', '留下的那一筆逐字不動');
 
-  // 刪掉第一筆時，它那一行的註解跟著它走（註解在 member span 之外，所以留下）
+  // 刪掉第一筆時，寫在它同一行的註解跟著它一起走（詳細情況見 F4 那一塊）
   const first = C.patchSource(SRC, r, [{ op: 'remove', path: ['signal', 0] }]);
   assert.strictEqual(first.ok, true, 'Got ' + JSON.stringify(first));
   const f2 = C.parseSource(first.text);
   assert.strictEqual(f2.ok, true, 'Got ' + JSON.stringify(f2));
   assert.deepStrictEqual(f2.doc.signal.map((s) => s.name), ['data']);
+  assert.ok(first.text.indexOf('// 主時脈') === -1,
+    '那條 lane 自己那一行的註解不得被留下來描述別人。Got ' + JSON.stringify(first.text));
 
   // 刪掉一個物件成員
   const ro = C.parseSource(SRC);
@@ -439,14 +441,15 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
     '來回一趟必須還原成同一個字串');
 }
 
-// 交疊的編輯必須拒絕（容器與它的孩子同時改）
+// 交疊的編輯必須拒絕（刪掉一整筆、又去改它裡面的欄位）
 {
   const r = C.parseSource(SRC);
   const out = C.patchSource(SRC, r, [
-    { path: ['signal', 0], value: { name: 'z', wave: '0' } },
+    { op: 'remove', path: ['signal', 0] },
     { path: ['signal', 0, 'wave'], value: '1' },
   ]);
   assert.strictEqual(out.ok, false, '兩筆編輯蓋到同一段，必須拒絕');
+  assert.ok(/overlap|交疊/i.test(out.reason), 'reason 要說明是交疊。Got ' + out.reason);
   assert.ok(out.rewroteRange, '必須說明它想動哪一段');
 }
 
@@ -468,6 +471,377 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   const empty = C.patchSource(SRC, r, []);
   assert.strictEqual(empty.ok, true, '空的 edits 是合法的');
   assert.strictEqual(empty.text, SRC, '空的 edits 必須逐字回傳原文');
+}
+
+// ---- 以下為 fix round 1（review F1-F12 + Q1）釘住的合約 ----
+
+// F1：值太深、或值自我循環時必須拒絕，不得丟 RangeError
+{
+  const r = C.parseSource(SRC);
+
+  const circ = { name: 'x', wave: '0' };
+  circ.self = circ;
+  const cy = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: circ }]);
+  assert.strictEqual(cy.ok, false, '自我循環必須被拒絕，不得丟例外');
+  assert.ok(/cycle|循環/i.test(cy.reason), 'reason 要說明是循環。Got ' + cy.reason);
+  assert.ok(cy.rewroteRange, '必須說明它想動哪一段');
+
+  // 間接循環（繞一圈回來）也一樣
+  const a = { name: 'a', wave: '0' };
+  a.child = { back: a };
+  assert.strictEqual(C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: a }]).ok,
+    false, '間接循環也必須被拒絕');
+
+  // 共用同一個子物件但沒有循環的值，不得被誤判
+  const shared = { wave: '0' };
+  const dag = { name: 'd', one: shared, two: shared };
+  assert.strictEqual(C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: dag }]).ok,
+    true, '共用子物件不是循環，不得誤殺');
+
+  // 深度：寫回去的東西必須是這個 parser 讀得回來的東西，所以上限跟 parser 同一個
+  const nest = (depth) => { let v = 'leaf'; for (let i = 0; i < depth; i++) v = [v]; return v; };
+  const deep = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: nest(6000) }]);
+  assert.strictEqual(deep.ok, false, '太深的值必須被拒絕，不得丟 RangeError');
+  assert.ok(/deep|深/i.test(deep.reason), 'reason 要說明是太深。Got ' + deep.reason);
+
+  // 邊界：path 有 2 層，所以值還剩 62 層額度
+  const fit = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: nest(62) }]);
+  assert.strictEqual(fit.ok, true, '剛好塞得下的深度必須成功。Got ' + JSON.stringify(fit.reason));
+  assert.strictEqual(C.parseSource(fit.text).ok, true,
+    '寫回去的東西必須是這個 parser 讀得回來的');
+  const over = C.patchSource(SRC, r, [{ op: 'insert', path: ['signal', 2], value: nest(63) }]);
+  assert.strictEqual(over.ok, false, '多一層就必須拒絕（否則寫出來的檔案自己讀不回來）');
+
+  // set 也吃同一套（陣列值，型別與原本相同）
+  const setDeep = C.patchSource(SRC, r,
+    [{ path: ['signal', 1, 'data'], value: nest(6000) }]);
+  assert.strictEqual(setDeep.ok, false, 'set 的值太深也必須拒絕');
+}
+
+// F2：parsed 必須來自這一份 text；拿舊的 parse 結果去 patch 新的 text 必須拒絕
+{
+  const r = C.parseSource(SRC);
+  const o1 = C.patchSource(SRC, r, [{ path: ['signal', 0, 'wave'], value: 'p..x..x..' }]);
+  assert.strictEqual(o1.ok, true, 'Got ' + JSON.stringify(o1));
+
+  const o2 = C.patchSource(o1.text, r, [{ path: ['signal', 1, 'name'], value: 'DATA' }]);
+  assert.strictEqual(o2.ok, false,
+    '拿上一輪的 parse 結果去 patch 已經變長的 text，必須拒絕而不是寫出壞檔案');
+  assert.ok(o2.text === undefined, '拒絕時不得回傳 text');
+
+  // 正確用法：重新 parse
+  const r2 = C.parseSource(o1.text);
+  const o3 = C.patchSource(o1.text, r2, [{ path: ['signal', 1, 'name'], value: 'DATA' }]);
+  assert.strictEqual(o3.ok, true, 'Got ' + JSON.stringify(o3));
+  assert.strictEqual(C.parseSource(o3.text).ok, true, '重新 parse 之後寫出來的必須還能解析');
+  assert.strictEqual(C.parseSource(o3.text).doc.signal[1].name, 'DATA');
+
+  // 長度一樣但內容不同，也必須抓得到
+  const twin = SRC.replace('p......', 'n......');
+  assert.strictEqual(twin.length, SRC.length, '這個對照組要等長才有意義');
+  assert.strictEqual(C.patchSource(twin, r, [{ path: ['signal', 0, 'wave'], value: '0' }]).ok,
+    false, '等長但不同的來源也必須被拒絕');
+}
+
+// F3：CRLF 來源插入的新行必須也是 CRLF，不得混進一個裸 LF
+{
+  const CR = ['{ signal: [', '  { name: "clk", wave: "p." },', ']}'].join('\r\n');
+  const rc = C.parseSource(CR);
+  assert.strictEqual(rc.ok, true, 'Got ' + JSON.stringify(rc));
+  const countLF = (t) => (t.match(/\n/g) || []).length;
+  const countCRLF = (t) => (t.match(/\r\n/g) || []).length;
+
+  const app = C.patchSource(CR, rc, [
+    { op: 'insert', path: ['signal', 1], value: { name: 'x', wave: '0' } },
+  ]);
+  assert.strictEqual(app.ok, true, 'Got ' + JSON.stringify(app));
+  assert.strictEqual(countLF(app.text), countCRLF(app.text),
+    '尾端插入不得留下裸 LF。LF=' + countLF(app.text) + ' CRLF=' + countCRLF(app.text));
+
+  const mid = C.patchSource(CR, rc, [
+    { op: 'insert', path: ['signal', 0], value: { name: 'y', wave: '1' } },
+  ]);
+  assert.strictEqual(mid.ok, true, 'Got ' + JSON.stringify(mid));
+  assert.strictEqual(countLF(mid.text), countCRLF(mid.text),
+    '中間插入不得留下裸 LF。LF=' + countLF(mid.text) + ' CRLF=' + countCRLF(mid.text));
+  assert.strictEqual(C.parseSource(mid.text).ok, true);
+
+  // LF 來源不得反過來長出 CR
+  const LF = ['{ signal: [', '  { name: "clk", wave: "p." },', ']}'].join('\n');
+  const rl = C.parseSource(LF);
+  const lo = C.patchSource(LF, rl, [
+    { op: 'insert', path: ['signal', 1], value: { name: 'x', wave: '0' } },
+  ]);
+  assert.strictEqual(lo.text.indexOf('\r'), -1, 'LF 來源不得長出 CR');
+}
+
+// F4：刪除一條 lane 時，屬於它的註解跟著它走，不得留下孤兒縮排或改去描述別人
+{
+  // (a) 同一行行尾的註解
+  const A = ['{ signal: [',
+             '    { name: "clk", wave: "p.." },  // 主時脈',
+             '    { name: "d", wave: "01" },',
+             ']}'].join('\n');
+  const ra = C.parseSource(A);
+  const oa = C.patchSource(A, ra, [{ op: 'remove', path: ['signal', 0] }]);
+  assert.strictEqual(oa.ok, true, 'Got ' + JSON.stringify(oa));
+  assert.strictEqual(oa.text.indexOf('// 主時脈'), -1,
+    '行尾註解不得被留下來變成別人的註解。Got ' + JSON.stringify(oa.text));
+  assert.strictEqual(oa.text.indexOf('      '), -1,
+    '不得留下一行孤兒縮排。Got ' + JSON.stringify(oa.text));
+  const pa = C.parseSource(oa.text);
+  assert.strictEqual(pa.ok, true, 'Got ' + JSON.stringify(pa));
+  assert.deepStrictEqual(pa.doc.signal.map((x) => x.name), ['d']);
+
+  // (b) 寫在上一行的註解
+  const B = ['{ signal: [',
+             '  // 主時脈',
+             '  { name: "clk", wave: "p.." },',
+             '  { name: "d", wave: "01" },',
+             ']}'].join('\n');
+  const rb = C.parseSource(B);
+  const ob = C.patchSource(B, rb, [{ op: 'remove', path: ['signal', 0] }]);
+  assert.strictEqual(ob.ok, true, 'Got ' + JSON.stringify(ob));
+  assert.strictEqual(ob.text.indexOf('// 主時脈'), -1,
+    '上一行的註解不得被留下來壓在下一條 lane 頭上。Got ' + JSON.stringify(ob.text));
+  const pb = C.parseSource(ob.text);
+  assert.strictEqual(pb.ok, true, 'Got ' + JSON.stringify(pb));
+  assert.deepStrictEqual(pb.doc.signal.map((x) => x.name), ['d']);
+
+  // (c) 別人的註解一個字都不能少：刪第二條時，第一條的兩種註解都要留著
+  const oc = C.patchSource(B, rb, [{ op: 'remove', path: ['signal', 1] }]);
+  assert.strictEqual(oc.ok, true, 'Got ' + JSON.stringify(oc));
+  assert.ok(oc.text.indexOf('// 主時脈') !== -1, '別人的註解不得被牽連');
+  assert.deepStrictEqual(C.parseSource(oc.text).doc.signal.map((x) => x.name), ['clk']);
+
+  // (d) 中間隔了一行空行的註解不屬於這條 lane，必須留著
+  const D = ['{ signal: [',
+             '  // 這段是講整張圖的',
+             '',
+             '  { name: "clk", wave: "p.." },',
+             '  { name: "d", wave: "01" },',
+             ']}'].join('\n');
+  const rd = C.parseSource(D);
+  const od = C.patchSource(D, rd, [{ op: 'remove', path: ['signal', 0] }]);
+  assert.strictEqual(od.ok, true, 'Got ' + JSON.stringify(od));
+  assert.ok(od.text.indexOf('// 這段是講整張圖的') !== -1,
+    '隔著空行的註解不算這條 lane 的，必須留著。Got ' + JSON.stringify(od.text));
+}
+
+// F5：插入時不得偷走下一條 lane 上方的註解
+{
+  const A = ['{ signal: [',
+             '  // 主時脈',
+             '  { name: "clk", wave: "p.." },',
+             '  { name: "d", wave: "01" },',
+             ']}'].join('\n');
+  const ra = C.parseSource(A);
+  const oa = C.patchSource(A, ra, [
+    { op: 'insert', path: ['signal', 0], value: { name: 'new', wave: '0' } },
+  ]);
+  assert.strictEqual(oa.ok, true, 'Got ' + JSON.stringify(oa));
+  const pa = C.parseSource(oa.text);
+  assert.strictEqual(pa.ok, true, 'Got ' + JSON.stringify(pa));
+  assert.deepStrictEqual(pa.doc.signal.map((x) => x.name), ['new', 'clk', 'd']);
+  const lines = oa.text.split('\n');
+  const cmt = lines.findIndex((l) => l.indexOf('// 主時脈') !== -1);
+  assert.ok(cmt !== -1, '註解必須還在');
+  assert.ok(lines[cmt + 1].indexOf('"clk"') !== -1,
+    '註解必須還貼在 clk 上面，不得變成新 lane 的註解。Got ' + JSON.stringify(oa.text));
+
+  // 插在中間也一樣：第二條上面的註解屬於第二條
+  const B = ['{ signal: [',
+             '  { name: "clk", wave: "p.." },',
+             '  // 資料',
+             '  { name: "d", wave: "01" },',
+             ']}'].join('\n');
+  const rb = C.parseSource(B);
+  const ob = C.patchSource(B, rb, [
+    { op: 'insert', path: ['signal', 1], value: { name: 'mid', wave: '0' } },
+  ]);
+  assert.strictEqual(ob.ok, true, 'Got ' + JSON.stringify(ob));
+  const lb = ob.text.split('\n');
+  const cb = lb.findIndex((l) => l.indexOf('// 資料') !== -1);
+  assert.ok(lb[cb + 1].indexOf('"d"') !== -1,
+    '註解必須還貼在 d 上面。Got ' + JSON.stringify(ob.text));
+  assert.deepStrictEqual(C.parseSource(ob.text).doc.signal.map((x) => x.name),
+    ['clk', 'mid', 'd']);
+}
+
+// F6：最後一筆後面的跨行區塊註解屬於最後一筆，新元素要落在它後面
+{
+  const A = ['{ signal: [',
+             '  { name: "clk", wave: "p.." },  /* 這段註解',
+             '     跨了兩行 */',
+             ']}'].join('\n');
+  const ra = C.parseSource(A);
+  assert.strictEqual(ra.ok, true, 'Got ' + JSON.stringify(ra));
+  const oa = C.patchSource(A, ra, [
+    { op: 'insert', path: ['signal', 1], value: { name: 'x', wave: '0' } },
+  ]);
+  assert.strictEqual(oa.ok, true, 'Got ' + JSON.stringify(oa));
+  assert.ok(oa.text.indexOf('跨了兩行 */') < oa.text.indexOf('"x"'),
+    '新元素要落在跨行註解後面。Got ' + JSON.stringify(oa.text));
+  const pa = C.parseSource(oa.text);
+  assert.strictEqual(pa.ok, true, 'Got ' + JSON.stringify(pa));
+  assert.deepStrictEqual(pa.doc.signal.map((x) => x.name), ['clk', 'x']);
+}
+
+// F7：同一條路徑在一次呼叫裡出現兩次必須拒絕（insert 與 set 一致）
+{
+  const r = C.parseSource(SRC);
+  const two = C.patchSource(SRC, r, [
+    { op: 'insert', path: ['signal', 1], value: { name: 'X', wave: '0' } },
+    { op: 'insert', path: ['signal', 1], value: { name: 'Y', wave: '1' } },
+  ]);
+  assert.strictEqual(two.ok, false,
+    '同一個索引插兩次，順序無法交代清楚，必須拒絕而不是靜默倒過來套');
+  assert.ok(/same path|同一條路徑/i.test(two.reason), 'reason 要說明原因。Got ' + two.reason);
+  assert.ok(two.rewroteRange, '必須說明它想動哪一段');
+
+  const sets = C.patchSource(SRC, r, [
+    { path: ['signal', 0, 'wave'], value: '0' },
+    { path: ['signal', 0, 'wave'], value: '1' },
+  ]);
+  assert.strictEqual(sets.ok, false, '同一條路徑 set 兩次也必須拒絕');
+  assert.ok(/same path|同一條路徑/i.test(sets.reason), 'reason 要一致。Got ' + sets.reason);
+
+  // 不同索引插兩次是合法的
+  const okTwo = C.patchSource(SRC, r, [
+    { op: 'insert', path: ['signal', 0], value: { name: 'X', wave: '0' } },
+    { op: 'insert', path: ['signal', 1], value: { name: 'Y', wave: '1' } },
+  ]);
+  assert.strictEqual(okTwo.ok, true, 'Got ' + JSON.stringify(okTwo));
+  assert.deepStrictEqual(C.parseSource(okTwo.text).doc.signal.map((x) => x.name),
+    ['X', 'clk', 'Y', 'data']);
+}
+
+// F8：容器值的 set 會把整棵子樹連同註解重寫，必須拒絕
+{
+  const A = ['{ signal: [',
+             '  { name: "clk", // 這行註解在 lane 物件裡面',
+             '    wave: "p.." },',
+             ']}'].join('\n');
+  const ra = C.parseSource(A);
+  const oa = C.patchSource(A, ra, [
+    { path: ['signal', 0], value: { name: 'z', wave: '0' } },
+  ]);
+  assert.strictEqual(oa.ok, false,
+    '整個 lane 物件的 set 會吃掉裡面的註解，必須拒絕');
+  assert.ok(/container|subtree|子樹|容器/i.test(oa.reason),
+    'reason 要說明是容器。Got ' + oa.reason);
+  const span = ra.spans.get(JSON.stringify(['signal', 0]));
+  assert.strictEqual(oa.rewroteRange.start, span[0], 'rewroteRange 要指出那棵子樹');
+  assert.strictEqual(oa.rewroteRange.end, span[1]);
+  assert.ok(A.indexOf('// 這行註解在 lane 物件裡面') !== -1, 'fixture 本身要有註解才有意義');
+
+  // 陣列值一樣
+  const ob = C.patchSource(SRC, C.parseSource(SRC),
+    [{ path: ['signal', 1, 'data'], value: ['x', 'y', 'z'] }]);
+  assert.strictEqual(ob.ok, false, '陣列值的 set 也必須拒絕');
+
+  // 但用 insert / remove 對同一個陣列做局部改動仍然可以
+  const rc = C.parseSource(SRC);
+  const oc = C.patchSource(SRC, rc, [{ op: 'remove', path: ['signal', 1, 'data', 1] }]);
+  assert.strictEqual(oc.ok, true, 'Got ' + JSON.stringify(oc));
+  assert.deepStrictEqual(C.parseSource(oc.text).doc.signal[1].data, ['a', 'c']);
+}
+
+// F9：值沒變的 edit 一個位元組都不寫（不得把 0xff 正規化成 255）
+{
+  const H = '{ config: { hscale: 0xff }, signal: [] }';
+  const rh = C.parseSource(H);
+  assert.strictEqual(rh.doc.config.hscale, 255);
+  const oh = C.patchSource(H, rh, [{ path: ['config', 'hscale'], value: 255 }]);
+  assert.strictEqual(oh.ok, true, 'Got ' + JSON.stringify(oh));
+  assert.strictEqual(oh.text, H,
+    '值沒變就不該重寫作者的字面值。Got ' + JSON.stringify(oh.text));
+
+  // 字串也一樣
+  const r = C.parseSource(SRC);
+  const same = C.patchSource(SRC, r, [{ path: ['signal', 0, 'wave'], value: 'p......' }]);
+  assert.strictEqual(same.ok, true, 'Got ' + JSON.stringify(same));
+  assert.strictEqual(same.text, SRC, '一樣的字串不得重寫');
+
+  // 混合：一筆沒變、一筆有變，只有變的那筆會動
+  const mix = C.patchSource(SRC, r, [
+    { path: ['signal', 0, 'wave'], value: 'p......' },
+    { path: ['signal', 1, 'name'], value: 'DATA' },
+  ]);
+  assert.strictEqual(mix.ok, true, 'Got ' + JSON.stringify(mix));
+  assert.ok(mix.text.includes('wave: "p......"'), '沒變的那筆保持原樣');
+  assert.ok(mix.text.includes("name: 'DATA'"), '有變的那筆要寫進去');
+
+  // 真的改成別的值當然還是要寫
+  const diff = C.patchSource(H, rh, [{ path: ['config', 'hscale'], value: 2 }]);
+  assert.strictEqual(diff.ok, true, 'Got ' + JSON.stringify(diff));
+  assert.ok(diff.text.includes('hscale: 2'), 'Got ' + JSON.stringify(diff.text));
+}
+
+// F10：落單的 surrogate 必須跳脫，輸出才是合法 UTF-8
+{
+  const r = C.parseSource(SRC);
+  const lone = 'a' + String.fromCharCode(0xd800) + 'b';
+  const out = C.patchSource(SRC, r, [{ path: ['signal', 0, 'name'], value: lone }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.strictEqual(out.text.indexOf(String.fromCharCode(0xd800)), -1,
+    '落單的 surrogate 不得原樣寫出去');
+  assert.strictEqual(Buffer.from(out.text, 'utf8').toString('utf8'), out.text,
+    '輸出寫成 UTF-8 再讀回來必須一模一樣');
+  assert.strictEqual(C.parseSource(out.text).doc.signal[0].name, lone,
+    '來回一趟必須還原成同一個字串');
+
+  // 成對的 surrogate（真的字）不得被拆開或跳脫
+  const pair = C.patchSource(SRC, r, [{ path: ['signal', 0, 'name'], value: '𝄞ok' }]);
+  assert.strictEqual(pair.ok, true, 'Got ' + JSON.stringify(pair));
+  assert.ok(pair.text.includes('𝄞ok'), '成對的 surrogate 必須原樣寫出。Got ' +
+    JSON.stringify(pair.text));
+}
+
+// F12：插進多行的空陣列要跟著它自己的排版，不得黏在中括號上
+{
+  const E = ['{', '  signal: [', '  ]', '}'].join('\n');
+  const re = C.parseSource(E);
+  assert.strictEqual(re.ok, true, 'Got ' + JSON.stringify(re));
+  const oe = C.patchSource(E, re, [
+    { op: 'insert', path: ['signal', 0], value: { name: 'N', wave: '0' } },
+  ]);
+  assert.strictEqual(oe.ok, true, 'Got ' + JSON.stringify(oe));
+  const el = oe.text.split('\n');
+  assert.strictEqual(el.length, 5, '新元素要自己佔一行。Got ' + JSON.stringify(oe.text));
+  assert.ok(/^ +\{ name: "N", wave: "0" \}$/.test(el[2]),
+    '新元素要縮排、獨佔一行。Got ' + JSON.stringify(el[2]));
+  assert.strictEqual(C.parseSource(oe.text).ok, true);
+  assert.deepStrictEqual(C.parseSource(oe.text).doc.signal.map((x) => x.name), ['N']);
+
+  // 單行的空陣列維持單行
+  const F = '{ signal: [] }';
+  const rf = C.parseSource(F);
+  const of2 = C.patchSource(F, rf, [
+    { op: 'insert', path: ['signal', 0], value: { name: 'N', wave: '0' } },
+  ]);
+  assert.strictEqual(of2.ok, true, 'Got ' + JSON.stringify(of2));
+  assert.strictEqual(of2.text.indexOf('\n'), -1, '單行來源不得長出換行。Got ' +
+    JSON.stringify(of2.text));
+}
+
+// Q1：單行陣列刪掉中間一筆，不得留下雙空格
+// （wavedrom 3.5.0 的 loader 是 eval('(' + text + ')')，實測雙空格與尾逗號都吃得下，
+//  所以這不是相容性問題；但那段空白是我們自己切出來的，該收乾淨。）
+{
+  const S = "{ signal: [ { name: 'a', wave: '0' }, { name: 'b', wave: '1' } ] }";
+  const r = C.parseSource(S);
+  const last = C.patchSource(S, r, [{ op: 'remove', path: ['signal', 1] }]);
+  assert.strictEqual(last.ok, true, 'Got ' + JSON.stringify(last));
+  assert.strictEqual(last.text.indexOf('  ]'), -1,
+    '不得留下雙空格。Got ' + JSON.stringify(last.text));
+  assert.deepStrictEqual(C.parseSource(last.text).doc.signal.map((x) => x.name), ['a']);
+
+  const firstOne = C.patchSource(S, r, [{ op: 'remove', path: ['signal', 0] }]);
+  assert.strictEqual(firstOne.ok, true, 'Got ' + JSON.stringify(firstOne));
+  assert.strictEqual(firstOne.text.indexOf('[  '), -1,
+    '刪掉第一筆也不得留下雙空格。Got ' + JSON.stringify(firstOne.text));
+  assert.deepStrictEqual(C.parseSource(firstOne.text).doc.signal.map((x) => x.name), ['b']);
 }
 
 console.log('wave-codec.test.js OK');
