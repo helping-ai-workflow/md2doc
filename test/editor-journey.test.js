@@ -2867,8 +2867,13 @@ async function main() {
     //   上面**——overlay 開著時把橫幅升起來，elementFromPoint 打在橫幅矩形
     //   中心拿到的是橫幅自己的 <button>（`inBanner: true`），滑鼠點得到。
     //   鍵盤也點得到：overlay 的 focus trap 的範圍**刻意不是 overlay 自己**，
-    //   而是「modal 這一層」＝ overlay ＋ 現場的每一條 .ed-conflict，實測從
-    //   overlay 內部按 Tab 第 32 下就進到橫幅的按鈕上。
+    //   而是「modal 這一層」＝ overlay ＋ 現場的每一條 .ed-conflict。
+    //   ⚠ 這裡**刻意不釘按鍵次數**。前一版寫「Tab 第 32 下」，那個數字是
+    //   focusable 名單的函數（本檔 fixture 目前 49 個），fixture 一改就漂，
+    //   而且沒有任何斷言在看它——量到的是 47（T6k 的合成 banner，接在它整圈
+    //   走完之後）與 50（T6l 的真 banner，從記載的起點算）。要斷言的是
+    //   「到得了」，那由 `wave/T6k` 與 `wave/T6l` 各自斷言，不是由一個註解裡
+    //   的數字。
     //   這一條不是可有可無的：橫幅是使用者解決磁碟衝突的唯一出口，而這個分支
     //   在 batch 2 已經為「一個 fixed 浮層蓋掉它」付過一次代價。
     { sel: '.ed-wave-edit-btn',        after: 'gone' },
@@ -9699,6 +9704,9 @@ async function main() {
             engineGaps.push(at.join(' '));
           }
           return { drawn: drawn, engine: engine, missing: missing,
+            lanes: lanes,
+            engineLanes: document.querySelectorAll(
+              '[id^="wavelane_draw_"][id$="_9000"]').length,
             drawnGaps: drawnGaps, engineGaps: engineGaps, totalUses: totalUses,
             hasWave: Array.from({ length: lanes },
               (_, i) => svg.getAttribute('data-haswave-' + i)),
@@ -9718,6 +9726,16 @@ async function main() {
         assert.deepStrictEqual(got.missing, [],
           'T6b: 每一條 lane 都必須在預覽裡有自己的 wavelane_draw_<i>_9000，' +
           '否則 index 對不上、下面在比空氣。Got ' + JSON.stringify(got.missing));
+        // …and the count itself has to come from the ENGINE, not from the thing
+        // under test. `missing` only checks the indices the loop visits, and the
+        // loop runs to the canvas's own `data-lane-count` — so a drawing that
+        // dropped a whole lane would shorten the loop, agree on every lane it
+        // still had, and stay green with the engine's extra lane group sitting
+        // there unexamined. Both are 6 on this fixture and nobody had written
+        // that down.
+        assert.strictEqual(got.lanes, got.engineLanes,
+          'T6b: 手繪的 lane 數必須等於引擎畫出來的 lane 數。Got ' +
+          got.lanes + ' vs ' + got.engineLanes);
         assert.ok(got.totalUses > 0,
           'T6b: 預覽必須真的畫出 brick。Got ' + got.totalUses);
         assert.ok(got.engine.filter((row) => row !== '').length > 1,
@@ -10275,18 +10293,48 @@ async function main() {
       assert.ok(isGone(btnAfter),
         '.ed-wave-edit-btn 捲動後必須消失（它的座標會過期），got ' + JSON.stringify(btnAfter));
 
-      // .ed-wave-overlay — live, and at the same viewport coordinates.
+      // .ed-wave-overlay — live, at the same viewport coordinates, and the
+      // document behind it does not scroll at all while it is up.
+      //
+      // The lock is the answer to a gap a state predicate over EVENTS cannot
+      // close: native wheel scrolling is not delivered to any listener this file
+      // guards, and measured, one wheel gesture over the panel took the document
+      // behind it from `scrollY 0` to `800`. Nothing is mutated by that, but the
+      // roster above classifies `.ed-wave-edit-btn` as `gone` precisely because
+      // a scroll invalidates coordinates, and the same scroll moves where the
+      // user lands when the overlay closes.
       await ctx.page.evaluate(() => window.scrollTo(0, 0));
       await new Promise((r) => setTimeout(r, 250));
+      const scrollable = await ctx.page.evaluate(() =>
+        document.documentElement.scrollHeight > window.innerHeight);
+      assert.strictEqual(scrollable, true,
+        'T6j 前提失敗：這份文件本來就要捲得動，否則「鎖住」什麼都沒證明');
       await openWave(ctx.page);
       const ovBefore = await overlayState(ctx.page, '.ed-wave-overlay');
       assertRaised(ovBefore, '.ed-wave-overlay');
-      await scrollBy(ctx.page, 900);
+      // The gesture, not a programmatic call. What the lock removes is the
+      // user-agent's own scrolling mechanism, which is what R2 named: pointer
+      // over the panel, one wheel, `scrollY 0 → 800`. MEASURED here, both ways
+      // round: with `overflow: hidden` on the root a wheel leaves `scrollY` at 0
+      // while `window.scrollBy(0, 900)` still moves it to 900 — that is what
+      // `hidden` means, and `clip` measured identically in this Chromium. A
+      // script calling `scrollBy` is the page's own code and not the hand this
+      // was about, and nothing on the overlay's path does.
+      const panelBox = await ctx.page.$eval('.ed-wave-panel', (el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await ctx.page.mouse.move(panelBox.x, panelBox.y);
+      await ctx.page.mouse.wheel({ deltaY: 800 });
+      await new Promise((r) => setTimeout(r, 400));
+      const lockedY = await ctx.page.evaluate(() => window.scrollY);
+      assert.strictEqual(lockedY, 0,
+        'T6j: modal 開著時滾輪不得捲動後面那份文件。Got ' + lockedY);
       const ovAfter = await overlayState(ctx.page, '.ed-wave-overlay');
       assert.ok(isLive(ovAfter),
-        '.ed-wave-overlay 捲動後必須仍然可見，got ' + JSON.stringify(ovAfter));
+        '.ed-wave-overlay 必須仍然可見，got ' + JSON.stringify(ovAfter));
       assert.strictEqual(ovAfter.top, ovBefore.top,
-        '.ed-wave-overlay 捲動後必須留在同一個視窗座標，got top=' + ovAfter.top);
+        '.ed-wave-overlay 必須留在同一個視窗座標，got top=' + ovAfter.top);
 
       // A file dropped on the panel. Before the state-based gate this reached
       // the document's own `drop` listener and inserted an image into `.content`
@@ -10311,12 +10359,22 @@ async function main() {
       assert.strictEqual(preventedOnPanel, false,
         'T6j: 那個 drop 必須被【婉拒】（不 preventDefault），而不是被吞掉');
 
-      // The control leg, and the reason the assertion above is not vacuous: the
-      // same synthetic drop on a block with NO overlay open really does insert.
+      // The control leg, and the reason the assertions above are not vacuous:
+      // with NO overlay open the same scroll moves the page and the same
+      // synthetic drop really does insert.
       await ctx.page.keyboard.press('Escape');
       await new Promise((r) => setTimeout(r, 250));
       assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
         'T6j 前提失敗：Escape 要把 overlay 收掉');
+      // The SAME wheel gesture, so the control leg and the locked leg differ in
+      // exactly one thing: whether the modal is up.
+      await ctx.page.mouse.move(panelBox.x, panelBox.y);
+      await ctx.page.mouse.wheel({ deltaY: 800 });
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(await ctx.page.evaluate(() => window.scrollY) > 0,
+        'T6j 前提失敗：關掉之後同一個滾輪手勢必須捲得動，否則「鎖住」那條是空的');
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 200));
       const preventedOnBlock = await dropPng('.ed-block[data-block-type="paragraph"]');
       await new Promise((r) => setTimeout(r, 2500));
       assert.strictEqual(preventedOnBlock, true,
@@ -10410,6 +10468,12 @@ async function main() {
       assert.ok(Number(stack.bannerZ) > Number(stack.overlayZ),
         'T6k: 磁碟衝突橫幅必須疊在波形編輯器【上面】（它是使用者解決衝突的唯一出口）。Got ' +
         stack.bannerZ + ' vs ' + stack.overlayZ);
+      // What is asserted is「命中測試落在橫幅【裡面】」, deliberately not which
+      // child. MEASURED: on this row's own banner (one Reload button) the centre
+      // is the BUTTON; on the banner `showConflictBanner()` really builds
+      // (message span + Reload + ✕) it is the SPAN. Both mean the same thing —
+      // the modal is not intercepting the banner's own rect — and naming a tag
+      // would pin a fact about this fixture rather than about the stacking.
       assert.strictEqual(stack.hitInBanner, true,
         'T6k: 橫幅矩形中心的命中測試必須落在橫幅自己身上，否則滑鼠點不到它');
 
@@ -10471,6 +10535,146 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T6k2: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T6k2 the unreadable panel owns undo as well, so the document behind it stays put — OK');
+    }
+
+    // ── fix round 3 ────────────────────────────────────────────────────
+
+    // T6l — Ctrl+S is not the modal's to swallow, and a disk conflict that
+    // arises DURING a wave session still reaches the user.
+    //
+    // Round 2 made ownership a state, and the state then swallowed a gesture
+    // that was never the editor's: measured, Ctrl+S with the overlay open put
+    // nothing on disk, and Escape-then-Ctrl+S did. The second-order cost was
+    // worse — `showConflictBanner()` has exactly ONE producer, the 409 branch of
+    // `save()`, and the toolbar's save control sits under an `inset: 0` backdrop
+    // and outside the focus trap. With Ctrl+S swallowed there was no route at
+    // all by which a conflict arising mid-session could be announced.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const disk = () => fs.readFileSync(ctx.mdPath, 'utf8');
+      const ctrlS = async () => {
+        await ctx.page.keyboard.down('Control');
+        await ctx.page.keyboard.press('KeyS');
+        await ctx.page.keyboard.up('Control');
+      };
+      // Wait for the FILE, not for a quiet page: the thing under test is
+      // whether the keystroke reached disk, so the disk is what is watched.
+      const diskBecomes = async (needle, ms) => {
+        const until = Date.now() + ms;
+        for (;;) {
+          if (disk().indexOf(needle) !== -1) return true;
+          if (Date.now() > until) return false;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      };
+
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' MARKA');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.strictEqual(disk().indexOf('MARKA'), -1,
+        'T6l 前提失敗：提交還沒有寫進磁碟，所以下面那次存檔才是被測的東西');
+
+      await openWave(ctx.page);
+      await ctrlS();
+      assert.strictEqual(await diskBecomes('MARKA', 8000), true,
+        'T6l: overlay 開著時按 Ctrl+S 必須真的寫進磁碟。Disk:\n' + disk());
+
+      // …and a conflict that arises now. Rewriting the file underneath makes
+      // the editor's `baseMtimeMs` stale, so the next save is a 409 — the one
+      // thing that produces this banner.
+      await new Promise((r) => setTimeout(r, 1100));
+      fs.writeFileSync(ctx.mdPath, disk() + '\nEXTERNAL EDIT\n', 'utf8');
+      assert.strictEqual(await ctx.page.$('.ed-conflict'), null,
+        'T6l 前提失敗：現在還不該有 banner');
+      await ctrlS();
+      await ctx.page.waitForSelector('.ed-conflict', { timeout: 10000 });
+      const banner = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-conflict');
+        return {
+          text: el.textContent || '',
+          buttons: Array.prototype.map.call(el.querySelectorAll('button'),
+            (b) => b.textContent),
+          overlayStillUp: !!document.querySelector('.ed-wave-overlay'),
+          z: Number(getComputedStyle(el).zIndex),
+          overlayZ: Number(getComputedStyle(document.querySelector('.ed-wave-overlay')).zIndex),
+        };
+      });
+      assert.ok(banner.text.indexOf('changed on disk') !== -1,
+        'T6l: 那必須是磁碟衝突那條 banner。Got ' + JSON.stringify(banner.text));
+      assert.ok(banner.buttons.indexOf('Reload') !== -1,
+        'T6l: banner 上要有 Reload 可以按。Got ' + JSON.stringify(banner.buttons));
+      assert.strictEqual(banner.overlayStillUp, true,
+        'T6l: banner 升起來不得把使用者手上的波形編輯器無預警關掉');
+      assert.ok(banner.z > banner.overlayZ,
+        'T6l: banner 必須疊在 modal 上面。Got ' + banner.z + ' vs ' + banner.overlayZ);
+      // …and it is reachable from inside the trap, which is what makes it an
+      // announcement rather than a decoration.
+      let reached = -1;
+      for (let i = 0; i < 120; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const inBanner = await ctx.page.evaluate(() =>
+          document.querySelector('.ed-conflict').contains(document.activeElement));
+        if (inBanner) { reached = i + 1; break; }
+      }
+      assert.notStrictEqual(reached, -1,
+        'T6l: 真正的衝突 banner 也必須 Tab 得到');
+      assert.strictEqual(ctx.errs.length, 0, 'T6l: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6l Ctrl+S still saves through the modal, and a conflict raised mid-session is announced and reachable — OK');
+    }
+
+    // T6m — Escape with the cursor on the conflict banner is the banner's
+    // Escape, not the dialog's.
+    //
+    // The banner is inside the focus trap on purpose, and round 2 then had the
+    // dialog claim every Escape unconditionally: measured, someone who
+    // Tab-walked over to read the banner and pressed Escape to back out lost the
+    // whole editing session while the banner they were looking at stayed up.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await ctx.page.evaluate(() => {
+        const el = document.createElement('div');
+        el.className = 'ed-conflict';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Reload';
+        el.appendChild(b);
+        document.body.appendChild(el);
+        b.focus();
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelector('.ed-conflict').contains(document.activeElement)), true,
+        'T6m 前提失敗：游標要先在 banner 上');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        overlay: !!document.querySelector('.ed-wave-overlay'),
+        banner: !!document.querySelector('.ed-conflict'),
+        stillOnBanner: document.querySelector('.ed-conflict')
+          ? document.querySelector('.ed-conflict').contains(document.activeElement) : false,
+      }));
+      assert.strictEqual(after.overlay, true,
+        'T6m: 在 banner 上按 Escape 不得把整個波形編輯器關掉');
+      assert.strictEqual(after.banner, true, 'T6m: banner 還在（它自己沒有 Escape）');
+      assert.strictEqual(after.stillOnBanner, true, 'T6m: 游標也留在原地');
+
+      // …and Escape from inside the DIALOG still closes it, so the exemption is
+      // about where the key came from and not about Escape having stopped
+      // working.
+      await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-close').focus());
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6m: 從 dialog 裡按 Escape 仍然要關掉它');
+      assert.strictEqual(ctx.errs.length, 0, 'T6m: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6m Escape on the conflict banner is the banner\'s, not the dialog\'s — OK');
     }
   }
 

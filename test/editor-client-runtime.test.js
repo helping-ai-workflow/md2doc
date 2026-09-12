@@ -154,13 +154,42 @@ async function newPage(browser) {
   // window is closed by construction rather than merely made narrower.
   await page.evaluateOnNewDocument(() => {
     window.__edInflight = 0;
+    // How many /api/save requests have COMPLETED, ever, on this page.
+    //
+    // `__edInflight` answers "is anything happening right now", which is a
+    // different question from "has the save I just asked for landed" — and the
+    // gap between them is real, not theoretical. Ctrl+S does not issue the save
+    // directly: it goes through commitThenSave()'s `await switchAwayFrom()`
+    // first, so between the keypress and the request ever being sent there is a
+    // window in which nothing is in flight and every quiescence-based wait
+    // releases. Measured by deferring only the DISPATCH of /api/save by 300 ms:
+    // the S2 T8 cell `li(ol, sole run member) → ul` reported the file as
+    // byte-identical with no banner — a dropped gesture — while the DOM said
+    // `data-list-type="ul"` and the file did change 1.5 s later. The write
+    // landed; the harness read before it did, and then blamed the product.
+    //
+    // Same family as the v3.3.0 counter bug one layer up: that one released on
+    // the response HEADERS instead of the body, this one released on "nothing
+    // in flight" instead of "the thing I asked for is done". A monotonic
+    // counter of completed saves is a question about the save itself, which is
+    // what saveAndRead() actually needs to wait on.
+    window.__edSaveDone = 0;
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
       const url = String(typeof input === 'string' ? input : (input && input.url) || '');
       if (!/\/api\/(render|save)\b/.test(url)) return origFetch.call(this, input, init);
+      const isSave = /\/api\/save\b/.test(url);
       window.__edInflight++;
       let settled = false;
-      const settle = () => { if (!settled) { settled = true; window.__edInflight--; } };
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        window.__edInflight--;
+        // Bumped on the SAME event the in-flight counter is released on — the
+        // body having been read, or the safety net below — so a completed save
+        // and a quiet page are decided at one moment and cannot disagree.
+        if (isSave) window.__edSaveDone++;
+      };
       return origFetch.call(this, input, init).then(
         (res) => {
           // Wrap the body readers ON THIS INSTANCE (never the prototype — a
@@ -1297,9 +1326,37 @@ async function dragRow(page, tableSel, fromIndex, toIndex) {
 // below to assert the committed source after a structure op, same
 // keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
 async function saveAndRead(page, mdPath) {
+  // Wait for THIS save, not for a quiet page. See `__edSaveDone`'s own comment
+  // in newPage() for the measurement: the quiescence wait can release in the
+  // window between the keypress and the request being sent, and then this
+  // function reads a file the editor has not written yet and the scenario
+  // reports a dropped gesture that never happened.
+  const before = await page.evaluate(() => window.__edSaveDone || 0);
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyS');
   await page.keyboard.up('Control');
+  try {
+    await page.waitForFunction(
+      (n) => (window.__edSaveDone || 0) > n, { timeout: 15000 }, before);
+  } catch (e) {
+    // No /api/save ever completed. There is exactly one documented reason for
+    // that: commitThenSave() skips save() when switchAwayFrom() returns false,
+    // i.e. the commit failed — and that path has already put a banner on screen.
+    // Anything else is a real defect, and reading the file past it would turn it
+    // into "the gesture did nothing", which is the misdiagnosis this whole
+    // change exists to stop.
+    const banner = await page.evaluate(() => {
+      const el = document.querySelector('.ed-conflict');
+      return el ? (el.textContent || '') : null;
+    });
+    if (banner === null) {
+      throw new Error('saveAndRead: Ctrl+S produced no completed /api/save in 15s, ' +
+        'and no banner explains why — the save really did not happen. ' +
+        'Original: ' + (e && e.message));
+    }
+  }
+  // The save has landed; this is now only the paint/settle grace, and it also
+  // covers any follow-on render the commit issued.
   await awaitSaveSettled(page);
   return fs.readFileSync(mdPath, 'utf8');
 }
