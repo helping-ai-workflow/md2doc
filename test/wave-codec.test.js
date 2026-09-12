@@ -1109,7 +1109,8 @@ assert.strictEqual(C.collapseWave(C.expandWave('p...')), 'p...');
 // levelsOf 回答「這一拍畫的是什麼 level」——`.` 與 `|` 都延續前一個
 assert.deepStrictEqual(C.levelsOf('0.1.'), ['0', '0', '1', '1']);
 assert.deepStrictEqual(C.levelsOf('0|.'), ['0', '0', '0'], '| 是缺口，不是自己的 level');
-assert.deepStrictEqual(C.levelsOf('..0'), ['', '', '0'], '開頭的 `.` 沒有東西可以延續');
+assert.deepStrictEqual(C.levelsOf('..0'), ['x', 'x', 'x'],
+  '開頭的 repeater：那一段與它後面第一個明碼都畫成 x（見下方對引擎的釘子）');
 
 // setCell：後面沒有延續的時候
 {
@@ -1284,10 +1285,13 @@ assert.strictEqual(
   assert.deepStrictEqual(doc.signal[0], lane);
 }
 
-// group（signal 裡的巢狀陣列）不是 lane，不改它的名字
+// group 的標題字串不是 lane，不佔編號；group 裡的 lane 佔
 {
   const doc = { signal: [['grp', { name: 'a', wave: '01' }]] };
-  assert.strictEqual(C.renameLane(doc, 0, 'X'), doc);
+  assert.strictEqual(C.renameLane(doc, 0, 'X').signal[0][1].name, 'X',
+    '編號 0 是 group 裡的那一條 lane，不是 group 本身');
+  assert.strictEqual(C.renameLane(doc, 0, 'X').signal[0][0], 'grp', '標題原樣留著');
+  assert.strictEqual(C.renameLane(doc, 1, 'X'), doc, '只有一條 lane，編號 1 不存在');
 }
 
 // 沒有被碰到的 lane 物件要原封不動地共用，之後才寫得回最小的 patch
@@ -1339,6 +1343,328 @@ assert.strictEqual(
   assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
   assert.deepStrictEqual(back.doc.signal.map(function (l) { return l.name; }),
     ['a', 'c', 'b']);
+}
+
+// ---- 以下為 Task 3 fix round 1 釘住的合約 ----
+// 這一輪的三個 MAJOR 都是「同一個模組裡兩個部分各信各的」，所以底下的測試釘的是
+// **兩邊的一致**，不是各自的行為：span op 對上顯示順序、copy 對上 paste、
+// levelsOf 對上 wavedrom 自己畫出來的東西、moveLane 的 doc 對上 patch 的結果。
+
+// levelsOf 必須跟引擎畫出來的一致。這一條直接把兩邊接起來：先用 wavedrom 量出
+// 每個 level 字元的 body glyph，再拿 levelsOf 的答案去對同一條 wave 每一拍真的
+// 畫出來的 glyph。p / n 不在名單裡，因為時脈的 glyph 隨奇偶拍交替。
+{
+  const wd = require('wavedrom');
+  const bodyOf = function (wave) {
+    const s = JSON.stringify(wd.renderAny(0, { signal: [{ name: 'a', wave: wave }] }, wd.waveSkin));
+    const all = [];
+    const re = /"xlink:href"\s*:\s*"([^"]*)"/g;
+    let m;
+    while ((m = re.exec(s))) {
+      if (m[1] !== '#gap') all.push(m[1]);   // 缺口另外畫一個 glyph，不佔一拍
+    }
+    const per = [];
+    for (let i = 1; i < all.length; i += 2) per.push(all[i]);
+    return per;
+  };
+  const glyph = {};
+  for (const ch of '01xzhlud=23456789'.split('')) glyph[ch] = bodyOf('x' + ch)[1];
+  const corpus = ['0.1.', '0|.', '..0', '.0110', '.0..', '|0.', '.110', '.x0', '.=2',
+    '01..', '0..0', '2...', '0|0.', '=.=.', 'x.z.', 'h.l.', 'u.d.', '0101', '.01100'];
+  for (const w of corpus) {
+    const drawn = bodyOf(w);
+    const said = C.levelsOf(w);
+    assert.strictEqual(said.length, drawn.length,
+      'levelsOf 的拍數要跟引擎畫的一樣：' + JSON.stringify(w));
+    for (let k = 0; k < drawn.length; k++) {
+      assert.strictEqual(glyph[said[k]], drawn[k],
+        JSON.stringify(w) + ' 第 ' + k + ' 拍：levelsOf 說 ' + JSON.stringify(said[k]) +
+        '（畫成 ' + glyph[said[k]] + '），引擎畫的是 ' + drawn[k]);
+    }
+  }
+}
+
+// F1：group 裡的 lane 也是 lane。span op 沒走到它們，插一拍就會把畫面錯開。
+{
+  const doc = { signal: [
+    { name: 'a', wave: '0011' },
+    ['grp', { name: 'b', wave: '0011' }, ['inner', { name: 'c', wave: '0011' }]],
+  ] };
+  const ins = C.insertCycles(doc, 2, 1);
+  assert.strictEqual(ins.signal[0].wave, '00.11');
+  assert.strictEqual(ins.signal[1][1].wave, '00.11', 'group 裡的 lane 也要一起加寬');
+  assert.strictEqual(ins.signal[1][2][1].wave, '00.11', '巢狀 group 裡的也要');
+  assert.strictEqual(ins.signal[1][0], 'grp', 'group 的標題原樣留著');
+  assert.strictEqual(doc.signal[1][1].wave, '0011', '原本的 doc 不得被改到');
+  const del = C.deleteCycles(doc, 0, 1);
+  assert.strictEqual(del.signal[1][1].wave, '011');
+  assert.strictEqual(del.signal[1][2][1].wave, '011');
+}
+
+// F1 的一致性釘子：span op 跑完，**每一條** lane 的拍數必須還是一樣長——
+// 這正是 spanOp 自己的註解說它存在的理由。
+{
+  const doc = { signal: [
+    { name: 'a', wave: '0011' },
+    ['g', { name: 'b', wave: '0011' }],
+    { name: 'c', wave: '0011' },
+  ] };
+  const lens = function (d) {
+    return [d.signal[0].wave, d.signal[1][1].wave, d.signal[2].wave]
+      .map(function (w) { return C.expandWave(w).length; });
+  };
+  assert.deepStrictEqual(lens(C.insertCycles(doc, 2, 1)), [5, 5, 5]);
+  assert.deepStrictEqual(lens(C.insertCycles(doc, 0, 2)), [6, 6, 6]);
+  assert.deepStrictEqual(lens(C.deleteCycles(doc, 1, 1)), [3, 3, 3]);
+  assert.deepStrictEqual(lens(C.pasteCycles(doc, 1, C.copyCycles(doc, 0, 2), 'insert')),
+    [6, 6, 6]);
+}
+
+// F2：copy 與 paste 必須用同一套 lane 編號。把一段原地 copy 再 overwrite 貼回去，
+// 結果必須是**同一個 doc 物件**——兩邊只要差一格，這條就紅。
+{
+  const doc = { signal: [
+    ['grp', { name: 'g', wave: '0101' }],
+    { name: 'a', wave: '0011' },
+    ['g2', { name: 'b', wave: '1100' }, { name: 'c', wave: '0110' }],
+  ] };
+  for (let at = 0; at <= 2; at++) {
+    assert.strictEqual(C.pasteCycles(doc, at, C.copyCycles(doc, at, 2), 'overwrite'), doc,
+      'at=' + at + ' 原地貼回去必須完全沒有變化');
+  }
+}
+
+// F2：而且要貼到對的那一條 lane 上
+{
+  const doc = { signal: [['grp', { name: 'g', wave: 'xxxx' }], { name: 'a', wave: '0011' }] };
+  const clip = C.copyCycles(doc, 1, 2);
+  assert.deepStrictEqual(clip.lanes.map(function (l) { return l.chars.length; }), [2, 2],
+    'group 裡的 lane 也要在 clip 裡佔一格');
+  const out = C.pasteCycles(doc, 2, clip, 'overwrite');
+  assert.strictEqual(out.signal[1].wave, '0001', 'a 的第 2、3 拍被 a 自己的第 1、2 拍蓋掉');
+  assert.strictEqual(out.signal[0][1].wave, 'xxxx', 'g 貼到的是 g 自己的那一段');
+}
+
+// F3：任何 op 都不得把 repeater 留在第 0 拍——引擎會把那一段連同它後面第一個
+// 明碼一起畫成 x。
+{
+  const doc = { signal: [{ name: 'a', wave: '0|0.' }] };
+  assert.strictEqual(C.deleteCycles(doc, 0, 1).signal[0].wave, '00.',
+    '刪掉第 0 拍不得把 | 留在開頭；它顯示的 level 要被寫出來');
+  assert.deepStrictEqual(C.levelsOf(C.deleteCycles(doc, 0, 1).signal[0].wave),
+    ['0', '0', '0'], '剩下三拍顯示的東西要跟原本的第 1、2、3 拍一樣');
+}
+
+// F3：clip 的第一拍是 | 的話它站不住，copy 的時候就要寫出來
+{
+  const clip = C.copyCycles({ signal: [{ name: 'a', wave: '0|1' }] }, 1, 2);
+  assert.deepStrictEqual(clip.lanes[0].chars,
+    [{ ch: '0', held: false }, { ch: '1', held: false }]);
+  assert.strictEqual(
+    C.pasteCycles({ signal: [{ name: 'b', wave: '111' }] }, 0, clip, 'overwrite').signal[0].wave,
+    '011');
+}
+
+// F3：手工做出來的 clip 也不得把 repeater 貼到第 0 拍
+{
+  const clip = { kind: 'cycles', count: 2, lanes: [{ chars: [{ ch: '|', held: false }, { ch: '1', held: false }], data: [] }] };
+  const out = C.pasteCycles({ signal: [{ name: 'b', wave: '000' }] }, 0, clip, 'overwrite');
+  assert.strictEqual(C.expandWave(out.signal[0].wave)[0].held, false);
+  assert.notStrictEqual(C.expandWave(out.signal[0].wave)[0].ch, '|');
+}
+
+// F3：畫筆本身也不得在第 0 拍畫 repeater——那兩個字元在那裡沒有意義
+{
+  const doc = { signal: [{ name: 'a', wave: '0101' }] };
+  assert.strictEqual(C.setCell(doc, 0, 0, '.'), doc, '第 0 拍沒有東西可以延續');
+  assert.strictEqual(C.setCell(doc, 0, 0, '|'), doc, '第 0 拍沒有東西可以蓋缺口');
+  assert.strictEqual(C.setCellRange(doc, 0, 0, 2, '|'), doc);
+  assert.strictEqual(C.setCell(doc, 0, 1, '|').signal[0].wave, '0|01', '第 1 拍可以');
+}
+
+// F3 的全面掃描：帶 | 的 fixture 走過每一個會動到第 0 拍的 op，
+// 結果的第 0 拍一律不得是 repeater
+{
+  const waves = ['0|0.', '0|1', '|0.', '0.|0', '01|.', '0|.', '2|3.', '0|||'];
+  for (const w of waves) {
+    const doc = { signal: [{ name: 'a', wave: w }] };
+    const outs = [
+      C.deleteCycles(doc, 0, 1),
+      C.deleteCycles(doc, 0, 2),
+      C.pasteCycles(doc, 0, C.copyCycles(doc, 1, 2), 'overwrite'),
+      C.pasteCycles(doc, 0, C.copyCycles(doc, 1, 2), 'insert'),
+    ];
+    for (const out of outs) {
+      const head = C.expandWave(out.signal[0].wave)[0];
+      if (head === undefined) continue;
+      assert.strictEqual(head.held, false, w + ' 的結果 ' +
+        JSON.stringify(out.signal[0].wave) + ' 第 0 拍不得是延續');
+      assert.notStrictEqual(head.ch, '|', w + ' 的結果 ' +
+        JSON.stringify(out.signal[0].wave) + ' 第 0 拍不得是缺口');
+    }
+  }
+}
+
+// F4 / F5 / F10：data 的字串寫法。沒動到標籤就一個位元組都不改；
+// 動到而且裝得下就照原本的間隔寫回去；裝不下（空白標籤、含空白的標籤）就轉成陣列。
+{
+  const doc = { signal: [{ name: 'a', wave: '2.3.', data: 'AA   BB' }] };
+  assert.strictEqual(C.setCell(doc, 0, 3, '0').signal[0].data, 'AA   BB',
+    '標籤沒變就原樣寫回去，連那三個空白都不動');
+}
+{
+  const doc = { signal: [{ name: 'a', wave: '03', data: 'A' }] };
+  const next = C.setCell(doc, 0, 0, '2');
+  assert.strictEqual(next.signal[0].wave, '23');
+  assert.deepStrictEqual(next.signal[0].data, ['', 'A'],
+    '空白標籤在空白分隔的字串裡活不下來，會讓 A 漂到使用者剛畫的那一拍上');
+}
+{
+  const from = { signal: [{ name: 'x', wave: '22', data: ['hello world', 'Z'] }] };
+  const clip = C.copyCycles(from, 0, 1);
+  const into = { signal: [{ name: 'y', wave: '33', data: 'P Q' }] };
+  const out = C.pasteCycles(into, 0, clip, 'overwrite');
+  assert.deepStrictEqual(out.signal[0].data, ['hello world', 'Q'],
+    '含空白的標籤 join 回字串會裂成兩個，把後面那個擠出去');
+}
+{
+  const doc = { signal: [{ name: 'a', wave: '23', data: 'AA   BB' }] };
+  const next = C.setCell(doc, 0, 0, '4');
+  assert.strictEqual(next.signal[0].wave, '43');
+  assert.strictEqual(next.signal[0].data, 'AA   BB',
+    '換掉一個值字元，標籤格數沒變，那三個空白也不該變');
+}
+// 真的多出一格標籤的時候，作者自己的間隔要留在原地，只有新的位置才補一個空白
+{
+  const doc = { signal: [{ name: 'a', wave: '2.3.', data: 'AA   BB' }] };
+  const next = C.setCell(doc, 0, 0, '4');
+  assert.strictEqual(next.signal[0].wave, '423.', '第 1 拍原本延續的 2 要被寫出來');
+  assert.strictEqual(next.signal[0].data, 'AA   AA BB',
+    '那三個空白原本在 AA 後面，就留在 AA 後面；只有新插進去的那一格用單一空白');
+}
+
+// F8：addLane 收的是一份深拷貝，呼叫端之後改它不得改到 doc 裡面
+{
+  const lane = { name: 'z', wave: '00', data: ['A'] };
+  const doc = C.addLane({ signal: [] }, 0, lane);
+  lane.data.push('LEAKED');
+  assert.deepStrictEqual(doc.signal[0].data, ['A']);
+  assert.notStrictEqual(doc.signal[0].data, lane.data);
+}
+
+// F9：overwrite 不得把 lane 加長
+{
+  const doc = { signal: [{ name: 'a', wave: '0000' }, { name: 'b', wave: '01' }] };
+  const clip = C.copyCycles(
+    { signal: [{ name: 'c', wave: '11' }, { name: 'd', wave: '11' }] }, 0, 2);
+  const lens = function (d) {
+    return d.signal.map(function (l) { return C.expandWave(l.wave).length; });
+  };
+  assert.deepStrictEqual(lens(C.pasteCycles(doc, 1, clip, 'overwrite')), [4, 2]);
+  assert.deepStrictEqual(lens(C.pasteCycles(doc, 3, clip, 'overwrite')), [4, 2],
+    '貼過尾端的部分要被切掉，不是把 lane 撐長');
+  assert.strictEqual(C.pasteCycles(doc, 3, clip, 'overwrite').signal[0].wave, '0001');
+}
+
+// Q2：扁平的顯示順序編號。group 的標題不佔號，group 裡的 lane 佔。
+{
+  const doc = { signal: [
+    { name: 'a', wave: '01' },
+    ['g', { name: 'b', wave: '01' }],
+    { name: 'c', wave: '01' },
+  ] };
+  assert.strictEqual(C.setCell(doc, 1, 0, '1').signal[1][1].wave, '11', '編號 1 是 group 裡的 b');
+  assert.strictEqual(C.renameLane(doc, 2, 'C').signal[2].name, 'C', '編號 2 是 c');
+  const moved = C.moveLane(doc, 1, 0);
+  assert.strictEqual(moved.signal[0].name, 'b', 'group 裡的 lane 可以被搬到最外層');
+  assert.deepStrictEqual(moved.signal[2], ['g'], '搬空的 group 留著標題，不自己刪掉');
+  assert.strictEqual(C.removeLane(doc, 1).signal[1].length, 1, 'removeLane 從它自己的容器裡拿掉');
+}
+
+// Q2 的邊界：插在 group 的第一個 lane 前面 = 進去；插在最後一個 lane 後面 = 在外面
+{
+  const doc = { signal: [
+    { name: 'a', wave: '01' },
+    ['grp', { name: 'b', wave: '01' }, { name: 'c', wave: '01' }],
+    { name: 'd', wave: '01' },
+  ] };
+  const head = C.addLane(doc, 1, { name: 'new', wave: '00' });
+  assert.strictEqual(head.signal[1][1].name, 'new', '插在 b 前面 → 進到 group 裡');
+  assert.strictEqual(head.signal[1].length, 4);
+  const tail = C.addLane(doc, 3, { name: 'new', wave: '00' });
+  assert.strictEqual(tail.signal[2].name, 'new', '插在 d 前面 → 落在 group 外面');
+  assert.strictEqual(tail.signal[1].length, 3, 'group 沒被動到');
+  const end = C.addLane(doc, 4, { name: 'new', wave: '00' });
+  assert.strictEqual(end.signal[3].name, 'new', '超過最後一條 lane → 接在最外層的尾端');
+  assert.strictEqual(doc.signal[1].length, 3, '原本的 doc 不得被改到');
+}
+
+// F6：沒有 name 的 lane 也要改得了名字，而且改完寫得回去
+{
+  const src = '{ signal: [\n  { wave: "0101" },   // 沒有名字\n]}';
+  const r = C.parseSource(src);
+  const next = C.renameLane(r.doc, 0, 'clk');
+  assert.strictEqual(next.signal[0].name, 'clk');
+  const out = C.patchSource(src, r,
+    [{ op: 'insert', path: ['signal', 0, 'name'], value: 'clk' }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.ok(out.text.includes('// 沒有名字'), '註解必須留著');
+  const back = C.parseSource(out.text);
+  assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+  assert.strictEqual(back.doc.signal[0].name, 'clk');
+  assert.strictEqual(back.doc.signal[0].wave, '0101');
+}
+
+// F6：已經有的 key 不得用 insert 再插一次（那是 set 的事）
+{
+  const r = C.parseSource(SRC);
+  const dup = C.patchSource(SRC, r,
+    [{ op: 'insert', path: ['signal', 0, 'name'], value: 'x' }]);
+  assert.strictEqual(dup.ok, false, '已經有的 member 不得再 insert 一次');
+  assert.ok(/already|set/i.test(dup.reason), 'Got ' + dup.reason);
+}
+
+// F7：搬一條 lane 不得把它的註解弄丟——member span 就是為了原樣搬位元組而存在的
+{
+  const src = ['{ signal: [',
+    '  { name: "a", wave: "01" },   // first',
+    '  { name: "b", wave: "10" },   // second',
+    '  { name: "c", wave: "0." },',
+    ']}'].join('\n');
+  const r = C.parseSource(src);
+  const out = C.patchSource(src, r, [{ op: 'move', path: ['signal', 0], to: 1 }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.ok(out.text.includes('// first'), '搬走的 lane 的註解要跟著它');
+  assert.ok(out.text.includes('// second'), '別人的註解不得被動到');
+  const back = C.parseSource(out.text);
+  assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+  assert.deepStrictEqual(back.doc.signal.map(function (l) { return l.name; }),
+    ['b', 'a', 'c']);
+  // patch 的結果要跟 moveLane 算出來的 doc 說同一件事
+  assert.deepStrictEqual(C.moveLane(r.doc, 0, 1).signal.map(function (l) { return l.name; }),
+    ['b', 'a', 'c'], 'moveLane 與 move patch 必須一致');
+}
+
+// data 陣列改長度的時候，store 要逐格寫回去；整包 set 會被 patch 層擋下來
+{
+  const src = '{ signal: [\n  { name: "a", wave: "230", data: ["A","B"] },\n]}';
+  const r = C.parseSource(src);
+  const next = C.setCell(r.doc, 0, 1, '1');
+  assert.strictEqual(next.signal[0].wave, '210');
+  assert.deepStrictEqual(next.signal[0].data, ['A']);
+  const whole = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: next.signal[0].wave },
+    { path: ['signal', 0, 'data'], value: next.signal[0].data },
+  ]);
+  assert.strictEqual(whole.ok, false, '整包 data 陣列 set 會被擋，這是刻意的');
+  const ok = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: next.signal[0].wave },
+    { op: 'remove', path: ['signal', 0, 'data', 1] },
+  ]);
+  assert.strictEqual(ok.ok, true, 'Got ' + JSON.stringify(ok));
+  const back = C.parseSource(ok.text);
+  assert.strictEqual(back.doc.signal[0].wave, '210');
+  assert.deepStrictEqual(back.doc.signal[0].data, ['A']);
 }
 
 console.log('wave-codec.test.js OK');
