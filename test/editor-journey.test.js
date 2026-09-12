@@ -2799,8 +2799,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十四個 `position: fixed` 宣告（另有 9 處是註解裡的散文
+  // ══ V3: 十六個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十六個 `position: fixed` 宣告（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -2852,6 +2852,27 @@ async function main() {
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
+    // v3.4.0 batch3 Task 6。兩者都由 `journey: wave/T6j` 這一列驅動（在本檔
+    // 尾端的 wave 區塊裡，因為它需要那邊的 fixture 與開啟手勢）。
+    //
+    // .ed-wave-edit-btn = gone：它的座標是從被 hover 的那張圖的
+    //   getBoundingClientRect() 算出來的【視窗座標】，捲動之後就指向錯的東西
+    //   ——跟 .ed-te-grip 同一個家族。client.js 的 scroll listener 直接把它收掉。
+    //
+    // .ed-wave-overlay = live：`inset: 0` 的 modal，幾何與捲動無關，而且使用者
+    //   當下必須還能操作它。
+    //
+    // ⚠ 疊放關係（本 session 實測，不是推論）：`.ed-wave-overlay` 是
+    //   z-index 998，`.ed-conflict` 是 999，所以**磁碟衝突橫幅蓋在波形編輯器
+    //   上面**——overlay 開著時把橫幅升起來，elementFromPoint 打在橫幅矩形
+    //   中心拿到的是橫幅自己的 <button>（`inBanner: true`），滑鼠點得到。
+    //   鍵盤也點得到：overlay 的 focus trap 的範圍**刻意不是 overlay 自己**，
+    //   而是「modal 這一層」＝ overlay ＋ 現場的每一條 .ed-conflict，實測從
+    //   overlay 內部按 Tab 第 32 下就進到橫幅的按鈕上。
+    //   這一條不是可有可無的：橫幅是使用者解決磁碟衝突的唯一出口，而這個分支
+    //   在 batch 2 已經為「一個 fixed 浮層蓋掉它」付過一次代價。
+    { sel: '.ed-wave-edit-btn',        after: 'gone' },
+    { sel: '.ed-wave-overlay',         after: 'live' },
   ];
   {
     // 宣告 vs 散文：先把註解整個抹掉，再找 `position: fixed`。
@@ -9496,7 +9517,14 @@ async function main() {
       // this is the one axis where the two pictures can differ on a lane whose
       // LEVELS agree exactly — and it is invisible to a comparison that only
       // looks at levels.
-      "  { name: 'gap', wave: '01|10' }",
+      "  { name: 'gap', wave: '01|10' },",
+      // `{}` — WaveDrom's own blank-row spacer, and the shape that separates
+      // "this lane has no `wave` key" from "its wave is the empty string". The
+      // engine draws NOTHING for it and one `x` cycle for the empty string;
+      // round 1 drew one `x` for both and put a solid brick on a row the
+      // preview left blank. The fixture has to be non-rectangular to say that,
+      // which is why the comparison below is per-lane.
+      '  {}',
       '] }',
       '```', '',
       'Tail para two.', '',
@@ -9508,6 +9536,14 @@ async function main() {
     // a synthetic .click().
     const openWave = async (page) => {
       await page.waitForSelector('.wavedrom-diagram');
+      // Park the pointer somewhere else first. The affordance is raised by a
+      // `mouseover`, which only fires when the element under the pointer
+      // CHANGES — after a scroll the pointer has not moved, so a move to the
+      // diagram's (new) coordinates can be a no-op and the button never comes
+      // back. That is the product's real behaviour and matches `.ed-te-grip`;
+      // it is the harness that has to be honest about the gesture.
+      await page.mouse.move(2, 2);
+      await new Promise((r) => setTimeout(r, 60));
       const box = await page.$eval('.wavedrom-diagram', (el) => {
         const r = el.getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -9617,36 +9653,55 @@ async function main() {
     // draw. If the two ever disagree the user has two pictures on screen and no
     // way to tell which one the file means.
     {
+      // Read both pictures PER LANE.
+      //
+      // The previous shape of this helper flattened the preview's whole `<use>`
+      // list and indexed it as `uses[(i*cycles + c)*2 + 1]`, guarded by
+      // `uses === lanes × cycles × 2`. That is only a cycle index while every
+      // lane emits the same number of cycles, and the very defect this row
+      // exists for — a spacer row the engine draws nothing for — makes the
+      // diagram non-rectangular. Adding the spacer to the fixture killed the
+      // old helper on its own pre-assertion (16 vs 24) rather than on the
+      // disagreement: the axis was uncovered by construction, the same shape as
+      // round 1's filtered-out gaps.
+      //
+      // The engine publishes the per-lane structure itself: `wavelane_draw_<i>_<index>`
+      // holds lane i's bricks and `wavegap_<i>_<index>` its gap markers, in the
+      // codec's own display order. Asking those directly needs no rectangle.
       const bricks = async (page) => {
         const got = await page.evaluate(() => {
           const svg = document.querySelector('.ed-wave-canvas');
           const lanes = Number(svg.getAttribute('data-lane-count'));
-          const cycles = Number(svg.getAttribute('data-cycle-count'));
-          const uses = Array.from(document.querySelectorAll('.ed-wave-preview-host use'))
-            .map((u) => (u.getAttribute('xlink:href') || u.getAttribute('href') || '').slice(1))
-            .filter((id) => id !== 'gap');
-          const drawn = [];
-          const engine = [];
+          const href = (u) => (u.getAttribute('xlink:href') || u.getAttribute('href') || '').slice(1);
+          const drawn = [], engine = [], drawnGaps = [], engineGaps = [], missing = [];
+          let totalUses = 0;
           for (let i = 0; i < lanes; i++) {
             drawn.push(svg.getAttribute('data-bricks-' + i));
+            drawnGaps.push(svg.getAttribute('data-gaps-' + i));
+            const g = document.getElementById('wavelane_draw_' + i + '_9000');
+            if (g === null) { missing.push(i); engine.push(null); engineGaps.push(null); continue; }
+            const u = Array.prototype.map.call(g.querySelectorAll('use'), href);
+            totalUses += u.length;
+            // A cycle is a PAIR of half-bricks and the second carries the level.
             const row = [];
-            for (let c = 0; c < cycles; c++) row.push(uses[(i * cycles + c) * 2 + 1]);
+            for (let k = 1; k < u.length; k += 2) row.push(u[k]);
             engine.push(row.join(' '));
+            // …and the gap markers of that same lane, as cycle indices: the
+            // engine places one at the centre of its own cycle, 40px wide, so
+            // `translate(x)` is `(cycle + 0.5) * 40`. (Only true while nothing
+            // rescales the engine — pinned by the `unmodelled` assertion below.)
+            const gg = document.getElementById('wavegap_' + i + '_9000');
+            const at = gg === null ? [] : Array.prototype.map.call(gg.querySelectorAll('use'),
+              (x) => {
+                const m = /translate\(\s*(-?[0-9.]+)/.exec(x.getAttribute('transform') || '');
+                return m === null ? 'NaN' : String((Number(m[1]) / 40) - 0.5);
+              });
+            engineGaps.push(at.join(' '));
           }
-          // `gap` is filtered out of the list above because it is NOT one of
-          // the two half-bricks a cycle is made of — the engine appends it
-          // after them — so leaving it in would shift every cycle index. It is
-          // carried as its own count instead, because "filtered out" and "not
-          // covered" were the same thing in round 1 and that is how a lane
-          // whose levels agreed exactly could still be drawn wrongly.
-          const gapUses = Array.from(
-            document.querySelectorAll('.ed-wave-preview-host use'))
-            .filter((u) => (u.getAttribute('xlink:href') ||
-              u.getAttribute('href') || '') === '#gap').length;
-          return { drawn: drawn, engine: engine, uses: uses.length,
-            expect: lanes * cycles * 2,
-            gapUses: gapUses,
-            gapMarks: svg.querySelectorAll('.ed-wave-gap').length,
+          return { drawn: drawn, engine: engine, missing: missing,
+            drawnGaps: drawnGaps, engineGaps: engineGaps, totalUses: totalUses,
+            hasWave: Array.from({ length: lanes },
+              (_, i) => svg.getAttribute('data-haswave-' + i)),
             levels: svg.getAttribute('data-levels-3'),
             wave: svg.getAttribute('data-wave-3'),
             waves: Array.from({ length: lanes },
@@ -9656,23 +9711,29 @@ async function main() {
             preview: document.querySelector('.ed-wave-preview')
               .getAttribute('data-wave-preview') };
         });
-        // Without this the indexing below is meaningless and every comparison
-        // is vacuously true against a preview that rendered nothing.
+        // Three pre-assertions, and each one rules out a different way for the
+        // comparison below to be true without having compared anything.
         assert.strictEqual(got.preview, 'ok',
           'T6b: 預覽必須真的畫出來了。Got ' + got.preview);
-        assert.strictEqual(got.uses, got.expect,
-          'T6b: 預覽的 brick 數必須剛好是 lane×cycle×2，否則下面的比對是在比空氣。Got ' +
-          got.uses + ' vs ' + got.expect);
+        assert.deepStrictEqual(got.missing, [],
+          'T6b: 每一條 lane 都必須在預覽裡有自己的 wavelane_draw_<i>_9000，' +
+          '否則 index 對不上、下面在比空氣。Got ' + JSON.stringify(got.missing));
+        assert.ok(got.totalUses > 0,
+          'T6b: 預覽必須真的畫出 brick。Got ' + got.totalUses);
+        assert.ok(got.engine.filter((row) => row !== '').length > 1,
+          'T6b: 至少要有兩條 lane 真的畫了東西，否則整排都是「空 vs 空」。Got ' +
+          JSON.stringify(got.engine));
         // period / phase / hscale change what the ENGINE paints and the drawing
-        // does not model them, so the cycle-index mapping above stops being a
-        // cycle index at all when one is present. The fixture carries none —
-        // pinned here so a future fixture cannot quietly break the arithmetic.
+        // does not model them; they also rescale the gap arithmetic above.
         assert.strictEqual(got.unmodelled, '',
-          'T6b: 這個 fixture 不得帶 period/phase/hscale，否則上面的 index 對應不成立。Got ' +
+          'T6b: 這個 fixture 不得帶 period/phase/hscale。Got ' +
           JSON.stringify(got.unmodelled));
-        assert.strictEqual(got.gapMarks, got.gapUses,
-          'T6b: 手繪的斷點記號數必須跟引擎畫的一樣多。Got ' + got.gapMarks +
-          ' vs ' + got.gapUses);
+        // Gaps, per lane and by POSITION — not a document-wide count. A count
+        // stays green when the marker is drawn one cycle to the left or on the
+        // neighbouring lane, which is exactly the class of bug it was there for.
+        assert.deepStrictEqual(got.drawnGaps, got.engineGaps,
+          'T6b: 斷點記號必須逐 lane、逐 cycle 對上\ndrawn : ' +
+          JSON.stringify(got.drawnGaps) + '\nengine: ' + JSON.stringify(got.engineGaps));
         return got;
       };
 
@@ -9721,10 +9782,23 @@ async function main() {
         'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
         '\nengine: ' + JSON.stringify(after.engine));
 
-      // The gap axis is only covered if the fixture actually HAS one drawn.
-      assert.ok(after.gapUses > 0,
+      // The gap axis is only covered if the fixture actually HAS one drawn, on
+      // a lane this comparison names.
+      assert.ok(after.engineGaps.some((x) => x !== ''),
         'T6b 前提失敗：fixture 必須真的帶一個 `|`，否則斷點那條斷言是空的。Got ' +
-        after.gapUses);
+        JSON.stringify(after.engineGaps));
+      // …and the spacer axis likewise: one lane with no `wave` key at all,
+      // which the engine draws nothing for.
+      assert.ok(after.hasWave.indexOf('0') !== -1,
+        'T6b 前提失敗：fixture 必須帶一條沒有 wave 的 lane。Got ' +
+        JSON.stringify(after.hasWave));
+      const spacer = after.hasWave.indexOf('0');
+      assert.strictEqual(after.drawn[spacer], '',
+        'T6b: 沒有 wave 的 lane 引擎什麼都不畫，手繪也不准畫。Got ' +
+        JSON.stringify(after.drawn[spacer]));
+      assert.strictEqual(after.engine[spacer], '',
+        'T6b 前提失敗：引擎對那條 lane 真的什麼都沒畫。Got ' +
+        JSON.stringify(after.engine[spacer]));
 
       // …and an ALL-EMPTY diagram, which is two clicks away and which round 1
       // drew as four blank rows while the engine drew four x cycles. Select
@@ -9734,9 +9808,18 @@ async function main() {
       await pressClick(ctx.page, '.ed-wave-cycle-delete');
       await new Promise((r) => setTimeout(r, 300));
       const emptied = await bricks(ctx.page);
-      assert.deepStrictEqual(emptied.waves, ['', '', '', '', ''],
-        'T6b 前提失敗：刪掉全部 cycle 之後每一條 lane 的 wave 都該是空的。Got ' +
-        JSON.stringify(emptied.waves));
+      for (let i = 0; i < emptied.hasWave.length; i++) {
+        if (emptied.hasWave[i] !== '1') continue;
+        assert.strictEqual(emptied.waves[i], '',
+          'T6b 前提失敗：刪掉全部 cycle 之後 lane ' + i + ' 的 wave 該是空的。Got ' +
+          JSON.stringify(emptied.waves[i]));
+      }
+      // The spacer is untouched by a cycle operation and still draws nothing,
+      // so this leg also pins that「空字串」and「沒有這個鍵」stay apart.
+      assert.strictEqual(emptied.hasWave[spacer], '0',
+        'T6b: 刪 cycle 不得替沒有 wave 的 lane 生一個出來');
+      assert.strictEqual(emptied.drawn[spacer], '',
+        'T6b: 全空之後那條 spacer 仍然什麼都不畫。Got ' + JSON.stringify(emptied.drawn[spacer]));
       assert.deepStrictEqual(emptied.drawn, emptied.engine,
         'T6b: 空的 lane 是「一格 x」不是「什麼都不畫」\ndrawn : ' +
         JSON.stringify(emptied.drawn) + '\nengine: ' + JSON.stringify(emptied.engine));
@@ -10067,6 +10150,39 @@ async function main() {
         ? document.activeElement.getAttribute('data-focus-key') : null);
       assert.strictEqual(added, 'lane-name-1',
         'T6h: 新增 lane 之後游標要落在新那一條的名字欄。Got ' + JSON.stringify(added));
+
+      // …and walking a lane all the way to an EDGE. The last press of that walk
+      // targets a button that is `disabled` at the edge, and `.focus()` on a
+      // disabled button is inert — measured before the fix, three ▲ put the
+      // cursor on `lane-up-2`, `lane-up-1` and then BODY, mid-gesture, and the
+      // fourth press did nothing at all. Focus on body is the state that turns
+      // the next Backspace into「delete the selected blocks」.
+      const focusKey = () => ctx.page.evaluate(() => document.activeElement.getAttribute
+        ? document.activeElement.getAttribute('data-focus-key') : null);
+      const laneCount = await ctx.page.evaluate(() => Number(
+        document.querySelector('.ed-wave-canvas').getAttribute('data-lane-count')));
+      assert.ok(laneCount >= 3, 'T6h 前提失敗：要有夠多 lane 才走得到邊。Got ' + laneCount);
+      // push lane 2 to the top
+      for (let at = 2; at > 0; at--) {
+        await pressClick(ctx.page, '.ed-wave-lane-up[data-focus-key="lane-up-' + at + '"]');
+        await new Promise((r) => setTimeout(r, 250));
+        const k = await focusKey();
+        assert.notStrictEqual(k, null,
+          'T6h: ▲ 走到第 ' + at + ' 步時游標掉到 body 上了');
+      }
+      assert.strictEqual(await focusKey(), 'lane-down-0',
+        'T6h: 推到頂之後 ▲ 已經 disabled，游標要交給同一列還活著的 ▼。Got ' +
+        JSON.stringify(await focusKey()));
+      // and to the bottom
+      const last = laneCount - 1;
+      for (let at = 0; at < last; at++) {
+        await pressClick(ctx.page, '.ed-wave-lane-down[data-focus-key="lane-down-' + at + '"]');
+        await new Promise((r) => setTimeout(r, 250));
+        assert.notStrictEqual(await focusKey(), null,
+          'T6h: ▼ 走到第 ' + at + ' 步時游標掉到 body 上了');
+      }
+      assert.strictEqual(await focusKey(), 'lane-up-' + last,
+        'T6h: 推到底之後 ▼ 已經 disabled，游標要交給 ▲。Got ' + JSON.stringify(await focusKey()));
       assert.strictEqual(ctx.errs.length, 0, 'T6h: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T6h a committed gesture hands the keyboard cursor back — OK');
@@ -10123,6 +10239,238 @@ async function main() {
       assert.strictEqual(plain.errs.length, 0, 'T6i: 不得有 pageerror: ' + plain.errs.join(' | '));
       await plain.page.close(); plain.srv.close();
       console.log('journey: wave/T6i the editor says which properties the drawing does not model, and ships no control for them — OK');
+    }
+
+    // ── fix round 2 ────────────────────────────────────────────────────
+
+    // T6j — the two new `position: fixed` layers answer the V3 census, and
+    // nothing DROPPED on the modal reaches the document behind it.
+    //
+    // The V3 roster above lists `.ed-wave-edit-btn` as `gone` and
+    // `.ed-wave-overlay` as `live`; this is the row that drives both. It lives
+    // here rather than in the V3 section because it needs this block's fixture
+    // and its opening gesture.
+    {
+      const WAVE_SCROLL_MD = WAVE_MD +
+        Array.from({ length: 40 }, (_, i) => 'Filler line ' + i + '.').join('\n\n') + '\n';
+      const ctx = await newPage(WAVE_SCROLL_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      const hoverDiagram = async () => {
+        const box = await ctx.page.$eval('.wavedrom-diagram', (el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await ctx.page.mouse.move(box.x, box.y);
+        await new Promise((r) => setTimeout(r, 200));
+      };
+
+      // .ed-wave-edit-btn — gone. Its position comes from the hovered diagram's
+      // own getBoundingClientRect(), i.e. viewport coordinates that a scroll
+      // makes point at the wrong thing; same family as `.ed-te-grip`.
+      await hoverDiagram();
+      const btnBefore = await overlayState(ctx.page, '.ed-wave-edit-btn');
+      assertRaised(btnBefore, '.ed-wave-edit-btn');
+      await scrollBy(ctx.page, 900);
+      const btnAfter = await overlayState(ctx.page, '.ed-wave-edit-btn');
+      assert.ok(isGone(btnAfter),
+        '.ed-wave-edit-btn 捲動後必須消失（它的座標會過期），got ' + JSON.stringify(btnAfter));
+
+      // .ed-wave-overlay — live, and at the same viewport coordinates.
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 250));
+      await openWave(ctx.page);
+      const ovBefore = await overlayState(ctx.page, '.ed-wave-overlay');
+      assertRaised(ovBefore, '.ed-wave-overlay');
+      await scrollBy(ctx.page, 900);
+      const ovAfter = await overlayState(ctx.page, '.ed-wave-overlay');
+      assert.ok(isLive(ovAfter),
+        '.ed-wave-overlay 捲動後必須仍然可見，got ' + JSON.stringify(ovAfter));
+      assert.strictEqual(ovAfter.top, ovBefore.top,
+        '.ed-wave-overlay 捲動後必須留在同一個視窗座標，got top=' + ovAfter.top);
+
+      // A file dropped on the panel. Before the state-based gate this reached
+      // the document's own `drop` listener and inserted an image into `.content`
+      // behind the modal — measured, 4 blocks became 5 with the overlay still up
+      // and saying nothing about it.
+      const dropPng = (sel) => ctx.page.evaluate((s2) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])],
+          'probe.png', { type: 'image/png' }));
+        const ev = new DragEvent('drop',
+          { bubbles: true, cancelable: true, dataTransfer: dt });
+        document.querySelector(s2).dispatchEvent(ev);
+        return ev.defaultPrevented;
+      }, sel);
+      const blockCount = () => ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      const before = await blockCount();
+      const preventedOnPanel = await dropPng('.ed-wave-panel');
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await blockCount(), before,
+        'T6j: 丟在 modal 上的檔案不得寫進後面那份文件');
+      assert.strictEqual(preventedOnPanel, false,
+        'T6j: 那個 drop 必須被【婉拒】（不 preventDefault），而不是被吞掉');
+
+      // The control leg, and the reason the assertion above is not vacuous: the
+      // same synthetic drop on a block with NO overlay open really does insert.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6j 前提失敗：Escape 要把 overlay 收掉');
+      const preventedOnBlock = await dropPng('.ed-block[data-block-type="paragraph"]');
+      await new Promise((r) => setTimeout(r, 2500));
+      assert.strictEqual(preventedOnBlock, true,
+        'T6j 前提失敗：沒有 modal 時這個 drop 必須被接走，否則上面那條是空的');
+      assert.ok(await blockCount() > before,
+        'T6j 前提失敗：沒有 modal 時同一個 drop 真的會多一個 block，' +
+        '否則「modal 時不會多」什麼都沒證明。Got ' + (await blockCount()) + ' / ' + before);
+      assert.strictEqual(ctx.errs.length, 0, 'T6j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6j the two fixed layers answer the scroll census, and a file dropped on the modal never reaches the document — OK');
+    }
+
+    // T6k — the modal focus model, and the one layer that is allowed above it.
+    //
+    // `role="dialog"` + `aria-modal="true"` was a promise the panel did not
+    // keep: nothing was focused on open (measured: activeElement was BODY), so
+    // the surrounding editor still owned every key, and its own「nothing
+    // focused」branch then swallowed Tab so none of the dialog's controls could
+    // be reached at all.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const opened = await ctx.page.evaluate(() => ({
+        cls: document.activeElement.className,
+        inOverlay: document.querySelector('.ed-wave-overlay').contains(document.activeElement),
+      }));
+      assert.strictEqual(opened.inOverlay, true,
+        'T6k: 開起來的瞬間焦點就必須在 dialog 裡。Got ' + JSON.stringify(opened));
+      assert.strictEqual(opened.cls, 'ed-wave-panel',
+        'T6k: 初始焦點是 dialog 自己（ARIA 的預設），不是第一顆按鈕。Got ' +
+        JSON.stringify(opened.cls));
+
+      // Walk PAST the end of the dialog and back round. Three presses prove
+      // nothing: the overlay is the last thing in `body`, so native tabbing
+      // also stays inside it for the first ~N presses and a short walk is
+      // satisfied by having no trap at all — measured, a trap-less build passes
+      // a three-press check. What separates them is the wrap: with a trap the
+      // last control leads back to the first, without one it leads out into the
+      // page behind the modal.
+      const focusCount = await ctx.page.evaluate(() => {
+        const FOC = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+        return Array.prototype.filter.call(
+          document.querySelector('.ed-wave-overlay').querySelectorAll(FOC),
+          (el) => !el.disabled && !el.hidden && el.getClientRects().length > 0).length;
+      });
+      assert.ok(focusCount > 5,
+        'T6k 前提失敗：dialog 要有夠多控制項，繞一圈才有意義。Got ' + focusCount);
+      let escaped = null;
+      let landedOnAControl = false;
+      for (let i = 0; i < focusCount + 3; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const at = await ctx.page.evaluate(() => ({
+          inOverlay: document.querySelector('.ed-wave-overlay').contains(document.activeElement),
+          key: document.activeElement.getAttribute
+            ? document.activeElement.getAttribute('data-focus-key') : null,
+          tag: document.activeElement.tagName,
+        }));
+        if (at.key !== null) landedOnAControl = true;
+        if (!at.inOverlay && escaped === null) escaped = { press: i + 1, at: at };
+      }
+      assert.strictEqual(escaped, null,
+        'T6k: Tab 必須留在 dialog 裡整整一圈（而且不得被外面那條「沒有東西 focus」的' +
+        '分支吞掉）。逃出去了：' + JSON.stringify(escaped));
+      assert.strictEqual(landedOnAControl, true,
+        'T6k: Tab 必須真的落在控制項上，不能只是停在 dialog 自己身上');
+
+      // The conflict banner is the ONE layer allowed above this modal, and it
+      // has to stay reachable both ways. `.ed-conflict` is what showBanner()
+      // builds — a div of that class on document.body with its own buttons —
+      // and what is under test here is the STACKING and the TRAP SCOPE, both of
+      // which depend only on the class and on being on body, so the banner is
+      // constructed directly rather than by provoking a disk conflict.
+      const stack = await ctx.page.evaluate(() => {
+        const el = document.createElement('div');
+        el.className = 'ed-conflict';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Reload';
+        el.appendChild(b);
+        document.body.appendChild(el);
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const cs = getComputedStyle(el);
+        return {
+          bannerZ: cs.zIndex, bannerPos: cs.position,
+          overlayZ: getComputedStyle(document.querySelector('.ed-wave-overlay')).zIndex,
+          hitInBanner: el.contains(hit),
+        };
+      });
+      assert.strictEqual(stack.bannerPos, 'fixed', 'T6k 前提失敗：橫幅是 position: fixed');
+      assert.ok(Number(stack.bannerZ) > Number(stack.overlayZ),
+        'T6k: 磁碟衝突橫幅必須疊在波形編輯器【上面】（它是使用者解決衝突的唯一出口）。Got ' +
+        stack.bannerZ + ' vs ' + stack.overlayZ);
+      assert.strictEqual(stack.hitInBanner, true,
+        'T6k: 橫幅矩形中心的命中測試必須落在橫幅自己身上，否則滑鼠點不到它');
+
+      // …and the keyboard. A trap scoped to the overlay alone would paint the
+      // banner on top and still make its buttons unreachable.
+      let reached = -1;
+      for (let i = 0; i < 80; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const inBanner = await ctx.page.evaluate(() =>
+          document.querySelector('.ed-conflict').contains(document.activeElement));
+        if (inBanner) { reached = i + 1; break; }
+      }
+      assert.notStrictEqual(reached, -1,
+        'T6k: focus trap 的範圍必須含現場的 .ed-conflict，否則衝突橫幅用鍵盤永遠按不到');
+      assert.strictEqual(ctx.errs.length, 0, 'T6k: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6k the dialog takes the keyboard, keeps it, and lets the conflict banner through — OK');
+    }
+
+    // T6k2 — the UNREADABLE panel owns undo too. It has no store to move, and
+    // returning early used to hand Ctrl+Z straight to the editor behind the
+    // modal: measured, a committed paragraph edit rolled back with the panel
+    // still on screen.
+    {
+      const BROKEN_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "  { name: 'clk', wave: 'p....' },",
+        "  ['bus',",
+        "    { name: 'req', wave: '0.1.0' }",
+        '  ',
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(BROKEN_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const edited = () => ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(await edited(), true, 'T6k2 前提失敗：那一筆編輯要先真的落地');
+
+      await openWave(ctx.page);
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-state')), 'unreadable',
+        'T6k2 前提失敗：這個區塊要開出「讀不回來」的面板');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('z');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await edited(), true,
+        'T6k2: 讀不回來的面板上按 Ctrl+Z，不得退掉 modal 後面那份 markdown 文件');
+      assert.ok(await ctx.page.$('.ed-wave-overlay'), 'T6k2: 面板要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T6k2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6k2 the unreadable panel owns undo as well, so the document behind it stays put — OK');
     }
   }
 
