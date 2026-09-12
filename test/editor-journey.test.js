@@ -9490,7 +9490,13 @@ async function main() {
       // that painted the wave characters instead would show 0 here and the
       // preview beside it would show x. That disagreement is the whole reason
       // the preview is on screen, and this is the lane that can express it.
-      "  { name: 'ack', wave: '.0..1' }",
+      "  { name: 'ack', wave: '.0..1' },",
+      // A `|` gap. The engine draws a discontinuity marker for it and
+      // `levelsOf` deliberately erases it (it answers what a cycle SHOWS), so
+      // this is the one axis where the two pictures can differ on a lane whose
+      // LEVELS agree exactly — and it is invisible to a comparison that only
+      // looks at levels.
+      "  { name: 'gap', wave: '01|10' }",
       '] }',
       '```', '',
       'Tail para two.', '',
@@ -9538,6 +9544,18 @@ async function main() {
         'cellPoint: lane ' + lane + ' cycle ' + cycle +
         ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
       return at;
+    };
+
+    // A real press-drag-release across a range of cycles.
+    const dragCells = async (page, lane, from, to) => {
+      const a = await cellPoint(page, lane, from);
+      const b = await cellPoint(page, lane, to);
+      await page.mouse.move(a.x, a.y);
+      await page.mouse.down();
+      await page.mouse.move((a.x + b.x) / 2, a.y);
+      await page.mouse.move(b.x, b.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
     };
 
     const paintCell = async (page, lane, cycle, ch) => {
@@ -9615,10 +9633,26 @@ async function main() {
             for (let c = 0; c < cycles; c++) row.push(uses[(i * cycles + c) * 2 + 1]);
             engine.push(row.join(' '));
           }
+          // `gap` is filtered out of the list above because it is NOT one of
+          // the two half-bricks a cycle is made of — the engine appends it
+          // after them — so leaving it in would shift every cycle index. It is
+          // carried as its own count instead, because "filtered out" and "not
+          // covered" were the same thing in round 1 and that is how a lane
+          // whose levels agreed exactly could still be drawn wrongly.
+          const gapUses = Array.from(
+            document.querySelectorAll('.ed-wave-preview-host use'))
+            .filter((u) => (u.getAttribute('xlink:href') ||
+              u.getAttribute('href') || '') === '#gap').length;
           return { drawn: drawn, engine: engine, uses: uses.length,
             expect: lanes * cycles * 2,
+            gapUses: gapUses,
+            gapMarks: svg.querySelectorAll('.ed-wave-gap').length,
             levels: svg.getAttribute('data-levels-3'),
             wave: svg.getAttribute('data-wave-3'),
+            waves: Array.from({ length: lanes },
+              (_, i) => svg.getAttribute('data-wave-' + i)),
+            unmodelled: document.querySelector('.ed-wave-overlay')
+              .getAttribute('data-wave-unmodelled'),
             preview: document.querySelector('.ed-wave-preview')
               .getAttribute('data-wave-preview') };
         });
@@ -9629,11 +9663,43 @@ async function main() {
         assert.strictEqual(got.uses, got.expect,
           'T6b: 預覽的 brick 數必須剛好是 lane×cycle×2，否則下面的比對是在比空氣。Got ' +
           got.uses + ' vs ' + got.expect);
+        // period / phase / hscale change what the ENGINE paints and the drawing
+        // does not model them, so the cycle-index mapping above stops being a
+        // cycle index at all when one is present. The fixture carries none —
+        // pinned here so a future fixture cannot quietly break the arithmetic.
+        assert.strictEqual(got.unmodelled, '',
+          'T6b: 這個 fixture 不得帶 period/phase/hscale，否則上面的 index 對應不成立。Got ' +
+          JSON.stringify(got.unmodelled));
+        assert.strictEqual(got.gapMarks, got.gapUses,
+          'T6b: 手繪的斷點記號數必須跟引擎畫的一樣多。Got ' + got.gapMarks +
+          ' vs ' + got.gapUses);
         return got;
       };
 
       const ctx = await newPage(WAVE_MD);
+      const dupBefore = await ctx.page.evaluate(() => {
+        const seen = new Map();
+        for (const el of document.querySelectorAll('[id]')) {
+          seen.set(el.id, (seen.get(el.id) || 0) + 1);
+        }
+        return Array.from(seen.values()).filter((n) => n > 1).length;
+      });
       await openWave(ctx.page);
+      // The preview is a SECOND engine render into a page that already carries
+      // one. Rendered at index 0 with the skin re-emitted it put 240 duplicate
+      // `id`s into a document that had 0 — measured — including a second
+      // definition of every brick symbol the first diagram's `<use>`s resolve
+      // against. Its own index and the shared skin bring that back to 0.
+      const dupAfter = await ctx.page.evaluate(() => {
+        const seen = new Map();
+        for (const el of document.querySelectorAll('[id]')) {
+          seen.set(el.id, (seen.get(el.id) || 0) + 1);
+        }
+        return Array.from(seen.values()).filter((n) => n > 1).length;
+      });
+      assert.strictEqual(dupBefore, 0, 'T6b 前提失敗：開之前這一頁本來就沒有重複的 id');
+      assert.strictEqual(dupAfter, 0,
+        'T6b: 預覽不得在頁面上留下重複的 id。Got ' + dupAfter);
       const before = await bricks(ctx.page);
       // The fixture can express the defect: `ack` is written `.0..1` and the
       // engine draws it x x x x 1. A drawing that painted the characters would
@@ -9654,9 +9720,29 @@ async function main() {
       assert.deepStrictEqual(after.drawn, after.engine,
         'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
         '\nengine: ' + JSON.stringify(after.engine));
+
+      // The gap axis is only covered if the fixture actually HAS one drawn.
+      assert.ok(after.gapUses > 0,
+        'T6b 前提失敗：fixture 必須真的帶一個 `|`，否則斷點那條斷言是空的。Got ' +
+        after.gapUses);
+
+      // …and an ALL-EMPTY diagram, which is two clicks away and which round 1
+      // drew as four blank rows while the engine drew four x cycles. Select
+      // every cycle of one lane and delete — `deleteCycles` narrows every lane
+      // at once, so the whole diagram empties.
+      await dragCells(ctx.page, 0, 0, 4);
+      await pressClick(ctx.page, '.ed-wave-cycle-delete');
+      await new Promise((r) => setTimeout(r, 300));
+      const emptied = await bricks(ctx.page);
+      assert.deepStrictEqual(emptied.waves, ['', '', '', '', ''],
+        'T6b 前提失敗：刪掉全部 cycle 之後每一條 lane 的 wave 都該是空的。Got ' +
+        JSON.stringify(emptied.waves));
+      assert.deepStrictEqual(emptied.drawn, emptied.engine,
+        'T6b: 空的 lane 是「一格 x」不是「什麼都不畫」\ndrawn : ' +
+        JSON.stringify(emptied.drawn) + '\nengine: ' + JSON.stringify(emptied.engine));
       assert.strictEqual(ctx.errs.length, 0, 'T6b: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
-      console.log('journey: wave/T6b the hand-drawn waveform and the WaveDrom preview agree cycle by cycle — OK');
+      console.log('journey: wave/T6b the hand-drawn waveform and the WaveDrom preview agree cycle by cycle, gaps and an emptied diagram included — OK');
     }
 
     // T6c — a group can be joined at its HEAD and never at its TAIL, and the UI
@@ -9762,6 +9848,281 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T6d: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T6d an unreadable wavedrom block opens an editor that says why and where — OK');
+    }
+
+    // ── fix round 1 ────────────────────────────────────────────────────
+    //
+    // T6e, T6f and T6g are one defect wearing three faces: the overlay lives
+    // OUTSIDE `.content` so it cannot be serialised into the user's markdown,
+    // and that same position puts it outside every assumption the surrounding
+    // editor makes about where focus and keys can be. The answer is not three
+    // patches — it is that the editor now says what it owns while it is open
+    // and the surrounding code ASKS.
+
+    // T6e — a Backspace typed into a wave field must not delete the user's
+    // blocks. Measured before the fix: 3 blocks became 2, the tail paragraph
+    // was gone, and the keystroke never reached the input at all.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tailLine = await ctx.page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((b) => (b.textContent || '').indexOf('Tail para two') !== -1);
+        return Number(el.getAttribute('data-block-id'));
+      });
+      const lineOf = await ctx.page.evaluate((id) => window.__ED__.blocks
+        .find((b) => b.id === id).startLine, tailLine);
+      const blockCount = () => ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      const before = await blockCount();
+      assert.ok(before >= 3, 'T6e 前提失敗：fixture 要有夠多的 block。Got ' + before);
+
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      assert.notStrictEqual(await ctx.page.evaluate(() => window.__edTestGetSelection()), null,
+        'T6e 前提失敗：必須真的有一組站著的 block 選取');
+
+      await openWave(ctx.page);
+      // Opening the editor settles the document and drops a selection the user
+      // can no longer see.
+      assert.strictEqual(await ctx.page.evaluate(() => window.__edTestGetSelection()), null,
+        'T6e: 開啟波形編輯器時要把看不見的 block 選取收掉');
+
+      // …and even with one deliberately standing again, a key typed into a
+      // wave field is the field's.
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      await pressClick(ctx.page, '.ed-wave-lane-name[data-focus-key="lane-name-0"]');
+      await ctx.page.keyboard.press('Backspace');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await blockCount();
+      const value = await ctx.page.$eval('.ed-wave-lane-name[data-focus-key="lane-name-0"]',
+        (el) => el.value);
+      assert.strictEqual(after, before,
+        'T6e: 在波形欄位裡按 Backspace 不得刪掉使用者的 block。Got ' + after + ' / ' + before);
+      assert.strictEqual(value, 'cl',
+        'T6e: 那一下 Backspace 必須真的進到欄位裡（clk -> cl）。Got ' + JSON.stringify(value));
+      assert.strictEqual(ctx.errs.length, 0, 'T6e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6e a Backspace typed into a wave field never deletes the document — OK');
+    }
+
+    // T6e2 — the same guard, with no wave editor anywhere near it. The
+    // block-selection branch's stated invariant is「focus is on a block wrapper
+    // and not on any text surface」, and the reader's own search box is a text
+    // surface outside `.content` that predates all of this. It was in the same
+    // hole.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const lineOf = await ctx.page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((b) => (b.textContent || '').indexOf('Tail para two') !== -1);
+        const id = Number(el.getAttribute('data-block-id'));
+        return window.__ED__.blocks.find((b) => b.id === id).startLine;
+      });
+      const before = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      await ctx.page.evaluate(() => {
+        const box = document.getElementById('doc-search-input');
+        box.focus();
+        box.value = 'abc';
+      });
+      await ctx.page.keyboard.press('Backspace');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        blocks: document.querySelectorAll('.ed-block').length,
+        search: document.getElementById('doc-search-input').value,
+      }));
+      assert.strictEqual(after.blocks, before,
+        'T6e2: 在搜尋框裡按 Backspace 不得刪掉 block。Got ' + after.blocks + ' / ' + before);
+      assert.strictEqual(after.search, 'ab',
+        'T6e2: 那一下必須進到搜尋框。Got ' + JSON.stringify(after.search));
+      assert.strictEqual(ctx.errs.length, 0, 'T6e2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6e2 the block-selection keys stay out of every text field, not just the ones in .content — OK');
+    }
+
+    // T6f — Ctrl+Z inside the overlay is the WAVEFORM's undo. Before the fix it
+    // rolled back the markdown document behind the modal.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const edited = () => ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(await edited(), true, 'T6f 前提失敗：那一筆編輯要先真的落地');
+
+      await openWave(ctx.page);
+      const wave0Before = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      await paintCell(ctx.page, 0, 2, '1');
+      const painted = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.ok(painted[2] === '1', 'T6f 前提失敗：要先有一筆波形編輯可以退。Got ' + painted);
+      assert.notStrictEqual(painted, wave0Before,
+        'T6f 前提失敗：那一筆塗抹要真的改到 wave');
+
+      await ctx.page.evaluate(() => document.querySelector('.ed-wave-head-text').focus());
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('z');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const got = await ctx.page.evaluate(() => ({
+        wave0: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+        overlay: !!document.querySelector('.ed-wave-overlay'),
+        doc: (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1,
+      }));
+      assert.strictEqual(got.overlay, true, 'T6f: overlay 要還在');
+      assert.strictEqual(got.wave0, wave0Before,
+        'T6f: Ctrl+Z 要退掉波形那一筆（回到塗之前的樣子）。Got ' + JSON.stringify(got.wave0));
+      assert.strictEqual(got.doc, true,
+        'T6f: Ctrl+Z 不得退掉 modal 後面那份 markdown 文件');
+      assert.strictEqual(ctx.errs.length, 0, 'T6f: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6f Ctrl+Z inside the overlay undoes the waveform, not the document — OK');
+    }
+
+    // T6g — Escape mid-drag, then release. Before the fix the release still ran
+    // the paint, into a store that was no longer on screen and through a
+    // callback whose owner had been torn down: a page-level TypeError, plus two
+    // leaked document listeners per cancelled drag.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const a = await cellPoint(ctx.page, 0, 1);
+      const b = await cellPoint(ctx.page, 0, 3);
+      const wave0 = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      await ctx.page.mouse.move(a.x, a.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.move(b.x, b.y);
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6g 前提失敗：Escape 要把 overlay 收掉');
+      await ctx.page.mouse.up();
+      await ctx.page.mouse.move(b.x + 5, b.y);
+      await ctx.page.mouse.move(b.x + 40, b.y + 10);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(ctx.errs.length, 0,
+        'T6g: 拖到一半 Escape 再放開，不得有 pageerror: ' + ctx.errs.join(' | '));
+
+      // The release must not have run the paint. Re-opening the block cannot
+      // show that on its own — nothing writes back to the document yet, so the
+      // reopened editor reads the same source either way and the comparison
+      // below is true whatever happened. What DOES separate the two is whether
+      // a gesture ever reached the caller after the overlay came down.
+      const stray = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(stray.open, false, 'T6g: overlay 已經關掉了');
+      assert.strictEqual(stray.stray, 0,
+        'T6g: 編輯器關掉之後不得再有任何手勢送出來（那一筆是使用者取消掉的）。Got ' +
+        stray.stray);
+
+      // Re-open: the edit that was in flight must not have landed, and a
+      // COMPLETED drag must still register — otherwise「沒有手勢」would be
+      // satisfied by an editor that never reports anything at all.
+      await openWave(ctx.page);
+      const again = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.strictEqual(again, wave0,
+        'T6g: 被取消的那一筆塗抹不得寫進文件。Got ' + JSON.stringify(again));
+      await dragCells(ctx.page, 0, 1, 3);
+      const live = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(live.seam !== null && live.seam.gestured, true,
+        'T6g 前提失敗：正常完成的拖曳必須有手勢送到 seam，否則上面那條 0 是空的。Got ' +
+        JSON.stringify(live));
+      assert.strictEqual(live.stray, 0, 'T6g: 正常的手勢不算 stray。Got ' + live.stray);
+      assert.strictEqual(ctx.errs.length, 0, 'T6g: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6g Escape mid-drag cancels the paint and leaves nothing behind — OK');
+    }
+
+    // T6h — a gesture must not drop the keyboard cursor. The lane list is
+    // rebuilt on every repaint, so before the fix committing a rename with
+    // Enter left focus on document.body — which is also the state that turns
+    // the next Backspace into「delete the selected blocks」.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '.ed-wave-lane-name[data-focus-key="lane-name-0"]');
+      await ctx.page.keyboard.type('X');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 300));
+      const got = await ctx.page.evaluate(() => ({
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        tag: document.activeElement.tagName,
+        value: document.activeElement.value,
+      }));
+      assert.strictEqual(got.key, 'lane-name-0',
+        'T6h: 改完名字游標要留在同一個欄位。Got ' + JSON.stringify(got));
+      assert.strictEqual(got.value, 'clkX', 'T6h: 欄位內容要是改過的那個。Got ' + got.value);
+
+      // …and the ＋ hands the keyboard to the lane it just made.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
+      await new Promise((r) => setTimeout(r, 300));
+      const added = await ctx.page.evaluate(() => document.activeElement.getAttribute
+        ? document.activeElement.getAttribute('data-focus-key') : null);
+      assert.strictEqual(added, 'lane-name-1',
+        'T6h: 新增 lane 之後游標要落在新那一條的名字欄。Got ' + JSON.stringify(added));
+      assert.strictEqual(ctx.errs.length, 0, 'T6h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6h a committed gesture hands the keyboard cursor back — OK');
+    }
+
+    // T6i — the three properties the drawing does not model. The editor used to
+    // ship an hscale CONTROL whose effect the canvas ignored; it is gone, and a
+    // document carrying any of the three now says so instead of drawing a
+    // confident wrong picture.
+    {
+      const SCALED_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ config: { hscale: 2 },',
+        '  signal: [',
+        "    { name: 'clk', wave: 'p...', period: 2 },",
+        "    ['bus', { name: 'req', wave: '0.1.', phase: 0.5 }]",
+        '  ] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(SCALED_MD);
+      await openWave(ctx.page);
+      const got = await ctx.page.evaluate(() => ({
+        unmodelled: document.querySelector('.ed-wave-overlay')
+          .getAttribute('data-wave-unmodelled'),
+        noticeHidden: document.querySelector('.ed-wave-unmodelled').hidden,
+        notice: document.querySelector('.ed-wave-unmodelled').textContent,
+        hscaleControls: document.querySelectorAll('.ed-wave-hscale').length,
+        canvas: !!document.querySelector('.ed-wave-canvas'),
+      }));
+      assert.strictEqual(got.hscaleControls, 0,
+        'T6i: 不得留著一個畫布根本不理會的 hscale 控制項。Got ' + got.hscaleControls);
+      assert.strictEqual(got.canvas, true, 'T6i: 其他東西還是可以編輯');
+      assert.strictEqual(got.noticeHidden, false, 'T6i: 提示必須看得見');
+      for (const what of ['config.hscale', 'period', 'phase']) {
+        assert.ok(got.unmodelled.indexOf(what) !== -1,
+          'T6i: 提示要指名 ' + what + '。Got ' + JSON.stringify(got.unmodelled));
+        assert.ok(got.notice.indexOf(what) !== -1,
+          'T6i: 畫面上的字要指名 ' + what + '。Got ' + JSON.stringify(got.notice));
+      }
+      // …and a document carrying none of them says nothing at all, so the
+      // notice is a signal and not wallpaper.
+      await ctx.page.close(); ctx.srv.close();
+      const plain = await newPage(WAVE_MD);
+      await openWave(plain.page);
+      const quiet = await plain.page.evaluate(() => ({
+        unmodelled: document.querySelector('.ed-wave-overlay')
+          .getAttribute('data-wave-unmodelled'),
+        hidden: document.querySelector('.ed-wave-unmodelled').hidden,
+      }));
+      assert.strictEqual(quiet.unmodelled, '', 'T6i: 沒用到的文件不得跳提示');
+      assert.strictEqual(quiet.hidden, true, 'T6i: 提示要收起來');
+      assert.strictEqual(plain.errs.length, 0, 'T6i: 不得有 pageerror: ' + plain.errs.join(' | '));
+      await plain.page.close(); plain.srv.close();
+      console.log('journey: wave/T6i the editor says which properties the drawing does not model, and ships no control for them — OK');
     }
   }
 
