@@ -1,0 +1,109 @@
+NOTICE — third-party code vendored into @helping-ai-workflow/md2doc
+==================================================================
+
+md2doc's own source is MIT (see the LICENSE file at the root of this
+package). This directory is NOT md2doc's own source: it is a verbatim
+copy of one file from the draw.io / diagrams.net project, which is
+licensed under the Apache License, Version 2.0. The full licence text
+sits next to this file, in `vendor/drawio/LICENSE`, so it travels with
+the artifact it covers.
+
+Apache-2.0 §4(d) requires propagating an upstream NOTICE file where one
+exists. jgraph/drawio does not have one: the repository root at
+https://github.com/jgraph/drawio contains LICENSE but no NOTICE (checked
+2026-09-12 against the GitHub contents API). Nothing is being withheld.
+
+
+The vendored file
+-----------------
+
+  path      vendor/drawio/viewer-static.min.js
+  project   draw.io (diagrams.net) — https://github.com/jgraph/drawio
+  version   v31.3.2  (the file also carries mxClient.VERSION="31.3.2")
+  upstream  src/main/webapp/js/viewer-static.min.js at tag v31.3.2
+  size      4,151,717 bytes
+  sha256    2fabaaa3e28d5f80f943285a2ce19c22cf870857203255f1e0347ef93693a297
+  licence   Apache License 2.0 — vendor/drawio/LICENSE
+  vendored  2026-09-10
+
+VERIFIED 2026-09-12: the bytes in this directory are identical to the
+file fetched from raw.githubusercontent.com at tag `v31.3.2` — same size
+and same sha256. The minified file itself carries no licence banner (it
+opens directly on executable code), so the licence is established by its
+provenance, not by a string inside it.
+
+md2doc runs this file only inside a build-time headless Chromium, to
+rasterise `.drawio` references into inline SVG. It is never emitted into
+md2doc's output HTML, and it is never fetched over the network.
+
+
+Third-party components inside that file
+---------------------------------------
+
+The bundle is not licence-homogeneous. What follows was established by
+reading the bundle, not by assumption. Where a component carries no
+banner of its own, its identity was fixed by locating its exact bytes
+inside the bundle: each of the four components below was fetched from
+the jgraph/drawio tree at tag v31.3.2 and found as a verbatim byte run
+inside vendor/drawio/viewer-static.min.js (offsets and lengths are the
+measurements, taken 2026-09-12).
+
+1. DOMPurify 3.4.13 — https://github.com/cure53/DOMPurify
+   (c) Cure53 and other contributors.
+   Apache License 2.0 OR Mozilla Public License 2.0 (dual-licensed;
+   a recipient may take it under either).
+   ESTABLISHED FROM THE BUNDLE: it carries its own `/*! @license ... */`
+   banner naming both the version and the dual licence, and points at
+   github.com/cure53/DOMPurify/blob/3.4.13/LICENSE. Its 29,474 bytes are
+   byte-identical to drawio's js/sanitizer/purify.min.js at v31.3.2, and
+   sit at offset 4,837.
+
+2. pako 2.2.0 — https://github.com/nodeca/pako
+   MIT AND Zlib.
+   ESTABLISHED FROM THE BUNDLE: `/*! pako 2.2.0 ... @license (MIT AND
+   Zlib) */`. Its 47,425 bytes are byte-identical to drawio's
+   js/deflate/pako.min.js at v31.3.2, and sit at offset 34,311.
+
+3. spin.js 2.0.0 — https://github.com/fgnass/spin.js
+   MIT. Copyright (c) 2011 Felix Gnass [fgnass at neteye dot de].
+   The bundle carries only the line comment
+   `//fgnass.github.com/spin.js#v2.0.0` — a version, not a licence. The
+   licence above was read from LICENSE.txt in fgnass/spin.js at tag
+   2.0.0. The bundled bytes are byte-identical to drawio's own
+   js/spin/spin.min.js (4,145 bytes) at v31.3.2, at offset 691.
+
+4. Rough.js 4.6.6 — https://github.com/rough-stuff/rough
+   MIT.
+   The bundle carries no banner for it at all. The version comes from
+   drawio's own js/rough/README.md at v31.3.2 ("Used roughjs 4.6.6 from
+   https://unpkg.com/roughjs@4.6.6/bundled/rough.js"), and the bundled
+   block is byte-identical (27,761 bytes, offset 81,736) to drawio's
+   js/rough/rough.min.js at that tag. The MIT licence is the one npm
+   reports for roughjs@4.6.6.
+
+5. A `Base64` encode/decode helper derived from webtoolkit.info.
+   Part of the drawio repository itself
+   (src/main/webapp/js/deflate/base64.js), whose header reads
+   "Copyright (c) 2020-2025, JGraph Holdings Ltd / Copyright (c)
+   2020-2025, draw.io AG". Covered by drawio's own Apache-2.0. Unlike
+   the four above this one is NOT a verbatim byte run — the bundle
+   carries a minified form of that source — so it is identified by its
+   code (the `_keyStr` alphabet and the same function shape), not by a
+   byte match.
+
+Everything after that in the bundle is draw.io / mxGraph code from the
+jgraph/drawio repository, covered by vendor/drawio/LICENSE.
+
+AMBIGUITIES, stated rather than resolved silently:
+
+  - For spin.js and Rough.js the bundle itself names no licence. The
+    licences recorded above come from those projects' own repositories
+    and package metadata at the matching versions. That is upstream's
+    attribution to make and drawio's bundle does not make it; anyone
+    running a compliance review should treat items 3 and 4 as
+    "identified by provenance" rather than "declared in the artifact".
+  - DOMPurify is dual-licensed; this NOTICE does not choose for you.
+  - The bundle references JSZip and MathJax by name, but neither is
+    bundled here: both are looked up as pre-existing globals that this
+    build never provides. No attribution is owed for code that is not
+    present, and none is claimed.
