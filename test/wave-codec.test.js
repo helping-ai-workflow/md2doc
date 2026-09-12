@@ -1068,4 +1068,277 @@ assert.strictEqual(C.parseSource('{ /* hi */ signal: [] }').ok, true,
   ]).ok, true, 'Object.create(null) 也是 plain object');
 }
 
+// ---- 以下為 Task 3 釘住的合約（wave 字元 op 與文件 op） ----
+
+// 這一段的前提是量出來的，不是推出來的。對 pin 住的 wavedrom 3.5.0 渲染
+// '01xzpnhlud=23456789' 這 19 個 level 字元的 `ch..ch` 與 `ch...`：只有 p 與 n
+// 兩個時脈字元渲染相同，其餘 17 個都不同（`ch..ch` 在那一拍多一個 transition
+// marker，例如 #0m0 對 #000；h/l 是 #pclk/#nclk 對 #111/#000）。
+// 所以 `.` 不是「重複前一個字元」，expandWave 必須無損：每一拍都記著它是
+// 「延續」還是「明寫」，否則 collapse(expand(w)) 對每一個 level 字元都會走樣。
+
+// expandWave 無損：{ch, held}，ch 是這一拍解析出來的 level，held 說它是不是寫成 `.`
+assert.deepStrictEqual(C.expandWave('p...'), [
+  { ch: 'p', held: false }, { ch: 'p', held: true },
+  { ch: 'p', held: true }, { ch: 'p', held: true },
+], '`.` 要記成 held，而且帶著它延續的 level');
+
+assert.deepStrictEqual(C.expandWave('01.x'), [
+  { ch: '0', held: false }, { ch: '1', held: false },
+  { ch: '1', held: true }, { ch: 'x', held: false },
+]);
+
+// collapse 絕不自己長出 `.`：只有 model 說是延續的地方才寫 `.`
+assert.strictEqual(C.collapseWave(['p', 'p', 'p', 'p']), 'pppp',
+  'collapse 不得把重複的字元擅自收成 `.`——那兩者渲染不同');
+assert.strictEqual(C.collapseWave(C.expandWave('p...')), 'p...');
+
+// 往返一致：所有合法字元，加上 `|`、空字串與開頭就是 `.` 的退化輸入
+{
+  const LEVELS = '01xzpnhlud=23456789'.split('');
+  const corpus = ['', '.', '..0', '0|.', '|', '0.1.', '0.10'];
+  for (const ch of LEVELS) {
+    corpus.push(ch + '..' + ch, ch + '...', ch + ch + ch + ch, ch, ch + '|' + ch);
+  }
+  for (const w of corpus) {
+    assert.strictEqual(C.collapseWave(C.expandWave(w)), w,
+      '往返必須一致：' + JSON.stringify(w));
+  }
+}
+
+// levelsOf 回答「這一拍畫的是什麼 level」——`.` 與 `|` 都延續前一個
+assert.deepStrictEqual(C.levelsOf('0.1.'), ['0', '0', '1', '1']);
+assert.deepStrictEqual(C.levelsOf('0|.'), ['0', '0', '0'], '| 是缺口，不是自己的 level');
+assert.deepStrictEqual(C.levelsOf('..0'), ['', '', '0'], '開頭的 `.` 沒有東西可以延續');
+
+// setCell：後面沒有延續的時候
+{
+  const doc = { signal: [{ name: 'a', wave: '0000' }] };
+  const next = C.setCell(doc, 0, 2, '1');
+  assert.strictEqual(next.signal[0].wave, '0010', 'setCell 之後的 wave');
+  assert.strictEqual(doc.signal[0].wave, '0000', '原本的 doc 不得被改到');
+}
+
+// setCell：後面的延續必須先被寫成明碼，否則會動到使用者沒碰的那一拍
+{
+  const doc = { signal: [{ name: 'a', wave: '0...' }] };
+  const next = C.setCell(doc, 0, 2, '1');
+  assert.strictEqual(next.signal[0].wave, '0.10',
+    '第 3 拍原本畫的是 0，要先被寫出來，否則它會跟著第 2 拍變成 1');
+  assert.deepStrictEqual(C.levelsOf(next.signal[0].wave), ['0', '0', '1', '0']);
+  assert.strictEqual(C.levelsOf('0.1.')[3], '1',
+    '天真的做法（直接把第 2 拍改掉）確實會把第 3 拍一起改掉');
+}
+
+// setCell：`|` 沒有自己的 level，所以要跨過它去釘後面的延續
+{
+  const doc = { signal: [{ name: 'a', wave: '0|.' }] };
+  const next = C.setCell(doc, 0, 0, '1');
+  assert.strictEqual(next.signal[0].wave, '1|0', '延續在 | 後面，也要被釘住');
+  assert.deepStrictEqual(C.levelsOf(next.signal[0].wave), ['1', '1', '0']);
+}
+
+// setCell 也可以寫 `.`：把這一拍變成延續
+assert.strictEqual(
+  C.setCell({ signal: [{ name: 'a', wave: '0101' }] }, 0, 1, '.').signal[0].wave, '0.01');
+
+// 開頭的 `.` 沒有東西可以延續。實測 wavedrom 3.5.0 把 "..0" 整條畫成 x
+// （連那個 0 都不畫），而 "x.0" 畫的是 x x 0——所以要釘住它只能寫 x，
+// 因為 x 就是那一拍本來畫出來的東西。
+{
+  const doc = { signal: [{ name: 'a', wave: '..0' }] };
+  assert.strictEqual(C.setCell(doc, 0, 0, '1').signal[0].wave, '1x0');
+}
+
+// setCellRange：一段是一個 run（一個明碼加延續），末端後面那一拍一樣要先釘住
+{
+  const doc = { signal: [{ name: 'a', wave: '0...' }] };
+  assert.strictEqual(C.setCellRange(doc, 0, 1, 2, '1').signal[0].wave, '01.0',
+    '一段填成一個 run，而不是每一拍各寫一次');
+  assert.strictEqual(C.setCellRange(doc, 0, 2, 1, '1').signal[0].wave, '01.0',
+    'from/to 反過來拖是同一段');
+  assert.strictEqual(doc.signal[0].wave, '0...', '原本的 doc 不得被改到');
+}
+
+// data 格：實測只有 = 與 2..9 會吃掉一個 data 格，其餘 level 字元與 `.`、`|` 都不會
+{
+  const doc = { signal: [{ name: 'a', wave: '0230', data: ['A', 'B'] }] };
+  const next = C.setCell(doc, 0, 1, '1');
+  assert.strictEqual(next.signal[0].wave, '0130');
+  assert.deepStrictEqual(next.signal[0].data, ['B'], '被蓋掉的值字元要連它的 data 一起走');
+  assert.deepStrictEqual(doc.signal[0].data, ['A', 'B'], '原本的 data 陣列不得被改到');
+}
+
+// 釘住延續的時候，那個 run 的標籤要跟著複製過去，否則畫面上的字會掉
+{
+  const doc = { signal: [{ name: 'a', wave: '2...', data: ['A'] }] };
+  const next = C.setCell(doc, 0, 2, '1');
+  assert.strictEqual(next.signal[0].wave, '2.12');
+  assert.deepStrictEqual(next.signal[0].data, ['A', 'A'],
+    '第 3 拍被寫成明碼的 2，它顯示的還是同一個標籤');
+  assert.deepStrictEqual(C.levelsOf(next.signal[0].wave), ['2', '2', '1', '2']);
+}
+
+// data 寫成字串的時候要還它一個字串（wavedrom 3.5.0 兩種都吃）
+{
+  const doc = { signal: [{ name: 'a', wave: '2.3.', data: 'AA BB' }] };
+  const next = C.setCell(doc, 0, 3, '0');
+  assert.strictEqual(next.signal[0].wave, '2.30');
+  assert.strictEqual(next.signal[0].data, 'AA BB', 'data 原本的寫法要保住');
+}
+
+// insert / delete cycles 對每一條 lane 都要作用
+{
+  const doc = { signal: [{ name: 'a', wave: '0011' }, { name: 'b', wave: 'xxzz' }] };
+  const ins = C.insertCycles(doc, 2, 1);
+  assert.strictEqual(C.expandWave(ins.signal[0].wave).length, 5);
+  assert.strictEqual(C.expandWave(ins.signal[1].wave).length, 5,
+    '插入 cycle 必須對每一條 lane 同時作用，否則波形會錯位');
+  assert.strictEqual(ins.signal[0].wave, '00.11', '插進去的是延續，原本的 level 不變');
+  assert.deepStrictEqual(C.levelsOf(ins.signal[0].wave), ['0', '0', '0', '1', '1']);
+}
+
+// insert 在第 0 拍：沒有東西可以延續，所以把第一拍複製一份出來
+{
+  const doc = { signal: [{ name: 'a', wave: '0011' }] };
+  const ins = C.insertCycles(doc, 0, 2);
+  assert.strictEqual(ins.signal[0].wave, '0.0011');
+  assert.deepStrictEqual(C.levelsOf(ins.signal[0].wave),
+    ['0', '0', '0', '0', '1', '1']);
+}
+
+// delete：被刪掉那一段後面的延續會改指向別人，所以要先釘住
+{
+  const doc = { signal: [{ name: 'a', wave: '0.11' }] };
+  const del = C.deleteCycles(doc, 0, 1);
+  assert.strictEqual(del.signal[0].wave, '011', '刪掉第 0 拍不得留下一個沒有依靠的 `.`');
+  assert.deepStrictEqual(C.levelsOf(del.signal[0].wave), ['0', '1', '1']);
+}
+
+// copy / paste
+{
+  const doc = { signal: [{ name: 'a', wave: '0101' }] };
+  const clip = C.copyCycles(doc, 1, 2);
+  assert.strictEqual(clip.kind, 'cycles');
+  assert.strictEqual(clip.count, 2);
+  assert.deepStrictEqual(clip.lanes[0].chars,
+    [{ ch: '1', held: false }, { ch: '0', held: false }]);
+  const pasted = C.pasteCycles(doc, 3, clip, 'insert');
+  assert.strictEqual(C.expandWave(pasted.signal[0].wave).length, 6);
+  assert.strictEqual(pasted.signal[0].wave, '010101');
+  assert.strictEqual(doc.signal[0].wave, '0101', '原本的 doc 不得被改到');
+}
+
+// clip 的第一拍如果是延續，要先被寫成明碼，否則貼到別的地方會去延續別人
+{
+  const doc = { signal: [{ name: 'a', wave: '0...' }] };
+  const clip = C.copyCycles(doc, 2, 2);
+  assert.deepStrictEqual(clip.lanes[0].chars,
+    [{ ch: '0', held: false }, { ch: '0', held: true }]);
+}
+
+// copy 要把值字元的標籤一起帶走
+{
+  const doc = { signal: [{ name: 'a', wave: '02.3', data: ['A', 'B'] }] };
+  assert.deepStrictEqual(C.copyCycles(doc, 1, 2).lanes[0].data, ['A']);
+}
+
+// paste insert 要把 clip 沒蓋到的 lane 一起加寬，否則波形錯位
+{
+  const doc = { signal: [{ name: 'a', wave: '0101' }, { name: 'b', wave: '1111' }] };
+  const clip = C.copyCycles({ signal: [doc.signal[0]] }, 1, 2);
+  const pasted = C.pasteCycles(doc, 2, clip, 'insert');
+  assert.strictEqual(C.expandWave(pasted.signal[0].wave).length, 6);
+  assert.strictEqual(C.expandWave(pasted.signal[1].wave).length, 6,
+    'clip 沒蓋到的 lane 也要加寬');
+  assert.strictEqual(pasted.signal[1].wave, '11..11', '加寬用的是延續，level 不變');
+}
+
+// paste overwrite 不改長度，而且蓋過去之後的那一拍要先被釘住
+{
+  const doc = { signal: [{ name: 'a', wave: '0...' }] };
+  const clip = C.copyCycles({ signal: [{ name: 'c', wave: '11' }] }, 0, 2);
+  const over = C.pasteCycles(doc, 1, clip, 'overwrite');
+  assert.strictEqual(over.signal[0].wave, '0110');
+  assert.deepStrictEqual(C.levelsOf(over.signal[0].wave), ['0', '1', '1', '0']);
+}
+
+// lane ops
+{
+  const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+  assert.strictEqual(C.moveLane(doc, 0, 1).signal[0].name, 'b');
+  assert.strictEqual(C.removeLane(doc, 0).signal.length, 1);
+  assert.strictEqual(C.renameLane(doc, 1, 'B').signal[1].name, 'B');
+  const added = C.addLane(doc, 1, { name: 'c', wave: '00' });
+  assert.strictEqual(added.signal[1].name, 'c');
+  assert.strictEqual(added.signal.length, 3);
+  assert.strictEqual(doc.signal[0].name, 'a', '原本的 doc 不得被改到');
+  assert.strictEqual(doc.signal.length, 2, '原本的 signal 陣列不得被改到');
+}
+
+// addLane 不得把呼叫端那個物件本人收進 doc 裡
+{
+  const lane = { name: 'c', wave: '00' };
+  const doc = C.addLane({ signal: [] }, 0, lane);
+  assert.notStrictEqual(doc.signal[0], lane, '收一份拷貝，否則呼叫端改它就改到 doc');
+  assert.deepStrictEqual(doc.signal[0], lane);
+}
+
+// group（signal 裡的巢狀陣列）不是 lane，不改它的名字
+{
+  const doc = { signal: [['grp', { name: 'a', wave: '01' }]] };
+  assert.strictEqual(C.renameLane(doc, 0, 'X'), doc);
+}
+
+// 沒有被碰到的 lane 物件要原封不動地共用，之後才寫得回最小的 patch
+{
+  const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+  const next = C.setCell(doc, 0, 1, '0');
+  assert.strictEqual(next.signal[1], doc.signal[1], '沒碰到的 lane 要是同一個物件');
+  assert.notStrictEqual(next.signal[0], doc.signal[0], '碰到的 lane 要是新的物件');
+  assert.notStrictEqual(next.signal, doc.signal);
+  assert.notStrictEqual(next, doc);
+}
+
+// 不合法的位置、字元或 mode 一律原樣回去，不丟例外也不猜
+{
+  const doc = { signal: [{ name: 'a', wave: '01' }] };
+  assert.strictEqual(C.setCell(doc, 0, 9, '1'), doc, '超出範圍就原樣回去');
+  assert.strictEqual(C.setCell(doc, 5, 0, '1'), doc);
+  assert.strictEqual(C.setCell(doc, 0, 0, '01'), doc, '一次只能寫一個字元');
+  assert.strictEqual(C.removeLane(doc, 9), doc);
+  assert.strictEqual(C.moveLane(doc, 0, 0), doc);
+  assert.strictEqual(C.insertCycles(doc, 0, 0), doc);
+  assert.strictEqual(C.pasteCycles(doc, 0, null, 'insert'), doc);
+  assert.strictEqual(C.pasteCycles(doc, 0, C.copyCycles(doc, 0, 1), 'nope'), doc,
+    '不認得的 mode 不得靜默當成 insert');
+}
+
+// 這些 op 的產物要真的寫得回原始碼，而且只動那一個值
+{
+  const src = '{ signal: [\n  { name: "a", wave: "0..." },   // 說明\n]}';
+  const r = C.parseSource(src);
+  const next = C.setCell(r.doc, 0, 2, '1');
+  const out = C.patchSource(src, r, [
+    { path: ['signal', 0, 'wave'], value: next.signal[0].wave },
+  ]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  assert.ok(out.text.includes('"0.10"'), 'Got ' + JSON.stringify(out.text));
+  assert.ok(out.text.includes('// 說明'), '註解必須原樣留著');
+}
+
+// addLane 的產物要走得過 insert 這條路
+{
+  const src = '{ signal: [\n  { name: "a", wave: "01" },\n  { name: "b", wave: "10" },\n]}';
+  const r = C.parseSource(src);
+  const next = C.addLane(r.doc, 1, { name: 'c', wave: '00' });
+  const out = C.patchSource(src, r,
+    [{ op: 'insert', path: ['signal', 1], value: next.signal[1] }]);
+  assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+  const back = C.parseSource(out.text);
+  assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+  assert.deepStrictEqual(back.doc.signal.map(function (l) { return l.name; }),
+    ['a', 'c', 'b']);
+}
+
 console.log('wave-codec.test.js OK');
