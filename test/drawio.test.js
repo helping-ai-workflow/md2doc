@@ -237,5 +237,28 @@ assert.strictEqual(D.resolvePageIndex(names, '0'), 0,
   }
 }
 
+// ── Task 5: 切頁 UI —— 條件式注入 ────────────────────────────────────────
+
+// 多頁：必須注入 sheet bar 的 CSS，頁名以 base64 JSON 帶著
+{
+  const html = await renderMdToHtml('![a](drawio-two-pages.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.ok(html.includes('.drawio-sheetbar'),
+    '多頁時必須注入 sheet bar 的 CSS');
+  const attr = (html.match(/data-drawio-pages="([^"]*)"/) || [])[1];
+  assert.ok(attr, 'sheet bar 需要頁名屬性');
+  assert.deepStrictEqual(
+    JSON.parse(Buffer.from(attr, 'base64').toString('utf8')),
+    ['Architecture', 'Flow'],
+    '頁名以 base64 JSON 帶著 —— 頁名可以含任何字元，不能用分隔字元');
+}
+// 單頁不該付出多頁的代價
+{
+  const html = await renderMdToHtml('![a](single.drawio)\n',
+    { srcDir: path.join(__dirname, 'fixtures') });
+  assert.ok(!html.includes('drawio-sheetbar'),
+    '單頁檔不得出現 sheet bar');
+}
+
 console.log('drawio.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });
