@@ -15,6 +15,32 @@ const CLIENT_SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', '
 
 let browser;
 
+/**
+ * A monotonic millisecond clock, for every DURATION this file measures.
+ *
+ * NEVER `Date.now()` for an interval. `Date.now()` is wall-clock: it is
+ * adjusted by NTP, by a VM resuming, and by the host waking from suspend, and
+ * a run that straddles one of those adjustments gets a duration that is simply
+ * wrong. MEASURED on this branch, from a full-suite run on WSL2 whose clock
+ * resynced mid-session:
+ *
+ *   ⠿ 建立副本（hold=80ms）前提失敗：實測按壓 -6341ms
+ *
+ * A press of minus six seconds. That run went RED, which is the mild half: the
+ * guard refused an impossible number and said so. A jump the other way inflates
+ * `heldMs`, the same guard PASSES, and the row runs with a press that may have
+ * been shorter than the commit round trip — printing OK with zero detection
+ * power, which is this batch's most-repeated failure shape hiding inside the
+ * guard that exists to prevent it.
+ *
+ * `performance.now()` on this side is `perf_hooks.performance`, monotonic since
+ * process start, and it is the same spelling the in-page probes already use
+ * (`window.__renderApplyMs`), so both sides of the CDP boundary measure the
+ * same way. Wall-clock readings — an `mtimeMs` comparison, a timestamp written
+ * into a document — are a different question and still belong to `Date.now()`.
+ */
+const monotonicMs = () => performance.now();
+
 // `extraFiles` (optional): { 'name.drawio': '<xml…>' } written next to doc.md
 // BEFORE the server renders it. Added for the v3.4.0 batch2 Task 6 rows at the
 // end of this file, which need a real referenced file on disk to rewrite from
@@ -404,9 +430,9 @@ async function pressClick(page, selector, holdMs, opts) {
   if (!pressAt) {
     await page.mouse.move(box.x, box.y);
     await page.mouse.down();
-    const t0 = Date.now();
+    const t0 = monotonicMs();
     if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
-    const heldMs = Date.now() - t0;
+    const heldMs = monotonicMs() - t0;
     await page.mouse.up();
     return { heldMs };
   }
@@ -437,9 +463,9 @@ async function pressClick(page, selector, holdMs, opts) {
   const cdp = await page.createCDPSession();
   const ev = { x: pressAt.x, y: pressAt.y, button: 'left', buttons: 1, clickCount: 1 };
   await cdp.send('Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed' }, ev));
-  const t0 = Date.now();
+  const t0 = monotonicMs();
   if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
-  const heldMs = Date.now() - t0;
+  const heldMs = monotonicMs() - t0;
   await cdp.send('Input.dispatchMouseEvent',
     Object.assign({ type: 'mouseReleased' }, ev, { buttons: 0 }));
   await cdp.detach();
@@ -4407,7 +4433,7 @@ async function main() {
       document.dispatchEvent(new Event('selectionchange'));
     }, SEL);
     await new Promise((r) => setTimeout(r, 200));
-    const t0 = Date.now();
+    const t0 = monotonicMs();
     await ctx.page.keyboard.down('Control');
     await ctx.page.keyboard.press('KeyB');
     await ctx.page.keyboard.up('Control');
@@ -4415,7 +4441,7 @@ async function main() {
     // 400ms 窗口【裡面】。
     await ctx.page.keyboard.press('End');
     await ctx.page.keyboard.type('XY');
-    const gapMs = Date.now() - t0;
+    const gapMs = monotonicMs() - t0;
     // 前提：那段間隔真的在窗口內。在慢到 ≥400ms 的機器上這一列會【修前也綠】，
     // 偵測力歸零 —— 這條斷言把那個情境變成一次響亮的失敗。
     assert.ok(gapMs < 400,
@@ -11075,10 +11101,10 @@ async function main() {
       // Wait for the FILE, not for a quiet page: the thing under test is
       // whether the keystroke reached disk, so the disk is what is watched.
       const diskBecomes = async (needle, ms) => {
-        const until = Date.now() + ms;
+        const until = monotonicMs() + ms;
         for (;;) {
           if (disk().indexOf(needle) !== -1) return true;
-          if (Date.now() > until) return false;
+          if (monotonicMs() > until) return false;
           await new Promise((r) => setTimeout(r, 100));
         }
       };

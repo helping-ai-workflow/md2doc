@@ -301,8 +301,20 @@ async function settleEditor(page) {
 // loaded CI runner, the same latent-flake class that failed the v2.9.0
 // publish. The short grace window is kept so scenarios asserting the file did
 // NOT change still give a stray save time to land.
+// `monotonicMs()`, not `Date.now()`, for every deadline and every duration in
+// this file. `Date.now()` is wall-clock and is adjusted under a running process
+// (NTP, a VM resuming, a host waking from suspend); a jump forward retires a
+// deadline early and the wait reports a failure that never happened, a jump
+// back holds it open. MEASURED on this branch, in the sibling suite where the
+// same mistake was load-bearing: a mouse press timed with `Date.now()` came
+// back as **-6341ms** on WSL2 after a clock resync. `performance.now()` here is
+// `perf_hooks.performance` — monotonic from process start — and it is the same
+// spelling the in-page probes use. Wall-clock questions (an `mtimeMs`, a
+// timestamp in a document) still belong to `Date.now()`.
+const monotonicMs = () => performance.now();
+
 async function awaitSaveSettled(page, quietMs = 200) {
-  const deadline = Date.now() + 15000;
+  const deadline = monotonicMs() + 15000;
   for (;;) {
     await settleEditor(page);
     // A Ctrl+S pressed while a commit's /api/render is still in flight issues
@@ -312,7 +324,7 @@ async function awaitSaveSettled(page, quietMs = 200) {
     // go round again if the page became busy inside it.
     await new Promise((r) => setTimeout(r, quietMs));
     const busy = await page.evaluate(() => !!window.__edInflight);
-    if (!busy || Date.now() > deadline) return;
+    if (!busy || monotonicMs() > deadline) return;
   }
 }
 
@@ -2051,8 +2063,8 @@ async function gutterGeometry(page, sel) {
       // Once switchAwayFrom() resolves, undo() proceeds with its OWN
       // legitimate, SEQUENCED render request (never concurrent with the
       // commit's) — wait for it to arrive.
-      const deadline = Date.now() + 5000;
-      while (heldRenderRequests.length === 0 && Date.now() < deadline) {
+      const deadline = monotonicMs() + 5000;
+      while (heldRenderRequests.length === 0 && monotonicMs() < deadline) {
         await new Promise((r) => setTimeout(r, 20));
       }
       assert.strictEqual(renderRequestCount, 2,
