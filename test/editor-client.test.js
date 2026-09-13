@@ -523,16 +523,18 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.ok(!/stack\.markSaved\(\)/.test(save),
     'save() must never mark "wherever the stack happens to be now"');
 
-  // The other half of the same ordering problem: two requests can be
-  // outstanding (Ctrl+S is not debounced and the modal deliberately does not
-  // swallow it), and an older reply landing last would re-baseline over the
-  // newer one's bytes and hand back an older mtimeMs with it.
-  const seqAt = save.indexOf('const seq = ++saveSeq;');
-  assert.notStrictEqual(seqAt, -1, 'save() must number its requests');
-  assert.ok(seqAt < fetchAt, 'before it sends');
-  assert.ok(save.indexOf('seq !== saveSeq') !== -1 &&
-            save.indexOf('seq !== saveSeq') < markAt,
-    'and drop a superseded reply before it touches mtimeMs or the save marker');
+  // fix 4: and NO supersede guard. `save()` briefly dropped a reply when a newer
+  // request existed, on the premise that the newer request's bytes are what disk
+  // ends up holding. The premise is false — the server 409s on any stale
+  // `baseMtimeMs` and `mtimeMs` has one writer, so the second request writes
+  // nothing — and the guard therefore discarded the one reply that described the
+  // file. Two measured failures, both under-warns, both on the ordinary Ctrl+S
+  // path; the driven agreement sweep in test/lineops.test.js is what actually
+  // covers this now, and this line only stops the idea coming back.
+  assert.ok(!/saveSeq/.test(save),
+    'save() must not drop a reply because a newer request exists — a newer ' +
+    'request cannot have written anything (server.js 409s on a stale baseline), ' +
+    'so the dropped reply is the only one that describes disk');
 }
 
 // fix 2 / MUST-FIX 1 — may a wave session's commits be popped? DRIVEN against a

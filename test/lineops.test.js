@@ -381,10 +381,18 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
     assert.strictEqual(st.stack.isDirty(), false, 'and it reads clean, correctly');
   }
 
-  // NEIGHBOUR 4 — two saves outstanding. Each carries its own receipt, so the
-  // later reply establishes the later depth and an earlier reply arriving after
-  // it would establish the earlier one. client.js drops the superseded reply
-  // (see its `saveSeq`); this pins that the receipts themselves do not collide.
+  // NEIGHBOUR 4 — two saves outstanding. Each carries its own receipt, and a
+  // receipt is only ever applied for a reply that actually WROTE (a 200), so
+  // the ordering of replies cannot make the document read clean over bytes disk
+  // does not hold.
+  //
+  // fix 4 correction: this row used to end by justifying a supersede guard in
+  // `save()` — "the later request's bytes are what disk ends up holding". That
+  // premise is false and the guard is gone. The server 409s on any stale
+  // `baseMtimeMs`, and the client's `mtimeMs` has exactly one writer (the 200
+  // branch), so a second request sent while the first is in flight carries a
+  // stale baseline and writes NOTHING. Its reply is a 409, which marks nothing.
+  // The full interleaving is swept exhaustively at the end of this file.
   {
     const st = mk();
     st.edit('para A');
@@ -395,13 +403,6 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
     st.disk = st.lines.join('\n');
     assert.strictEqual(st.stack.markSaved(t2), true, 'the newer receipt is accepted');
     assert.strictEqual(st.stack.isDirty(), false, 'and memory matches disk');
-    // The older reply landing afterwards would rewind the marker to A's depth.
-    // It is not wrong about the past, it is wrong about NOW — which is what the
-    // sequence guard in save() exists to prevent.
-    st.stack.markSaved(t1);
-    assert.strictEqual(st.stack.isDirty(), true,
-      'a stale receipt applied late reads dirty, not clean — the failure of the ' +
-      'sequence guard would be over-warning, never under-warning');
   }
 
   // The no-argument form is unchanged: "right here, right now".
@@ -421,6 +422,124 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
     assert.strictEqual(st.stack.markSaved(token), true);
     assert.strictEqual(st.stack.isDirty(), false);
   }
+}
+
+// ---------------------------------------------------------------------------
+// v3.4.0 batch3 Task 7 fix 4 — the question the suite never asked, asked
+// exhaustively: **does `isDirty()` agree with "memory equals disk"?**
+//
+// Four consecutive full-suite runs were green while a defect sat on the save
+// path — the one path every user takes on every Ctrl+S — because every
+// assertion around it watched a shape (does this line appear, is this call
+// before that one) and none watched the agreement itself. A source-text guard
+// cannot see a wrong premise; this can.
+//
+// The model below is the real one, not a sketch: the real `UndoStack`, the real
+// `replaceLines`, the real server rule (`server.js`'s /api/save answers 409
+// whenever `baseMtimeMs` does not match the file, and writes nothing), and the
+// real client rule (`mtimeMs` has exactly one writer, the 200 branch). Replies
+// may be delivered in either order, so every interleaving of concurrent saves
+// is reached.
+//
+// The invariant is checked only once a sequence has SETTLED — no reply
+// outstanding. While a request is in flight the server may already have written
+// bytes the client has not been told about, and the client cannot know; that
+// window is optimistic by construction, is recorded in the known issues rather
+// than asserted away, and the fix-3 receipt is what makes it close correctly.
+//
+// The CONTROL is the load-bearing half. The same sweep is run against a model
+// that includes the supersede guard `save()` briefly carried, and asserted to
+// find violations — so a green above means the sweep can see this class of
+// defect, not that it cannot see anything.
+// ---------------------------------------------------------------------------
+{
+  const sweep = (withSupersedeGuard, maxLen) => {
+    const deliver = (w, i) => {
+      if (w.inflight.length === 0) return;
+      const r = w.inflight.splice(i, 1)[0];
+      if (r.status !== 200) return;
+      if (withSupersedeGuard && r.seq !== w.saveSeq) return;
+      w.mtimeMs = r.mtimeMs;
+      w.stack.markSaved(r.token);
+    };
+    const gestures = {
+      edit(w) {
+        w.n++;
+        const text = 'p' + w.n;
+        w.stack.push({ startLine: 3, endLine: 3, before: [w.lines[2]], after: [text] });
+        w.lines = replaceLines(w.lines, 3, 3, [text]).lines;
+      },
+      undo(w) { const r = w.stack.undo(w.lines); if (r) w.lines = r.lines; },
+      redo(w) { const r = w.stack.redo(w.lines); if (r) w.lines = r.lines; },
+      send(w) {
+        // Ctrl+S: take the receipt, post, and let the server answer on arrival.
+        const token = w.stack.saveToken();
+        const seq = ++w.saveSeq;
+        if (w.mtimeMs !== w.server.mtime) {
+          w.inflight.push({ status: 409, token, seq });   // writes nothing
+          return;
+        }
+        w.server.content = w.lines.join('\n');
+        w.server.mtime += 1;
+        w.inflight.push({ status: 200, token, seq, mtimeMs: w.server.mtime });
+      },
+      replyFIFO(w) { deliver(w, 0); },
+      replyLIFO(w) { deliver(w, w.inflight.length - 1); },
+    };
+    const names = Object.keys(gestures);
+    const out = { sequences: 0, steps: 0, settledUnder: 0, settledOver: 0,
+                  windowUnder: 0, example: null };
+    const run = (path) => {
+      const w = { stack: new UndoStack(), lines: ['# H', '', 'p0'], mtimeMs: 1000,
+                  server: { content: '# H\n\np0', mtime: 1000 }, inflight: [],
+                  n: 0, saveSeq: 0 };
+      for (const g of path) {
+        gestures[g](w);
+        out.steps++;
+        const agree = w.lines.join('\n') === w.server.content;
+        const dirty = w.stack.isDirty();
+        if (w.inflight.length !== 0) { if (!dirty && !agree) out.windowUnder++; continue; }
+        if (!dirty && !agree) {
+          out.settledUnder++;
+          if (out.example === null) out.example = path.join(' > ');
+        } else if (dirty && agree) out.settledOver++;
+      }
+    };
+    const walk = (path) => {
+      if (path.length > 0) { run(path); out.sequences++; }
+      if (path.length === maxLen) return;
+      for (const n of names) walk(path.concat([n]));
+    };
+    walk([]);
+    return out;
+  };
+
+  // Depth 7 over 6 gestures: 335,922 sequences, 2,284,278 assertion steps.
+  // MEASURED in this session: the whole file runs in 0.62 s, so this is
+  // affordable in a fast suite. That number is a timing, not a budget — if it
+  // grows, the depth is what to lower.
+  const shipped = sweep(false, 7);
+  assert.strictEqual(shipped.sequences, 335922, 'fixture: the sweep must be exhaustive');
+  assert.strictEqual(shipped.steps, 2284278, 'fixture: and every step checked');
+  assert.strictEqual(shipped.settledUnder, 0,
+    'isDirty() must never answer false over a document that differs from disk, ' +
+    'in ANY settled interleaving of edits, undo, redo and concurrent saves. ' +
+    'Got ' + shipped.settledUnder + ', e.g. ' + shipped.example);
+
+  // THE CONTROL: the same sweep against the supersede guard `save()` briefly
+  // carried. It must find violations, or the row above is proving nothing.
+  const guarded = sweep(true, 7);
+  assert.ok(guarded.settledUnder > 0,
+    'the sweep must be able to SEE this class of defect — with the supersede ' +
+    'guard modelled it has to report settled under-warns, or its 0 above is ' +
+    'a statement about the sweep rather than about the code');
+  assert.strictEqual(guarded.settledUnder, 344,
+    'and the count is the measured one. Got ' + guarded.settledUnder +
+    ', first at: ' + guarded.example);
+  assert.ok(/send > undo > send > reply/.test(guarded.example),
+    'the shortest shape it finds is the measured one — a save, an undo, a ' +
+    'second save that 409s, and the FIRST reply then discarded as "superseded". ' +
+    'Got ' + guarded.example);
 }
 
 console.log('lineops.test.js OK');

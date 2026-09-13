@@ -6308,7 +6308,20 @@ async function main() {
     await ctx.page.keyboard.press('KeyS');
     await ctx.page.keyboard.up('Control');
     // 等到請求真的送出去了（而回覆還被押著）再按 Ctrl+Z。
-    await ctx.page.waitForFunction(() => window.__heldSave === 2, { timeout: 8000 });
+    //
+    // 刻意【不】用 `waitForFunction`：這個檔案第一個 throw 就會終止整輪，而
+    // TimeoutError 什麼都不會告訴你 —— 印出來的只有「Timeout 8000ms exceeded」，
+    // 分不出是「Ctrl+S 沒送出去」「攔截沒裝上」還是「已經回來了」。輪詢之後把
+    // 真正的值讀出來斷言，紅的時候就會直接說是哪一種。
+    let held = 0;
+    for (let i = 0; i < 80; i++) {
+      held = await ctx.page.evaluate(() => window.__heldSave);
+      if (held === 2) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.strictEqual(held, 2,
+      'N5-inflight 前提失敗：/api/save 的請求要真的送出去、而且回覆被押著。' +
+      '0 = Ctrl+S 根本沒送出存檔請求，1 = 送出去了但 fetch 還沒 resolve。Got ' + held);
     const onDisk = fs.readFileSync(ctx.mdPath, 'utf8');
     assert.strictEqual(onDisk, '# Doc\n\nAlpha paragraph. INFLIGHT\n',
       'N5-inflight 前提失敗：送出去的那一份必須是撤銷【之前】的位元組，而且已經' +
