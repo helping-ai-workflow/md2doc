@@ -62,11 +62,17 @@ function sleepMs(ms) {
 // child's 'exit' event rather than polling.)
 function waitFor(predicateFn, timeoutMs, label) {
   return new Promise((resolve, reject) => {
-    const start = Date.now();
+    // Monotonic, never `Date.now()`: this is an elapsed time, and wall-clock is
+    // adjusted under a running process (NTP, a VM resuming, a host waking from
+    // suspend). A jump forward makes this give up on a child process that was
+    // answering perfectly well, and the failure it reports — "timeout waiting
+    // for …" — names the wrong cause. MEASURED on this branch in the journey
+    // suite, where the same mistake produced a mouse press of **-6341ms**.
+    const start = performance.now();
     const iv = setInterval(() => {
       const v = predicateFn();
       if (v) { clearInterval(iv); resolve(v); }
-      else if (Date.now() - start > timeoutMs) {
+      else if (performance.now() - start > timeoutMs) {
         clearInterval(iv);
         reject(new Error('timeout waiting for: ' + label));
       }

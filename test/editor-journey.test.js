@@ -10,14 +10,53 @@ const os = require('os');
 const puppeteer = require('puppeteer');
 const { createEditorServer } = require('../lib/editor/server.js');
 const { renderMarkdown } = require('../lib/md2doc.js');
+// The wave rows that ask about the SAVED block parse it back instead of
+// matching its bytes — see `waveLaneNames()` below for what that bought.
+const waveCodec = require('../lib/editor/wave-codec.js');
 
 const CLIENT_SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
 
 let browser;
 
-async function boot(mdText) {
+/**
+ * A monotonic millisecond clock, for every DURATION this file measures.
+ *
+ * NEVER `Date.now()` for an interval. `Date.now()` is wall-clock: it is
+ * adjusted by NTP, by a VM resuming, and by the host waking from suspend, and
+ * a run that straddles one of those adjustments gets a duration that is simply
+ * wrong. MEASURED on this branch, from a full-suite run on WSL2 whose clock
+ * resynced mid-session:
+ *
+ *   ⠿ 建立副本（hold=80ms）前提失敗：實測按壓 -6341ms
+ *
+ * A press of minus six seconds. That run went RED, which is the mild half: the
+ * guard refused an impossible number and said so. A jump the other way inflates
+ * `heldMs`, the same guard PASSES, and the row runs with a press that may have
+ * been shorter than the commit round trip — printing OK with zero detection
+ * power, which is this batch's most-repeated failure shape hiding inside the
+ * guard that exists to prevent it.
+ *
+ * `performance.now()` on this side is `perf_hooks.performance`, monotonic since
+ * process start, and it is the same spelling the in-page probes already use
+ * (`window.__renderApplyMs`), so both sides of the CDP boundary measure the
+ * same way. Wall-clock readings — an `mtimeMs` comparison, a timestamp written
+ * into a document — are a different question and still belong to `Date.now()`.
+ */
+const monotonicMs = () => performance.now();
+
+// `extraFiles` (optional): { 'name.drawio': '<xml…>' } written next to doc.md
+// BEFORE the server renders it. Added for the v3.4.0 batch2 Task 6 rows at the
+// end of this file, which need a real referenced file on disk to rewrite from
+// outside the editor. Every existing call site passes one argument and is
+// unaffected.
+async function boot(mdText, extraFiles, srvOpts) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-journey-'));
   const mdPath = path.join(dir, 'doc.md');
+  if (extraFiles) {
+    for (const name of Object.keys(extraFiles)) {
+      fs.writeFileSync(path.join(dir, name), extraFiles[name], 'utf8');
+    }
+  }
   fs.writeFileSync(mdPath, mdText, 'utf8');
   // createEditorServer() takes a single options object ({ files, clientJs,
   // idleTimeoutMs, listenPort }), not the (paths, opts) shape the original
@@ -25,13 +64,22 @@ async function boot(mdText) {
   // { server, port, urlFor(absPath), close() }, no bare `.url`/`.port`
   // shortcut on the caller's side; the URL for a given file comes from
   // urlFor(), which maps the resolved path back to its /edit/:id index.
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  // `srvOpts` is merged LAST and is opt-in per scenario. Fix round 2
+  // (re-review G10): the Task 6 rows at the end of this file want a longer
+  // idle timeout (they deliberately sit still for two real 10s heartbeats),
+  // and round 1 put that straight into this shared helper — silently
+  // reconfiguring the server for ~60 pre-existing scenarios that had been
+  // running against the production 30s default. Every other scenario now gets
+  // exactly the server it got before.
+  const srv = await createEditorServer(Object.assign({
+    files: [mdPath], clientJs: CLIENT_SRC,
+  }, srvOpts || {}));
   const url = srv.urlFor(mdPath);
-  return { srv, url, mdPath };
+  return { srv, url, mdPath, dir };
 }
 
-async function newPage(mdText) {
-  const b = await boot(mdText);
+async function newPage(mdText, extraFiles, srvOpts) {
+  const b = await boot(mdText, extraFiles, srvOpts);
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', (e) => errs.push(String(e)));
@@ -69,6 +117,57 @@ async function newPage(mdText) {
   // scenario here already waits after its gesture, so in practice it lands;
   // this is a net, not a barrier.
   await page.exposeFunction('__journeyRejection', (msg) => { errs.push(msg); });
+  // Which /api/save requests have been STARTED and which have COMPLETED.
+  //
+  // `saveAndRead()` below used to be a flat `setTimeout(400)`, which is weaker
+  // than the quiescence wait that test/editor-client-runtime.test.js's R10 fix
+  // condemned: Ctrl+S does not issue the save directly — the client resolves
+  // whatever is open with `switchAwayFrom()` and calls `save()` only in that
+  // promise's `.then` — so the 400 ms covers the dispatch only while the box is
+  // idle. MEASURED in this session on the sibling suite: an unloaded save takes
+  // ~249 ms end to end, so 400 ms is ~150 ms of margin for a commit, a render
+  // and a save, and under load the read lands before the write. A positive
+  // assertion then reds on correct product code; the assertions that pin a file
+  // as UNCHANGED pass vacuously, which is worse.
+  //
+  // Ids rather than a count: a `/api/save` already in flight when the snapshot
+  // is taken would satisfy a counter (measured on the sibling suite — released
+  // after 1193 ms on the wrong save), so a waiter asks for an id GREATER than
+  // the sequence it saw before it pressed.
+  //
+  // Only /api/save is wrapped. The render counter this suite never had is not
+  // needed for this, and wrapping less keeps the page's own timing untouched.
+  await page.evaluateOnNewDocument(() => {
+    window.__edSaveSeq = 0;
+    window.__edSaveLanded = [];
+    const origFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+      if (!/\/api\/save\b/.test(url)) return origFetch.call(this, input, init);
+      const id = ++window.__edSaveSeq;
+      let settled = false;
+      const settle = () => { if (!settled) { settled = true; window.__edSaveLanded.push(id); } };
+      return origFetch.call(this, input, init).then((res) => {
+        // Released when the BODY has been read — or, for the 409 branch that
+        // answers off the status alone and never touches the body, by a clone
+        // armed alongside it. Both are strictly after the server has answered.
+        let asked = false;
+        ['json', 'text', 'arrayBuffer', 'blob', 'formData'].forEach((m) => {
+          if (typeof res[m] !== 'function') return;
+          const orig = res[m].bind(res);
+          res[m] = function () {
+            asked = true;
+            return orig().then((v) => { settle(); return v; }, (e) => { settle(); throw e; });
+          };
+        });
+        try {
+          const arm = () => { if (!asked) settle(); };
+          res.clone().arrayBuffer().then(() => setTimeout(arm, 0), () => setTimeout(arm, 0));
+        } catch (e) { settle(); }
+        return res;
+      }, (err) => { settle(); throw err; });
+    };
+  });
   await page.evaluateOnNewDocument(() => {
     window.addEventListener('unhandledrejection', (e) => {
       const r = e && e.reason;
@@ -164,11 +263,48 @@ const assertRoute = (r, primed, where) => {
   }
 };
 
-async function saveAndRead(ctx) {
+/**
+ * Press Ctrl+S and return once THAT save has landed.
+ *
+ * See the instrumentation in `newPage()` for why a fixed sleep was the wrong
+ * shape. Never returns silently on a timeout: the one documented path where
+ * Ctrl+S issues no save at all is a commit that failed, and that path has
+ * already put a banner on screen — anything else is a real defect and reading
+ * the file past it would report it as "the gesture did nothing".
+ */
+async function pressSaveAndLand(ctx) {
+  const startedBefore = await ctx.page.evaluate(() => window.__edSaveSeq || 0);
   await ctx.page.keyboard.down('Control');
   await ctx.page.keyboard.press('KeyS');
   await ctx.page.keyboard.up('Control');
-  await new Promise((r) => setTimeout(r, 400));
+  try {
+    await ctx.page.waitForFunction(
+      (n) => (window.__edSaveLanded || []).some((id) => id > n),
+      { timeout: 15000 }, startedBefore);
+  } catch (e) {
+    const banner = await ctx.page.evaluate(() => {
+      const el = document.querySelector('.ed-conflict');
+      return el ? (el.textContent || '') : null;
+    });
+    if (banner === null) {
+      throw new Error('pressSaveAndLand: Ctrl+S produced no completed /api/save in 15s, ' +
+        'and no banner explains why — the save really did not happen. ' +
+        'Original: ' + (e && e.message));
+    }
+  }
+  // The paint/settle grace the old fixed sleep also provided, kept because some
+  // rows read the DOM — a banner, a title — straight after the save rather than
+  // the file. The old shape slept a flat 400 ms from the KEYPRESS, so on a
+  // landing measured at 181 ms it left ~220 ms of post-response settle; 150 ms
+  // would have been a small regression for exactly those rows, on exactly the
+  // loaded box this whole change is about. 250 ms restores that margin and the
+  // helper is still event-driven overall (it leaves as soon as the save lands
+  // plus this, instead of always sleeping 400 ms).
+  await new Promise((r) => setTimeout(r, 250));
+}
+
+async function saveAndRead(ctx) {
+  await pressSaveAndLand(ctx);
   return fs.readFileSync(ctx.mdPath, 'utf8');
 }
 
@@ -297,9 +433,9 @@ async function pressClick(page, selector, holdMs, opts) {
   if (!pressAt) {
     await page.mouse.move(box.x, box.y);
     await page.mouse.down();
-    const t0 = Date.now();
+    const t0 = monotonicMs();
     if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
-    const heldMs = Date.now() - t0;
+    const heldMs = monotonicMs() - t0;
     await page.mouse.up();
     return { heldMs };
   }
@@ -330,9 +466,9 @@ async function pressClick(page, selector, holdMs, opts) {
   const cdp = await page.createCDPSession();
   const ev = { x: pressAt.x, y: pressAt.y, button: 'left', buttons: 1, clickCount: 1 };
   await cdp.send('Input.dispatchMouseEvent', Object.assign({ type: 'mousePressed' }, ev));
-  const t0 = Date.now();
+  const t0 = monotonicMs();
   if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
-  const heldMs = Date.now() - t0;
+  const heldMs = monotonicMs() - t0;
   await cdp.send('Input.dispatchMouseEvent',
     Object.assign({ type: 'mouseReleased' }, ev, { buttons: 0 }));
   await cdp.detach();
@@ -694,7 +830,17 @@ async function main() {
     await new Promise((r) => setTimeout(r, 400));
     const b = await ctx.page.evaluate(() => ({
       active: document.activeElement ? document.activeElement.tagName : null,
-      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+      // Review I2: `save` excluded — it is one of NO_BLOCK_ALLOWED
+      // (lib/editor/toolbar-model.js) and, unlike the other four members of
+      // that set, its OWN disabled flag also tracks ctx.dirty rather than
+      // being unconditionally live. A gesture that dirties the document (a
+      // commit, not just a save) would otherwise make a genuine collapse-to-
+      // no-block read as 5 instead of 4 and slip past every `> 4` sentinel
+      // in this file — counting it back in restores the ORIGINAL meaning
+      // ("did the toolbar collapse to its structural no-block floor")
+      // this count has always pinned.
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+        .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(b.active, 'BODY', 'B 態轉換後焦點不得掉到 BODY');
     assert.ok(b.enabled > 4, 'B 態轉換後工具列不得塌成 4 顆，got ' + b.enabled);
@@ -744,7 +890,10 @@ async function main() {
     await new Promise((r) => setTimeout(r, 500));
     const h = await ctx.page.evaluate(() => ({
       active: document.activeElement ? document.activeElement.tagName : null,
-      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+      // Review I2: `save` excluded — see the identical comment on the
+      // conversion scenario above for why.
+      enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+        .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(h.active, 'BODY', 'H▾ 改既有標題層級後焦點不得掉到 BODY');
     assert.ok(h.enabled > 4, 'H▾ 改既有標題層級後工具列不得塌成 4 顆，got ' + h.enabled);
@@ -1556,7 +1705,7 @@ async function main() {
 
   // ══ V2: 工具列 + ⠿ 選單全矩陣 ═════════════════════════════════════════
   // 族群級的網：Task 3 只修了 convertBlockViaMenu() 一條路徑，這一段逐一
-  // 真實點擊 22 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
+  // 真實點擊 23 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
   // 按完之後還有著力點」。
   //
   // 每一列的「必需答案」是量測出來的，不是猜的（量測腳本見 task-11 報告）：
@@ -1566,13 +1715,17 @@ async function main() {
   //             清單項）、ed-wys-cell（表格儲存格）或 ed-raw（MD 原始碼
   //             textarea）三者之一；而且工具列沒有塌回「沒有瞄準任何 block」
   //             的 4 顆。
-  //   bar-only  目標型別【依設計】沒有可聚焦的編輯面 —— client.js 的
-  //             convertBlockViaMenu() 自己就寫著「降級目標（quote / code）
-  //             沒有可聚焦編輯面，focusBlockAtLine 會安靜 no-op；把
-  //             toolbarBlockEl 指回轉換後的 block，工具列才不會塌成 4 顆」。
-  //             所以 BODY 是合法答案，但工具列必須還瞄著那個 block —— 這裡
-  //             不只數按鈕數，還真的再按一次「在下方插入區塊」並確認游標落
-  //             在新段落上，證明那個「還瞄著」是真的能用而不只是計數好看。
+  //   bar-only  目標沒有可聚焦的編輯面、也沒有 raw editor 可以退回去 —— BODY
+  //             是合法答案，但工具列必須還瞄著那個 block。這裡不只數按鈕數，
+  //             還真的再按一次「在下方插入區塊」並確認游標落在新段落上，
+  //             證明那個「還瞄著」是真的能用而不只是計數好看。
+  //             ⚠ quote / code / line 曾經是這一類（convertBlockViaMenu()
+  //             自己寫著「降級目標沒有可聚焦編輯面，focusBlockAtLine 會安靜
+  //             no-op」），Task 9 backlog #6 之後不再是 —— 那句話現在只描述
+  //             focusBlockAtLine() 本身的行為，`restoreAfterStructuralOp()`
+  //             接著開的 raw editor 把落點升級成 caret（見 TB_ROWS / GUTTER_ROWS
+  //             各自的 review M4 註解）。目前唯一還在用這個答案的是 V2d
+  //             的「🔗 in a table cell」。
   //   source    離開 edit 模式；游標必須在 .ed-source textarea 裡，工具列
   //             此時合法地只剩模式切換一顆，所以改為斷言再按一次能回到
   //             edit 且工具列復原。
@@ -1632,7 +1785,14 @@ async function main() {
   const readLeverage = (page) => page.evaluate(() => ({
     active: document.activeElement ? document.activeElement.tagName : null,
     activeClass: document.activeElement ? String(document.activeElement.className) : '',
-    enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+    // Review I2: `save` excluded from this count — see the identical
+    // comment on the "conversion restores focus" scenario earlier in this
+    // file for why (NO_BLOCK_ALLOWED member whose OWN disabled flag tracks
+    // ctx.dirty, which would otherwise let a dirty-but-genuinely-collapsed
+    // toolbar read as 5 and slip every `<= 4` / `> 4` sentinel this
+    // function feeds — TB_ROWS' checkLeverage() among them).
+    enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+      .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     mode: document.body.getAttribute('data-ed-mode'),
   }));
 
@@ -1771,9 +1931,53 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       return r;
     })();
-    assert.strictEqual(ids.length, 22, '工具列應為 22 顆，got ' + ids.length);
+    assert.strictEqual(ids.length, 23, '工具列應為 23 顆，got ' + ids.length);
 
     const TB_ROWS = [
+      // v3.4.0 §3: `ctx.dirty` is wired now (lib/editor/client.js's
+      // toolbarContext()/documentIsDirty()) — this replaces the temporary
+      // 'disabled' tripwire that stood here through Task 3 (it warned this
+      // exact day would come: "this row must go red ... and migrate to
+      // whatever real answer clicking Save produces").
+      //
+      // The arrange deliberately leaves an UNCOMMITTED edit sitting in the
+      // open burst (typed, never blurred/committed) rather than reusing
+      // v2TypeAndCommit (the undo/redo rows below): that is the HARDER of
+      // the two paths into a dirty document. Pressing save must resolve
+      // (commit + re-render) this very burst before save() itself ever
+      // runs — same precondition Ctrl+S already has, see save()'s own
+      // dispatch comments — and that commit's render is exactly the class
+      // of render that used to strand the caret on BODY: unconditionally
+      // for quote/code/line and for undo/redo/image whenever a burst was
+      // left open (activateToolbarCursor()'s own comment) — both now fixed
+      // (Task 9 backlog #6: the raw-editor rescue for quote/code/line, and
+      // undoViaToolbar()/redoViaToolbar()/imageViaToolbar() for the other
+      // three). `save` must not become a fourth name needing the same fix,
+      // and `answer: 'caret'` below is exactly the claim that it does not.
+      { id: 'save',         state: 'sel',  answer: 'caret',
+        arrange: async (ctx) => {
+          await ctx.page.keyboard.type('ZZ'); // replaces the pre-selected "Alpha"
+          await new Promise((r) => setTimeout(r, 250));
+        },
+        // The click must not itself change what is on screen — the
+        // uncommitted "ZZ" was already visible before the press, and a
+        // commit-then-save round-trip re-renders the same bytes.
+        //
+        // Review I3: the `disk` predicate below is NOT what proves the
+        // click wrote anything — saveAndRead() (the loop's shared `row.disk`
+        // runner) issues its OWN Ctrl+S before reading the file, so `disk`
+        // would read back correct bytes even if the save BUTTON did
+        // nothing at all. The actual proof that the CLICK itself persisted
+        // the commit is the direct `fs.readFileSync()` the main loop does
+        // for this row specifically, BEFORE saveAndRead() ever runs (see
+        // "review I3" in the loop body, right after the press). `disk`
+        // stays as a secondary, harmless confirmation of the same bytes
+        // post-Ctrl+S.
+        effect: (b, a) => same(b, a) ? null
+          : '按下 save 不應該改變畫面上的任何區塊內容，got before ' +
+            JSON.stringify(b) + ' after ' + JSON.stringify(a),
+        disk: (d) => d === '# H\n\nZZ bravo charlie delta.\n\nBravo paragraph.\n'
+          ? null : '按下工具列的 save 必須先把還沒提交的編輯提交，再把結果存到磁碟' },
       { id: 'undo',         state: 'sel',  answer: 'caret',
         arrange: v2TypeAndCommit,
         effect: (b, a) => b.text !== V2_TEXT_ZZ
@@ -1794,10 +1998,15 @@ async function main() {
       { id: 'headings',     state: 'sel',  answer: 'caret',
         effect: (b, a) => !a.toolbarMenu ? 'H▾ 必須開出 .ed-toolbar-menu'
           : (same(b, a) ? null : '只開選單不得動到文件，got ' + a.types + ' / ' + a.text) },
-      { id: 'quote',        state: 'sel',  answer: 'bar-only',
+      // Task 9 review M4: bar-only → caret. backlog #6's fix
+      // (restoreAfterStructuralOp()'s `allowRawEditRescue`) now opens the
+      // converted block's own raw editor when it lands with no focusable
+      // WYSIWYG surface — MEASURED (review): activeClass 'ed-raw',
+      // enabled 15, mode 'edit', matching 'caret''s own shape exactly.
+      { id: 'quote',        state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,blockquote,paragraph' ? null
           : '選取所在的段落必須變成 blockquote，got ' + a.types },
-      { id: 'code',         state: 'sel',  answer: 'bar-only',
+      { id: 'code',         state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,code,paragraph' ? null
           : '選取所在的段落必須變成 code block，got ' + a.types },
       // ul / ol / task 在 DOM 上都是 li，分不出來 —— 那三列各自靠 disk() 的
@@ -1894,7 +2103,10 @@ async function main() {
           ? '必須多出一個段落，got ' + a.types
           : (a.text === 'H | Alpha bravo charlie delta. |  | Bravo paragraph.' ? null
             : '新段落必須落在游標那個 block 【後面】，got ' + a.text) },
-      { id: 'line',         state: 'sel',  answer: 'bar-only',
+      // Task 9 review M4: bar-only → caret. insertBlockBelow()'s own
+      // `kind === 'line'` branch now opens the new hr's raw editor — same
+      // MEASURED shape as quote/code above.
+      { id: 'line',         state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,paragraph,hr,paragraph' ? null
           : '必須在游標那個 block 後面長出一條分隔線，got ' + a.types },
       // 圖片按鈕開的是一顆 hidden 的 input[type=file]（pickAndInsertImage()
@@ -1930,13 +2142,41 @@ async function main() {
       const dis = await ctx.page.evaluate((i) =>
         document.querySelector('[data-ed-tb="' + i + '"]').disabled, row.id);
       if (dis) {
-        bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
+        // `answer: 'disabled'` is the one legitimate reason a row may find
+        // its button disabled (the `save` row used it through Task 3, before
+        // ctx.dirty wiring landed — no row currently needs it, but the
+        // branch stays: a future button that is legitimately disabled on
+        // every fixture this matrix can construct has somewhere to say so).
+        // Every other row still treats this branch as the bug it always
+        // was: a disabled button means the row clicked nothing and its whole
+        // verdict is a false green.
+        if (row.answer !== 'disabled') {
+          bad.push(row.id + ' → 在 ' + row.state + ' 狀態下是 disabled，這一列什麼都沒點到（空跑的綠燈）');
+        }
+        await ctx.page.close(); ctx.srv.close();
+        continue;
+      }
+      if (row.answer === 'disabled') {
+        bad.push(row.id + ' → 預期在 ' + row.state + ' 狀態下維持 disabled，但現在是 enabled —— ' +
+          'client.js 的 ctx.dirty 佈線任務顯然已經上線，這一列必須搬到它實際點下去的答案');
         await ctx.page.close(); ctx.srv.close();
         continue;
       }
       const before = await docSnap(ctx.page);
       await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
+      // Review I3: read the file directly HERE, before anything below gets a
+      // chance to press Ctrl+S of its own accord (saveAndRead(), which
+      // `row.disk` runs through further down, issues its own Ctrl+S — a
+      // save button that did nothing would still pass that check). This is
+      // the one assertion that actually proves THE CLICK wrote the bytes.
+      if (row.id === 'save') {
+        const clickOnlyBytes = fs.readFileSync(ctx.mdPath, 'utf8');
+        if (clickOnlyBytes !== '# H\n\nZZ bravo charlie delta.\n\nBravo paragraph.\n') {
+          bad.push('save → 按下按鈕本身（在任何 Ctrl+S 之前）必須已經把提交後的內容存到磁碟，got:\n' +
+            clickOnlyBytes);
+        }
+      }
       const after = await docSnap(ctx.page);
       const noEffect = row.effect(before, after);
       if (noEffect) {
@@ -1983,8 +2223,13 @@ async function main() {
       { label: '項目符號列表',  answer: 'caret',    convert: true },
       { label: '編號列表',     answer: 'caret',    convert: true },
       { label: '待辦清單',     answer: 'caret',    convert: true },
-      { label: '程式碼',       answer: 'bar-only', convert: true },
-      { label: '引用',        answer: 'bar-only', convert: true },
+      // Task 9 review M4 (found while fixing the identical staleness in
+      // TB_ROWS above): bar-only → caret. The ⠿ menu's own 轉換成 submenu
+      // calls the SAME convertBlockViaMenu() the toolbar's quote/code
+      // buttons do, so backlog #6's `allowRawEditRescue` fix applies here
+      // too — MEASURED, activeClass 'ed-raw', enabled 15, mode 'edit'.
+      { label: '程式碼',       answer: 'caret', convert: true },
+      { label: '引用',        answer: 'caret', convert: true },
     ];
     // 覆蓋率守衛：⠿ 的葉節點集合必須恰好等於上表。多一項少一項都要有人決定
     // 它的必需答案，而不是安靜地不被測到。
@@ -2101,6 +2346,11 @@ async function main() {
         'V2c(dirty=' + dirty + '): 按到一顆停用的按鈕不得帶走游標，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2c(dirty=' + dirty + '): 游標必須還在原來那個編輯面上，got ' + JSON.stringify(st));
+      // v3.4.0 §3 / review I2: stays 15 in BOTH branches — readLeverage()'s
+      // `enabled` deliberately excludes `save` (see its own comment) so
+      // this count keeps meaning exactly what it always meant here
+      // ("clicking a DISABLED button changes nothing"), independent of
+      // whether typing 'XY' above also lit the save button itself.
       assert.strictEqual(st.enabled, 15,
         'V2c(dirty=' + dirty + '): 工具列不得改變 —— 沒有 commit、沒有 render，' +
         'got ' + JSON.stringify(st));
@@ -2319,6 +2569,9 @@ async function main() {
       await ctx.page.keyboard.type('X');          // 髒 burst：switchAwayFrom() 會提交＋重繪
       await new Promise((r) => setTimeout(r, 250));
       const before = await readLeverage(ctx.page);
+      // review I2: stays 15 — readLeverage()'s `enabled` deliberately
+      // excludes `save` (see its own comment), so typing 'X' lighting it up
+      // does not move this count.
       assert.strictEqual(before.enabled, 15,
         'V2g(' + name + ') 前提：打字後工具列應是 15 顆，got ' + JSON.stringify(before));
       if (shift) await ctx.page.keyboard.down('Shift');
@@ -2462,7 +2715,13 @@ async function main() {
       const st = await ctx.page.evaluate(() => ({
         active: document.activeElement ? document.activeElement.tagName : null,
         activeClass: document.activeElement ? String(document.activeElement.className || '') : '',
-        enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn')).filter((x) => !x.disabled).length,
+        // Review I2: `save` excluded — see the identical comment on the
+        // "conversion restores focus" scenario earlier in this file for
+        // why. This fixture types 'X' before reaching this scenario (it is
+        // what the C1 primed variant needs), which would otherwise light
+        // `save` and hide a real collapse-to-no-block behind a count of 5.
+        enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
+          .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
         banner: (document.querySelector('.ed-conflict') || {}).textContent || '',
       }));
       assertRoute(await patchRoutes(ctx), primed, 'V2h(' + name + ')');
@@ -2657,8 +2916,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十四個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十四個 `position: fixed` 宣告（另有 9 處是註解裡的散文
+  // ══ V3: 十六個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十六個 `position: fixed` 宣告（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -2710,6 +2969,32 @@ async function main() {
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
+    // v3.4.0 batch3 Task 6。兩者都由 `journey: wave/T6j` 這一列驅動（在本檔
+    // 尾端的 wave 區塊裡，因為它需要那邊的 fixture 與開啟手勢）。
+    //
+    // .ed-wave-edit-btn = gone：它的座標是從被 hover 的那張圖的
+    //   getBoundingClientRect() 算出來的【視窗座標】，捲動之後就指向錯的東西
+    //   ——跟 .ed-te-grip 同一個家族。client.js 的 scroll listener 直接把它收掉。
+    //
+    // .ed-wave-overlay = live：`inset: 0` 的 modal，幾何與捲動無關，而且使用者
+    //   當下必須還能操作它。
+    //
+    // ⚠ 疊放關係（本 session 實測，不是推論）：`.ed-wave-overlay` 是
+    //   z-index 998，`.ed-conflict` 是 999，所以**磁碟衝突橫幅蓋在波形編輯器
+    //   上面**——overlay 開著時把橫幅升起來，elementFromPoint 打在橫幅矩形
+    //   中心拿到的是橫幅自己的 <button>（`inBanner: true`），滑鼠點得到。
+    //   鍵盤也點得到：overlay 的 focus trap 的範圍**刻意不是 overlay 自己**，
+    //   而是「modal 這一層」＝ overlay ＋ 現場的每一條 .ed-conflict。
+    //   ⚠ 這裡**刻意不釘按鍵次數**。前一版寫「Tab 第 32 下」，那個數字是
+    //   focusable 名單的函數（本檔 fixture 目前 49 個），fixture 一改就漂，
+    //   而且沒有任何斷言在看它——量到的是 47（T6k 的合成 banner，接在它整圈
+    //   走完之後）與 50（T6l 的真 banner，從記載的起點算）。要斷言的是
+    //   「到得了」，那由 `wave/T6k` 與 `wave/T6l` 各自斷言，不是由一個註解裡
+    //   的數字。
+    //   這一條不是可有可無的：橫幅是使用者解決磁碟衝突的唯一出口，而這個分支
+    //   在 batch 2 已經為「一個 fixed 浮層蓋掉它」付過一次代價。
+    { sel: '.ed-wave-edit-btn',        after: 'gone' },
+    { sel: '.ed-wave-overlay',         after: 'live' },
   ];
   {
     // 宣告 vs 散文：先把註解整個抹掉，再找 `position: fixed`。
@@ -3002,10 +3287,13 @@ async function main() {
     console.log('journey: T11-2 step5 source mode hides the drawer TOC and search-results, keeps reader-tools — OK');
   }
 
-  // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時）──────────
-  // 實測：抽屜打開時 body 仍然可以捲（overflow 是 `clip visible`，scrollY
-  // 真的從 0 走到 1938），而兩者被捲動會動到的那個軸都定死在視窗上，所以
-  // 捲動之後位置一格都沒動：
+  // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時仍可見）──────
+  // window.scrollBy() cannot stand in for a real gesture under
+  // overflow:hidden — see the lightbox lock row below, which measured this
+  // first: it moves the page BY DEFINITION regardless of the CSS lock, so it
+  // is the right tool for "does the overlay survive a scroll" and the wrong
+  // one for "is scrolling actually blocked". This row keeps window.scrollBy()
+  // for exactly the former question; the lock itself is a separate row below.
   //   .sidebar-scrim   `inset: 0` —— 四個邊都定死。
   //   .reader-sidebar  只定死 top / left / bottom 三個邊（lib/md2doc.js
   //                    :2104），寬度是 `width: 85%; max-width: 360px`。
@@ -3034,6 +3322,95 @@ async function main() {
     }
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .sidebar-scrim / .reader-sidebar stay live across a scroll — OK');
+  }
+
+  // ── lock：窄視窗抽屜打開時真實手勢不得捲動底下的文件 ────────────────
+  // Task 11 (backlog #12): body[data-sidebar-open] / html[data-sidebar-open]
+  // both go `overflow: hidden`, mirroring the lightbox's own two-rule shape
+  // a few hundred lines below (body[data-lightbox-open] /
+  // html[data-lightbox-open], next to the 'overflow-x: clip' comment) and for
+  // the identical reason: documentElement, not body, is the element a real
+  // gesture scrolls, so a body-only rule would not have closed the gap. JS
+  // mirrors data-sidebar-open onto documentElement in setSidebarOpen(),
+  // matching openLightbox/closeLightbox.
+  //
+  // This is a MISSING lock, not a defeated one: there was never any rule
+  // here before this task, and the row above never covered it — it only
+  // ever asked whether the overlays kept their viewport position, using
+  // window.scrollBy(), which (per the comment on that row) moves the page
+  // regardless of any lock. PageDown / End go through page.keyboard.press(),
+  // which drives the real input pipeline the lock is meant to stop.
+  {
+    const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
+    await ctx.page.setViewport({ width: 800, height: 800 });
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Precondition: the same PageDown must move the page BEFORE the drawer
+    // opens. Without this, a fixture that stopped being taller than the
+    // viewport would leave scrollY at 0 before and after, and the
+    // locked-state assertions below would pass for the wrong reason.
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const preOpenY = await ctx.page.evaluate(() => window.scrollY);
+    assert.ok(preOpenY > 0,
+      '前提失敗：抽屜關著時 PageDown 沒有真的捲動文件（scrollY=' + preOpenY +
+      '），下面「鎖住」的斷言測不到東西');
+
+    // Review round 2, M3: open the drawer while scrollY is still NON-zero
+    // (deliberately do NOT reset to 0 first) and assert it does not move.
+    // `overflow: hidden` is a hold-in-place lock — it does not itself alter
+    // scroll position — but a `position: fixed`-based lock (a plausible
+    // future rewrite) WOULD snap the page back to the top when engaged, and
+    // every assertion below resets to 0 before checking, so none of them
+    // would ever notice that regression without this one.
+    // Final-review C1: `.sidebar-toggle` is `display: none` in edit mode
+    // (T11-2 ruling, MEASURED above at line ~3038-3040 — NOT merely occluded
+    // by `.ed-toolbar`'s higher z-index, an earlier draft of this comment's
+    // claim, now retracted). The toolbar's ☰ outline button
+    // (`.ed-toolbar [data-ed-tb="outline"]`) is the only entry point a real
+    // edit-mode user has to this drawer, so drive the real one instead of a
+    // DOM click on a button the user can never reach.
+    await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar [data-ed-tb="outline"]').click());
+    await new Promise((r) => setTimeout(r, 450));
+    const open = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
+    assert.notStrictEqual(open, null, '前提失敗：抽屜沒有打開');
+    const yAtOpen = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(yAtOpen, preOpenY,
+      '打開抽屜本身不得移動捲動位置（不是 position:fixed 那種會把頁面拉回頂端的鎖法），' +
+      'got before=' + preOpenY + ' after=' + yAtOpen);
+
+    await ctx.page.evaluate(() => window.scrollTo(0, 0));
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterPageDown = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterPageDown, 0,
+      '抽屜開著時 PageDown 不得捲動底下的文件，got ' + afterPageDown);
+
+    // End jumps straight to the bottom instead of advancing by a viewport at
+    // a time — a different code path from PageDown, checked separately.
+    await ctx.page.keyboard.press('End');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterEnd = await ctx.page.evaluate(() => window.scrollY);
+    assert.strictEqual(afterEnd, 0,
+      '抽屜開著時 End 不得捲動底下的文件，got ' + afterEnd);
+
+    // Closing the drawer must release the lock — otherwise the fix would
+    // have traded one stuck state (unlocked-forever) for another
+    // (locked-forever).
+    await ctx.page.evaluate(() => document.querySelector('.sidebar-scrim').click());
+    await new Promise((r) => setTimeout(r, 300));
+    const closedAttr = await ctx.page.evaluate(() => document.body.getAttribute('data-sidebar-open'));
+    assert.strictEqual(closedAttr, null, '抽屜必須真的關上，scrim 點擊沒有生效');
+    await ctx.page.keyboard.press('PageDown');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterClose = await ctx.page.evaluate(() => window.scrollY);
+    assert.ok(afterClose > 0,
+      '抽屜關上後 PageDown 必須恢復正常捲動，got ' + afterClose);
+
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the sidebar drawer actually locks the page behind it — OK');
   }
 
   // ── live：.lightbox ─────────────────────────────────────────────────
@@ -4059,7 +4436,7 @@ async function main() {
       document.dispatchEvent(new Event('selectionchange'));
     }, SEL);
     await new Promise((r) => setTimeout(r, 200));
-    const t0 = Date.now();
+    const t0 = monotonicMs();
     await ctx.page.keyboard.down('Control');
     await ctx.page.keyboard.press('KeyB');
     await ctx.page.keyboard.up('Control');
@@ -4067,7 +4444,7 @@ async function main() {
     // 400ms 窗口【裡面】。
     await ctx.page.keyboard.press('End');
     await ctx.page.keyboard.type('XY');
-    const gapMs = Date.now() - t0;
+    const gapMs = monotonicMs() - t0;
     // 前提：那段間隔真的在窗口內。在慢到 ≥400ms 的機器上這一列會【修前也綠】，
     // 偵測力歸零 —— 這條斷言把那個情境變成一次響亮的失敗。
     assert.ok(gapMs < 400,
@@ -5731,10 +6108,10 @@ async function main() {
   }
 
   // ── N5: 打了字還沒離開 block 時，關掉分頁必須被攔 ──────────────────
-  // burst 把使用者打的字留在 DOM 裡直到它自己收掉，而 `stack.dirtyDepth`
-  // 是 `_done.length - _savedDepth`（lineops.js），要等 undo stack 被推入／
-  // 彈出一個 op、或存檔重訂基準，它才會動 —— 打字當下這些都還沒發生，所以
-  // 「打了字、還沒離開這個 block」在它眼中是乾淨的。
+  // burst 把使用者打的字留在 DOM 裡直到它自己收掉，而 `stack.isDirty()`
+  // （lineops.js）問的是 undo stack 現在站的位置是不是上一次存檔寫出去的那個，
+  // 要等 undo stack 被推入／彈出一個 op、或存檔重訂基準，它才會動 —— 打字當下
+  // 這些都還沒發生，所以「打了字、還沒離開這個 block」在它眼中是乾淨的。
   // MEASURED at 2519204（這一列還沒進去的時候）：
   //   mid-burst   title "doc"    navBlocked false   page.url() "about:blank"
   //   blur 之後    title "● doc"  navBlocked true    page.url() 沒有變
@@ -5856,6 +6233,263 @@ async function main() {
       'N5 存檔：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
+  // ── N5-undo: 撤銷到存檔點【之前】，再打一筆，不得讓文件回報成乾淨的 ────
+  //
+  // v3.4.0 batch3 Task 7 fix 2。這是一個【既有】缺陷，v3.3.0 就在線上，而且
+  // 整條路徑跟波形編輯器一點關係都沒有 —— `_savedDepth` 是一個指向 undo stack
+  // 的絕對索引，歷史一旦倒退到它前面再長出別的分支，深度算術就會從下面走回 0。
+  // MEASURED（修之前）：打字、提交、Ctrl+S、Ctrl+Z、再打一筆普通的編輯 ——
+  // `documentIsDirty()` 回 false、● 熄掉、存檔鈕變灰、beforeunload 不再攔，
+  // 衝突 banner 的 Reload 會把「被撤銷掉的那次存檔」跟「新打的這一筆」一起丟掉。
+  //
+  // 這一列走的是離站對話框，跟 N5 家族其他列同一支觀測器。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' ONE');
+    await new Promise((r) => setTimeout(r, 200));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph. ONE\n',
+      'N5-undo 前提失敗：第一筆必須真的存進磁碟，got ' + JSON.stringify(disk));
+    assert.strictEqual((await ctx.page.title()).indexOf('●'), -1,
+      'N5-undo 前提失敗：存完之後 ● 要先熄掉');
+
+    // 撤銷到存檔點之前。記憶體從此跟磁碟不一樣。
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 1200));
+    const undone = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.strictEqual(undone.text.indexOf('ONE'), -1,
+      'N5-undo 前提失敗：Ctrl+Z 要真的退掉那一筆');
+    assert.strictEqual(undone.title.indexOf('●'), 0,
+      'N5-undo 前提失敗：退到存檔點之前就必須是髒的，got ' + JSON.stringify(undone.title));
+
+    // 一筆普通的編輯 —— 修之前就是這一發把髒度從 -1 走回 0 的。
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.type(' TWO');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 1200));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.ok(after.text.indexOf('TWO') !== -1,
+      'N5-undo 前提失敗：第二筆要真的在畫面上');
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), disk,
+      'N5-undo 前提失敗：磁碟上還是第一筆那一份 —— 記憶體跟磁碟真的不一樣');
+    assert.strictEqual(after.title.indexOf('●'), 0,
+      'N5-undo：記憶體跟磁碟不一樣的時候 ● 不得熄掉，got ' + JSON.stringify(after.title));
+
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(navBlocked, true,
+      'N5-undo：離站必須被攔 —— 修之前這裡連一個對話框都不會跳，Reload 直接把' +
+      '兩筆都丟掉');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-undo：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-undo an undo past a save point cannot make a later edit read clean — OK');
+  }
+  // ── N5-inflight: 存檔來回途中按 Ctrl+Z，回覆到達時不得把文件標成已存檔 ──
+  //
+  // v3.4.0 batch3 Task 7 fix 3。也是【既有】缺陷：`markSaved()` 以前是在 200
+  // 到達那一刻才去讀 undo stack 的深度，而一次存檔來回是好幾百毫秒 —— 中間按
+  // Ctrl+Z 是很平常的事。MEASURED（修之前）：回覆把「撤銷之後」的深度當成存檔
+  // 點，三道網同時失效 —— ● 熄掉、beforeunload 不再攔、而且 `mtimeMs` 才剛被
+  // 更新，所以連衝突檢查也不會擋。關掉分頁就把使用者親手撤銷掉的那筆編輯留在
+  // 磁碟上。
+  //
+  // 窗口是用「延後 /api/save 的【回覆】」做出來的，不是靠時間賽跑：請求照常
+  // 立刻送出（送出去的位元組因此是撤銷【之前】那一份，這正是本列的前提），
+  // 只有 resolve 被押後。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const orig = window.fetch;
+      window.__heldSave = 0;
+      window.fetch = function (input, init) {
+        const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+        if (/\/api\/save\b/.test(url) && window.__heldSave === 0) {
+          window.__heldSave = 1;
+          // 送出是立刻的；只有回覆被押後。
+          return orig.call(this, input, init).then((res) => new Promise((r) => {
+            window.__heldSave = 2;
+            setTimeout(() => r(res), 2500);
+          }));
+        }
+        return orig.call(this, input, init);
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' INFLIGHT');
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyS');
+    await ctx.page.keyboard.up('Control');
+    // 等到請求真的送出去了（而回覆還被押著）再按 Ctrl+Z。
+    //
+    // 刻意【不】用 `waitForFunction`：這個檔案第一個 throw 就會終止整輪，而
+    // TimeoutError 什麼都不會告訴你 —— 印出來的只有「Timeout 8000ms exceeded」，
+    // 分不出是「Ctrl+S 沒送出去」「攔截沒裝上」還是「已經回來了」。輪詢之後把
+    // 真正的值讀出來斷言，紅的時候就會直接說是哪一種。
+    let held = 0;
+    for (let i = 0; i < 80; i++) {
+      held = await ctx.page.evaluate(() => window.__heldSave);
+      if (held === 2) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.strictEqual(held, 2,
+      'N5-inflight 前提失敗：/api/save 的請求要真的送出去、而且回覆被押著。' +
+      '0 = Ctrl+S 根本沒送出存檔請求，1 = 送出去了但 fetch 還沒 resolve。Got ' + held);
+    const onDisk = fs.readFileSync(ctx.mdPath, 'utf8');
+    assert.strictEqual(onDisk, '# Doc\n\nAlpha paragraph. INFLIGHT\n',
+      'N5-inflight 前提失敗：送出去的那一份必須是撤銷【之前】的位元組，而且已經' +
+      '落到磁碟上了，got ' + JSON.stringify(onDisk));
+
+    await ctx.page.keyboard.down('Control');
+    await ctx.page.keyboard.press('KeyZ');
+    await ctx.page.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 1000));
+    const mid = await ctx.page.evaluate(() => ({
+      text: document.querySelector('.content').textContent || '',
+      held: window.__heldSave,
+    }));
+    assert.strictEqual(mid.text.indexOf('INFLIGHT'), -1,
+      'N5-inflight 前提失敗：Ctrl+Z 要真的退掉那一筆');
+
+    // 讓押著的 200 到達。
+    await new Promise((r) => setTimeout(r, 3000));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.strictEqual(after.text.indexOf('INFLIGHT'), -1,
+      'N5-inflight 前提失敗：回覆到達不得把文字變回來');
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), onDisk,
+      'N5-inflight 前提失敗：磁碟上還是送出去的那一份 —— 記憶體跟磁碟真的不一樣');
+    assert.strictEqual(after.title.indexOf('●'), 0,
+      'N5-inflight：回覆到達時要標的是【送出去那一刻】的深度，不是回覆到達時的' +
+      '深度 —— 磁碟上有一筆使用者已經撤銷掉的編輯，所以 ● 必須亮著，got ' +
+      JSON.stringify(after.title));
+
+    let navBlocked = false;
+    ctx.page.once('dialog', async (d) => { navBlocked = true; await d.dismiss(); });
+    await ctx.page.evaluate(() => { window.location.href = 'about:blank'; })
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 600));
+    assert.strictEqual(navBlocked, true,
+      'N5-inflight：離站也必須被攔 —— 修之前這是本任務唯一一個三道網同時失效的' +
+      '序列（連 mtimeMs 都已經前進，衝突檢查也擋不住）');
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-inflight：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-inflight a Ctrl+Z inside a save round-trip is not marked as saved — OK');
+  }
+  // ── N5-two-saves: 兩個存檔同時在路上時，第一個 200 的效果必須留下來 ─────
+  //
+  // v3.4.0 batch3 Task 7 fix 5（R1）。這條路徑上曾經有一道「有更新的請求就把
+  // 舊的回覆丟掉」的守衛，前提是錯的：server 對任何過期的 `baseMtimeMs` 一律
+  // 回 409 而且不寫檔，而 client 的 `mtimeMs` 只有 200 那一支在寫 —— 所以第
+  // 二個請求必然帶著過期的 baseline、必然 409、必然什麼都沒寫。被丟掉的那一
+  // 個，正好是唯一描述磁碟現況的那一個。
+  //
+  // 它之所以能一路綠著出貨，是因為守著它的是一條「原始碼長什麼樣」的斷言 ——
+  // 換個名字（實測 `reqSeq`）整套 fast suite 依然 EXIT 0。這一列改成守【性質】：
+  // 真的讓兩個請求同時在路上，然後看第一個 200 的效果有沒有留下來。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const orig = window.fetch;
+      window.__saveSent = 0;
+      window.__saveStatus = [];
+      window.fetch = function (input, init) {
+        const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+        if (!/\/api\/save\b/.test(url)) return orig.call(this, input, init);
+        const nth = ++window.__saveSent;
+        return orig.call(this, input, init).then((res) => {
+          window.__saveStatus.push(nth + ':' + res.status);
+          // 只押住第一個回覆，第二個照常 —— 這樣兩個請求會同時在路上，而且
+          // 第一個 200 是【後】到的那一個。
+          if (nth !== 1) return res;
+          return new Promise((r) => setTimeout(() => r(res), 2500));
+        });
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' FIRST');
+    await new Promise((r) => setTimeout(r, 250));
+    const ctrlS = async () => {
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyS');
+      await ctx.page.keyboard.up('Control');
+    };
+    await ctrlS();
+    // 等到第一個請求真的送出去（它的回覆被押著），再送第二個。
+    let sent = 0;
+    for (let i = 0; i < 80; i++) {
+      sent = await ctx.page.evaluate(() => window.__saveSent);
+      if (sent >= 1) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.strictEqual(sent, 1,
+      'N5-two-saves 前提失敗：第一個 /api/save 要真的送出去。0 = Ctrl+S 沒送出' +
+      '存檔請求。Got ' + sent);
+    const diskAfterFirst = fs.readFileSync(ctx.mdPath, 'utf8');
+    assert.strictEqual(diskAfterFirst, '# Doc\n\nAlpha paragraph. FIRST\n',
+      'N5-two-saves 前提失敗：第一個請求已經把檔案寫出去了（回覆只是還沒到），' +
+      'got ' + JSON.stringify(diskAfterFirst));
+
+    await ctrlS();                       // 第二個：baseline 過期，必然 409
+    await new Promise((r) => setTimeout(r, 1200));
+    const statusMid = await ctx.page.evaluate(() => window.__saveStatus.slice());
+    assert.ok(statusMid.indexOf('2:409') !== -1,
+      'N5-two-saves 前提失敗：第二個請求必須是 409（baseline 過期、什麼都沒寫）。' +
+      'Got ' + JSON.stringify(statusMid));
+
+    // …讓被押住的第一個 200 到達。它是【最後】到的那一個，而它必須算數。
+    await new Promise((r) => setTimeout(r, 2500));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      status: window.__saveStatus.slice(),
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.ok(after.status.indexOf('1:200') !== -1,
+      'N5-two-saves 前提失敗：第一個請求要真的是 200。Got ' + JSON.stringify(after.status));
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), diskAfterFirst,
+      'N5-two-saves 前提失敗：磁碟上還是第一個請求寫的那一份');
+    assert.ok(after.text.indexOf('FIRST') !== -1, 'N5-two-saves 前提失敗：字還在畫面上');
+    assert.strictEqual(after.title.indexOf('●'), -1,
+      'N5-two-saves：後到的那個 200 必須算數 —— 記憶體跟磁碟一模一樣，● 就要熄掉。' +
+      '把它當成「被更新的請求取代了」而丟掉，文件會永遠標成髒的、而且 mtimeMs ' +
+      '永遠停在舊值，之後每一次 Ctrl+S 都 409。Got ' + JSON.stringify(after.title));
+
+    // 而且基準線真的更新了：下一次存檔不得再 409。
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' SECOND');
+    await new Promise((r) => setTimeout(r, 250));
+    const md = await saveAndRead(ctx);
+    assert.strictEqual(md, '# Doc\n\nAlpha paragraph. FIRST SECOND\n',
+      'N5-two-saves：下一次 Ctrl+S 必須存得進去 —— 丟掉那個 200 會讓 mtimeMs ' +
+      '停在舊值，這一發就會變成 409。Got ' + JSON.stringify(md));
+    const finalStatus = await ctx.page.evaluate(() => window.__saveStatus.slice());
+    assert.ok(finalStatus.indexOf('3:200') !== -1,
+      'N5-two-saves：而且它是 200，不是 409。Got ' + JSON.stringify(finalStatus));
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-two-saves：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-two-saves a reply that lands after a newer request still counts — OK');
+  }
   // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
   // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
   // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提
@@ -5957,7 +6591,7 @@ async function main() {
     });
     // 前提：這一列在「工具列沒有任何按鈕」時會自動空過 —— btns 是空的、
     // 兩個差集也都是空的。先把數量釘住，前提倒了就要大聲紅。
-    assert.strictEqual(shape.count, 22,
+    assert.strictEqual(shape.count, 23,
       w + '×900 F12 前提失敗：工具列必須真的有按鈕可掃，got ' + shape.count);
     assert.deepStrictEqual(shape.unreachable, [],
       w + '×900：這些按鈕在整個捲動範圍內都拿不到: ' + JSON.stringify(shape.unreachable));
@@ -5978,6 +6612,16 @@ async function main() {
   // 末端：client.js 寫屬性、md2doc.js 的狀態規則把 custom property 點亮、
   // background-image 把它畫出來。只斷屬性的話，一個沒有對應 CSS 的屬性也會綠；
   // 只斷 custom property 的話，把 background-image 整條刪掉也還是綠。
+  //
+  // v3.4.0 §3: 420px 的 max 555 → 522（.ed-toolbar 的 gap 6px → 3px 之後
+  // scrollWidth 變小）。改之前先讀過 paintToolbarOverflow()（lib/editor/
+  // client.js）：它的判準是 `sl > 1` 亮 left、`sl < max - 1` 亮 right —— 中間
+  // 取樣點 Math.round(max/2) 要能同時亮兩側，靠的是離那兩個邊界夠遠，不是
+  // 剛好卡在門檻上。522 時中間取樣點是 261，離 1 與 521 都還很遠，不是薄冰；
+  // 用一支獨立量測腳本（runs/t3-scrollhint.js）在 820/640/420 分別重新測過
+  // `at` 圖案，三個寬度都還是「只右／兩側都亮／只左」，不是剛好卡在邊緣才過。
+  // 這裡只釘 420（跟 1400 一樣是這條既有測試唯一驗的兩個寬度）；820/640 這條
+  // 測試本來就沒有釘 max，這次也沒有新增。
   for (const w of [1400, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     await ctx.page.setViewport({ width: w, height: 900 });
@@ -6004,7 +6648,7 @@ async function main() {
       ? { max: 0, at: [{ attr: '', left: false, right: false },
                        { attr: '', left: false, right: false },
                        { attr: '', left: false, right: false }] }
-      : { max: 555, at: [{ attr: 'right', left: false, right: true },
+      : { max: 522, at: [{ attr: 'right', left: false, right: true },
                          { attr: 'left right', left: true, right: true },
                          { attr: 'left', left: true, right: false }] };
     assert.deepStrictEqual(seen, want,
@@ -6123,7 +6767,11 @@ async function main() {
     await new Promise((r) => setTimeout(r, 150));
     const altOther = await f12Snap(ctx.page);
     await f12Enter(ctx.page);
-    for (let i = 0; i < 3; i++) {
+    // v3.4.0 §3: 4 hops, not 3 — the document is dirty here (' typed' is
+    // still an uncommitted burst edit), so `save` (BUTTON_DEFS' new first
+    // button) is enabled and is where entry now lands; undo/redo/headings/
+    // quote follow it in that order, one hop each.
+    for (let i = 0; i < 4; i++) {
       await ctx.page.keyboard.press('ArrowRight');
       await new Promise((r) => setTimeout(r, 90));
     }
@@ -6157,7 +6805,7 @@ async function main() {
         onScreen: atQuote.onScreen, clearOfSlot: atQuote.clearOfSlot },
       { at: 'quote', cursors: ['quote'], who: 'P.ed-wys-armed',
         onScreen: true, clearOfSlot: true },
-      'Alt+F10 之後三下 ArrowRight 必須停在 ❝ 上、那顆必須真的看得到、而且插入點' +
+      'Alt+F10 之後四下 ArrowRight 必須停在 ❝ 上、那顆必須真的看得到、而且插入點' +
       '不得離開編輯面，got ' + JSON.stringify(atQuote));
     assert.strictEqual(paint.on, 'solid 2px',
       '游標所在的按鈕必須畫出外框，got ' + JSON.stringify(paint));
@@ -6294,6 +6942,13 @@ async function main() {
     await ctx.page.keyboard.type('A');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
+    // v3.4.0 §3: 2 hops, not 1 — the document is dirty here ('A' is still an
+    // uncommitted burst edit), so entry now lands on `save` (BUTTON_DEFS'
+    // new first button) instead of `undo`; one more hop reaches `redo`,
+    // which is what this scenario actually needs to be "somewhere on the
+    // bar" for its own assertion below.
+    await ctx.page.keyboard.press('ArrowRight');
+    await new Promise((r) => setTimeout(r, 90));
     await ctx.page.keyboard.press('ArrowRight');
     await new Promise((r) => setTimeout(r, 120));
     const inBar = await f12Snap(ctx.page);
@@ -6329,6 +6984,11 @@ async function main() {
     await ctx.page.keyboard.type(' kept');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
+    // v3.4.0 §3: 3 hops, not 2 — the document is dirty here (' kept' is
+    // still an uncommitted burst edit), so entry now lands on `save`
+    // (BUTTON_DEFS' new first button); undo then redo then headings follow
+    // it one hop each, so one more ArrowRight than before reaches `headings`.
+    await ctx.page.keyboard.press('ArrowRight');
     await ctx.page.keyboard.press('ArrowRight');
     await ctx.page.keyboard.press('ArrowRight');
     await new Promise((r) => setTimeout(r, 150));
@@ -6635,6 +7295,45 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: a bare modifier press leaves the keyboard cursor alone — OK');
+
+  // K12 (v3.4.0 §3): `save` is now BUTTON_DEFS' own FIRST button (group
+  // 'file', listed ahead of 'history'), so it is the one moveToolbarCursor()
+  // would land the Alt+F10 roving cursor on first — UNLESS it is disabled,
+  // in which case the walk's existing skip-disabled logic must step past it
+  // exactly the way it already steps past any other disabled button. Two
+  // halves, same fixture: a clean document must skip it (landing on 'undo'
+  // instead, same as every pre-v3.4.0 F12 scenario above that opens on a
+  // clean doc), and a dirty one must actually reach it.
+  {
+    const ctx = await newPage(F12_MD);
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await f12Enter(ctx.page);
+    const clean = await f12Snap(ctx.page);
+    assert.notStrictEqual(clean.at, 'save',
+      '乾淨文件上，Alt+F10 的游標不得落在灰掉的 save 按鈕上，got ' + JSON.stringify(clean));
+    assert.strictEqual(clean.at, 'undo',
+      '乾淨文件上，Alt+F10 的游標必須落在第一顆還亮著的按鈕（undo）上，got ' +
+      JSON.stringify(clean));
+    // Escape only retires the virtual cursor — real DOM focus/caret never
+    // left the block this whole time (see this section's own opening
+    // comment: "沒有任何按鈕拿到 DOM 焦點，插入點原地不動"), so typing lands
+    // directly in the still-armed surface and dirties the document via the
+    // same uncommitted-burst path documentIsDirty() measures.
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.keyboard.type('Z');
+    await new Promise((r) => setTimeout(r, 250));
+    await f12Enter(ctx.page);
+    const dirty = await f12Snap(ctx.page);
+    assert.strictEqual(dirty.at, 'save',
+      '文件變髒之後，Alt+F10 的游標必須落在亮起來的 save 按鈕上（BUTTON_DEFS 排序第一），got ' +
+      JSON.stringify(dirty));
+    assert.strictEqual(ctx.errs.length, 0,
+      'F12 K12：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: the keyboard cursor reaches save, and skips it when it is dead — OK');
 
   // ── F4: 轉換子選單的項目在矮視窗下都必須可達 ────────────────────────
   // 量測基礎：開 ⠿ + 轉換成整段手勢從未讀過 window.innerHeight/innerWidth
@@ -7520,6 +8219,77 @@ async function main() {
     console.log('journey: the ＋ bubble survives you reaching for it — OK');
   }
 
+  // ── backlog #11 (T14-5 closed): standing ON the ＋ bubble must not hide
+  // the ⠿ row grip ────────────────────────────────────────────────────────
+  // The F7 block above is the SYMMETRIC, already-fixed half: the BUBBLE
+  // surviving the pointer's approach (updateTableInsertBubbles()). This is
+  // the half T14-5 deferred — updateTableEdgeGrips()'s own guard did not
+  // list '.ed-tb-insert', so once the pointer actually landed ON the bubble,
+  // the GRIP fell through to hideTableGrips() and vanished, along with the
+  // module-level refs (gripRowTableEl/gripRowEl) it needs to redraw itself
+  // when the pointer leaves the bubble again.
+  {
+    const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n| c3 | c4 |\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    const headerCellPt = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const th = table.tHead.rows[0].cells[0];
+      const r = th.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    await ctx.page.mouse.move(headerCellPt.x, headerCellPt.y);
+    await ctx.page.mouse.move(headerCellPt.x + 1, headerCellPt.y + 1);
+    await new Promise((r) => setTimeout(r, 250));
+    const gripBefore = await overlayState(ctx.page, '.ed-te-grip-row');
+    assertRaised(gripBefore, '.ed-te-grip-row');
+
+    // The row-insert bubble for "after the header row" — the one boundary
+    // whose grip can ever be the HEADER row's (headerGripBlock()'s own gate).
+    const rowBubblePt = await ctx.page.evaluate(() => {
+      const table = document.querySelector('.ed-block[data-block-type="table"] table');
+      const headerRow = table.tHead.rows[0];
+      const r = headerRow.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      return { x: tableRect.left, y: r.bottom };
+    });
+    await ctx.page.mouse.move(rowBubblePt.x, rowBubblePt.y, { steps: 3 });
+    await new Promise((r) => setTimeout(r, 250));
+    const onBubble = await ctx.page.evaluate(() => {
+      const bubble = document.querySelector('.ed-tb-insert-row');
+      const rowGrip = document.querySelector('.ed-te-grip-row');
+      return { bubbleHidden: bubble.hidden, rowGripHidden: rowGrip.hidden };
+    });
+    assert.strictEqual(onBubble.bubbleHidden, false,
+      '前提失敗：泡泡自己沒有升起來，got ' + JSON.stringify(onBubble));
+    assert.strictEqual(onBubble.rowGripHidden, false,
+      '指標停在 ＋ 泡泡上時 row grip 不得消失，got ' + JSON.stringify(onBubble));
+
+    // Leaving the bubble back onto the header cell must still find a live,
+    // correctly-anchored grip. Review round 2, M1: this does NOT prove the
+    // module state survived the visit to the bubble — re-hovering the
+    // header cell takes the onValidCell branch, which unconditionally
+    // RECOMPUTES gripRowTableEl/gripRowEl/the grip's own rect from the cell,
+    // so the same rect would come back even in a world where the bubble had
+    // torn everything down and this test just rebuilt it. All the detecting
+    // power for "did the grip survive" is in the onBubble.rowGripHidden
+    // assertion above; this second check only guards that the grip still
+    // functions normally afterward — a real, if weaker, regression net (a
+    // gesture that left gripRowTableEl pointing at a stale/detached element
+    // would fail it), just not proof of state continuity.
+    await ctx.page.mouse.move(headerCellPt.x, headerCellPt.y);
+    await ctx.page.mouse.move(headerCellPt.x - 1, headerCellPt.y);
+    await new Promise((r) => setTimeout(r, 250));
+    const gripAfter = await overlayState(ctx.page, '.ed-te-grip-row');
+    assert.ok(isLive(gripAfter),
+      '離開泡泡回到表頭儲存格後，row grip 必須恢復正常，got ' + JSON.stringify(gripAfter));
+    assert.strictEqual(gripAfter.left, gripBefore.left,
+      'row grip 的錨定必須沒被弄壞，got ' + JSON.stringify({ before: gripBefore, after: gripAfter }));
+
+    assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: standing on the ＋ bubble no longer hides the row grip — OK');
+  }
+
   // ── F5/F6: Tab 走完表格就離開它，落點是「整格被選起來」 ──────────────────
   //
   // F6 = 格內 Tab 的落點。舊行為把游標塞在目標格【結尾】，所以「Tab 過去直接
@@ -7877,6 +8647,4295 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'T15-5/鍵盤：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: collapsing then reselecting by keyboard raises .ed-seltb again — OK');
+  }
+
+  // ── Task 9 backlog #6: quote / code / line strand the caret on BODY after
+  // activation, with nothing to click into and (by keyboard) nowhere to Tab
+  // to; undo / redo / image do the same ONLY when there is an uncommitted
+  // edit (switchAwayFrom()'s own commit-and-render is what drops it). Every
+  // case below is driven through pressClick() (real press-hold-release,
+  // §0's own "dirty burst + real press timing" class of defect) rather than
+  // a synthetic .click(), since three of the six scenarios are dirty bursts.
+  {
+    const sel = '.ed-block[data-block-type="paragraph"] .ed-wys-armed';
+
+    // quote / code / line: a CLEAN burst (just a click, no typing) is enough
+    // — activateToolbarCursor()'s own comment: "quote, code and line end on
+    // BODY … with a clean burst and with a dirty one alike." Each id gets
+    // its own fresh page (converting/inserting once is enough per id).
+    for (const id of ['quote', 'code', 'line']) {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="' + id + '"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (' + id + ')：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      // The raw editor is quote/code/line's real (only) editing surface —
+      // prove it actually took the caret, not merely SOME element.
+      assert.strictEqual(tag, 'TEXTAREA',
+        'T9-6 (' + id + ')：caret 必須落在該 block 自己的 raw editor 裡，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (' + id + ')：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    // undo over a DIRTY burst: switchAwayFrom()'s own auto-commit-then-
+    // render is what drops the caret — see undoViaToolbar()'s own comment.
+    {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.keyboard.press('End');
+      await c.page.keyboard.type(' PRIMED');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="undo"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (undo/dirty)：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (undo/dirty)：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    // image over a DIRTY burst: imageViaToolbar()'s own await resolves right
+    // after switchAwayFrom(), well before any file is actually chosen — the
+    // native file dialog is swallowed so this probes the same caret-drop
+    // point without needing a real file chooser.
+    {
+      const c = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+      await c.page.click(sel);
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.keyboard.press('End');
+      await c.page.keyboard.type(' DIRTY');
+      await new Promise((r) => setTimeout(r, 200));
+      await c.page.evaluate(() => {
+        HTMLInputElement.prototype.click = function () {
+          if (this.type === 'file') return;
+          return HTMLElement.prototype.click.call(this);
+        };
+      });
+      await pressClick(c.page, '.ed-toolbar [data-ed-tb="image"]', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const tag = await c.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'BODY',
+        'T9-6 (image/dirty)：按完不得把 caret 留在 BODY，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(c.errs.length, 0, 'T9-6 (image/dirty)：不得有 pageerror: ' + c.errs.join(' | '));
+      await c.page.close(); c.srv.close();
+    }
+
+    console.log('journey: quote/code/line and undo/image over a dirty burst give the caret back — OK');
+  }
+
+  // ── Task 9 backlog #7: the H▾ dropdown's six items must be reachable and
+  // operable by keyboard, not mouse-only. ArrowDown/ArrowUp now move a
+  // cursor INSIDE the open panel (own index, own attribute
+  // data-ed-tb-menu-cursor — the bar's own toolbarRovingIndex stays parked
+  // on `headings` throughout, per K6's own pinned assertion a few dozen
+  // lines above this one), and Enter/Space activate the highlighted item —
+  // but ONLY once the panel cursor has actually moved. With nothing
+  // highlighted yet, Enter/Space still just toggle the H▾ button itself
+  // (K6's exact pinned shape), so this row is deliberately layered on top of
+  // K6 rather than replacing any of it.
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const menuState = () => ctx.page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll('.ed-toolbar-menu-btn'));
+      return {
+        open: !!document.querySelector('.ed-toolbar-menu'),
+        at: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+        cursorIdx: items.findIndex((b) => b.hasAttribute('data-ed-tb-menu-cursor')),
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'headings' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    assert.strictEqual(at, 'headings', 'T9-7 前提失敗：走不到 headings 按鈕，got ' + at);
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+    const opened = await menuState();
+    assert.strictEqual(opened.open, true, 'T9-7：Enter 必須打開 H▾ 面板，got ' + JSON.stringify(opened));
+    assert.strictEqual(opened.cursorIdx, -1,
+      'T9-7：剛打開時面板裡不得有任何項目帶游標，got ' + JSON.stringify(opened));
+
+    await ctx.page.keyboard.press('ArrowDown');
+    await new Promise((r) => setTimeout(r, 200));
+    const firstItem = await menuState();
+    assert.strictEqual(firstItem.cursorIdx, 0,
+      'T9-7：ArrowDown 必須把面板游標移到第一項（標題 1），got ' + JSON.stringify(firstItem));
+
+    await ctx.page.keyboard.press('ArrowDown');
+    await new Promise((r) => setTimeout(r, 200));
+    const secondItem = await menuState();
+    assert.strictEqual(secondItem.cursorIdx, 1,
+      'T9-7：再一次 ArrowDown 必須移到第二項（標題 2），got ' + JSON.stringify(secondItem));
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 400));
+    const afterActivate = await menuState();
+    assert.strictEqual(afterActivate.open, false,
+      'T9-7：Enter 在已高亮的項目上必須把面板收起來，got ' + JSON.stringify(afterActivate));
+    const converted = await ctx.page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll('.ed-block'))
+        .find((b) => (b.textContent || '').indexOf('Alpha paragraph') !== -1);
+      const h = el && el.querySelector('h1,h2,h3,h4,h5,h6');
+      return { type: el && el.getAttribute('data-block-type'), tag: h ? h.tagName : null };
+    });
+    assert.deepStrictEqual(converted, { type: 'heading', tag: 'H2' },
+      'T9-7：鍵盤選到的第二項必須真的把該區塊轉成 H2，got ' + JSON.stringify(converted));
+    assert.strictEqual(ctx.errs.length, 0, 'T9-7：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: the H▾ dropdown items are keyboard-reachable — OK');
+  }
+
+  // ── Task 9 backlog #9: the outline drawer had a keyboard route to OPEN
+  // it (the toolbar's `outline` button, reachable since F12 keynav shipped)
+  // but none to OPERATE what is inside it — TOC links and the search box.
+  // A bare Tab with nothing focused is deliberately swallowed elsewhere in
+  // this file (§3.5's block-indent contract), so a keyboard user who never
+  // clicked into a real control had no Tab destination once the drawer was
+  // open. Fix: activating `outline` BY KEYBOARD moves real DOM focus onto
+  // `#doc-search-input` (lib/md2doc.js's reader-sidebar markup) — scoped to
+  // the keyboard path only, so a mouse click on the same button still does
+  // not steal focus from whatever burst the mouse user had open.
+  {
+    const ctx = await newPage(
+      '# Doc\n\n## Section One\n\nAlpha paragraph.\n\n## Section Two\n\nBravo paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const activeInfo = () => ctx.page.evaluate(() => {
+      const ae = document.activeElement;
+      return { tag: ae ? ae.tagName : null, id: ae ? ae.id : null };
+    });
+
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'outline' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    assert.strictEqual(at, 'outline', 'T9-9 前提失敗：走不到 outline 按鈕，got ' + at);
+
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+    const afterOpen = await activeInfo();
+    assert.strictEqual(afterOpen.id, 'doc-search-input',
+      'T9-9：鍵盤打開抽屜後真實 DOM focus 必須落在 #doc-search-input，got ' + JSON.stringify(afterOpen));
+
+    await ctx.page.keyboard.type('Alpha');
+    await new Promise((r) => setTimeout(r, 200));
+    const searchVal = await ctx.page.evaluate(() =>
+      (document.getElementById('doc-search-input') || {}).value);
+    assert.strictEqual(searchVal, 'Alpha',
+      'T9-9：打開抽屜之後打字必須落進 search box，got ' + JSON.stringify(searchVal));
+    assert.strictEqual(ctx.errs.length, 0, 'T9-9：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: opening the outline drawer by keyboard lands inside it — OK');
+  }
+
+  // ── Task 9 backlog #10: a stray key must not silently drop the toolbar's
+  // keyboard cursor. MEASURED (v3.3.0): ArrowUp / ArrowDown / Tab / Home /
+  // End / 'a' / Backspace all dropped [data-ed-tb-cursor] AND the bar's own
+  // data-ed-tb-keynav with nothing on screen marking it — the bar looked
+  // exactly as it did before Alt+F10 was pressed. The fix does BOTH halves
+  // of v3.3.0's own ruling ("一併處理，加上可見的信號"): Home/End now move
+  // the cursor to the first/last enabled button (a useful thing to do with
+  // them, not merely "harmless"), and every OTHER stray key still exits the
+  // mode but now raises a visible .ed-conflict banner saying so — EXCEPT
+  // Tab (review I3, below this row): Tab is asserted separately since it
+  // exits keynav WITHOUT a banner (a legitimate ARIA-toolbar "leave"
+  // gesture, not a stray key with nowhere to go).
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const cursorState = () => ctx.page.evaluate(() => ({
+      cursor: !!document.querySelector('[data-ed-tb-cursor]'),
+      keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      banner: !!document.querySelector('.ed-conflict'),
+    }));
+    // Task 9 review I3: `Tab` is asserted separately below — it exits
+    // keynav WITHOUT a banner (a legitimate ARIA-toolbar "leave" gesture,
+    // not a stray key with nowhere to go — Tab moving real DOM focus IS
+    // its own visible signal), so it no longer belongs in this shared loop.
+    for (const key of ['ArrowUp', 'ArrowDown', 'Home', 'End', 'a', 'Backspace']) {
+      // Known clean slate: Escape exits keynav if a prior iteration left it
+      // on (Home/End no longer exit it), and dismiss any leftover banner —
+      // otherwise Alt+F10's own toggle semantics would turn THIS iteration's
+      // entry chord into an exit instead.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-conflict button');
+        if (b) b.click();
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await enterKeynav();
+      const before = await cursorState();
+      assert.ok(before.cursor, key + '：前提失敗 —— Alt+F10 沒有點亮鍵盤游標，got ' +
+        JSON.stringify(before));
+      await ctx.page.keyboard.press(key);
+      await new Promise((r) => setTimeout(r, 200));
+      const after = await cursorState();
+      assert.ok(after.cursor || after.banner,
+        key + ' 不得靜靜丟掉鍵盤游標 —— 要嘛游標還在，要嘛有可見的信號，got ' +
+        JSON.stringify(after));
+    }
+
+    // Tab (review I3): exits keynav cleanly with NO banner.
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 150));
+    await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-conflict button');
+      if (b) b.click();
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    await enterKeynav();
+    const beforeTab = await cursorState();
+    assert.ok(beforeTab.cursor, 'Tab：前提失敗 —— Alt+F10 沒有點亮鍵盤游標，got ' + JSON.stringify(beforeTab));
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterTab = await cursorState();
+    assert.deepStrictEqual(afterTab, { cursor: false, keynav: null, banner: false },
+      'Tab 必須乾淨退出 keynav、不升 banner，got ' + JSON.stringify(afterTab));
+
+    assert.strictEqual(ctx.errs.length, 0, 'T9-10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a stray key inside toolbar keynav says the cursor is going away — OK');
+  }
+
+  // ── Task 9 review I2: #9 lands real focus in #doc-search-input while
+  // toolbarRovingIndex stays >= 0 (F12's cursor is virtual, so nothing
+  // clears it just because real focus moved) — and #10 taught Home/End to
+  // navigate the bar. Combined, a keyboard user who opens the drawer and
+  // immediately presses Home/End/ArrowLeft to edit their search text gets
+  // the BAR's cursor moving instead of the input's own text cursor. Fixed
+  // by toolbarKeynavBlockedByRealControl(): any keydown while a genuine
+  // standalone control (INPUT/TEXTAREA/SELECT) holds focus quietly ends
+  // keynav first, with no banner (this is legitimate control use, not a
+  // stray key with nowhere to go).
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const searchState = () => ctx.page.evaluate(() => {
+      const s = document.getElementById('doc-search-input');
+      return {
+        active: document.activeElement === s,
+        selectionStart: s ? s.selectionStart : null,
+        keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+      };
+    });
+
+    await enterKeynav();
+    let at = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    let guard = 0;
+    while (at !== 'outline' && guard++ < 30) {
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      at = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    }
+    await ctx.page.keyboard.press('Enter');
+    await new Promise((r) => setTimeout(r, 300));
+
+    await ctx.page.evaluate(() => {
+      const s = document.getElementById('doc-search-input');
+      s.value = 'needle';
+      s.setSelectionRange(6, 6);
+    });
+    await new Promise((r) => setTimeout(r, 150));
+
+    await ctx.page.keyboard.press('Home');
+    await new Promise((r) => setTimeout(r, 200));
+    const afterHome = await searchState();
+    assert.strictEqual(afterHome.selectionStart, 0,
+      'I2：Home 必須移動搜尋框自己的文字游標，不得被工具列吃掉，got ' + JSON.stringify(afterHome));
+    assert.strictEqual(afterHome.active, true,
+      'I2：真實 focus 必須還在搜尋框上，got ' + JSON.stringify(afterHome));
+    assert.strictEqual(ctx.errs.length, 0, 'I2：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a real control focused inside the drawer keeps its own keys — OK');
+  }
+
+  // ── Task 9 review I3: the keynav-exit banner (backlog #10) sits at
+  // z-index:999 over the toolbar's own z-index:101 — MEASURED, 22-23 of 23
+  // buttons' own centre points hit-test to the banner, not the button — and
+  // a keyboard user had no way to take it down (Escape did not dismiss it,
+  // and a bare Tab is swallowed elsewhere with nothing real focused). Fix:
+  // Escape now dismisses it (dismissKeynavExitBanner()), and Tab — a
+  // legitimate "leave the toolbar" gesture per the ARIA toolbar pattern,
+  // not a stray key with nowhere to go — no longer raises it at all (it
+  // still exits keynav, unchanged).
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    const enterKeynav = async () => {
+      await ctx.page.keyboard.down('Alt');
+      await ctx.page.keyboard.press('F10');
+      await ctx.page.keyboard.up('Alt');
+      await new Promise((r) => setTimeout(r, 150));
+    };
+    const state = () => ctx.page.evaluate(() => ({
+      banner: !!document.querySelector('.ed-conflict'),
+      keynav: document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'),
+    }));
+
+    await enterKeynav();
+    await ctx.page.keyboard.press('ArrowUp');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterStray = await state();
+    assert.strictEqual(afterStray.banner, true,
+      'I3 前提失敗：真正無處可去的鍵仍必須升起 banner，got ' + JSON.stringify(afterStray));
+
+    await ctx.page.keyboard.press('Escape');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterEscape = await state();
+    assert.strictEqual(afterEscape.banner, false,
+      'I3：Escape 必須能收掉 keynav-exit banner，got ' + JSON.stringify(afterEscape));
+
+    await enterKeynav();
+    await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 250));
+    const afterTab = await state();
+    assert.strictEqual(afterTab.keynav, null, 'I3：Tab 仍必須退出 keynav，got ' + JSON.stringify(afterTab));
+    assert.strictEqual(afterTab.banner, false,
+      'I3：Tab 是合法離開手勢，不得升起 banner，got ' + JSON.stringify(afterTab));
+    assert.strictEqual(ctx.errs.length, 0, 'I3：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: Escape dismisses the keynav banner, Tab never raises it — OK');
+  }
+
+  // ── Task 10 (backlog #8): "banner 升起時工具列整條打不到". `.ed-conflict`
+  // is `position:fixed; top:0; z-index:999`, and `.ed-toolbar` is
+  // `top:0; height:44px; z-index:101` — same band, banner wins the paint.
+  // MEASURED (task-10-toolbar-probe.js) before the fix: ALL 23 toolbar
+  // buttons' own centre points hit-tested to the banner, not the button,
+  // for BOTH the keynav-exit banner (Task 9's #10) and the real
+  // save-conflict banner (showConflictBanner()) — `.ed-conflict` has
+  // exactly one producer (showBanner()), shared by every banner family, so
+  // a fix scoped to one message would not have proven anything about the
+  // others. Fix: `.ed-conflict` now sits at `top: var(--ed-toolbar-h)`
+  // (lib/md2doc.js) — the same floor `.ed-te-menu`/`.ed-seltb` already use
+  // to stay out of that band — so it renders as a band directly BELOW the
+  // toolbar instead of on top of it. Not a z-index change: the banner is
+  // still the topmost thing on the page, it simply no longer shares the
+  // toolbar's own band to be on top OF.
+  {
+    const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+    const BUTTON_IDS = [
+      'save', 'undo', 'redo', 'headings', 'quote', 'code', 'list', 'ordered-list',
+      'check', 'bold', 'italic', 'strike', 'inline-code', 'link', 'outdent',
+      'indent', 'table', 'insert-before', 'insert-after', 'line', 'image',
+      'outline', 'preview',
+    ];
+    const hitTestAllButtons = () => ctx.page.evaluate((ids) => {
+      const out = {};
+      for (const id of ids) {
+        const b = document.querySelector('.ed-toolbar [data-ed-tb="' + id + '"]');
+        if (!b) { out[id] = 'MISSING'; continue; }
+        const r = b.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        out[id] = (el === b) ? 'own-button'
+          : (el && el.closest && el.closest('.ed-conflict')) ? 'BANNER'
+          : (el ? el.tagName + '.' + (el.className || '') : 'null');
+      }
+      return out;
+    }, BUTTON_IDS);
+    const bannerCount = (hits) => Object.values(hits).filter((v) => v === 'BANNER').length;
+
+    // Trigger 1: the keynav-exit banner — Alt+F10 into keynav mode, then a
+    // stray key with nowhere to go (ArrowUp).
+    await ctx.page.keyboard.down('Alt');
+    await ctx.page.keyboard.press('F10');
+    await ctx.page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.keyboard.press('ArrowUp');
+    await new Promise((r) => setTimeout(r, 250));
+    const bannerUp1 = await ctx.page.evaluate(() => !!document.querySelector('.ed-conflict'));
+    assert.strictEqual(bannerUp1, true,
+      'T10 前提失敗：keynav-exit banner 沒有升起');
+    const hits1 = await hitTestAllButtons();
+    assert.strictEqual(bannerCount(hits1), 0,
+      'T10：keynav-exit banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      JSON.stringify(hits1));
+
+    // Dismiss and switch to trigger 2: the real save-conflict banner
+    // (showConflictBanner(), via a closed server under an in-flight commit).
+    await ctx.page.evaluate(() => {
+      const b = document.querySelector('.ed-conflict button');
+      if (b) b.click();
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' X');
+    ctx.srv.close();
+    await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.waitForSelector('.ed-conflict', { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const hits2 = await hitTestAllButtons();
+    assert.strictEqual(bannerCount(hits2), 0,
+      'T10：真正的存檔衝突 banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      JSON.stringify(hits2));
+
+    assert.strictEqual(ctx.errs.length, 0, 'T10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close();
+    console.log('journey: the toolbar is still reachable under any banner — OK');
+  }
+
+  // ── Task 10 follow-up: moving `.ed-conflict` to `top: var(--ed-toolbar-h)`
+  // puts it in the SAME band `.ed-toolbar-menu` (the H▾ dropdown) already
+  // floats in (`top = r.bottom + 4`, i.e. right at that floor) — without a
+  // mitigation, raising a banner while the dropdown is open would reproduce
+  // backlog #8 one layer down. showBanner() now also closes
+  // hideTableGrips()/hideTableInsertBubbles()/hideTableEdgeMenu()/
+  // closeToolbarMenu() (the same bundle onAnyScroll() already uses)
+  // whenever a new banner appears, so the dropdown is gone, not painted
+  // over. MEASURED (task-10-menu-collision-probe.js) with those four calls
+  // temporarily removed: the dropdown stayed open (`.ed-toolbar-menu`
+  // present) while the banner covered it — a real regression this row pins.
+  {
+    const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
+    await ctx.page.setViewport({ width: 1400, height: 900 });
+
+    // Arm the block and type into it FIRST (uncommitted) so committing
+    // later needs no second click on the block — a second click would
+    // itself go through wireToolbarTracking()'s own "click outside
+    // .ed-toolbar/.ed-toolbar-menu closes the menu" handler and pass this
+    // row for the wrong reason. Toolbar buttons preventDefault() on
+    // mousedown specifically so clicking one does not steal focus from the
+    // content (buildToolbar()'s own comment), so real DOM focus stays in
+    // this block through the dropdown click below.
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' X');
+    await new Promise((r) => setTimeout(r, 150));
+
+    await ctx.page.click('.ed-toolbar [data-ed-tb="headings"]');
+    await new Promise((r) => setTimeout(r, 200));
+    const menuOpenBefore = await ctx.page.evaluate(() => !!document.querySelector('.ed-toolbar-menu'));
+    assert.strictEqual(menuOpenBefore, true, 'T10 前提失敗：H▾ 選單沒有打開');
+
+    // Raise the real conflict banner via Enter (a keydown, not a click) —
+    // the only thing that can close the dropdown here is showBanner()'s
+    // own closeToolbarMenu() call.
+    ctx.srv.close();
+    await ctx.page.keyboard.press('Enter');
+    await ctx.page.waitForSelector('.ed-conflict', { timeout: 8000 });
+    await new Promise((r) => setTimeout(r, 200));
+    const after = await ctx.page.evaluate(() => ({
+      banner: !!document.querySelector('.ed-conflict'),
+      menu: !!document.querySelector('.ed-toolbar-menu'),
+    }));
+    assert.strictEqual(after.banner, true, 'T10：banner 必須升起，got ' + JSON.stringify(after));
+    assert.strictEqual(after.menu, false,
+      'T10：showBanner() 必須收掉開著的 H▾ 選單，不是畫在它上面，got ' + JSON.stringify(after));
+
+    assert.strictEqual(ctx.errs.length, 0, 'T10：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close();
+    console.log('journey: a banner closes an open H▾ dropdown instead of painting over it — OK');
+  }
+
+  // ── Task 9 review I4: the backlog #6 raw-editor rescue in
+  // restoreAfterStructuralOp() must stay scoped to convertBlockViaMenu()
+  // (the toolbar's quote/code conversion, the one gesture backlog #6 names)
+  // — it must NOT spill into 建立副本 (duplicate) or 刪除 (delete) via the
+  // ⠿ gutter menu, even when either lands on a quote/code block. MEASURED
+  // before this scoping: 建立副本 on a code block, 建立副本 on a
+  // blockquote, and 刪除 landing on a surviving blockquote all went
+  // BODY → TEXTAREA.ed-raw — philosophically consistent but never asked
+  // for, and risking backlog #5's still-open Escape-discards-uncommitted-
+  // edit gap right after a DESTRUCTIVE gesture.
+  {
+    const clickGutterMenuItem = async (page, blockSel, label) => {
+      await page.hover(blockSel);
+      await pressClick(page, blockSel + ' .ed-handle', 80);
+      await page.waitForSelector('.ed-handle-menu-btn');
+      await page.evaluate((lbl) => {
+        const items = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === lbl);
+        items[items.length - 1].click();
+      }, label);
+    };
+
+    {
+      const ctx = await newPage('# Doc\n\n```\ncode line\n```\n\nAfter.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="code"]', '建立副本');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (建立副本/code)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (建立副本/code)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage('# Doc\n\n> quoted line\n\nAfter.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="blockquote"]', '建立副本');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (建立副本/blockquote)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (建立副本/blockquote)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage('# Doc\n\n> quoted line\n\nDelete me.\n');
+      await clickGutterMenuItem(ctx.page, '.ed-block[data-block-type="paragraph"]', '刪除');
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.notStrictEqual(tag, 'TEXTAREA',
+        'I4 (刪除/blockquote 鄰居)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      assert.strictEqual(ctx.errs.length, 0, 'I4 (刪除/blockquote 鄰居)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    // Regression guard: the ACTUAL backlog #6 gesture must still work.
+    {
+      const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+      await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(ctx.page, '.ed-toolbar [data-ed-tb="quote"]', 80);
+      await new Promise((r) => setTimeout(r, 400));
+      const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(tag, 'TEXTAREA',
+        'I4 迴歸守衛：toolbar 的 quote 轉換仍必須開啟 raw editor，got ' + JSON.stringify({ tag }));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: the raw-editor rescue stays scoped to the toolbar quote/code conversion — OK');
+  }
+
+  // ── Task 9 review M3: toggleOutlineSidebar() must tell a keyboard
+  // activation apart from a mouse click by WHICH DEVICE fired THIS call,
+  // not by whether keynav happens to be on — `toolbarRovingIndex >= 0` is
+  // true after Alt+F10 regardless of whether the very next input is a
+  // keypress or a mouse click, so the first cut of backlog #9's fix
+  // treated a mouse click as keyboard whenever keynav was still on from an
+  // earlier keypress, stealing focus into the search box in direct
+  // contradiction of its own commit message ("a mouse click on the same
+  // button must not steal focus"). Fixed with an explicit `viaKeyboard`
+  // parameter threaded from activateToolbarCursor() (the one call path
+  // that IS the keyboard route) through runToolbarAction() to
+  // toggleOutlineSidebar().
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await new Promise((r) => setTimeout(r, 200));
+    const focusedBefore = await ctx.page.evaluate(() => document.activeElement.className);
+
+    // Alt+F10 turns keynav ON, but the user reaches for the MOUSE instead
+    // of pressing Enter.
+    await ctx.page.keyboard.down('Alt');
+    await ctx.page.keyboard.press('F10');
+    await ctx.page.keyboard.up('Alt');
+    await new Promise((r) => setTimeout(r, 200));
+    const keynavOn = await ctx.page.evaluate(() =>
+      document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-keynav'));
+    assert.notStrictEqual(keynavOn, null, 'M3 前提失敗：Alt+F10 之後 keynav 必須是開的，got ' + keynavOn);
+
+    await ctx.page.click('.ed-toolbar [data-ed-tb="outline"]');
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await ctx.page.evaluate(() => ({
+      cls: document.activeElement.className,
+      inSidebar: !!(document.activeElement.closest &&
+        document.activeElement.closest('[data-reader-sidebar]')),
+    }));
+    assert.strictEqual(after.inSidebar, false,
+      'M3：keynav 開著時用滑鼠點 ☰ 不得把 focus 搶進側欄，got ' + JSON.stringify(after));
+    assert.strictEqual(after.cls, focusedBefore,
+      'M3：滑鼠點 ☰ 不得動到原本的 focus，got ' + JSON.stringify({ focusedBefore, after }));
+    assert.strictEqual(ctx.errs.length, 0, 'M3：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: a mouse click on outline never steals focus, even with keynav still on — OK');
+  }
+
+
+  // ── v3.4.0 batch2 Task 6 fix round 1 — the .drawio background re-bake ────
+  //
+  // Ruling B2-6: the previous round shipped requirement (c) verified by code
+  // reading alone, and review finding F1 is the proof that reading is not
+  // enough — a mechanism that never fired on its main path read perfectly
+  // fine. Every row below drives the REAL 10s heartbeat (no test-only
+  // trigger hook exists in client.js, deliberately: a test that drives a
+  // different path from the shipped one proves nothing) and reads the actual
+  // value before asserting, never a bare waitForFunction on a value it could
+  // have predicted.
+  {
+    const DRAWIO_MD = '# Doc\n\n![d](d.drawio)\n\nTail para two.\n';
+    // A ```html fence whose CONTENT quotes `class="drawio"`. MEASURED: marked
+    // escapes the angle brackets but not the quotes, so the literal survives
+    // verbatim into this block's part — which is what made round 1's text
+    // regex select it as a diagram block (G1/G3).
+    const FENCE_MD = '# Doc\n\n![d](d.drawio)\n\n```html\n' +
+      '<div class="drawio" data-x="1"></div>\n```\n\nTail para two.\n';
+    const CODE_SEL = '.ed-block[data-block-type="code"]';
+    const TWO_DIAGRAM_MD = '# Doc\n\n![a](a.drawio)\n\n![b](b.drawio)\n\nTail para two.\n';
+    // Fix round 3 (re-review2 H2/H1): two diagrams in ONE block, and a diagram
+    // inside a TABLE cell. Both shapes are asserted in their own rows before
+    // anything else, because both were claimed impossible at some point.
+    const TWO_IN_ONE_MD = '# Doc\n\n![a](a.drawio) ![b](b.drawio)\n\nTail para two.\n';
+    const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
+    const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
+    // Scoped to these rows only (re-review G10). They sit still for a real
+    // heartbeat (two of them for two), and createEditorServer()'s 30s default
+    // is close enough to that to turn a slow bake into a mystery
+    // ERR_CONNECTION_REFUSED. No other scenario in this file is affected.
+    const DRAWIO_SRV_OPTS = { idleTimeoutMs: 10 * 60 * 1000 };
+    const diagram = (name, id, value) =>
+      '  <diagram name="' + name + '" id="' + id + '">\n' +
+      '    <mxGraphModel dx="800" dy="600" grid="0" page="1" pageWidth="850" pageHeight="1100">\n' +
+      '      <root>\n' +
+      '        <mxCell id="0" /><mxCell id="1" parent="0" />\n' +
+      '        <mxCell id="' + id + '-c" value="' + value + '" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">\n' +
+      '          <mxGeometry x="80" y="80" width="160" height="60" as="geometry" />\n' +
+      '        </mxCell>\n' +
+      '      </root>\n' +
+      '    </mxGraphModel>\n' +
+      '  </diagram>\n';
+    const mxfile = (...ds) =>
+      '<mxfile host="app.diagrams.net" modified="2026-09-10T00:00:00.000Z" version="24.0.0">\n' +
+      ds.join('') + '</mxfile>\n';
+    const ARCH_FLOW = mxfile(diagram('Architecture', 'p1', 'ARCH_BOX'),
+                             diagram('Flow', 'p2', 'FLOW_BOX'));
+    const FLOW_ARCH = mxfile(diagram('Flow', 'p2', 'FLOW_BOX'),
+                             diagram('Architecture', 'p1', 'ARCH_BOX'));
+    const ARCH_TIMING = mxfile(diagram('Architecture', 'p1', 'ARCH_BOX'),
+                               diagram('Timing', 'p3', 'TIMING_BOX'));
+    const SINGLE_V1 = mxfile(diagram('Only', 'p1', 'SINGLE_BOX'),
+                             diagram('Second', 'p2', 'SECOND_BOX'));
+    const SINGLE_V2 = mxfile(diagram('Only', 'p1', 'CHANGED_BOX'),
+                             diagram('Second', 'p2', 'SECOND_BOX'));
+    const OTHER_V1 = mxfile(diagram('Other', 'p9', 'OTHER_BOX'));
+    const OTHER_V2 = mxfile(diagram('Other', 'p9', 'OTHER_CHANGED'));
+    const rewriteDrawio = (ctx, xml) =>
+      fs.writeFileSync(path.join(ctx.dir, 'd.drawio'), xml, 'utf8');
+    // Which mark the diagram on screen is actually painting. Returns a
+    // STRING in every case (including the failure cases) so a wrong answer
+    // prints what it really was instead of a timeout.
+    // MEASURED: every page's baked SVG is in the DOM at once (the hidden ones
+    // carry `hidden`, not `display:none` from a parent that is absent), and
+    // textContent reads hidden text too — so this has to read the VISIBLE
+    // page's subtree or it reports two marks at once and can never tell a
+    // page switch from a re-bake.
+    const shownMark = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio');
+      if (!box) return 'NO_DRAWIO_BOX';
+      const vis = box.querySelector('.drawio-page:not([hidden])');
+      const t = (vis || box).textContent || '';
+      const hits = ['ARCH_BOX', 'FLOW_BOX', 'TIMING_BOX', 'SINGLE_BOX', 'CHANGED_BOX', 'SECOND_BOX']
+        .filter((m) => t.indexOf(m) !== -1);
+      return hits.length === 1 ? hits[0] : 'HITS:' + JSON.stringify(hits);
+    });
+    // The NAME of the single visible page, by the same rule.
+    const shownPage = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio[data-drawio-pages]');
+      if (!box) return 'NO_PAGED_BOX';
+      let names;
+      try { names = JSON.parse(atob(box.getAttribute('data-drawio-pages') || '')); }
+      catch (e) { return 'BAD_PAGES_ATTR'; }
+      const pages = box.querySelectorAll('.drawio-page');
+      const vis = [];
+      for (let i = 0; i < pages.length; i++) if (!pages[i].hidden) vis.push(names[i]);
+      return vis.length === 1 ? String(vis[0]) : 'VISIBLE:' + JSON.stringify(vis);
+    });
+    // The page-name list the CURRENT box carries. The discriminator that tells
+    // "the re-bake landed and the reader stayed on their page" apart from
+    // "nothing happened at all" — on a reorder those two look identical if
+    // you only read the visible page's name.
+    const pagesAttr = (page) => page.evaluate(() => {
+      const box = document.querySelector('.drawio[data-drawio-pages]');
+      if (!box) return 'NO_PAGED_BOX';
+      try { return JSON.parse(atob(box.getAttribute('data-drawio-pages') || '')).join('|'); }
+      catch (e) { return 'BAD_PAGES_ATTR'; }
+    });
+    // The navigation is `display: none` until `.drawio:hover` (lib/md2doc.js),
+    // so a bare page.click() on a button fails with "Node is either not
+    // clickable or not an Element". Hover the box first, exactly as a reader
+    // does; the pointer stays inside `.drawio` on the way to the button.
+    const pickPage = async (page, nth) => {
+      await page.hover('.drawio');
+      await new Promise((r) => setTimeout(r, 150));
+      await page.click('.drawio-sheetbar button:nth-child(' + nth + ')');
+      await new Promise((r) => setTimeout(r, 200));
+    };
+    // Every diagram on the page, in document order, by the mark its visible
+    // page paints. A string in every case, including the failure ones.
+    const bothMarks = (page) => page.evaluate(() =>
+      Array.from(document.querySelectorAll('.drawio')).map((box) => {
+        const vis = box.querySelector('.drawio-page:not([hidden])');
+        const t = ((vis || box).textContent || '');
+        const hits = ['ARCH_BOX', 'FLOW_BOX', 'TIMING_BOX', 'SINGLE_BOX', 'CHANGED_BOX',
+          'SECOND_BOX', 'OTHER_BOX', 'OTHER_CHANGED'].filter((m) => t.indexOf(m) !== -1);
+        return hits.length === 1 ? hits[0] : 'HITS:' + JSON.stringify(hits);
+      }).join('|'));
+    // Draw one rectangle over the SECOND diagram through the reader's own
+    // lightbox annotation tools, then Escape — which is what writes
+    // `.anno-inline-wrap` into that `.drawio-page` (lib/md2doc.js's
+    // annoSyncInline()). Uses only real gestures; no internal API is poked.
+    const annotateSecondDiagram = async (page) => {
+      const box = await page.evaluate(() => {
+        const b = document.querySelectorAll('.drawio')[1];
+        b.scrollIntoView({ block: 'center' });
+        const r = b.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.click(box.x, box.y);
+      await new Promise((r) => setTimeout(r, 600));
+      await page.evaluate(() => { document.querySelector('[data-anno-tool="r"]').click(); });
+      await new Promise((r) => setTimeout(r, 200));
+      const stage = await page.evaluate(() => {
+        const s = document.querySelector('.lightbox-stage');
+        const r = s.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(stage.x - 60, stage.y - 40);
+      await page.mouse.down();
+      await page.mouse.move(stage.x + 60, stage.y + 40, { steps: 8 });
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 300));
+      await page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 500));
+    };
+    const sheetTabs = (page) => page.evaluate(() =>
+      Array.from(document.querySelectorAll('.drawio-sheetbar button')).map((b) => b.textContent).join('|'));
+
+    // F1 (BLOCKING) — the headline user story, and the one the shipped code
+    // could not do: open a document, DO NOT edit it, change the .drawio in
+    // Draw.io. `lastParts` was null until this tab's first commit, so the
+    // re-bake was fetched, paid for and discarded while the server's baseline
+    // advanced past it — the diagram stayed wrong for the whole session.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      const before = await shownMark(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX',
+        'F1 前提失敗：初始頁面必須已經烤出原始的 .drawio 內容');
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'F1：開著文件、完全不編輯、外部改掉 .drawio —— 這條主路徑必須真的更新畫面');
+      assert.strictEqual(ctx.errs.length, 0, 'F1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F1 an untouched tab really does re-bake a changed .drawio — OK');
+    }
+
+    // (c) / F6 — the reader's open page survives a re-bake that REORDERED the
+    // pages, and no banner is raised for an outcome that is not a loss.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      await pickPage(ctx.page, 2);
+      const picked = await shownPage(ctx.page);
+      assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
+      rewriteDrawio(ctx, FLOW_ARCH);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const attr = await pagesAttr(ctx.page);
+      assert.strictEqual(attr, 'Flow|Architecture',
+        '(c) 前提失敗：重烤必須真的套用到畫面上（否則「還在同一頁」只是因為什麼都沒發生）');
+      const kept = await shownPage(ctx.page);
+      assert.strictEqual(kept, 'Flow',
+        '(c)：重烤之後頁序變了，但使用者開著的那一頁還在 —— 必須留在同一頁');
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(banner, null,
+        '(c)：頁還在的時候不得升起「分頁已不存在」的 banner，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, '(c)：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/(c) a reordered re-bake keeps the reader on the same page — OK');
+    }
+
+    // (c) / Ruling B2-P1 — the page really was deleted: fall back to the
+    // first page AND say so visibly. Both outcomes must not be silent.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      await pickPage(ctx.page, 2);
+      assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
+      rewriteDrawio(ctx, ARCH_TIMING);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const attr = await pagesAttr(ctx.page);
+      assert.strictEqual(attr, 'Architecture|Timing',
+        'B2-P1 前提失敗：重烤必須真的套用到畫面上');
+      const landed = await shownPage(ctx.page);
+      assert.strictEqual(landed, 'Architecture',
+        'B2-P1：使用者開著的那一頁被刪掉時必須退回第一頁');
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof banner === 'string' && banner.indexOf('分頁已不存在') !== -1, true,
+        'B2-P1：而且必須看得見一條說明 —— 靜默跳頁正是這條規則禁止的，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, 'B2-P1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/(c) a deleted page falls back to page 1 with a visible banner — OK');
+    }
+
+    // A refresh arriving while the user is editing must not move the caret.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type('TYPED');
+      await new Promise((r) => setTimeout(r, 200));
+      const beforeFocus = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const blk = ae && ae.closest ? ae.closest('.ed-block') : null;
+        return (ae ? ae.className : 'NONE') + '@' +
+          (blk ? blk.getAttribute('data-block-id') : 'NONE');
+      });
+      assert.strictEqual(beforeFocus.indexOf('ed-wys-armed') !== -1, true,
+        '前提失敗：必須真的有一個 WYSIWYG 編輯面獲得焦點，got ' + beforeFocus);
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const afterFocus = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const blk = ae && ae.closest ? ae.closest('.ed-block') : null;
+        return (ae ? ae.className : 'NONE') + '@' +
+          (blk ? blk.getAttribute('data-block-id') : 'NONE');
+      });
+      assert.strictEqual(afterFocus, beforeFocus,
+        '背景刷新絕不可以把使用者手上的焦點搬走');
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        '而且刷新本身仍然要發生 —— 使用者在別的區塊打字不是跳過整輪的理由');
+      assert.strictEqual(ctx.errs.length, 0, '不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio a background refresh never moves document.activeElement — OK');
+    }
+
+    // F2 — the retry. The old server advanced the staleness baseline on the
+    // ping that REPORTED stale, before any client had acted on it, so every
+    // one of the client's bail paths lost the change permanently while the
+    // client comment promised "the next 10s tick tries again". Here the first
+    // /api/render after the signal is failed at the network layer (one of the
+    // real bail paths, at client.js's `catch (e) { return; }`), and the
+    // second heartbeat must still be told.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      await ctx.page.evaluate(() => {
+        window.__renderCalls = 0;
+        const orig = window.fetch;
+        window.fetch = function (u, o) {
+          if (String(u).indexOf('/api/render') !== -1) {
+            window.__renderCalls++;
+            if (window.__renderCalls === 1) return Promise.reject(new Error('INJECTED_NETWORK_FAILURE'));
+          }
+          return orig.apply(this, arguments);
+        };
+      });
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const midMark = await shownMark(ctx.page);
+      const midCalls = await ctx.page.evaluate(() => window.__renderCalls);
+      assert.strictEqual(midCalls >= 1, true,
+        'F2 前提失敗：第一拍必須真的送出過 /api/render（否則注入的失敗根本沒發生），got ' + midCalls);
+      assert.strictEqual(midMark, 'SINGLE_BOX',
+        'F2 前提失敗：那一發被注入的網路失敗必須真的讓這輪放棄，got ' + midMark);
+      // Longer than one beat ON PURPOSE. Fix round 2 (re-review G1b) backs off
+      // after a bail that already PAID for a fetch — the first one waits
+      // DRAWIO_BACKOFF_BASE_MS * 2 = 20s — so the retry lands on a later tick
+      // than the next one. That delay is the whole point of the backoff; what
+      // this row pins is that the update is DELAYED, never dropped.
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT + 25000));
+      const finalMark = await shownMark(ctx.page);
+      assert.strictEqual(finalMark, 'CHANGED_BOX',
+        'F2：用戶端放棄了一輪之後，下一次心跳必須再報一次 stale 並且這次成功 —— ' +
+        '基準線只能在用戶端確認套用之後才前進');
+      assert.strictEqual(ctx.errs.length, 0, 'F2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F2 a bailed refresh is genuinely retried on the next heartbeat — OK');
+    }
+
+    // F5 — the background notice must never destroy the disk-conflict banner.
+    // showBanner()'s first statement removes whatever banner is up, and the
+    // conflict banner is the user's only route to resolving a conflict on the
+    // one data-safety-critical path this editor has (it carries Reload).
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      await pickPage(ctx.page, 2);
+      assert.strictEqual(await shownPage(ctx.page), 'Flow', 'F5 前提失敗：必須先切到 Flow');
+      // An external write to the MARKDOWN moves its mtime, so the next save
+      // fails the mtime guard and raises the conflict banner for real.
+      fs.writeFileSync(ctx.mdPath, DRAWIO_MD + '\nAppended outside the editor.\n', 'utf8');
+      // A 409 is a COMPLETED save — `save()` answers off the status alone and
+      // never reads the body, which is exactly what the clone-armed net in
+      // newPage()'s instrumentation is for — so this waits for the save like
+      // every other site rather than guessing 600 ms.
+      await pressSaveAndLand(ctx);
+      const conflict = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof conflict === 'string' && conflict.indexOf('File changed on disk') !== -1, true,
+        'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
+      // Now make the background path WANT to raise its own notice.
+      rewriteDrawio(ctx, ARCH_TIMING);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const stillConflict = await visibleBannerText(ctx.page);
+      assert.strictEqual(
+        typeof stillConflict === 'string' && stillConflict.indexOf('File changed on disk') !== -1, true,
+        'F5：背景刷新不得把磁碟衝突 banner（連同它的 Reload 按鈕）換掉，got ' + JSON.stringify(stillConflict));
+      const reloadBtns = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-conflict button')).map((b) => b.textContent).join('|'));
+      assert.strictEqual(reloadBtns.indexOf('Reload') !== -1, true,
+        'F5：Reload 按鈕必須還在 —— 那是使用者解衝突的唯一入口，got ' + reloadBtns);
+      // And the DOM update itself still happened underneath it.
+      const landed = await shownPage(ctx.page);
+      assert.strictEqual(landed, 'Architecture',
+        'F5：延後的只是那條訊息，重烤本身仍然要套用');
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F5 a background notice never clobbers the conflict banner — OK');
+    }
+
+
+    // G1 / G3 (fix round 2) — a block whose rendered markup merely QUOTES
+    // `class="drawio"` must not be treated as a diagram block by anything.
+    //
+    // MEASURED on this renderer: marked escapes `<`/`>` inside a fenced code
+    // block but leaves `"` alone, so a ```html fence containing
+    // `<div class="drawio" …>` really does emit the literal verbatim into its
+    // part — the false positive is reachable, not theoretical. Round 1's loop
+    // selected that block by a text regex while the pre-fetch guard asked the
+    // DOM, and the two disagreeing is what turned an editing surface parked in
+    // that block into a full /api/render + headless-Chromium bake every 10
+    // seconds forever, with the diagram never updating.
+    {
+      const ctx = await newPage(FENCE_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      const before = await shownMark(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX', 'G1 前提失敗：初始頁面必須已經烤好');
+      // Park a real editing surface inside the quoting block, via the same
+      // ⠿ → MD 原始碼 route a user takes.
+      await ctx.page.hover(CODE_SEL);
+      await pressClick(ctx.page, CODE_SEL + ' .ed-handle', 80);
+      await new Promise((r) => setTimeout(r, 300));
+      const opened = await ctx.page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .filter((x) => x.textContent.trim() === 'MD 原始碼');
+        if (!items.length) return 'NO_MENU_ITEM';
+        items[items.length - 1].click();
+        return 'clicked';
+      });
+      assert.strictEqual(opened, 'clicked',
+        'G1 前提失敗：⠿ 選單必須真的開著而且有「MD 原始碼」這一項，got ' + opened);
+      await new Promise((r) => setTimeout(r, 400));
+      const surface = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(surface, 'TEXTAREA',
+        'G1 前提失敗：必須真的有一個原始碼編輯面獲得焦點，got ' + surface);
+      // Tag the quoting block's NODE. An expando does not survive
+      // replaceWith(), so this is how "was it swapped" is read back.
+      await ctx.page.evaluate((sel) => {
+        document.querySelector(sel).__drawioProbe = 'kept';
+      }, CODE_SEL);
+
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'G1：引用了這段標記文字的區塊不得讓整輪刷新放棄 —— 舊版會每 10 秒重跑一次 ' +
+        '完整 render + headless 烘焙，而圖永遠不更新');
+      const stillOpen = await ctx.page.evaluate(() => document.activeElement.tagName);
+      assert.strictEqual(stillOpen, 'TEXTAREA',
+        'G1：而且那個原始碼編輯面必須原封不動，got ' + stillOpen);
+      const probe = await ctx.page.evaluate((sel) => {
+        const el = document.querySelector(sel);
+        return el ? String(el.__drawioProbe) : 'NO_BLOCK';
+      }, CODE_SEL);
+      assert.strictEqual(probe, 'kept',
+        'G3：只是文字上含有這段標記的區塊不得被整個換掉，got ' + probe);
+      assert.strictEqual(ctx.errs.length, 0, 'G1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/G1 a block that merely quotes the markup is not a diagram block — OK');
+    }
+
+    // G4 (fix round 2) — one external write must not re-swap every OTHER
+    // diagram on the page. The bootstrap seed is the HTML parser's
+    // re-serialisation, so the cheap `parts[i] === lastParts[i]` equality
+    // never fires on an unedited tab; without a bake-level comparison, a
+    // change to a.drawio replaced the block holding b.drawio too.
+    {
+      const ctx = await newPage(TWO_DIAGRAM_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      const marks = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.drawio')).map((box) => {
+          const vis = box.querySelector('.drawio-page:not([hidden])');
+          return ((vis || box).textContent || '').trim();
+        }).join('|'));
+      assert.strictEqual(marks, 'SINGLE_BOX|ARCH_BOX',
+        'G4 前提失敗：兩張圖都必須先烤出來，got ' + marks);
+      await ctx.page.evaluate(() => {
+        const boxes = Array.from(document.querySelectorAll('.drawio'));
+        boxes.forEach((b, i) => { b.closest('.ed-block').__drawioProbe = 'block' + i; });
+      });
+      fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.drawio')).map((box) => {
+          const vis = box.querySelector('.drawio-page:not([hidden])');
+          const blk = box.closest('.ed-block');
+          return ((vis || box).textContent || '').trim() + '/' + String(blk && blk.__drawioProbe);
+        }).join('|'));
+      assert.strictEqual(after, 'CHANGED_BOX/undefined|ARCH_BOX/block1',
+        'G4：改了 a.drawio 只能換掉 a 那個區塊（所以它的標記不見了）；' +
+        'b.drawio 那個區塊必須原封不動（標記還在），got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'G4：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/G4 one external write only re-swaps the diagram that changed — OK');
+    }
+
+
+    // H2 (fix round 3) — TWO diagrams in ONE block, and it is the SECOND one
+    // that changes. `![a](a.drawio) ![b](b.drawio)` on one markdown line is a
+    // single paragraph block holding two `.drawio` boxes (verified by render).
+    // Round 2 fingerprinted only `querySelector('.drawio')` — the first — so
+    // this comparison came back equal, the loop skipped the block, `applied`
+    // stayed true, the tab ACKED, and the server advanced its baseline past an
+    // update the DOM never took. Silent, permanent, and F2's invariant broken
+    // from the client side. Measured against both commits by the re-reviewer:
+    // bd22ec6 updated B on the first beat, 945ca23 never did.
+    {
+      const ctx = await newPage(TWO_IN_ONE_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': OTHER_V1 }, DRAWIO_SRV_OPTS);
+      const before = await bothMarks(ctx.page);
+      assert.strictEqual(before, 'SINGLE_BOX|OTHER_BOX',
+        'H2 前提失敗：一個區塊裡必須真的有兩張圖，got ' + before);
+      const boxesPerBlock = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block'))
+          .map((b) => b.querySelectorAll('.drawio').length).join('|'));
+      assert.strictEqual(boxesPerBlock, '0|2|0',
+        'H2 前提失敗：兩張圖必須落在同一個區塊裡（否則測到的是已經會過的那一種），got ' + boxesPerBlock);
+      fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await bothMarks(ctx.page);
+      assert.strictEqual(after, 'SINGLE_BOX|OTHER_CHANGED',
+        'H2：同一個區塊裡的第二張圖改變時必須真的更新 —— 舊版把它當成「沒變」跳過、' +
+        '然後還 ack 回去，伺服器基準線越過了一個畫面從未顯示的版本，永久且無聲，got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'H2：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H2 the second diagram in one block is not silently skipped — OK');
+    }
+
+    // H1 (fix round 3) — a `.drawio` in a table cell makes the whole TABLE
+    // block replaceable by this path. Round 2's report claimed 「一個 drawio
+    // 區塊永遠不是表格」 and skipped the table resets on that basis; rendering
+    // `| ![d](d.drawio) | x |` falsifies it, and this row pins the shape.
+    //
+    // It ALSO pins the reason the dangling-grip scenario that finding
+    // described is not reachable today, because that reason is an invariant
+    // somebody could change without noticing: the grips, the edge menu and
+    // the row/column drag all require `ed-wys-table`, and a table holding a
+    // baked diagram never gets it — `canWysiwygForTable()` is
+    // `serializeTable(...).unsupported.length === 0`.
+    //
+    // WHICH NODE is unsupported matters, because it is what a future change
+    // would have to move (fix round 4, re-review3 M1 — the earlier version of
+    // this comment named the wrong one). MEASURED, real page +
+    // `md2docTableMd.serializeTable()`:
+    //   the drawio table   unsupported ["svg"]   armed false
+    //   a plain neighbour  unsupported []        armed true
+    // It is the baked `<svg>`, NOT the `<div class="drawio">` wrapper:
+    // lib/editor/inline-md.js handles `DIV` explicitly and recurses into it,
+    // while `svg` reaches the fall-through that pushes onto `unsupported`.
+    // (A bake that FAILED emits `<div class="drawio drawio-failed"><p>…`, and
+    // `P` reaches the same fall-through, so that shape is degraded too.) So
+    // the trigger to watch for is inline-md.js learning to serialise inline
+    // `svg` — not anything about `<div>`. If that lands, this row goes red
+    // and whoever changed it is pointed at the scoped resets in
+    // refreshStaleDrawio() that go live with it.
+    {
+      const ctx = await newPage(TABLE_MD, { 'd.drawio': SINGLE_V1 }, DRAWIO_SRV_OPTS);
+      const shape = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-block'))
+          .map((b) => b.getAttribute('data-block-type') + ':' + b.querySelectorAll('.drawio').length)
+          .join('|'));
+      assert.strictEqual(shape, 'heading:0|table:1|paragraph:0',
+        'H1：表格儲存格裡的 drawio 真的會產生一個 table 區塊 —— 「drawio 區塊永遠不是表格」是錯的，got ' + shape);
+      const armed = await ctx.page.evaluate(() => {
+        const t = document.querySelector('.ed-block[data-block-type="table"] table');
+        return t ? (t.classList.contains('ed-wys-table') ? 'armed' : 'degraded') : 'NO_TABLE';
+      });
+      assert.strictEqual(armed, 'degraded',
+        'H1：帶 drawio 的表格必須是 degraded —— 實測 serializeTable() 的 unsupported 是 ' +
+        '["svg"]（烘焙出來的 <svg>，不是 .drawio 那個 <div>：inline-md.js 會遞迴進 DIV）。' +
+        '這正是握把 / 邊選單 / 列拖曳在它身上永遠起不來的原因；一旦這裡變成 armed ' +
+        '（最可能的來源是 inline-md.js 學會序列化行內 svg），' +
+        'refreshStaleDrawio() 裡那幾道 scoped reset 就從防禦性變成活的，got ' + armed);
+      // Hover the row band the way a reader would. MEASURED: nothing comes up.
+      const rowBox = await ctx.page.evaluate(() => {
+        const tr = document.querySelector('.ed-block[data-block-type="table"] tbody tr');
+        const r = tr.getBoundingClientRect();
+        return { x: r.left + 8, y: r.top + r.height / 2 };
+      });
+      await ctx.page.mouse.move(rowBox.x, rowBox.y);
+      await new Promise((r) => setTimeout(r, 300));
+      const gripsUp = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-te-grip-row, .ed-te-grip-col, .ed-te-menu'))
+          .filter((g) => !g.hidden).length);
+      assert.strictEqual(gripsUp, 0,
+        'H1：degraded 表格上滑過列不得升起任何握把 / 邊選單，got ' + gripsUp);
+      rewriteDrawio(ctx, SINGLE_V2);
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const after = await shownMark(ctx.page);
+      assert.strictEqual(after, 'CHANGED_BOX',
+        'H1：表格區塊裡的 drawio 一樣要重烤 —— 這條路徑真的會整個換掉一個 table 區塊，got ' + after);
+      assert.strictEqual(ctx.errs.length, 0, 'H1：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H1 a diagram in a table cell re-bakes, and that table never arms — OK');
+    }
+
+    // H3 (fix round 3) — the reader's annotations are drawn INTO
+    // `.drawio-page`. An UNRELATED write must leave them alone; the annotated
+    // diagram's OWN change must still update AND say that the annotations went.
+    {
+      const ctx = await newPage(TWO_DIAGRAM_MD,
+        { 'a.drawio': SINGLE_V1, 'b.drawio': OTHER_V1 }, DRAWIO_SRV_OPTS);
+      await annotateSecondDiagram(ctx.page);
+      const annotated = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
+      assert.strictEqual(annotated, 1,
+        'H3 前提失敗：註記必須真的畫進 .drawio-page 裡，got ' + annotated);
+      // (1) unrelated write: a.drawio changes, b's annotations must survive.
+      fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const kept = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
+      assert.strictEqual(kept, 1,
+        'H3：改的是別的檔案，讀者自己畫的註記必須原封不動，got ' + kept);
+      const marksNow = await bothMarks(ctx.page);
+      assert.strictEqual(marksNow, 'CHANGED_BOX|OTHER_BOX',
+        'H3 前提失敗：而那次改動本身仍然要套用，got ' + marksNow);
+      const bannerNow = await visibleBannerText(ctx.page);
+      assert.strictEqual(bannerNow, null,
+        'H3：沒有東西被丟掉的時候不得升起「註記已移除」的訊息，got ' + JSON.stringify(bannerNow));
+      // (2) the annotated diagram's own bytes change: it updates, the
+      // annotations cannot follow, and the reader is told.
+      fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const marksAfter = await bothMarks(ctx.page);
+      assert.strictEqual(marksAfter, 'CHANGED_BOX|OTHER_CHANGED',
+        'H3：被註記的那張圖自己變了時仍然必須重烤，got ' + marksAfter);
+      const banner = await visibleBannerText(ctx.page);
+      assert.strictEqual(typeof banner === 'string' && banner.indexOf('註記') !== -1, true,
+        'H3：使用者自己畫的東西被丟掉不可以無聲 —— 必須看得見一條說明，got ' + JSON.stringify(banner));
+      assert.strictEqual(ctx.errs.length, 0, 'H3：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/H3 annotations survive an unrelated write and are announced when dropped — OK');
+    }
+
+    // F9 — the page navigation is rebuilt after an ORDINARY edit commit. It
+    // used to be created once at page load and destroyed by the first
+    // innerHTML swap, so a user who typed one character lost it for the rest
+    // of the session — which made preserving the open page across a
+    // background re-bake largely academic.
+    {
+      const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
+      const tabsBefore = await sheetTabs(ctx.page);
+      assert.strictEqual(tabsBefore, 'Architecture|Flow',
+        'F9 前提失敗：載入時必須先有切頁列，got ' + tabsBefore);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1500));
+      const tabsAfter = await sheetTabs(ctx.page);
+      assert.strictEqual(tabsAfter, 'Architecture|Flow',
+        'F9：一次普通的編輯提交之後切頁列必須還在（舊版是永久消失），got ' + tabsAfter);
+      assert.strictEqual(ctx.errs.length, 0, 'F9：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: drawio/F9 the page navigation survives an ordinary edit commit — OK');
+    }
+  }
+
+  // ── v3.4.0 batch3 Task 6: the wavedrom editing surface ─────────────────
+  //
+  // EVERY fixture below has a GROUP in it. That is not decoration: the flattened
+  // lane index and the group tree are the two things this batch's silent
+  // defects have lived between, and a group-free fixture cannot express any of
+  // them — it reads as coverage and proves nothing.
+  {
+    const WAVE_MD = [
+      '# W', '',
+      '```wavedrom',
+      '{ signal: [',
+      "  { name: 'clk', wave: 'p....' },  // 主時脈",
+      "  ['bus',",
+      "    { name: 'req', wave: '0.1.0' },",
+      "    { name: 'dat', wave: 'x.3.x', data: ['D'] }",
+      '  ],',
+      // A lane whose FIRST cycle is a bare repeater. The engine draws it as x
+      // until the run recovers — `levelsOf` models exactly that — so a drawing
+      // that painted the wave characters instead would show 0 here and the
+      // preview beside it would show x. That disagreement is the whole reason
+      // the preview is on screen, and this is the lane that can express it.
+      "  { name: 'ack', wave: '.0..1' },",
+      // A `|` gap. The engine draws a discontinuity marker for it and
+      // `levelsOf` deliberately erases it (it answers what a cycle SHOWS), so
+      // this is the one axis where the two pictures can differ on a lane whose
+      // LEVELS agree exactly — and it is invisible to a comparison that only
+      // looks at levels.
+      "  { name: 'gap', wave: '01|10' },",
+      // `{}` — WaveDrom's own blank-row spacer, and the shape that separates
+      // "this lane has no `wave` key" from "its wave is the empty string". The
+      // engine draws NOTHING for it and one `x` cycle for the empty string;
+      // round 1 drew one `x` for both and put a solid brick on a row the
+      // preview left blank. The fixture has to be non-rectangular to say that,
+      // which is why the comparison below is per-lane.
+      '  {}',
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // Open the editor the way a person does: hover the rendered diagram, then
+    // press the affordance that appears. Real pointer events throughout —
+    // v3.3.0's entire discovery mechanism was the difference between these and
+    // a synthetic .click().
+    const openWave = async (page) => {
+      await page.waitForSelector('.wavedrom-diagram');
+      // Park the pointer somewhere else first. The affordance is raised by a
+      // `mouseover`, which only fires when the element under the pointer
+      // CHANGES — after a scroll the pointer has not moved, so a move to the
+      // diagram's (new) coordinates can be a no-op and the button never comes
+      // back. That is the product's real behaviour and matches `.ed-te-grip`;
+      // it is the harness that has to be honest about the gesture.
+      await page.mouse.move(2, 2);
+      await new Promise((r) => setTimeout(r, 60));
+      const box = await page.$eval('.wavedrom-diagram', (el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(box.x, box.y);
+      await page.waitForSelector('.ed-wave-edit-btn:not([hidden])');
+      await pressClick(page, '.ed-wave-edit-btn');
+      await page.waitForSelector('.ed-wave-overlay');
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // The centre of one cell, in viewport coordinates, plus whether that point
+    // is actually ON the drawing. The canvas is a scroll container inside a
+    // fixed-width column: MEASURED in this session, a press 116px past its clip
+    // landed on the preview column instead, the mousedown listener never fired,
+    // and the result was indistinguishable from "the paint refused". Without
+    // this flag that is a silently green scenario.
+    const cellPoint = async (page, lane, cycle) => {
+      const at = await page.evaluate((l, c) => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const wrap = document.querySelector('.ed-wave-canvas-wrap');
+        if (!svg || !wrap) return null;
+        const r = svg.getBoundingClientRect();
+        const w = wrap.getBoundingClientRect();
+        const lh = r.height / Number(svg.getAttribute('data-lane-count'));
+        const cw = r.width / Number(svg.getAttribute('data-cycle-count'));
+        const x = r.left + c * cw + cw / 2;
+        const y = r.top + l * lh + lh / 2;
+        return { x: x, y: y,
+          visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
+      }, lane, cycle);
+      assert.ok(at, 'cellPoint: 畫布不在畫面上');
+      assert.strictEqual(at.visible, true,
+        'cellPoint: lane ' + lane + ' cycle ' + cycle +
+        ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
+      return at;
+    };
+
+    // The saved block, parsed back: the lane names in the codec's display order.
+    //
+    // For rows that ask a question about the DOCUMENT — how many lanes are in
+    // the file? — rather than about the bytes. Matching emitted text with a
+    // quote character baked into the pattern is exactly how T7d broke: it
+    // asserted `md.match(/name: ""/g).length === 1`, and when the writer
+    // learned to follow the source file's own quote style (v3.4.0's final
+    // review, RESIDUE 5) this single-quoted fixture started producing
+    // `name: ''` — zero matches, red row, and the PRODUCT was right. The fence
+    // markers are the author's bytes, not the writer's, so finding the block by
+    // them is stable in a way the member spelling is not.
+    const waveLaneNames = (md) => {
+      const block = md.match(/```wavedrom\n([\s\S]*?)\n```/);
+      assert.ok(block !== null,
+        'waveLaneNames 前提失敗：存回去的檔案裡要有一個 wavedrom 區塊。Got:\n' + md);
+      const parsed = waveCodec.parseSource(block[1]);
+      assert.strictEqual(parsed.ok, true,
+        'waveLaneNames 前提失敗：寫回去的區塊必須還解析得回來。Got ' +
+        JSON.stringify(parsed) + '\n' + md);
+      return waveCodec.lanePaths(parsed.doc).map((path) => {
+        let v = parsed.doc;
+        for (const seg of path) v = v[seg];
+        return (v === null || typeof v !== 'object') ? null : v.name;
+      });
+    };
+
+    // A real press-drag-release across a range of cycles.
+    const dragCells = async (page, lane, from, to) => {
+      const a = await cellPoint(page, lane, from);
+      const b = await cellPoint(page, lane, to);
+      await page.mouse.move(a.x, a.y);
+      await page.mouse.down();
+      await page.mouse.move((a.x + b.x) / 2, a.y);
+      await page.mouse.move(b.x, b.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    const paintCell = async (page, lane, cycle, ch) => {
+      await pressClick(page, '.ed-wave-brush[data-brush="' + ch + '"]');
+      const at = await cellPoint(page, lane, cycle);
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // T6a — it opens, it opens on document.body, and a painted cell reaches the
+    // state the file is written from.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      assert.ok(await ctx.page.$('.ed-wave-overlay'), 'T6a: 編輯器必須開起來');
+
+      // The overlay may not live inside .content: everything in there is read
+      // back as this tab's own render and serialised into the user's markdown.
+      const where = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        parent: el.parentElement.tagName,
+        inContent: document.querySelector('.content').contains(el),
+      }));
+      assert.strictEqual(where.parent, 'BODY',
+        'T6a: overlay 必須掛在 document.body 上。Got ' + where.parent);
+      assert.strictEqual(where.inContent, false,
+        'T6a: overlay 不得在 .content 裡面（.content 會被序列化回使用者的 markdown）');
+
+      await paintCell(ctx.page, 0, 2, '1');
+      const wave = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.ok(wave && wave[2] === '1',
+        'T6a: 塗過的那一格必須反映在狀態上。Got ' + JSON.stringify(wave));
+      // One gesture, one write-back — not a session's worth saved up. Task 5
+      // measured the store's refusal rate climbing with the number of
+      // structural operations stacked before a patch (8.0% at 1-3 ops, 17.0%
+      // at 1-6), so a patch that only happens at the end makes refusal the
+      // normal path.
+      const per = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        gestures: el.getAttribute('data-wave-gestures'),
+        patch: el.getAttribute('data-wave-patch'),
+      }));
+      assert.strictEqual(per.gestures, '1',
+        'T6a: 一個手勢就是一次 apply。Got ' + per.gestures);
+      assert.strictEqual(per.patch, 'ok',
+        'T6a: 那個手勢自己就要產出 patch，不是留到最後才算。Got ' + per.patch);
+      assert.strictEqual(ctx.errs.length, 0, 'T6a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6a the overlay opens on document.body and a painted cell reaches the state — OK');
+    }
+
+    // T6b — the hand-drawn waveform and the engine's own preview agree, cycle by
+    // cycle, before AND after an edit.
+    //
+    // The comparison is against the preview's own brick ids (its
+    // `<use xlink:href="#…">` list, two half-bricks per cycle, the second of
+    // which carries the level). `data-bricks-N` is what this editor decided to
+    // draw. If the two ever disagree the user has two pictures on screen and no
+    // way to tell which one the file means.
+    {
+      // Read both pictures PER LANE.
+      //
+      // The previous shape of this helper flattened the preview's whole `<use>`
+      // list and indexed it as `uses[(i*cycles + c)*2 + 1]`, guarded by
+      // `uses === lanes × cycles × 2`. That is only a cycle index while every
+      // lane emits the same number of cycles, and the very defect this row
+      // exists for — a spacer row the engine draws nothing for — makes the
+      // diagram non-rectangular. Adding the spacer to the fixture killed the
+      // old helper on its own pre-assertion (16 vs 24) rather than on the
+      // disagreement: the axis was uncovered by construction, the same shape as
+      // round 1's filtered-out gaps.
+      //
+      // The engine publishes the per-lane structure itself: `wavelane_draw_<i>_<index>`
+      // holds lane i's bricks and `wavegap_<i>_<index>` its gap markers, in the
+      // codec's own display order. Asking those directly needs no rectangle.
+      const bricks = async (page) => {
+        const got = await page.evaluate(() => {
+          const svg = document.querySelector('.ed-wave-canvas');
+          const lanes = Number(svg.getAttribute('data-lane-count'));
+          const href = (u) => (u.getAttribute('xlink:href') || u.getAttribute('href') || '').slice(1);
+          const drawn = [], engine = [], drawnGaps = [], engineGaps = [], missing = [];
+          let totalUses = 0;
+          for (let i = 0; i < lanes; i++) {
+            drawn.push(svg.getAttribute('data-bricks-' + i));
+            drawnGaps.push(svg.getAttribute('data-gaps-' + i));
+            const g = document.getElementById('wavelane_draw_' + i + '_9000');
+            if (g === null) { missing.push(i); engine.push(null); engineGaps.push(null); continue; }
+            const u = Array.prototype.map.call(g.querySelectorAll('use'), href);
+            totalUses += u.length;
+            // A cycle is a PAIR of half-bricks and the second carries the level.
+            const row = [];
+            for (let k = 1; k < u.length; k += 2) row.push(u[k]);
+            engine.push(row.join(' '));
+            // …and the gap markers of that same lane, as cycle indices: the
+            // engine places one at the centre of its own cycle, 40px wide, so
+            // `translate(x)` is `(cycle + 0.5) * 40`. (Only true while nothing
+            // rescales the engine — pinned by the `unmodelled` assertion below.)
+            const gg = document.getElementById('wavegap_' + i + '_9000');
+            const at = gg === null ? [] : Array.prototype.map.call(gg.querySelectorAll('use'),
+              (x) => {
+                const m = /translate\(\s*(-?[0-9.]+)/.exec(x.getAttribute('transform') || '');
+                return m === null ? 'NaN' : String((Number(m[1]) / 40) - 0.5);
+              });
+            engineGaps.push(at.join(' '));
+          }
+          // ── what was actually PAINTED ───────────────────────────────────
+          //
+          // Everything above reads `data-bricks-<i>` — the canvas's own
+          // description of itself, written at the top of `drawLane` BEFORE it
+          // paints anything. Measured with a mutant that returns straight after
+          // that attribute block: the canvas paints 0 non-gridline shapes
+          // (pristine: 25) and every assertion in this row still passes,
+          // `lanes === engineLanes` included. An editor that draws nothing is
+          // indistinguishable from a correct one when both halves of the
+          // comparison come from the same source.
+          //
+          // So this reads the SHAPES. The cycle grid comes from the painted
+          // `.ed-wave-grid` lines rather than from any attribute, the row height
+          // comes from that grid's own extent divided by the ENGINE's lane
+          // count, and each cycle is classified by what is painted over its
+          // midpoint — a rect is x, a polygon is a bus, a clock path is a clock,
+          // and a plain line is read as high/mid/low by which third of its row
+          // it sits in. Transition edges are vertical and sit ON a boundary, so
+          // a cycle's midpoint never falls inside one; gap markers and bus
+          // labels are excluded by class (gaps have their own per-cycle
+          // comparison above).
+          const gridXs = Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('x1')))
+            .sort((a, b) => a - b);
+          const gridBottom = Math.max.apply(null, Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('y2'))));
+          const engineLaneCount = document.querySelectorAll(
+            '[id^="wavelane_draw_"][id$="_9000"]').length;
+          const rowH = engineLaneCount > 0 ? gridBottom / engineLaneCount : 0;
+          const shapes = Array.prototype.filter.call(svg.children, (el) => {
+            const cls = el.getAttribute('class') || '';
+            return cls.indexOf('ed-wave-grid') === -1 &&
+              cls.indexOf('ed-wave-selection') === -1 &&
+              // Task 8's cell cursor, excluded on the same ground as the
+              // selection box beside it: both are CHROME saying where the next
+              // gesture will land, neither is a brick the engine has an opinion
+              // about. It is drawn from the moment either device touches the
+              // drawing, so leaving it in would make every count below one too
+              // high the instant this row's own `paintCell` runs.
+              cls.indexOf('ed-wave-cursor') === -1 &&
+              cls.indexOf('ed-wave-gap') === -1 &&
+              cls.indexOf('ed-wave-buslabel') === -1 &&
+              cls.indexOf('ed-wave-edge') === -1;
+          }).map((el) => {
+            const b = el.getBBox();
+            return { tag: el.tagName, cls: el.getAttribute('class') || '',
+              x0: b.x, x1: b.x + b.width, cy: b.y + b.height / 2,
+              y0: b.y, y1: b.y + b.height };
+          });
+          const painted = [];
+          const paintedCounts = [];
+          for (let i = 0; i < engineLaneCount; i++) {
+            const top = i * rowH;
+            paintedCounts.push(shapes.filter(
+              (sh) => sh.cy >= top && sh.cy < top + rowH).length);
+            const row = [];
+            for (let c = 0; c + 1 < gridXs.length; c++) {
+              const mx = (gridXs[c] + gridXs[c + 1]) / 2;
+              const hit = shapes.find((sh) => sh.x0 <= mx && mx <= sh.x1 &&
+                sh.cy >= top && sh.cy < top + rowH);
+              if (hit === undefined) { row.push(''); continue; }
+              if (hit.tag === 'rect') { row.push('x'); continue; }
+              if (hit.tag === 'polygon') { row.push('bus'); continue; }
+              if (hit.tag === 'path') {
+                row.push(hit.cls.indexOf('ed-wave-clock') !== -1 ? 'clock' : '?');
+                continue;
+              }
+              const third = (hit.cy - top) / rowH;
+              row.push(third < 1 / 3 ? 'hi' : (third < 2 / 3 ? 'mid' : 'lo'));
+            }
+            painted.push(row.join(' '));
+          }
+          return { drawn: drawn, engine: engine, missing: missing,
+            painted: painted, paintedCounts: paintedCounts,
+            shapeCount: shapes.length,
+            gridCount: gridXs.length,
+            lanes: lanes,
+            engineLanes: document.querySelectorAll(
+              '[id^="wavelane_draw_"][id$="_9000"]').length,
+            drawnGaps: drawnGaps, engineGaps: engineGaps, totalUses: totalUses,
+            hasWave: Array.from({ length: lanes },
+              (_, i) => svg.getAttribute('data-haswave-' + i)),
+            levels: svg.getAttribute('data-levels-3'),
+            wave: svg.getAttribute('data-wave-3'),
+            waves: Array.from({ length: lanes },
+              (_, i) => svg.getAttribute('data-wave-' + i)),
+            unmodelled: document.querySelector('.ed-wave-overlay')
+              .getAttribute('data-wave-unmodelled'),
+            preview: document.querySelector('.ed-wave-preview')
+              .getAttribute('data-wave-preview') };
+        });
+        // Three pre-assertions, and each one rules out a different way for the
+        // comparison below to be true without having compared anything.
+        assert.strictEqual(got.preview, 'ok',
+          'T6b: 預覽必須真的畫出來了。Got ' + got.preview);
+        assert.deepStrictEqual(got.missing, [],
+          'T6b: 每一條 lane 都必須在預覽裡有自己的 wavelane_draw_<i>_9000，' +
+          '否則 index 對不上、下面在比空氣。Got ' + JSON.stringify(got.missing));
+        // …and the count itself has to come from the ENGINE, not from the thing
+        // under test. `missing` only checks the indices the loop visits, and the
+        // loop runs to the canvas's own `data-lane-count` — so a drawing that
+        // dropped a whole lane would shorten the loop, agree on every lane it
+        // still had, and stay green with the engine's extra lane group sitting
+        // there unexamined. Both are 6 on this fixture and nobody had written
+        // that down.
+        assert.strictEqual(got.lanes, got.engineLanes,
+          'T6b: 手繪的 lane 數必須等於引擎畫出來的 lane 數。Got ' +
+          got.lanes + ' vs ' + got.engineLanes);
+        assert.ok(got.totalUses > 0,
+          'T6b: 預覽必須真的畫出 brick。Got ' + got.totalUses);
+        assert.ok(got.engine.filter((row) => row !== '').length > 1,
+          'T6b: 至少要有兩條 lane 真的畫了東西，否則整排都是「空 vs 空」。Got ' +
+          JSON.stringify(got.engine));
+        // period / phase / hscale change what the ENGINE paints and the drawing
+        // does not model them; they also rescale the gap arithmetic above.
+        assert.strictEqual(got.unmodelled, '',
+          'T6b: 這個 fixture 不得帶 period/phase/hscale。Got ' +
+          JSON.stringify(got.unmodelled));
+        // Gaps, per lane and by POSITION — not a document-wide count. A count
+        // stays green when the marker is drawn one cycle to the left or on the
+        // neighbouring lane, which is exactly the class of bug it was there for.
+        assert.deepStrictEqual(got.drawnGaps, got.engineGaps,
+          'T6b: 斷點記號必須逐 lane、逐 cycle 對上\ndrawn : ' +
+          JSON.stringify(got.drawnGaps) + '\nengine: ' + JSON.stringify(got.engineGaps));
+
+        // The painted half. `expected` is derived from the ENGINE's own bricks,
+        // so neither side of this comparison comes from the canvas's attributes.
+        const familyOf = (brick) => {
+          if (brick === '') return '';
+          if (brick === 'xxx') return 'x';
+          if (brick.slice(0, 4) === 'vvv-') return 'bus';
+          if (brick === 'nclk' || brick === 'pclk') return 'clock';
+          if (brick === '111' || brick === 'uuu') return 'hi';
+          if (brick === '000' || brick === 'ddd') return 'lo';
+          if (brick === 'zzz') return 'mid';
+          return '?' + brick;
+        };
+        // Both sides are padded to the number of cycle COLUMNS the drawing has,
+        // so the comparison stays positional: a lane the engine gives three
+        // bricks on must be painted on exactly those three columns and blank on
+        // the rest, and a lane it gives none on (the `{}` spacer) must be blank
+        // everywhere rather than merely "not compared".
+        const columns = got.gridCount - 1;
+        const padTo = (arr) => {
+          const out = arr.slice(0, columns);
+          while (out.length < columns) out.push('');
+          return out.join(' ');
+        };
+        const expected = got.engine.map((row) =>
+          padTo((row === '' ? [] : row.split(' ')).map(familyOf)));
+        assert.ok(got.gridCount > 1,
+          'T6b: cycle 格線必須真的畫出來了，否則下面是拿空格線在分格。Got ' + got.gridCount);
+        assert.ok(got.shapeCount > 0,
+          'T6b: 畫布上必須真的有形狀，不只是屬性。Got ' + got.shapeCount);
+
+        // …and EXACTLY as many shapes per lane as the engine's bricks call for,
+        // not merely "at least one per cycle". `painted` samples one point per
+        // cycle, so a drawing that leaks an extra shape between two correct ones
+        // reads as correct — measured on a mutant that appends one stray rect
+        // per run: `shapeCount` went 16 → 32 and every other assertion here
+        // stayed green.
+        //
+        // The expected count is the number of RUNS in the engine's own row:
+        // `drawLane` emits one shape per run of equal bricks, and clocks never
+        // merge because each `p` cycle is a whole clock period. Edges, gap
+        // markers and bus labels are excluded from `shapes` by class, so the
+        // two sides count the same things.
+        const runsOf = (row) => {
+          const bricks = row === '' ? [] : row.split(' ');
+          let n = 0;
+          for (let k = 0; k < bricks.length; k++) {
+            const clock = bricks[k] === 'nclk' || bricks[k] === 'pclk';
+            if (k === 0 || clock || bricks[k] !== bricks[k - 1]) n++;
+          }
+          return n;
+        };
+        const expectedCounts = got.engine.map(runsOf);
+        assert.deepStrictEqual(got.paintedCounts, expectedCounts,
+          'T6b: 每一條 lane 畫出來的形狀【數量】必須剛好等於引擎那一列的 run 數\n' +
+          'painted : ' + JSON.stringify(got.paintedCounts) + '\n' +
+          'expected: ' + JSON.stringify(expectedCounts));
+        // …and nothing painted outside every row band, which the per-lane sums
+        // above cannot see on their own.
+        assert.strictEqual(got.shapeCount,
+          expectedCounts.reduce((a, b) => a + b, 0),
+          'T6b: 不得有形狀畫在所有 lane 的範圍之外。Got ' + got.shapeCount +
+          ' vs ' + expectedCounts.reduce((a, b) => a + b, 0));
+        assert.deepStrictEqual(got.painted, expected,
+          'T6b: 畫出來的【形狀】必須跟引擎逐格對上（不是只有 data-bricks 屬性對上）\n' +
+          'painted : ' + JSON.stringify(got.painted) + '\n' +
+          'expected: ' + JSON.stringify(expected));
+        return got;
+      };
+
+      const ctx = await newPage(WAVE_MD);
+      const dupBefore = await ctx.page.evaluate(() => {
+        const seen = new Map();
+        for (const el of document.querySelectorAll('[id]')) {
+          seen.set(el.id, (seen.get(el.id) || 0) + 1);
+        }
+        return Array.from(seen.values()).filter((n) => n > 1).length;
+      });
+      await openWave(ctx.page);
+      // The preview is a SECOND engine render into a page that already carries
+      // one. Rendered at index 0 with the skin re-emitted it put 240 duplicate
+      // `id`s into a document that had 0 — measured — including a second
+      // definition of every brick symbol the first diagram's `<use>`s resolve
+      // against. Its own index and the shared skin bring that back to 0.
+      const dupAfter = await ctx.page.evaluate(() => {
+        const seen = new Map();
+        for (const el of document.querySelectorAll('[id]')) {
+          seen.set(el.id, (seen.get(el.id) || 0) + 1);
+        }
+        return Array.from(seen.values()).filter((n) => n > 1).length;
+      });
+      assert.strictEqual(dupBefore, 0, 'T6b 前提失敗：開之前這一頁本來就沒有重複的 id');
+      assert.strictEqual(dupAfter, 0,
+        'T6b: 預覽不得在頁面上留下重複的 id。Got ' + dupAfter);
+      const before = await bricks(ctx.page);
+      // The fixture can express the defect: `ack` is written `.0..1` and the
+      // engine draws it x x x x 1. A drawing that painted the characters would
+      // read 0 here and this row would catch it.
+      assert.strictEqual(before.wave, '.0..1', 'T6b 前提失敗：fixture 的 ack 必須是 .0..1');
+      assert.strictEqual(before.levels, 'xxxx1',
+        'T6b: 開頭是 repeater 的 lane，引擎畫的是 x 直到恢復。Got ' + before.levels);
+      assert.deepStrictEqual(before.drawn, before.engine,
+        'T6b: 自己畫的波形必須跟旁邊的 WaveDrom 預覽逐格一致\ndrawn : ' +
+        JSON.stringify(before.drawn) + '\nengine: ' + JSON.stringify(before.engine));
+
+      // …and it still agrees after an edit. `=` on a lane INSIDE the group, so
+      // the lane index that got painted had to survive the flattening.
+      await paintCell(ctx.page, 1, 4, '=');
+      const after = await bricks(ctx.page);
+      assert.notDeepStrictEqual(after.drawn, before.drawn,
+        'T6b 前提失敗：那一筆編輯必須真的改到畫面，否則「編輯後仍一致」是空的');
+      assert.deepStrictEqual(after.drawn, after.engine,
+        'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
+        '\nengine: ' + JSON.stringify(after.engine));
+
+      // The gap axis is only covered if the fixture actually HAS one drawn, on
+      // a lane this comparison names.
+      assert.ok(after.engineGaps.some((x) => x !== ''),
+        'T6b 前提失敗：fixture 必須真的帶一個 `|`，否則斷點那條斷言是空的。Got ' +
+        JSON.stringify(after.engineGaps));
+      // …and the spacer axis likewise: one lane with no `wave` key at all,
+      // which the engine draws nothing for.
+      assert.ok(after.hasWave.indexOf('0') !== -1,
+        'T6b 前提失敗：fixture 必須帶一條沒有 wave 的 lane。Got ' +
+        JSON.stringify(after.hasWave));
+      const spacer = after.hasWave.indexOf('0');
+      assert.strictEqual(after.drawn[spacer], '',
+        'T6b: 沒有 wave 的 lane 引擎什麼都不畫，手繪也不准畫。Got ' +
+        JSON.stringify(after.drawn[spacer]));
+      assert.strictEqual(after.engine[spacer], '',
+        'T6b 前提失敗：引擎對那條 lane 真的什麼都沒畫。Got ' +
+        JSON.stringify(after.engine[spacer]));
+
+      // …and an ALL-EMPTY diagram, which is two clicks away and which round 1
+      // drew as four blank rows while the engine drew four x cycles. Select
+      // every cycle of one lane and delete — `deleteCycles` narrows every lane
+      // at once, so the whole diagram empties.
+      await dragCells(ctx.page, 0, 0, 4);
+      await pressClick(ctx.page, '.ed-wave-cycle-delete');
+      await new Promise((r) => setTimeout(r, 300));
+      const emptied = await bricks(ctx.page);
+      for (let i = 0; i < emptied.hasWave.length; i++) {
+        if (emptied.hasWave[i] !== '1') continue;
+        assert.strictEqual(emptied.waves[i], '',
+          'T6b 前提失敗：刪掉全部 cycle 之後 lane ' + i + ' 的 wave 該是空的。Got ' +
+          JSON.stringify(emptied.waves[i]));
+      }
+      // The spacer is untouched by a cycle operation and still draws nothing,
+      // so this leg also pins that「空字串」and「沒有這個鍵」stay apart.
+      assert.strictEqual(emptied.hasWave[spacer], '0',
+        'T6b: 刪 cycle 不得替沒有 wave 的 lane 生一個出來');
+      assert.strictEqual(emptied.drawn[spacer], '',
+        'T6b: 全空之後那條 spacer 仍然什麼都不畫。Got ' + JSON.stringify(emptied.drawn[spacer]));
+      assert.deepStrictEqual(emptied.drawn, emptied.engine,
+        'T6b: 空的 lane 是「一格 x」不是「什麼都不畫」\ndrawn : ' +
+        JSON.stringify(emptied.drawn) + '\nengine: ' + JSON.stringify(emptied.engine));
+      assert.strictEqual(ctx.errs.length, 0, 'T6b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6b the hand-drawn waveform and the WaveDrom preview agree cycle by cycle, gaps and an emptied diagram included — OK');
+    }
+
+    // T6c — a group can be joined at its HEAD and never at its TAIL, and the UI
+    // says which before the button is pressed.
+    //
+    // The asymmetry is `laneInsertPath`'s and is a consequence of flattened
+    // indexing, not a bug to paper over. What can be got wrong is letting the
+    // two look the same — this batch has already shipped one comparison that
+    // made two different insert positions indistinguishable — so this row
+    // asserts the DIFFERENCE first and only then what each one does.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const labels = await ctx.page.evaluate(() =>
+        Array.from(document.querySelectorAll('.ed-wave-lane-add')).map((b) => ({
+          at: b.getAttribute('data-insert-at'),
+          lands: b.getAttribute('data-lands-in'),
+          title: b.title,
+        })));
+      const head = labels.find((l) => l.at === '1');
+      const tail = labels.find((l) => l.at === '3');
+      assert.ok(head && tail, 'T6c 前提失敗：群組的頭與尾都要有一顆 ＋。Got ' +
+        JSON.stringify(labels));
+      assert.notStrictEqual(head.lands, tail.lands,
+        'T6c: 群組的頭與尾必須指向不同的落點，否則這個案例分辨不出任何東西。Got ' +
+        JSON.stringify([head, tail]));
+      assert.strictEqual(head.lands, 'bus',
+        'T6c: 群組第一條 lane 前面插入會進群組。Got ' + JSON.stringify(head));
+      assert.strictEqual(tail.lands, '',
+        'T6c: 群組最後一條 lane 後面插入會落在群組外。Got ' + JSON.stringify(tail));
+      assert.ok(tail.title.indexOf('群組外') !== -1,
+        'T6c: 按下之前就要說清楚會落在群組外。Got ' + JSON.stringify(tail.title));
+
+      const span = () => ctx.page.evaluate(() => {
+        const g = document.querySelector('.ed-wave-group');
+        return g === null ? null : g.getAttribute('data-group-from') + '-' +
+          g.getAttribute('data-group-to');
+      });
+      assert.strictEqual(await span(), '1-2', 'T6c 前提失敗：群組一開始蓋住 row 1-2');
+
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="3"]');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await span(), '1-2',
+        'T6c: 在群組尾巴新增的 lane 不得被吸進群組裡');
+      const said = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      assert.ok(said.indexOf('群組外') !== -1,
+        'T6c: 新增之後也要說它落在哪裡。Got ' + JSON.stringify(said));
+
+      // And the head really does join, so the pair above is a real asymmetry
+      // and not two spellings of the same behaviour.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await span(), '1-3',
+        'T6c: 在群組頭插入的 lane 必須真的進群組（群組因此多蓋一列）');
+      assert.strictEqual(ctx.errs.length, 0, 'T6c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6c a lane joins a group at its head and never at its tail, and says so first — OK');
+    }
+
+    // T6d — a block whose WaveJSON cannot be read still opens, and says what the
+    // parser said and WHERE. A button that silently does nothing is the worst
+    // outcome available here: the block looks editable and simply is not.
+    {
+      const BROKEN_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "  { name: 'clk', wave: 'p....' },",
+        "  ['bus',",
+        "    { name: 'req', wave: '0.1.0' }",
+        '  ',            // the group is never closed
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(BROKEN_MD);
+      await openWave(ctx.page);
+      const got = await ctx.page.evaluate(() => {
+        const o = document.querySelector('.ed-wave-overlay');
+        const w = document.querySelector('.ed-wave-parse-where');
+        return {
+          state: o.getAttribute('data-wave-state'),
+          msg: (document.querySelector('.ed-wave-parse-message') || {}).textContent || '',
+          offset: w === null ? null : w.getAttribute('data-wave-offset'),
+          where: w === null ? '' : w.textContent,
+          excerpt: (document.querySelector('.ed-wave-parse-excerpt') || {}).textContent || '',
+          hasCanvas: !!document.querySelector('.ed-wave-canvas'),
+        };
+      });
+      assert.strictEqual(got.state, 'unreadable',
+        'T6d: 讀不回來的區塊必須開出一個說明用的編輯器。Got ' + got.state);
+      assert.strictEqual(got.hasCanvas, false,
+        'T6d: 讀不回來的時候不得假裝有東西可以編輯');
+      assert.ok(got.msg.length > 0 && got.msg.indexOf('讀不回來') !== -1,
+        'T6d: 必須把 parser 的話原樣說出來。Got ' + JSON.stringify(got.msg));
+      assert.ok(got.offset !== null && /^[0-9]+$/.test(got.offset),
+        'T6d: offset 必須說出來。Got ' + JSON.stringify(got.offset));
+      assert.ok(got.where.indexOf('offset ' + got.offset) !== -1,
+        'T6d: 畫面上要看得到那個 offset。Got ' + JSON.stringify(got.where));
+      assert.ok(got.excerpt.length > 0,
+        'T6d: 只有 offset 對人沒有用，必須連那一行一起給。Got ' + JSON.stringify(got.excerpt));
+      assert.strictEqual(ctx.errs.length, 0, 'T6d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6d an unreadable wavedrom block opens an editor that says why and where — OK');
+    }
+
+    // ── fix round 1 ────────────────────────────────────────────────────
+    //
+    // T6e, T6f and T6g are one defect wearing three faces: the overlay lives
+    // OUTSIDE `.content` so it cannot be serialised into the user's markdown,
+    // and that same position puts it outside every assumption the surrounding
+    // editor makes about where focus and keys can be. The answer is not three
+    // patches — it is that the editor now says what it owns while it is open
+    // and the surrounding code ASKS.
+
+    // T6e — a Backspace typed into a wave field must not delete the user's
+    // blocks. Measured before the fix: 3 blocks became 2, the tail paragraph
+    // was gone, and the keystroke never reached the input at all.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tailLine = await ctx.page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((b) => (b.textContent || '').indexOf('Tail para two') !== -1);
+        return Number(el.getAttribute('data-block-id'));
+      });
+      const lineOf = await ctx.page.evaluate((id) => window.__ED__.blocks
+        .find((b) => b.id === id).startLine, tailLine);
+      const blockCount = () => ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      const before = await blockCount();
+      assert.ok(before >= 3, 'T6e 前提失敗：fixture 要有夠多的 block。Got ' + before);
+
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      assert.notStrictEqual(await ctx.page.evaluate(() => window.__edTestGetSelection()), null,
+        'T6e 前提失敗：必須真的有一組站著的 block 選取');
+
+      await openWave(ctx.page);
+      // Opening the editor settles the document and drops a selection the user
+      // can no longer see.
+      assert.strictEqual(await ctx.page.evaluate(() => window.__edTestGetSelection()), null,
+        'T6e: 開啟波形編輯器時要把看不見的 block 選取收掉');
+
+      // …and even with one deliberately standing again, a key typed into a
+      // wave field is the field's.
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      await pressClick(ctx.page, '.ed-wave-lane-name[data-focus-key="lane-name-0"]');
+      await ctx.page.keyboard.press('Backspace');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await blockCount();
+      const value = await ctx.page.$eval('.ed-wave-lane-name[data-focus-key="lane-name-0"]',
+        (el) => el.value);
+      assert.strictEqual(after, before,
+        'T6e: 在波形欄位裡按 Backspace 不得刪掉使用者的 block。Got ' + after + ' / ' + before);
+      assert.strictEqual(value, 'cl',
+        'T6e: 那一下 Backspace 必須真的進到欄位裡（clk -> cl）。Got ' + JSON.stringify(value));
+      assert.strictEqual(ctx.errs.length, 0, 'T6e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6e a Backspace typed into a wave field never deletes the document — OK');
+    }
+
+    // T6e2 — the same guard, with no wave editor anywhere near it. The
+    // block-selection branch's stated invariant is「focus is on a block wrapper
+    // and not on any text surface」, and the reader's own search box is a text
+    // surface outside `.content` that predates all of this. It was in the same
+    // hole.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const lineOf = await ctx.page.evaluate(() => {
+        const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((b) => (b.textContent || '').indexOf('Tail para two') !== -1);
+        const id = Number(el.getAttribute('data-block-id'));
+        return window.__ED__.blocks.find((b) => b.id === id).startLine;
+      });
+      const before = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      await ctx.page.evaluate((l) => window.__edTestSetSelection(l, l), lineOf);
+      await ctx.page.evaluate(() => {
+        const box = document.getElementById('doc-search-input');
+        box.focus();
+        box.value = 'abc';
+      });
+      await ctx.page.keyboard.press('Backspace');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        blocks: document.querySelectorAll('.ed-block').length,
+        search: document.getElementById('doc-search-input').value,
+      }));
+      assert.strictEqual(after.blocks, before,
+        'T6e2: 在搜尋框裡按 Backspace 不得刪掉 block。Got ' + after.blocks + ' / ' + before);
+      assert.strictEqual(after.search, 'ab',
+        'T6e2: 那一下必須進到搜尋框。Got ' + JSON.stringify(after.search));
+      assert.strictEqual(ctx.errs.length, 0, 'T6e2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6e2 the block-selection keys stay out of every text field, not just the ones in .content — OK');
+    }
+
+    // T6f — Ctrl+Z inside the overlay is the WAVEFORM's undo. Before the fix it
+    // rolled back the markdown document behind the modal.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const edited = () => ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(await edited(), true, 'T6f 前提失敗：那一筆編輯要先真的落地');
+
+      await openWave(ctx.page);
+      const wave0Before = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      await paintCell(ctx.page, 0, 2, '1');
+      const painted = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.ok(painted[2] === '1', 'T6f 前提失敗：要先有一筆波形編輯可以退。Got ' + painted);
+      assert.notStrictEqual(painted, wave0Before,
+        'T6f 前提失敗：那一筆塗抹要真的改到 wave');
+
+      await ctx.page.evaluate(() => document.querySelector('.ed-wave-head-text').focus());
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('z');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 300));
+      const got = await ctx.page.evaluate(() => ({
+        wave0: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+        overlay: !!document.querySelector('.ed-wave-overlay'),
+        doc: (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1,
+      }));
+      assert.strictEqual(got.overlay, true, 'T6f: overlay 要還在');
+      assert.strictEqual(got.wave0, wave0Before,
+        'T6f: Ctrl+Z 要退掉波形那一筆（回到塗之前的樣子）。Got ' + JSON.stringify(got.wave0));
+      assert.strictEqual(got.doc, true,
+        'T6f: Ctrl+Z 不得退掉 modal 後面那份 markdown 文件');
+      assert.strictEqual(ctx.errs.length, 0, 'T6f: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6f Ctrl+Z inside the overlay undoes the waveform, not the document — OK');
+    }
+
+    // T6g — Escape mid-drag, then release. Before the fix the release still ran
+    // the paint, into a store that was no longer on screen and through a
+    // callback whose owner had been torn down: a page-level TypeError, plus two
+    // leaked document listeners per cancelled drag.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const a = await cellPoint(ctx.page, 0, 1);
+      const b = await cellPoint(ctx.page, 0, 3);
+      const wave0 = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      await ctx.page.mouse.move(a.x, a.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.move(b.x, b.y);
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6g 前提失敗：Escape 要把 overlay 收掉');
+      await ctx.page.mouse.up();
+      await ctx.page.mouse.move(b.x + 5, b.y);
+      await ctx.page.mouse.move(b.x + 40, b.y + 10);
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(ctx.errs.length, 0,
+        'T6g: 拖到一半 Escape 再放開，不得有 pageerror: ' + ctx.errs.join(' | '));
+
+      // The release must not have run the paint. Re-opening the block cannot
+      // show that on its own: a gesture that arrives after the overlay came
+      // down has no seam to write through (it is COUNTED as stray and returns
+      // before commitRangeEdit), so the reopened editor reads the same source
+      // either way and the comparison below is true whatever happened. What
+      // DOES separate the two is whether a gesture ever reached the caller
+      // after the overlay came down.
+      //
+      // v3.4.0 batch3 Task 7 correction: the sentence that stood here said
+      // 「nothing writes back to the document yet」, which was a statement about
+      // the FEATURE and is no longer true — an ordinary gesture now commits.
+      // What makes this particular comparison toothless is narrower and
+      // survives Task 7: no seam, no write. The `stray` assertion below is
+      // still the one with teeth.
+      const stray = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(stray.open, false, 'T6g: overlay 已經關掉了');
+      assert.strictEqual(stray.stray, 0,
+        'T6g: 編輯器關掉之後不得再有任何手勢送出來（那一筆是使用者取消掉的）。Got ' +
+        stray.stray);
+
+      // Re-open: the edit that was in flight must not have landed, and a
+      // COMPLETED drag must still register — otherwise「沒有手勢」would be
+      // satisfied by an editor that never reports anything at all.
+      await openWave(ctx.page);
+      const again = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.strictEqual(again, wave0,
+        'T6g: 被取消的那一筆塗抹不得寫進文件。Got ' + JSON.stringify(again));
+      await dragCells(ctx.page, 0, 1, 3);
+      const live = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(live.seam !== null && live.seam.gestured, true,
+        'T6g 前提失敗：正常完成的拖曳必須有手勢送到 seam，否則上面那條 0 是空的。Got ' +
+        JSON.stringify(live));
+      assert.strictEqual(live.stray, 0, 'T6g: 正常的手勢不算 stray。Got ' + live.stray);
+      assert.strictEqual(ctx.errs.length, 0, 'T6g: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6g Escape mid-drag cancels the paint and leaves nothing behind — OK');
+    }
+
+    // T6h — a gesture must not drop the keyboard cursor. The lane list is
+    // rebuilt on every repaint, so before the fix committing a rename with
+    // Enter left focus on document.body — which is also the state that turns
+    // the next Backspace into「delete the selected blocks」.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '.ed-wave-lane-name[data-focus-key="lane-name-0"]');
+      await ctx.page.keyboard.type('X');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 300));
+      const got = await ctx.page.evaluate(() => ({
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        tag: document.activeElement.tagName,
+        value: document.activeElement.value,
+      }));
+      assert.strictEqual(got.key, 'lane-name-0',
+        'T6h: 改完名字游標要留在同一個欄位。Got ' + JSON.stringify(got));
+      assert.strictEqual(got.value, 'clkX', 'T6h: 欄位內容要是改過的那個。Got ' + got.value);
+
+      // …and the ＋ hands the keyboard to the lane it just made.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
+      await new Promise((r) => setTimeout(r, 300));
+      const added = await ctx.page.evaluate(() => document.activeElement.getAttribute
+        ? document.activeElement.getAttribute('data-focus-key') : null);
+      assert.strictEqual(added, 'lane-name-1',
+        'T6h: 新增 lane 之後游標要落在新那一條的名字欄。Got ' + JSON.stringify(added));
+
+      // …and walking a lane all the way to an EDGE. The last press of that walk
+      // targets a button that is `disabled` at the edge, and `.focus()` on a
+      // disabled button is inert — measured before the fix, three ▲ put the
+      // cursor on `lane-up-2`, `lane-up-1` and then BODY, mid-gesture, and the
+      // fourth press did nothing at all. Focus on body is the state that turns
+      // the next Backspace into「delete the selected blocks」.
+      const focusKey = () => ctx.page.evaluate(() => document.activeElement.getAttribute
+        ? document.activeElement.getAttribute('data-focus-key') : null);
+      const laneCount = await ctx.page.evaluate(() => Number(
+        document.querySelector('.ed-wave-canvas').getAttribute('data-lane-count')));
+      assert.ok(laneCount >= 3, 'T6h 前提失敗：要有夠多 lane 才走得到邊。Got ' + laneCount);
+      // push lane 2 to the top
+      for (let at = 2; at > 0; at--) {
+        await pressClick(ctx.page, '.ed-wave-lane-up[data-focus-key="lane-up-' + at + '"]');
+        await new Promise((r) => setTimeout(r, 250));
+        const k = await focusKey();
+        assert.notStrictEqual(k, null,
+          'T6h: ▲ 走到第 ' + at + ' 步時游標掉到 body 上了');
+      }
+      assert.strictEqual(await focusKey(), 'lane-down-0',
+        'T6h: 推到頂之後 ▲ 已經 disabled，游標要交給同一列還活著的 ▼。Got ' +
+        JSON.stringify(await focusKey()));
+      // and to the bottom
+      const last = laneCount - 1;
+      for (let at = 0; at < last; at++) {
+        await pressClick(ctx.page, '.ed-wave-lane-down[data-focus-key="lane-down-' + at + '"]');
+        await new Promise((r) => setTimeout(r, 250));
+        assert.notStrictEqual(await focusKey(), null,
+          'T6h: ▼ 走到第 ' + at + ' 步時游標掉到 body 上了');
+      }
+      assert.strictEqual(await focusKey(), 'lane-up-' + last,
+        'T6h: 推到底之後 ▼ 已經 disabled，游標要交給 ▲。Got ' + JSON.stringify(await focusKey()));
+      assert.strictEqual(ctx.errs.length, 0, 'T6h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6h a committed gesture hands the keyboard cursor back — OK');
+    }
+
+    // T6i — the three properties the drawing does not model. The editor used to
+    // ship an hscale CONTROL whose effect the canvas ignored; it is gone, and a
+    // document carrying any of the three now says so instead of drawing a
+    // confident wrong picture.
+    {
+      const SCALED_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ config: { hscale: 2 },',
+        '  signal: [',
+        "    { name: 'clk', wave: 'p...', period: 2 },",
+        "    ['bus', { name: 'req', wave: '0.1.', phase: 0.5 }]",
+        '  ] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(SCALED_MD);
+      await openWave(ctx.page);
+      const got = await ctx.page.evaluate(() => ({
+        unmodelled: document.querySelector('.ed-wave-overlay')
+          .getAttribute('data-wave-unmodelled'),
+        noticeHidden: document.querySelector('.ed-wave-unmodelled').hidden,
+        notice: document.querySelector('.ed-wave-unmodelled').textContent,
+        hscaleControls: document.querySelectorAll('.ed-wave-hscale').length,
+        canvas: !!document.querySelector('.ed-wave-canvas'),
+      }));
+      assert.strictEqual(got.hscaleControls, 0,
+        'T6i: 不得留著一個畫布根本不理會的 hscale 控制項。Got ' + got.hscaleControls);
+      assert.strictEqual(got.canvas, true, 'T6i: 其他東西還是可以編輯');
+      assert.strictEqual(got.noticeHidden, false, 'T6i: 提示必須看得見');
+      for (const what of ['config.hscale', 'period', 'phase']) {
+        assert.ok(got.unmodelled.indexOf(what) !== -1,
+          'T6i: 提示要指名 ' + what + '。Got ' + JSON.stringify(got.unmodelled));
+        assert.ok(got.notice.indexOf(what) !== -1,
+          'T6i: 畫面上的字要指名 ' + what + '。Got ' + JSON.stringify(got.notice));
+      }
+      // …and a document carrying none of them says nothing at all, so the
+      // notice is a signal and not wallpaper.
+      await ctx.page.close(); ctx.srv.close();
+      const plain = await newPage(WAVE_MD);
+      await openWave(plain.page);
+      const quiet = await plain.page.evaluate(() => ({
+        unmodelled: document.querySelector('.ed-wave-overlay')
+          .getAttribute('data-wave-unmodelled'),
+        hidden: document.querySelector('.ed-wave-unmodelled').hidden,
+      }));
+      assert.strictEqual(quiet.unmodelled, '', 'T6i: 沒用到的文件不得跳提示');
+      assert.strictEqual(quiet.hidden, true, 'T6i: 提示要收起來');
+      assert.strictEqual(plain.errs.length, 0, 'T6i: 不得有 pageerror: ' + plain.errs.join(' | '));
+      await plain.page.close(); plain.srv.close();
+      console.log('journey: wave/T6i the editor says which properties the drawing does not model, and ships no control for them — OK');
+    }
+
+    // ── fix round 2 ────────────────────────────────────────────────────
+
+    // T6j — the two new `position: fixed` layers answer the V3 census, and
+    // nothing DROPPED on the modal reaches the document behind it.
+    //
+    // The V3 roster above lists `.ed-wave-edit-btn` as `gone` and
+    // `.ed-wave-overlay` as `live`; this is the row that drives both. It lives
+    // here rather than in the V3 section because it needs this block's fixture
+    // and its opening gesture.
+    {
+      const WAVE_SCROLL_MD = WAVE_MD +
+        Array.from({ length: 40 }, (_, i) => 'Filler line ' + i + '.').join('\n\n') + '\n';
+      const ctx = await newPage(WAVE_SCROLL_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      const hoverDiagram = async () => {
+        const box = await ctx.page.$eval('.wavedrom-diagram', (el) => {
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        await ctx.page.mouse.move(box.x, box.y);
+        await new Promise((r) => setTimeout(r, 200));
+      };
+
+      // .ed-wave-edit-btn — gone. Its position comes from the hovered diagram's
+      // own getBoundingClientRect(), i.e. viewport coordinates that a scroll
+      // makes point at the wrong thing; same family as `.ed-te-grip`.
+      await hoverDiagram();
+      const btnBefore = await overlayState(ctx.page, '.ed-wave-edit-btn');
+      assertRaised(btnBefore, '.ed-wave-edit-btn');
+      await scrollBy(ctx.page, 900);
+      const btnAfter = await overlayState(ctx.page, '.ed-wave-edit-btn');
+      assert.ok(isGone(btnAfter),
+        '.ed-wave-edit-btn 捲動後必須消失（它的座標會過期），got ' + JSON.stringify(btnAfter));
+
+      // .ed-wave-overlay — live, at the same viewport coordinates, and the
+      // document behind it does not scroll at all while it is up.
+      //
+      // The lock is the answer to a gap a state predicate over EVENTS cannot
+      // close: native wheel scrolling is not delivered to any listener this file
+      // guards, and measured, one wheel gesture over the panel took the document
+      // behind it from `scrollY 0` to `800`. Nothing is mutated by that, but the
+      // roster above classifies `.ed-wave-edit-btn` as `gone` precisely because
+      // a scroll invalidates coordinates, and the same scroll moves where the
+      // user lands when the overlay closes.
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 250));
+      const scrollable = await ctx.page.evaluate(() =>
+        document.documentElement.scrollHeight > window.innerHeight);
+      assert.strictEqual(scrollable, true,
+        'T6j 前提失敗：這份文件本來就要捲得動，否則「鎖住」什麼都沒證明');
+      await openWave(ctx.page);
+      const ovBefore = await overlayState(ctx.page, '.ed-wave-overlay');
+      assertRaised(ovBefore, '.ed-wave-overlay');
+      // The gesture, not a programmatic call. What the lock removes is the
+      // user-agent's own scrolling mechanism, which is what R2 named: pointer
+      // over the panel, one wheel, `scrollY 0 → 800`. MEASURED here, both ways
+      // round: with `overflow: hidden` on the root a wheel leaves `scrollY` at 0
+      // while `window.scrollBy(0, 900)` still moves it to 900 — that is what
+      // `hidden` means, and `clip` measured identically in this Chromium. A
+      // script calling `scrollBy` is the page's own code and not the hand this
+      // was about, and nothing on the overlay's path does.
+      const panelBox = await ctx.page.$eval('.ed-wave-panel', (el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await ctx.page.mouse.move(panelBox.x, panelBox.y);
+      await ctx.page.mouse.wheel({ deltaY: 800 });
+      await new Promise((r) => setTimeout(r, 400));
+      const lockedY = await ctx.page.evaluate(() => window.scrollY);
+      assert.strictEqual(lockedY, 0,
+        'T6j: modal 開著時滾輪不得捲動後面那份文件。Got ' + lockedY);
+
+      // …and now a scroll that the lock does NOT block, because the `live`
+      // half of this census row is only meaningful across a page that really
+      // moved. The version this comment replaced deleted the scroll when it
+      // added the lock, and then compared `top` before and after a scroll the
+      // line above asserts did not happen. Measured on a sandbox whose only
+      // change was `.ed-wave-overlay { position: absolute }`: THE VERSION THIS
+      // REPLACED passed — it missed the defect — while this shape fails it at
+      // `top -900 === 0`. That is the class this row exists for and the one this
+      // branch already paid for once. `scrollBy` moves while a wheel does not:
+      // that is what `overflow: hidden` means, measured both ways.
+      await scrollBy(ctx.page, 900);
+      const ovAfter = await overlayState(ctx.page, '.ed-wave-overlay');
+      assert.ok(isLive(ovAfter),
+        '.ed-wave-overlay 捲動後必須仍然可見，got ' + JSON.stringify(ovAfter));
+      assert.strictEqual(ovAfter.top, ovBefore.top,
+        '.ed-wave-overlay 捲動後必須留在同一個視窗座標，got top=' + ovAfter.top);
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 250));
+
+      // A file dropped on the panel. Before the state-based gate this reached
+      // the document's own `drop` listener and inserted an image into `.content`
+      // behind the modal — measured, 4 blocks became 5 with the overlay still up
+      // and saying nothing about it.
+      const dropPng = (sel) => ctx.page.evaluate((s2) => {
+        const dt = new DataTransfer();
+        dt.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])],
+          'probe.png', { type: 'image/png' }));
+        const ev = new DragEvent('drop',
+          { bubbles: true, cancelable: true, dataTransfer: dt });
+        document.querySelector(s2).dispatchEvent(ev);
+        return ev.defaultPrevented;
+      }, sel);
+      const blockCount = () => ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-block').length);
+      const before = await blockCount();
+      const preventedOnPanel = await dropPng('.ed-wave-panel');
+      await new Promise((r) => setTimeout(r, 900));
+      assert.strictEqual(await blockCount(), before,
+        'T6j: 丟在 modal 上的檔案不得寫進後面那份文件');
+      assert.strictEqual(preventedOnPanel, false,
+        'T6j: 那個 drop 必須被【婉拒】（不 preventDefault），而不是被吞掉');
+
+      // The control leg, and the reason the assertions above are not vacuous:
+      // with NO overlay open the same scroll moves the page and the same
+      // synthetic drop really does insert.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6j 前提失敗：Escape 要把 overlay 收掉');
+      // The SAME wheel gesture, so the control leg and the locked leg differ in
+      // exactly one thing: whether the modal is up.
+      await ctx.page.mouse.move(panelBox.x, panelBox.y);
+      await ctx.page.mouse.wheel({ deltaY: 800 });
+      await new Promise((r) => setTimeout(r, 400));
+      assert.ok(await ctx.page.evaluate(() => window.scrollY) > 0,
+        'T6j 前提失敗：關掉之後同一個滾輪手勢必須捲得動，否則「鎖住」那條是空的');
+      await ctx.page.evaluate(() => window.scrollTo(0, 0));
+      await new Promise((r) => setTimeout(r, 200));
+      const preventedOnBlock = await dropPng('.ed-block[data-block-type="paragraph"]');
+      await new Promise((r) => setTimeout(r, 2500));
+      assert.strictEqual(preventedOnBlock, true,
+        'T6j 前提失敗：沒有 modal 時這個 drop 必須被接走，否則上面那條是空的');
+      assert.ok(await blockCount() > before,
+        'T6j 前提失敗：沒有 modal 時同一個 drop 真的會多一個 block，' +
+        '否則「modal 時不會多」什麼都沒證明。Got ' + (await blockCount()) + ' / ' + before);
+      assert.strictEqual(ctx.errs.length, 0, 'T6j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6j the two fixed layers answer the scroll census, and a file dropped on the modal never reaches the document — OK');
+    }
+
+    // T6k — the modal focus model, and the one layer that is allowed above it.
+    //
+    // `role="dialog"` + `aria-modal="true"` was a promise the panel did not
+    // keep: nothing was focused on open (measured: activeElement was BODY), so
+    // the surrounding editor still owned every key, and its own「nothing
+    // focused」branch then swallowed Tab so none of the dialog's controls could
+    // be reached at all.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const opened = await ctx.page.evaluate(() => ({
+        cls: document.activeElement.className,
+        inOverlay: document.querySelector('.ed-wave-overlay').contains(document.activeElement),
+      }));
+      assert.strictEqual(opened.inOverlay, true,
+        'T6k: 開起來的瞬間焦點就必須在 dialog 裡。Got ' + JSON.stringify(opened));
+      assert.strictEqual(opened.cls, 'ed-wave-panel',
+        'T6k: 初始焦點是 dialog 自己（ARIA 的預設），不是第一顆按鈕。Got ' +
+        JSON.stringify(opened.cls));
+
+      // Walk PAST the end of the dialog and back round. Three presses prove
+      // nothing: the overlay is the last thing in `body`, so native tabbing
+      // also stays inside it for the first ~N presses and a short walk is
+      // satisfied by having no trap at all — measured, a trap-less build passes
+      // a three-press check. What separates them is the wrap: with a trap the
+      // last control leads back to the first, without one it leads out into the
+      // page behind the modal.
+      const focusCount = await ctx.page.evaluate(() => {
+        const FOC = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+        return Array.prototype.filter.call(
+          document.querySelector('.ed-wave-overlay').querySelectorAll(FOC),
+          (el) => !el.disabled && !el.hidden && el.getClientRects().length > 0).length;
+      });
+      assert.ok(focusCount > 5,
+        'T6k 前提失敗：dialog 要有夠多控制項，繞一圈才有意義。Got ' + focusCount);
+      let escaped = null;
+      let landedOnAControl = false;
+      for (let i = 0; i < focusCount + 3; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const at = await ctx.page.evaluate(() => ({
+          inOverlay: document.querySelector('.ed-wave-overlay').contains(document.activeElement),
+          key: document.activeElement.getAttribute
+            ? document.activeElement.getAttribute('data-focus-key') : null,
+          tag: document.activeElement.tagName,
+        }));
+        if (at.key !== null) landedOnAControl = true;
+        if (!at.inOverlay && escaped === null) escaped = { press: i + 1, at: at };
+      }
+      assert.strictEqual(escaped, null,
+        'T6k: Tab 必須留在 dialog 裡整整一圈（而且不得被外面那條「沒有東西 focus」的' +
+        '分支吞掉）。逃出去了：' + JSON.stringify(escaped));
+      assert.strictEqual(landedOnAControl, true,
+        'T6k: Tab 必須真的落在控制項上，不能只是停在 dialog 自己身上');
+
+      // The conflict banner is the ONE layer allowed above this modal, and it
+      // has to stay reachable both ways. `.ed-conflict` is what showBanner()
+      // builds — a div of that class on document.body with its own buttons —
+      // and what is under test here is the STACKING and the TRAP SCOPE, both of
+      // which depend only on the class and on being on body, so the banner is
+      // constructed directly rather than by provoking a disk conflict.
+      const stack = await ctx.page.evaluate(() => {
+        const el = document.createElement('div');
+        el.className = 'ed-conflict';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Reload';
+        el.appendChild(b);
+        document.body.appendChild(el);
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const cs = getComputedStyle(el);
+        return {
+          bannerZ: cs.zIndex, bannerPos: cs.position,
+          overlayZ: getComputedStyle(document.querySelector('.ed-wave-overlay')).zIndex,
+          hitInBanner: el.contains(hit),
+        };
+      });
+      assert.strictEqual(stack.bannerPos, 'fixed', 'T6k 前提失敗：橫幅是 position: fixed');
+      assert.ok(Number(stack.bannerZ) > Number(stack.overlayZ),
+        'T6k: 磁碟衝突橫幅必須疊在波形編輯器【上面】（它是使用者解決衝突的唯一出口）。Got ' +
+        stack.bannerZ + ' vs ' + stack.overlayZ);
+      // What is asserted is「命中測試落在橫幅【裡面】」, deliberately not which
+      // child. MEASURED: on this row's own banner (one Reload button) the centre
+      // is the BUTTON; on the banner `showConflictBanner()` really builds
+      // (message span + Reload + ✕) it is the SPAN. Both mean the same thing —
+      // the modal is not intercepting the banner's own rect — and naming a tag
+      // would pin a fact about this fixture rather than about the stacking.
+      assert.strictEqual(stack.hitInBanner, true,
+        'T6k: 橫幅矩形中心的命中測試必須落在橫幅自己身上，否則滑鼠點不到它');
+
+      // …and the keyboard. A trap scoped to the overlay alone would paint the
+      // banner on top and still make its buttons unreachable.
+      let reached = -1;
+      for (let i = 0; i < 80; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const inBanner = await ctx.page.evaluate(() =>
+          document.querySelector('.ed-conflict').contains(document.activeElement));
+        if (inBanner) { reached = i + 1; break; }
+      }
+      assert.notStrictEqual(reached, -1,
+        'T6k: focus trap 的範圍必須含現場的 .ed-conflict，否則衝突橫幅用鍵盤永遠按不到');
+      assert.strictEqual(ctx.errs.length, 0, 'T6k: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6k the dialog takes the keyboard, keeps it, and lets the conflict banner through — OK');
+    }
+
+    // T6k2 — the UNREADABLE panel owns undo too. It has no store to move, and
+    // returning early used to hand Ctrl+Z straight to the editor behind the
+    // modal: measured, a committed paragraph edit rolled back with the panel
+    // still on screen.
+    {
+      const BROKEN_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "  { name: 'clk', wave: 'p....' },",
+        "  ['bus',",
+        "    { name: 'req', wave: '0.1.0' }",
+        '  ',
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(BROKEN_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const edited = () => ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(await edited(), true, 'T6k2 前提失敗：那一筆編輯要先真的落地');
+
+      await openWave(ctx.page);
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-state')), 'unreadable',
+        'T6k2 前提失敗：這個區塊要開出「讀不回來」的面板');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('z');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await edited(), true,
+        'T6k2: 讀不回來的面板上按 Ctrl+Z，不得退掉 modal 後面那份 markdown 文件');
+      assert.ok(await ctx.page.$('.ed-wave-overlay'), 'T6k2: 面板要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T6k2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6k2 the unreadable panel owns undo as well, so the document behind it stays put — OK');
+    }
+
+    // ── fix round 3 ────────────────────────────────────────────────────
+
+    // T6l — Ctrl+S is not the modal's to swallow, and a disk conflict that
+    // arises DURING a wave session still reaches the user.
+    //
+    // Round 2 made ownership a state, and the state then swallowed a gesture
+    // that was never the editor's: measured, Ctrl+S with the overlay open put
+    // nothing on disk, and Escape-then-Ctrl+S did. The second-order cost was
+    // worse — `showConflictBanner()` has exactly ONE producer, the 409 branch of
+    // `save()`, and the toolbar's save control sits under an `inset: 0` backdrop
+    // and outside the focus trap. With Ctrl+S swallowed there was no route at
+    // all by which a conflict arising mid-session could be announced.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const disk = () => fs.readFileSync(ctx.mdPath, 'utf8');
+      // Deliberately NOT pressSaveAndLand(): this row's whole subject is
+      // whether the keystroke reaches disk at all, so it watches the DISK and
+      // must not be handed a helper that waits for the save first — that would
+      // make the observation depend on the thing being observed.
+      const ctrlS = async () => {
+        await ctx.page.keyboard.down('Control');
+        await ctx.page.keyboard.press('KeyS');
+        await ctx.page.keyboard.up('Control');
+      };
+      // Wait for the FILE, not for a quiet page: the thing under test is
+      // whether the keystroke reached disk, so the disk is what is watched.
+      const diskBecomes = async (needle, ms) => {
+        const until = monotonicMs() + ms;
+        for (;;) {
+          if (disk().indexOf(needle) !== -1) return true;
+          if (monotonicMs() > until) return false;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      };
+
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' MARKA');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.strictEqual(disk().indexOf('MARKA'), -1,
+        'T6l 前提失敗：提交還沒有寫進磁碟，所以下面那次存檔才是被測的東西');
+
+      await openWave(ctx.page);
+      await ctrlS();
+      assert.strictEqual(await diskBecomes('MARKA', 8000), true,
+        'T6l: overlay 開著時按 Ctrl+S 必須真的寫進磁碟。Disk:\n' + disk());
+
+      // …and a conflict that arises now. Rewriting the file underneath makes
+      // the editor's `baseMtimeMs` stale, so the next save is a 409 — the one
+      // thing that produces this banner.
+      await new Promise((r) => setTimeout(r, 1100));
+      fs.writeFileSync(ctx.mdPath, disk() + '\nEXTERNAL EDIT\n', 'utf8');
+      assert.strictEqual(await ctx.page.$('.ed-conflict'), null,
+        'T6l 前提失敗：現在還不該有 banner');
+      await ctrlS();
+      await ctx.page.waitForSelector('.ed-conflict', { timeout: 10000 });
+      const banner = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-conflict');
+        return {
+          text: el.textContent || '',
+          buttons: Array.prototype.map.call(el.querySelectorAll('button'),
+            (b) => b.textContent),
+          overlayStillUp: !!document.querySelector('.ed-wave-overlay'),
+          z: Number(getComputedStyle(el).zIndex),
+          overlayZ: Number(getComputedStyle(document.querySelector('.ed-wave-overlay')).zIndex),
+        };
+      });
+      assert.ok(banner.text.indexOf('changed on disk') !== -1,
+        'T6l: 那必須是磁碟衝突那條 banner。Got ' + JSON.stringify(banner.text));
+      assert.ok(banner.buttons.indexOf('Reload') !== -1,
+        'T6l: banner 上要有 Reload 可以按。Got ' + JSON.stringify(banner.buttons));
+      assert.strictEqual(banner.overlayStillUp, true,
+        'T6l: banner 升起來不得把使用者手上的波形編輯器無預警關掉');
+      assert.ok(banner.z > banner.overlayZ,
+        'T6l: banner 必須疊在 modal 上面。Got ' + banner.z + ' vs ' + banner.overlayZ);
+      // …and it is reachable from inside the trap, which is what makes it an
+      // announcement rather than a decoration.
+      let reached = -1;
+      for (let i = 0; i < 120; i++) {
+        await ctx.page.keyboard.press('Tab');
+        const inBanner = await ctx.page.evaluate(() =>
+          document.querySelector('.ed-conflict').contains(document.activeElement));
+        if (inBanner) { reached = i + 1; break; }
+      }
+      assert.notStrictEqual(reached, -1,
+        'T6l: 真正的衝突 banner 也必須 Tab 得到');
+      assert.strictEqual(ctx.errs.length, 0, 'T6l: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6l Ctrl+S still saves through the modal, and a conflict raised mid-session is announced and reachable — OK');
+    }
+
+    // T6m — Escape with the cursor on the conflict banner is the banner's
+    // Escape, not the dialog's.
+    //
+    // The banner is inside the focus trap on purpose, and round 2 then had the
+    // dialog claim every Escape unconditionally: measured, someone who
+    // Tab-walked over to read the banner and pressed Escape to back out lost the
+    // whole editing session while the banner they were looking at stayed up.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await ctx.page.evaluate(() => {
+        const el = document.createElement('div');
+        el.className = 'ed-conflict';
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = 'Reload';
+        el.appendChild(b);
+        document.body.appendChild(el);
+        b.focus();
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelector('.ed-conflict').contains(document.activeElement)), true,
+        'T6m 前提失敗：游標要先在 banner 上');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        overlay: !!document.querySelector('.ed-wave-overlay'),
+        banner: !!document.querySelector('.ed-conflict'),
+        stillOnBanner: document.querySelector('.ed-conflict')
+          ? document.querySelector('.ed-conflict').contains(document.activeElement) : false,
+      }));
+      assert.strictEqual(after.overlay, true,
+        'T6m: 在 banner 上按 Escape 不得把整個波形編輯器關掉');
+      assert.strictEqual(after.banner, true, 'T6m: banner 還在（它自己沒有 Escape）');
+      assert.strictEqual(after.stillOnBanner, true, 'T6m: 游標也留在原地');
+
+      // …and Escape from inside the DIALOG still closes it, so the exemption is
+      // about where the key came from and not about Escape having stopped
+      // working.
+      await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-close').focus());
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.$('.ed-wave-overlay'), null,
+        'T6m: 從 dialog 裡按 Escape 仍然要關掉它');
+      assert.strictEqual(ctx.errs.length, 0, 'T6m: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T6m Escape on the conflict banner is the banner\'s, not the dialog\'s — OK');
+    }
+
+    // ── v3.4.0 batch3 Task 7: the write-back ───────────────────────────────
+    //
+    // Tasks 1-6 built a store that can turn a drawing into a minimal patch and
+    // a modal that computes one per gesture. Nothing wrote it anywhere. These
+    // rows are that seam: one gesture is one commit on the document's own undo
+    // stack, Ctrl+S is still the only thing that touches disk, Escape takes the
+    // session back off again and one Ctrl+Z puts it back, a refusal is raised
+    // by name instead of being papered over, and — the one that had no net at
+    // all before — the conflict banner's Reload cannot throw a drawing away in
+    // silence.
+
+    // T7a — one gesture, one commit; Ctrl+S is what reaches disk, and the
+    // comment beside the lane survives the round trip.
+    //
+    // The comment is the point of the whole codec layer, not decoration: a
+    // write-back that re-serialised the block would take `// 主時脈` with it,
+    // and the block would still parse, so nothing downstream would notice.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const before = fs.readFileSync(ctx.mdPath, 'utf8');
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+
+      const mid = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(mid.seam === null ? null : mid.seam.ops, 1,
+        'T7a: 一個手勢就是一次 commit。Got ' + JSON.stringify(mid.seam));
+      assert.strictEqual(mid.unwritten, false,
+        'T7a: 這個 patch 是寫得回去的，不該被記成「沒寫回去」');
+      assert.strictEqual(mid.dirty, true,
+        'T7a: 畫下去的那一刻文件就必須是髒的 —— 這是 Reload／關分頁那道網的依據');
+
+      // 還沒有人叫它存檔，所以磁碟不得動。
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), before,
+        'T7a: 寫回是寫進記憶體裡的文件，不是寫進磁碟');
+
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 800));
+      // 關掉編輯器本身也不得落磁碟 —— 這一半是 brief 的第二條。
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), before,
+        'T7a: 關閉編輯器不得自己落磁碟 —— 只有 Ctrl+S 才可以');
+
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('// 主時脈') !== -1,
+        'T7a: 註解必須存活（最小 patch 的整個理由）。Got:\n' + md);
+      // 'p....' 的第 2 格塗成 1，第 3 格的重複符號因此失去它在重複的東西，
+      // codec 把它展開回 p —— 這個值是本 session 直接跑 wave-store 量到的，
+      // 不是推算的。
+      // The VALUE is the assertion; the quote character is not. A replaced
+      // span inherits the quote of the bytes it replaced, so this pattern is
+      // true of this fixture today either way — but T7d was pinned to an
+      // emitted quote and broke the moment the writer got smarter, so every
+      // wave-text assertion in this file now matches the value and lets the
+      // file spell it however it spells it.
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(md),
+        'T7a: 改動必須落到磁碟，而且是就地改那一個字串。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7a one gesture is one commit, Ctrl+S is what reaches disk, and the lane comment survives — OK');
+    }
+
+    // T7b — Escape 丟棄，而且丟乾淨：文件回到原樣、● 熄掉。然後 Ctrl+Z 把它
+    // 拿回來，連編輯器一起。
+    //
+    // 「拿回來」這一半刻意不只斷言 overlay 又出現：一個什麼都沒放回去、只是
+    // 重開一個空編輯器的實作也會讓那條斷言變綠。所以最後是去讀磁碟。
+    {
+      const ctx = await newPage(WAVE_MD);
+      const before = fs.readFileSync(ctx.mdPath, 'utf8');
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const during = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(during.s.dirty, true, 'T7b 前提失敗：畫完就該是髒的');
+      assert.strictEqual(during.title.indexOf('●'), 0,
+        'T7b 前提失敗：畫完標題就該亮 ●，got ' + JSON.stringify(during.title));
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      const afterEsc = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(afterEsc.s.open, false, 'T7b: Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.s.stashed, true,
+        'T7b: Escape 丟掉的東西必須停放起來，否則 Ctrl+Z 沒有東西可以拿');
+      assert.strictEqual(afterEsc.s.dirty, false,
+        'T7b: Escape 要把這一整段 session 從 undo stack 上拿掉，文件回到原樣');
+      assert.strictEqual(afterEsc.title.indexOf('●'), -1,
+        'T7b: 回到原樣之後 ● 必須熄掉，got ' + JSON.stringify(afterEsc.title));
+
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await ctx.page.waitForSelector('.ed-wave-overlay', { timeout: 8000 });
+      await new Promise((r) => setTimeout(r, 400));
+      const back = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(back.open, true,
+        'T7b: Escape 之後的 Ctrl+Z 必須把丟掉的編輯拿回來（重開編輯器）');
+      assert.strictEqual(back.stashed, false,
+        'T7b: 停放是一次性的 —— 拿回來之後不得再留著');
+      assert.strictEqual(back.dirty, true,
+        'T7b: 拿回來的編輯是一筆真的、還沒存檔的改動');
+
+      const md = await saveAndRead(ctx);
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(md),
+        'T7b: 拿回來的必須是【畫過的那份】，不是一個空編輯器。Got:\n' + md);
+      assert.ok(md.indexOf('// 主時脈') !== -1, 'T7b: 註解一樣要活著');
+      assert.notStrictEqual(md, before, 'T7b: 而且它真的跟原檔不一樣');
+      assert.strictEqual(ctx.errs.length, 0, 'T7b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7b Escape takes the session back off the document and one Ctrl+Z puts it back with the editor — OK');
+    }
+
+    // T7c — 衝突 banner 上的 Reload 不得無聲丟掉畫好的波形。
+    //
+    // 這是 Task 6 量到的洞：真的畫完之後文件【不是】髒的、磁碟 byte-identical、
+    // 按 Reload 連一個 beforeunload 對話框都不會跳 —— 因為那道網問的是 `lines`，
+    // 而波形從來沒有進過 `lines`。寫回一落地它就自己補上了，這兩列是去證明它
+    // 真的補上了，而且【沒畫東西的時候不會亂攔】。
+    //
+    // 控制組先跑，而且是分開的一顆 page：沒有被攔的那一次，頁面是真的會重新
+    // 載入的。
+    const raiseConflict = async (ctx) => {
+      // 讓下一次存檔變成 409：那是 showConflictBanner() 唯一的產生點。
+      await new Promise((r) => setTimeout(r, 1100));
+      fs.writeFileSync(ctx.mdPath,
+        fs.readFileSync(ctx.mdPath, 'utf8') + '\nEXTERNAL EDIT\n', 'utf8');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyS');
+      await ctx.page.keyboard.up('Control');
+      await ctx.page.waitForSelector('.ed-conflict', { timeout: 10000 });
+    };
+    const pressReload = async (ctx) => {
+      // 按的是 banner 上那顆真的按鈕，不是直接呼叫 location.reload()：這一列
+      // 的主詞就是那顆按鈕。
+      await ctx.page.evaluate(() => {
+        const bs = document.querySelectorAll('.ed-conflict button');
+        for (const b of bs) if (b.textContent === 'Reload') { b.click(); return; }
+        throw new Error('no Reload button on the banner');
+      }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 1200));
+    };
+    {
+      // 控制組：編輯器開著，但一筆都沒畫 —— 按 Reload 不得被攔。
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      const cleanBefore = await ctx.page.evaluate(() => window.__edTestWaveState().dirty);
+      await pressReload(ctx);
+      assert.strictEqual(cleanBefore, false,
+        'T7c 控制組前提失敗：什麼都沒畫的時候文件不該是髒的');
+      assert.strictEqual(blocked, false,
+        'T7c 控制組：什麼都沒畫就不得攔 Reload —— 那是一個關不掉的對話框');
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await raiseConflict(ctx);
+      const armed = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(armed.dirty, true,
+        'T7c 前提失敗：畫過之後文件必須是髒的，否則下面那道網沒有依據');
+      assert.strictEqual(armed.open, true,
+        'T7c 前提失敗：banner 升起來不得把編輯器關掉（T6l 已經釘過）');
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7c: 畫過波形之後按 Reload 必須被攔下來 —— 使用者不得在沒有被告知的' +
+        '情況下失去畫好的東西');
+      // 取消之後東西還在原地：被攔住而失去現場，跟沒被攔住一樣糟。
+      const after = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(after.open, true, 'T7c: 取消離站之後編輯器要還在');
+      assert.strictEqual(after.dirty, true, 'T7c: 畫的東西也要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T7c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7c the conflict banner\'s Reload cannot silently discard a drawn waveform — OK');
+    }
+
+    // T7d — 寫不回去的那一步：升起可見的說明、指名行號、等使用者確認，而且
+    // 【不得】偷偷把整個區塊重寫掉。
+    //
+    // 驅動方式是同一個位置連按兩次「＋」。第二次之所以一定被拒絕，是因為兩條
+    // 新 lane 插在來源的同一個位元組位置上，誰先誰後沒有定義 —— 本 session
+    // 直接跑 wave-store 確認過這個 fixture 會回 ok:false，理由是
+    // 「the same path ["signal",1,1] appears in two edits」。而且那個位置在
+    // 群組 bus 裡面，所以它同時也是「插入點會落進群組」那條不對稱規則的現場。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const one = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(one.seam === null ? null : one.seam.ops, 1,
+        'T7d 前提失敗：第一次插入必須是寫得回去的。Got ' + JSON.stringify(one.seam));
+      assert.strictEqual(one.unwritten, false, 'T7d 前提失敗：第一次不該被拒絕');
+
+      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const two = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(two.seam === null ? null : two.seam.ops, 1,
+        'T7d: 第二次寫不回去，就不得多出一次 commit —— 那會是偷偷重寫整個區塊');
+      assert.strictEqual(two.unwritten, true,
+        'T7d: 寫不回去這件事必須被記住，它就是 beforeunload 那道網的另一半');
+      assert.strictEqual(two.dirty, true,
+        'T7d: 螢幕上有一步是檔案沒有的，這時候離站必須被攔');
+
+      const banner = await visibleBannerText(ctx.page);
+      assert.ok(banner !== null, 'T7d: 拒絕必須升起看得見的說明，不是只寫在狀態列');
+      assert.ok(banner.indexOf('沒有') !== -1 && banner.indexOf('寫回') !== -1,
+        'T7d: 說明要講清楚它【沒有】寫回去。Got ' + JSON.stringify(banner));
+      assert.ok(/第 \d+–\d+ 行/.test(banner),
+        'T7d: 說明要指名是哪一段行號。Got ' + JSON.stringify(banner));
+      assert.ok(banner.indexOf('appears in two edits') !== -1,
+        'T7d: store 的拒絕理由要原封不動傳到使用者面前。Got ' + JSON.stringify(banner));
+      assert.ok(banner.indexOf('知道了') !== -1,
+        'T7d: 要有一顆確認鈕可以按。Got ' + JSON.stringify(banner));
+
+      // 按下確認只收掉那條 banner，不收掉「還有一步沒寫回去」這個事實。
+      await ctx.page.evaluate(() => {
+        const bs = document.querySelectorAll('.ed-conflict button');
+        for (const b of bs) if (b.textContent === '知道了') { b.click(); return; }
+        throw new Error('no 知道了 button');
+      });
+      await new Promise((r) => setTimeout(r, 250));
+      const acked = await ctx.page.evaluate(() => ({
+        banner: document.querySelector('.ed-conflict') !== null,
+        s: window.__edTestWaveState(),
+      }));
+      assert.strictEqual(acked.banner, false, 'T7d: 按了知道了，banner 要收掉');
+      assert.strictEqual(acked.s.unwritten, true,
+        'T7d: 但「有一步沒寫回去」不會因為讀過說明就消失');
+      assert.strictEqual(acked.s.dirty, true, 'T7d: 所以離站也還是要被攔');
+
+      // 磁碟上只能有寫得回去的那一步。
+      const md = await saveAndRead(ctx);
+      // 問的是【文件】不是位元組：這一列要知道「被拒絕的那一次插入有沒有偷偷
+      // 進檔案」，那是一個關於 lane 數量的問題。原本寫成
+      // `md.match(/name: ""/g).length === 1` —— 雙引號寫死在 pattern 裡 ——
+      // 於是 GUI 改成跟著來源檔的引號風格寫之後，這個通篇單引號的 fixture
+      // 產出 `name: ''`，命中 0 次、整列紅掉，而產品是對的。解析回來之後
+      // 引號、逗號、縮排怎麼變都不影響這個問題的答案。
+      const names = waveLaneNames(md);
+      const blank = names.filter((n) => n === '').length;
+      assert.strictEqual(blank, 1,
+        'T7d: 檔案裡只能有第一次插入的那一條 lane（名字是空字串的那條）。Got ' +
+        JSON.stringify(names) + '\n' + md);
+      assert.strictEqual(names.length, 7,
+        'T7d: 總數必須是原本 6 條加上寫得回去的那一條 —— 被拒絕的第二次不得留下痕跡。Got ' +
+        JSON.stringify(names) + '\n' + md);
+      assert.ok(md.indexOf('// 主時脈') !== -1, 'T7d: 註解一樣要活著');
+      assert.strictEqual(ctx.errs.length, 0, 'T7d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7d a refusal is raised by name, waits to be acknowledged, and never rewrites the block — OK');
+    }
+
+    // ── fix round 1 ────────────────────────────────────────────────────────
+
+    // T7e — F1. Ctrl+S is the one gesture the modal deliberately does not
+    // swallow, and the Escape arithmetic did not keep up with it.
+    //
+    // `markSaved()` sets `_savedDepth` to an ABSOLUTE index, so popping this
+    // session's ops below it makes `dirtyDepth` NEGATIVE — which still reads as
+    // dirty, so nothing looks wrong — and the next ordinary commit walks it back
+    // up through exactly zero. MEASURED before this fix, on this very sequence:
+    // documentIsDirty() answered false, the title dropped its ●, and the real
+    // conflict banner's real Reload raised no dialog at all and destroyed the
+    // typed edit while the disk still held the waveform the user had Escaped
+    // away. One gesture is enough; the row drives the minimal form.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const saved = await saveAndRead(ctx);
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(saved),
+        'T7e 前提失敗：這一發 Ctrl+S 必須真的把波形寫進磁碟。Got:\n' + saved);
+      const afterSave = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(afterSave.dirty, false,
+        'T7e 前提失敗：存完檔之後文件應該是乾淨的');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      const afterEsc = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(afterEsc.s.open, false, 'T7e 前提失敗：Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.s.dirty, true,
+        'T7e 前提失敗：Escape 把記憶體裡的波形丟掉了，磁碟上還留著 —— 兩邊不一樣，' +
+        '這時候文件本來就是髒的');
+
+      // 一筆普通的編輯。舊版就是在這一步把髒度走回 0 的。
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' IMPORTANT');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const afterEdit = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        onScreen: (document.querySelector('.content').textContent || '')
+          .indexOf('IMPORTANT') !== -1,
+      }));
+      assert.strictEqual(afterEdit.onScreen, true,
+        'T7e 前提失敗：那一筆編輯要真的在畫面上');
+      assert.strictEqual(afterEdit.s.dirty, true,
+        'T7e: 一筆普通的編輯不得把文件變回「乾淨」—— 螢幕上有 IMPORTANT，磁碟上沒有');
+      assert.strictEqual(afterEdit.title.indexOf('●'), 0,
+        'T7e: ● 也不得熄掉，got ' + JSON.stringify(afterEdit.title));
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8').indexOf('IMPORTANT'), -1,
+        'T7e 前提失敗：那一筆編輯還沒有落到磁碟');
+
+      // …所以真正的 Reload 必須被攔下來。
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7e: 存檔發生在 session 中間，之後的普通編輯一樣不得無聲地被 Reload 丟掉');
+      const survived = await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('IMPORTANT') !== -1);
+      assert.strictEqual(survived, true, 'T7e: 取消離站之後那筆編輯要還在');
+      assert.strictEqual(ctx.errs.length, 0, 'T7e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7e a save taken inside a wave session cannot make a later edit read clean — OK');
+    }
+
+    // T7f — F2. 關閉時那一次 render 失敗，文件不得因此變成一份 block map 指不到
+    // 的東西。
+    //
+    // 保住使用者畫的東西（不 rollback）是對的判斷，但 `blocks` 原本只有在
+    // render【成功】時才會被結算。MEASURED：+1 行的 session 配上一次失敗的
+    // render，下一筆普通段落編輯就提交到收尾圍欄後面那一行空白上，分隔行被吃掉、
+    // 段落被複製，完全沒有警告。這一列用 +2 行，因為那時候陳舊的 block map 指到
+    // 的是【收尾圍欄本身】。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const two = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(two.seam === null ? null : two.seam.ops, 2,
+        'T7f 前提失敗：兩次插入都要寫得回去（各加一行）。Got ' + JSON.stringify(two.seam));
+
+      // 讓【下一次】 /api/render 失敗，其餘照常。
+      await ctx.page.evaluate(() => {
+        const orig = window.fetch;
+        window.__failNextRender = true;
+        window.fetch = function (input, init) {
+          const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+          if (window.__failNextRender && /\/api\/render\b/.test(url)) {
+            window.__failNextRender = false;
+            return Promise.reject(new TypeError('probe: render aborted'));
+          }
+          return orig.call(this, input, init);
+        };
+      });
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 900));
+
+      const failed = await ctx.page.evaluate(() => ({
+        banner: (document.querySelector('.ed-conflict') || {}).textContent || null,
+        code: window.__edTestBlockSpan(1),
+        para: window.__edTestBlockSpan(2),
+        stillFailing: window.__failNextRender,
+      }));
+      assert.strictEqual(failed.stillFailing, false,
+        'T7f 前提失敗：那一次 render 真的要被擋掉（否則這一列什麼都沒測到）');
+      assert.ok(failed.banner !== null && failed.banner.indexOf('畫面沒有重畫成功') !== -1,
+        'T7f 前提失敗：失敗的 render 要升起「東西還在文件裡」那條 banner。Got ' +
+        JSON.stringify(failed.banner));
+      // 直接斷言那條不變式：每個 block 還是指得到自己的文字。
+      assert.strictEqual(failed.para.text, 'Tail para two.',
+        'T7f: render 失敗之後，block map 仍然必須指得到那個段落自己 —— 舊版指到的' +
+        '是收尾圍欄。Got ' + JSON.stringify(failed.para));
+      assert.deepStrictEqual(
+        { s: failed.code.startLine, e: failed.code.endLine }, { s: 3, e: 16 },
+        'T7f: 被編輯的那個區塊保留 startLine、由 endLine 吸收行數變化。Got ' +
+        JSON.stringify(failed.code));
+
+      // …而「下一筆普通編輯不得落在錯的地方」是這一切真正的判準。
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' ZZZ');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      const dupes = md.split('Tail para two.').length - 1;
+      assert.strictEqual(dupes, 1,
+        'T7f: 那個段落只能出現一次 —— 出現兩次就是提交落在分隔行上、把段落複製了。' +
+        'Got:\n' + md);
+      assert.ok(md.indexOf('```\n\nTail para two. ZZZ') !== -1,
+        'T7f: 收尾圍欄後面那一行空白也必須還在。Got:\n' + md);
+      assert.ok(md.indexOf(' ZZZ') !== -1, 'T7f 前提失敗：那一筆編輯要真的存進去');
+      assert.strictEqual(ctx.errs.length, 0, 'T7f: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7f a failed close render keeps the drawing and still leaves a block map the next edit can trust — OK');
+    }
+
+    // T7f2 — F2 的第二個症狀：失敗的 render 之後再打開編輯器，拿到的必須是完整
+    // 的 block body。MEASURED（舊版）：seam 回報 4..14，真正的 body 是 4..16，
+    // store 被餵了一份被截斷的來源，`.ed-wave-canvas` 根本沒有建出來。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      await new Promise((r) => setTimeout(r, 400));
+      await ctx.page.evaluate(() => {
+        const orig = window.fetch;
+        window.__failNextRender = true;
+        window.fetch = function (input, init) {
+          const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+          if (window.__failNextRender && /\/api\/render\b/.test(url)) {
+            window.__failNextRender = false;
+            return Promise.reject(new TypeError('probe: render aborted'));
+          }
+          return orig.call(this, input, init);
+        };
+      });
+      await pressClick(ctx.page, '.ed-wave-close');
+      await ctx.page.waitForFunction(
+        () => document.querySelector('.ed-wave-overlay') === null, { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 900));
+
+      // `.content` 還停在 session 之前那一次 render，所以那張圖還畫得出 hover，
+      // 開啟手勢跟平常一樣。
+      await openWave(ctx.page);
+      const reopened = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(),
+        canvas: document.querySelector('.ed-wave-canvas') !== null,
+        lanes: document.querySelector('.ed-wave-overlay')
+          ? document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes') : null,
+      }));
+      assert.strictEqual(reopened.canvas, true,
+        'T7f2: 重新打開必須拿到完整的 body，畫布要建得出來。Got ' +
+        JSON.stringify(reopened));
+      assert.deepStrictEqual(
+        { s: reopened.s.seam.startLine, e: reopened.s.seam.endLine }, { s: 4, e: 15 },
+        'T7f2: seam 要涵蓋真正的 body（原本 10 行 + 2 條新 lane）。Got ' +
+        JSON.stringify(reopened.s.seam));
+      assert.strictEqual(reopened.lanes, '8',
+        'T7f2: 六條原本的 lane 加兩條新的都要在。Got ' + JSON.stringify(reopened.lanes));
+      assert.strictEqual(ctx.errs.length, 0, 'T7f2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7f2 re-opening after a failed close render reads the whole block body — OK');
+    }
+
+    // T7g — F3. 一個被丟掉的 wave session 不得吃掉使用者原本就有的 redo。
+    //
+    // `push()` 會清掉 `_undone`，而 `discardTop()` 沒辦法把它放回去。MEASURED
+    // （舊版，含控制組）：打字、提交、Ctrl+Z，然後開 wave 畫一筆再 Escape ——
+    // Ctrl+Y 什麼都回不來；沒有中間那段 wave session 的話它會回來。文件在
+    // session 前後是逐位元組相同的，使用者沒有理由預期 redo 被吃掉。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.click('.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const undone = await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1);
+      assert.strictEqual(undone, false, 'T7g 前提失敗：Ctrl+Z 要先真的退掉那筆編輯');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('EDITED') !== -1,
+        'T7g: 被丟掉的 wave session 不得連使用者原本的 redo 一起吃掉。Got:\n' + md);
+      assert.ok(/wave: ['"]p\.\.\.\.['"]/.test(md),
+        'T7g: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7g: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7g a discarded wave session hands back the redo branch it cleared — OK');
+    }
+
+    // T7h — F5. 在編輯器裡把自己畫的東西撤銷回原樣，● 要熄掉。
+    //
+    // MEASURED（舊版）：塗一格再按編輯器自己的「復原」，文件的位元組回到原狀，
+    // 但 `ops` 從 1 變 2、`dirty` 一直是 true、● 在這個 session 剩下的時間裡再也
+    // 沒有熄過。偏安全的方向，但那是在告訴使用者有一筆他沒有的未存檔改動。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const painted = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title }));
+      assert.strictEqual(painted.s.dirty, true, 'T7h 前提失敗：畫完要是髒的');
+      assert.strictEqual(painted.title.indexOf('●'), 0, 'T7h 前提失敗：● 要亮著');
+
+      await pressClick(ctx.page, '.ed-wave-undo');
+      await new Promise((r) => setTimeout(r, 500));
+      const undone = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        wave0: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+      }));
+      assert.strictEqual(undone.wave0, 'p....',
+        'T7h 前提失敗：編輯器自己的復原要真的退回原樣。Got ' + JSON.stringify(undone.wave0));
+      assert.strictEqual(undone.s.seam.ops, 0,
+        'T7h: 回到原樣的 session 要把自己的 op 從 undo stack 上收回去。Got ' +
+        JSON.stringify(undone.s.seam));
+      assert.strictEqual(undone.s.dirty, false,
+        'T7h: 位元組跟原檔一樣的時候文件不得還說自己是髒的');
+      assert.strictEqual(undone.title.indexOf('●'), -1,
+        'T7h: ● 要熄掉，got ' + JSON.stringify(undone.title));
+
+      // 而且收回去之後還能繼續畫 —— 收的是 op，不是 session。
+      await paintCell(ctx.page, 0, 3, '1');
+      const again = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(again.seam.ops, 1,
+        'T7h: 收回去之後再畫一筆仍然是一次 commit。Got ' + JSON.stringify(again.seam));
+      assert.strictEqual(again.dirty, true, 'T7h: 而且又髒起來了');
+      assert.strictEqual(ctx.errs.length, 0, 'T7h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7h a session that comes back to the bytes it started from stops claiming to be dirty — OK');
+    }
+
+    // ── fix round 2 ────────────────────────────────────────────────────────
+
+    // T7i — MUST-FIX 1. The same hole as T7e, reached from a NEGATIVE baseline.
+    //
+    // Fix round 1 decided "did a save land inside this session?" by arithmetic:
+    // `dirtyDepth === baseDirtyDepth + ops`. That implication only runs the way
+    // it was used when the baseline is non-negative, and a user reaches a
+    // negative one by pressing Ctrl+Z once after a save. MEASURED against the
+    // real stack: the predicate read `1 === -1 + 2`, answered「沒有存檔」, popped
+    // blind, and reproduced F1's original outcome straight through the fixed
+    // code. The predicate is now two POSITION comparisons against the session's
+    // own baseline, which have no sign to get wrong.
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tail = '.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed';
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' ONE');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const disk1 = await saveAndRead(ctx);
+      assert.ok(disk1.indexOf('ONE') !== -1, 'T7i 前提失敗：第一筆要真的存進磁碟');
+
+      // 一發普通的 Ctrl+Z，退到存檔點【之前】—— 這就是負的基準點。
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const rewound = await ctx.page.evaluate(() => ({
+        dirty: window.__edTestWaveState().dirty,
+        text: document.querySelector('.content').textContent || '',
+      }));
+      assert.strictEqual(rewound.text.indexOf('ONE'), -1,
+        'T7i 前提失敗：Ctrl+Z 要真的退掉那一筆');
+      assert.strictEqual(rewound.dirty, true,
+        'T7i 前提失敗：退到存檔點之前，記憶體跟磁碟不一樣');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      const midSession = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(midSession.dirty, true,
+        'T7i: 編輯器開著、剛畫了一筆，文件不得回報成乾淨的（負基準點上，' +
+        '舊的深度算術在這一步就已經讀成 0 了）');
+
+      await saveAndRead(ctx);                 // 存檔【發生在 session 中間】
+      await paintCell(ctx.page, 0, 3, '1');
+      const before = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(before.seam.ops, 2, 'T7i 前提失敗：兩筆都要寫得回去');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+      const afterEsc = await ctx.page.evaluate(() => window.__edTestWaveState());
+      assert.strictEqual(afterEsc.open, false, 'T7i 前提失敗：Escape 要關掉編輯器');
+      assert.strictEqual(afterEsc.dirty, true,
+        'T7i 前提失敗：Escape 把畫的東西丟掉了，磁碟上還留著，所以是髒的');
+
+      // 一筆普通的編輯 —— 舊的算術就是在這裡把髒度走回 0 的。
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' TWO');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const after = await ctx.page.evaluate(() => ({
+        s: window.__edTestWaveState(), title: document.title,
+        text: document.querySelector('.content').textContent || '',
+      }));
+      assert.ok(after.text.indexOf('TWO') !== -1, 'T7i 前提失敗：第二筆要在畫面上');
+      assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8').indexOf('TWO'), -1,
+        'T7i 前提失敗：第二筆還沒落磁碟');
+      assert.strictEqual(after.s.dirty, true,
+        'T7i: 從負的基準點開始的 session 一樣不得讓後面的編輯讀成乾淨的');
+      assert.strictEqual(after.title.indexOf('●'), 0,
+        'T7i: ● 也不得熄掉，got ' + JSON.stringify(after.title));
+
+      await raiseConflict(ctx);
+      let blocked = false;
+      ctx.page.once('dialog', async (d) => { blocked = true; await d.dismiss(); });
+      await pressReload(ctx);
+      assert.strictEqual(blocked, true,
+        'T7i: 所以 Reload 必須被攔 —— 這一列跟 T7e 的差別只有一發 Ctrl+Z');
+      assert.strictEqual(ctx.errs.length, 0, 'T7i: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7i a session opened from a negative baseline still cannot make a later edit read clean — OK');
+    }
+
+    // T7j — R1. Escape 的【另一條】分支也要把 redo 還回去。
+    //
+    // T7g 走的是「可以直接把 op 收掉」那條；session 中間存過檔就會走 revert
+    // commit 那條，而它原本什麼都沒還。兩條結束時 `lines` 都跟 `seam.baseLines`
+    // 逐位元組相同，所以使用者在這裡的處境跟 F3 一模一樣：一份沒有變的文件，
+    // 加上一個被默默吃掉的 redo。差別只在中間那一發 Ctrl+S。
+    {
+      const ctx = await newPage(WAVE_MD);
+      const tail = '.ed-block[data-block-type="paragraph"]:last-child .ed-wys-armed';
+      await ctx.page.click(tail);
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.type(' EDITED');
+      await new Promise((r) => setTimeout(r, 200));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        (document.querySelector('.content').textContent || '').indexOf('EDITED') !== -1),
+        false, 'T7j 前提失敗：Ctrl+Z 要先真的退掉那筆編輯');
+
+      await openWave(ctx.page);
+      await paintCell(ctx.page, 0, 2, '1');
+      await saveAndRead(ctx);                 // 這一發就是讓 Escape 走另一條分支的東西
+      await paintCell(ctx.page, 0, 3, '1');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 1200));
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf('EDITED') !== -1,
+        'T7j: session 中間存過檔的 Escape 一樣不得吃掉使用者原本的 redo。Got:\n' + md);
+      assert.ok(/wave: ['"]p\.\.\.\.['"]/.test(md),
+        'T7j: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T7j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T7j the revert-commit Escape hands back the redo branch too — OK');
+    }
+
+    // ── Task 8: the keyboard ───────────────────────────────────────────
+    //
+    // v3.3.0's backlog carried FOUR accessibility defects with one cause — the
+    // interaction surface was designed without the keyboard and the keyboard
+    // was added afterwards — and this batch produced a fifth and a sixth of the
+    // same family. The rows below are the four questions that family is always
+    // asking: can it be OPENED, can the surface itself be OPERATED, does a
+    // repaint leave the keyboard somewhere the user can see, and does the way
+    // out land anywhere at all.
+
+    // T8a — the drawing takes a keyboard cursor, and one keystroke paints where
+    // that cursor is.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const at = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          count: document.querySelectorAll('[data-ed-wave-cursor]').length,
+          published: ov.getAttribute('data-wave-cursor'),
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      const opened = await at();
+      assert.strictEqual(opened.cell, null,
+        'T8a 前提失敗：還沒有人按鍵盤，畫布上不該先有一個游標。Got ' + JSON.stringify(opened));
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 200));
+      const entered = await at();
+      assert.strictEqual(entered.cell, '0,0',
+        'T8a: 第一下方向鍵是「進畫布」，停在 0,0，不得順便移動一格。Got ' +
+        JSON.stringify(entered));
+      assert.strictEqual(entered.key, 'canvas',
+        'T8a: 進了畫布，鍵盤就要真的落在畫布上。Got ' + JSON.stringify(entered));
+      assert.strictEqual(entered.count, 1,
+        'T8a: 游標只能有一個。Got ' + JSON.stringify(entered));
+      assert.strictEqual(entered.published, entered.cell,
+        'T8a: overlay 公布的游標位置與畫出來的那一格必須是同一個答案。Got ' +
+        JSON.stringify(entered));
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual((await at()).cell, '0,1', 'T8a: 右鍵走一個 cycle');
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      const walked = await at();
+      assert.strictEqual(walked.cell, '3,1',
+        'T8a: 下鍵走 lane。Got ' + JSON.stringify(walked));
+
+      // The status line is an ARIA live region (`role="status"`), so it is
+      // re-announced IN FULL every time it changes — and it changes on every
+      // arrow key. It therefore carries the position and nothing else: the
+      // instructions live on the canvas's own `aria-label`, where they are
+      // read once, when the keyboard arrives.
+      const spoken = await ctx.page.evaluate(() => ({
+        status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+        role: document.querySelector('.ed-wave-status').getAttribute('role'),
+        label: document.querySelector('.ed-wave-canvas').getAttribute('aria-label'),
+      }));
+      assert.strictEqual(spoken.role, 'status',
+        'T8a 前提失敗：狀態列要是 live region，這條斷言才有意義');
+      assert.strictEqual(spoken.status, '游標：ack cycle 2',
+        'T8a: live region 只報位置 —— 每按一次方向鍵就整句唸一次操作說明是反效果。Got ' +
+        JSON.stringify(spoken.status));
+      assert.ok(spoken.label.indexOf('方向鍵') !== -1,
+        'T8a: 那句說明要在畫布的 aria-label 上（唸一次），不是在 live region 上（每按一次唸一次）。Got ' +
+        JSON.stringify(spoken.label));
+      const row = await ctx.page.evaluate(() => Array.from(
+        document.querySelectorAll('.ed-wave-lane-row.is-selected'))
+        .map((el) => el.getAttribute('data-lane')));
+      assert.deepStrictEqual(row, ['3'],
+        'T8a: lane 列表要跟著游標亮，否則使用者只能從畫布上猜自己在第幾條。Got ' +
+        JSON.stringify(row));
+
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const painted = await ctx.page.evaluate(() => ({
+        wave3: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-3'),
+        brush: document.querySelector('.ed-wave-brush.is-on').getAttribute('data-brush'),
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        patch: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-patch'),
+      }));
+      assert.strictEqual(painted.wave3, '.10.1',
+        'T8a: 電位要落在游標那一格（ack 的 cycle 1）。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.brush, '1',
+        'T8a: 那個鍵也要把筆刷選起來。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.gestures, '1',
+        'T8a: 一個按鍵是一個手勢。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.patch, 'ok',
+        'T8a: 那個手勢自己就要產出 patch。Got ' + JSON.stringify(painted));
+      const after = await at();
+      assert.strictEqual(after.cell, '3,1',
+        'T8a: 重畫過後游標要留在原地。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.key, 'canvas',
+        'T8a: 重畫換掉整個 <svg>，鍵盤不得跟著掉到 body 上 —— F7 / T6h 同一類。Got ' +
+        JSON.stringify(after));
+
+      const md = await saveAndRead(ctx);
+      assert.ok(/wave: ['"]\.10\.1['"]/.test(md),
+        'T8a: 鍵盤畫的東西必須跟滑鼠畫的一樣寫得回檔案。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T8a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8a the drawing takes a keyboard cursor and one keystroke paints where it is — OK');
+    }
+    // T8b — Shift+←/→ selects a run along the lane, and ONE keystroke paints
+    // all of it.
+    for (const extend of [true, false]) {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const cell = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return c === null ? null : c.getAttribute('data-cell');
+      });
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(await cell(), '3,1',
+        'T8b 前提失敗：兩半都必須從同一格出發，否則它們比的不是同一件事');
+
+      if (extend) {
+        await ctx.page.keyboard.down('Shift');
+        for (let i = 0; i < 3; i++) {
+          await ctx.page.keyboard.press('ArrowRight');
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await ctx.page.keyboard.up('Shift');
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(await cell(), '3,4',
+          'T8b: Shift+→ 也要把游標帶過去，選取不是獨立於游標的第二個東西');
+        const span = await ctx.page.evaluate(() => {
+          const svg = document.querySelector('.ed-wave-canvas');
+          const box = document.querySelector('.ed-wave-selection');
+          const cw = Number(svg.getAttribute('width')) /
+            Number(svg.getAttribute('data-cycle-count'));
+          return box === null ? null : {
+            cycles: Number(box.getAttribute('width')) / cw,
+            lane: Number(box.getAttribute('y')) /
+              (Number(svg.getAttribute('height')) / Number(svg.getAttribute('data-lane-count'))),
+          };
+        });
+        assert.deepStrictEqual(span, { cycles: 4, lane: 3 },
+          'T8b: 選取框必須真的蓋住那四個 cycle、而且在游標那一條 lane 上。Got ' +
+          JSON.stringify(span));
+      }
+
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const wave3 = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-3'));
+      // MEASURED in this session against the pinned codec: `.0..1` painted at
+      // cycle 1 ALONE comes back `.10.1` — the `0` is written out explicitly at
+      // cycle 2 so the cycles after the brush keep the level they had — and
+      // painted across cycles 1–4 it is `.1...`. Both halves of the walk are
+      // run because a build that ignored Shift still gets the first two
+      // characters right, and a row that only asserted those would be green on
+      // it.
+      assert.strictEqual(wave3, extend ? '.1...' : '.10.1',
+        'T8b(' + (extend ? 'Shift 選一段' : '單格') + '): 畫出來的範圍不對。Got ' +
+        JSON.stringify(wave3));
+      assert.strictEqual(ctx.errs.length, 0, 'T8b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: wave/T8b Shift+arrow selects a run and one keystroke paints all of it — OK');
+    // T8c — the cursor survives every repaint, is clamped by the document it
+    // sits on, and is scrolled back into the clip when it walks off it.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const at = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          published: ov.getAttribute('data-wave-cursor'),
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+          lanes: ov.getAttribute('data-wave-lanes'),
+          cycles: ov.getAttribute('data-wave-cycles'),
+          scrollLeft: document.querySelector('.ed-wave-canvas-wrap').scrollLeft,
+        };
+      });
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      for (let i = 0; i < 5; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const homed = await at();
+      assert.strictEqual(homed.scrollLeft, 0, 'T8c 前提失敗：還沒往右走，欄位不該先捲過');
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 200));
+      const bottom = await at();
+      assert.strictEqual(bottom.cell, '5,4',
+        'T8c 前提失敗：要走到最後一條 lane 的最後一個 cycle。Got ' + JSON.stringify(bottom));
+      // The drawing is wider than its column at this viewport (MEASURED in this
+      // session: clientWidth 230 against a 240px drawing at 5 cycles), so the
+      // last cycle is off the clip and walking onto it has to bring the view.
+      assert.ok(bottom.scrollLeft > 0,
+        'T8c: 游標走出欄位的裁切範圍時必須把畫面帶過去 —— 否則鍵盤游標在一個' +
+        '使用者看不到的地方。Got ' + JSON.stringify(bottom));
+
+      // The lane the cursor is standing on is removed underneath it.
+      await pressClick(ctx.page, '.ed-wave-lane-remove[data-focus-key="lane-remove-5"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const shrunk = await at();
+      assert.strictEqual(shrunk.lanes, '5', 'T8c 前提失敗：那一條 lane 要真的被刪掉');
+      assert.strictEqual(shrunk.cell, '4,4',
+        'T8c: 文件變短了，游標要被夾回最後一條 lane，不能指在不存在的列上。Got ' +
+        JSON.stringify(shrunk));
+      assert.strictEqual(shrunk.published, shrunk.cell === null ? '' : shrunk.cell,
+        'T8c: overlay 公布的位置與【真的畫出來的】那一格必須是同一個決定 —— 公布值' +
+        '現在是在畫 rect 的那個分支裡算出來的，不是另外從 cursor 讀一次。Got ' +
+        JSON.stringify(shrunk));
+      assert.notStrictEqual(shrunk.tag, 'BODY',
+        'T8c: 刪掉一條 lane 之後鍵盤不得掉到 body 上。Got ' + JSON.stringify(shrunk));
+      assert.strictEqual(shrunk.inOverlay, true,
+        'T8c: 鍵盤必須還在 dialog 裡。Got ' + JSON.stringify(shrunk));
+
+      // The pointer and the keyboard are the same cursor.
+      await paintCell(ctx.page, 2, 2, 'x');
+      const clicked = await at();
+      assert.strictEqual(clicked.cell, '2,2',
+        'T8c: 用滑鼠按過的那一格就是鍵盤接下來會畫的那一格。Got ' + JSON.stringify(clicked));
+      assert.strictEqual(clicked.key, 'canvas',
+        'T8c: 按過畫布之後鍵盤就在畫布上。Got ' + JSON.stringify(clicked));
+
+      // …and a toolbar cycle operation acts on the keyboard's own selection.
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(ctx.page, '.ed-wave-cycle-delete');
+      await new Promise((r) => setTimeout(r, 400));
+      const cut = await at();
+      assert.strictEqual(cut.cycles, '4',
+        'T8c: 工具列的「刪除 cycle」必須吃得到鍵盤做出來的選取 —— 在這之前只有拖曳' +
+        '做得出選取，這顆按鈕對鍵盤使用者是死的。Got ' + JSON.stringify(cut));
+      assert.strictEqual(cut.cell, '2,3',
+        'T8c: cycle 少了一個，游標要被夾回去。Got ' + JSON.stringify(cut));
+      assert.notStrictEqual(cut.tag, 'BODY',
+        'T8c: 按完工具列按鈕鍵盤不得掉到 body 上。Got ' + JSON.stringify(cut));
+
+      // …and a lane MOVE carries the marks with the lane. It is the one
+      // gesture that changes which lane a row index names, and the keyboard
+      // already follows the lane (▲ hands focus to the button the moved lane
+      // arrives at). Before this the cell cursor and the rail highlight did
+      // not: they stayed on the row number and so named the lane that had
+      // been displaced into it — two answers to「我在哪」, pointing at
+      // different lanes.
+      const beforeMove = await ctx.page.evaluate(() => Array.from(
+        document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value));
+      await pressClick(ctx.page, '.ed-wave-lane-up[data-focus-key="lane-up-2"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const moved = await ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          names: Array.from(document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value),
+          rows: Array.from(document.querySelectorAll('.ed-wave-lane-row.is-selected'))
+            .map((el) => el.getAttribute('data-lane')),
+        };
+      });
+      assert.strictEqual(moved.cell, '1,3',
+        'T8c: ▲ 把游標那條 lane 往上搬，游標要跟著它。Got ' + JSON.stringify(moved));
+      assert.strictEqual(moved.names[1], beforeMove[2],
+        'T8c: 游標所在的那一列，必須還是同一條 lane。before=' +
+        JSON.stringify(beforeMove) + ' after=' + JSON.stringify(moved.names));
+      assert.deepStrictEqual(moved.rows, ['1'],
+        'T8c: rail 的高亮也要一起走。Got ' + JSON.stringify(moved));
+
+      // …and BACK again, which is where the first attempt at this broke. It
+      // swapped the two indexes on the way out and nothing swapped them back,
+      // so ▲ then Ctrl+Z left both marks one row off — pointing at the
+      // neighbour, with nothing on screen to say so — and the next brush key
+      // painted a lane the user was not looking at. The marks are carried by
+      // lane IDENTITY now, through the one funnel every store movement takes,
+      // so undo needs no rule of its own.
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 500));
+      const undoneMove = await ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          names: Array.from(document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value),
+        };
+      });
+      assert.deepStrictEqual(undoneMove.names, beforeMove,
+        'T8c 前提失敗：Ctrl+Z 要真的把 lane 順序放回去。Got ' + JSON.stringify(undoneMove));
+      assert.strictEqual(undoneMove.cell, '2,3',
+        'T8c: 搬回去了，游標也要跟著回去。Got ' + JSON.stringify(undoneMove));
+      assert.strictEqual(undoneMove.names[2], beforeMove[2],
+        'T8c: 游標那一列還是同一條 lane');
+
+      // The assertion that actually costs something: the next brush key has to
+      // edit THAT lane. A cursor one row off looks identical on screen.
+      const paintedRow = await ctx.page.evaluate(() => {
+        // A Tab would do this too — the drawing is a tab stop — but it is 30
+        // controls away from the button the ▲ left the keyboard on.
+        document.querySelector('.ed-wave-canvas').focus();
+        const svg = document.querySelector('.ed-wave-canvas');
+        const n = Number(svg.getAttribute('data-lane-count'));
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(svg.getAttribute('data-wave-' + i));
+        return out;
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 500));
+      const afterPaint = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const n = Number(svg.getAttribute('data-lane-count'));
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(svg.getAttribute('data-wave-' + i));
+        return out;
+      });
+      const changed = afterPaint.map((w, i) => (w === paintedRow[i] ? null : i))
+        .filter((i) => i !== null);
+      assert.deepStrictEqual(changed, [2],
+        'T8c: 搬移再 undo 之後，下一個電位鍵必須落在游標【看起來】在的那一條 lane 上，' +
+        '不是它的鄰居。before=' + JSON.stringify(paintedRow) + ' after=' +
+        JSON.stringify(afterPaint));
+      assert.strictEqual(ctx.errs.length, 0, 'T8c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8c the cell cursor survives every repaint, and is clamped and scrolled into view — OK');
+    }
+    // T8d — Escape is layered: the rail's rename field first, the editor
+    // second. Before this, Escape at that field ran the editor's own
+    // `close('escape')`, which DISCARDS — so backing out of a half-typed group
+    // name threw away every gesture of the session.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const painted = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.strictEqual(painted, '1p...',
+        'T8d 前提失敗：這一列要先有一個真的會被丟掉的手勢。Got ' + JSON.stringify(painted));
+
+      // Tab all the way to the rail tag — the group rename is reachable by
+      // keyboard, which is how this row presses it.
+      let walked = 0;
+      for (; walked < 60; walked++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-1') break;
+      }
+      assert.ok(walked < 60, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const opened = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+      }));
+      assert.strictEqual(opened.input, 1,
+        'T8d 前提失敗：Enter 要把群組名稱變成可以打字的欄位。Got ' + JSON.stringify(opened));
+      assert.strictEqual(opened.key, 'group-input-1',
+        'T8d 前提失敗：而且鍵盤要落在那個欄位裡。Got ' + JSON.stringify(opened));
+
+      // ── the wedge this field had, and this row used to walk straight past ──
+      //
+      // One Ctrl+Z typed into the rename field locked the ENTIRE page's
+      // keyboard: the undo repaints, the rail is rebuilt, the field's
+      // `data-focus-key` no longer exists, `restoreFocus` finds nothing, and
+      // focus is left on a DETACHED element — after which no keydown reaches
+      // the page at all. Measured before the fix: `a` and three Escapes were
+      // all lost and the modal could not be closed without a mouse. It
+      // reproduces two keystrokes into the one sub-panel this task redesigned,
+      // and the first cut of this row opened the field, typed into it and
+      // pressed Escape without ever looking at it.
+      await ctx.page.keyboard.type('ZZ');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 500));
+      const undone = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        tag: document.activeElement.tagName,
+        wave0: document.querySelector('.ed-wave-canvas') === null ? null
+          : document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+      }));
+      // Order matters here, and it is the order of what a wrong state can
+      // still satisfy. First the two premises — the undo happened and nothing
+      // closed — because without them the delivery check below would compare
+      // `1p...` with `1p...` and pass on a page where nothing happened at all.
+      assert.strictEqual(undone.overlay, 1, 'T8d 前提失敗：undo 不關編輯器');
+      assert.strictEqual(undone.wave0, 'p....',
+        'T8d 前提失敗：那一下 Ctrl+Z 要真的退掉剛剛畫的那一格。Got ' + JSON.stringify(undone));
+      // Then DELIVERY, before anything about where the keyboard is: a focus
+      // that reads BODY looks survivable, and the wedge was that every key
+      // after it was swallowed. This is the assertion that survives a misleading
+      // state, so it goes first of the two.
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyY');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 500));
+      const redone = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.strictEqual(redone, '1p...',
+        'T8d: 下一個按鍵必須還送得到頁面上 —— 卡死的那個版本在這裡什麼都收不到。Got ' +
+        JSON.stringify(redone));
+      // …and only then where it is. Both halves are real: this one fails on a
+      // build that delivers keys but leaves the cursor nowhere visible.
+      assert.strictEqual(undone.input, 0,
+        'T8d: 重畫會把改名欄位拆掉，所以它必須先被收掉，而不是留一個掉在文件外的元素。Got ' +
+        JSON.stringify(undone));
+      assert.notStrictEqual(undone.tag, 'BODY',
+        'T8d: 改名到一半按 Ctrl+Z，鍵盤不得掉到 body 上。Got ' + JSON.stringify(undone));
+      assert.strictEqual(undone.key, 'group-1',
+        'T8d: 而且要回到那個欄位蓋住的鈕上。Got ' + JSON.stringify(undone));
+
+      // Re-open the field (the keyboard is back on its button) for the
+      // layering half.
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-group-input').length), 1,
+        'T8d 前提失敗：欄位要能再打開一次');
+
+      await ctx.page.keyboard.type('ZZ');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 400));
+      const first = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        title: document.querySelector('.ed-wave-group')
+          ? document.querySelector('.ed-wave-group').textContent : null,
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        wave0: document.querySelector('.ed-wave-canvas') === null ? null
+          : document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+        state: window.__edTestWaveState(),
+      }));
+      assert.strictEqual(first.input, 0, 'T8d: 第一次 Escape 關掉子面板');
+      assert.strictEqual(first.overlay, 1,
+        'T8d: 編輯器本身要還在 —— 取消一次改名不是取消整個 session。Got ' +
+        JSON.stringify(first));
+      assert.strictEqual(first.title, 'bus',
+        'T8d: 取消掉的名字不得留下來。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.key, 'group-1',
+        'T8d: 欄位收掉之後鍵盤要回到它蓋住的那顆鈕上。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.wave0, '1p...',
+        'T8d: 而且這個 session 畫過的東西一筆都不能少。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.state.open, true, 'T8d: 頁面自己也要認為編輯器還開著');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 800));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-overlay').length), 0,
+        'T8d: 第二次 Escape 才關編輯器');
+      assert.strictEqual(ctx.errs.length, 0, 'T8d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8d Escape closes the rename field first and the editor second — OK');
+    }
+    // T8e — the editor opens from the keyboard, and leaving it hands the
+    // keyboard back to the block it came from instead of stranding it on BODY.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      await new Promise((r) => setTimeout(r, 300));
+      // A block selection, then walked with the keyboard onto the diagram.
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.click('.ed-block[data-block-id="0"]');
+      await ctx.page.click('.ed-block[data-block-id="2"]');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('ArrowUp');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      const standing = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        return { type: ae.getAttribute ? ae.getAttribute('data-block-type') : null,
+          selected: document.querySelectorAll('.ed-block.ed-selected').length };
+      });
+      assert.strictEqual(standing.type, 'code',
+        'T8e 前提失敗：鍵盤要站在那個 wavedrom 區塊上。Got ' + JSON.stringify(standing));
+
+      // act → settle → read the value → assert it, NOT `waitForSelector`: a
+      // wait that times out prints `TimeoutError` and nothing else, and these
+      // two suites run every scenario in one unguarded sequence, so the first
+      // throw is also the last thing that runs. Read what is actually there
+      // and the failure names it.
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      const entered = await ctx.page.evaluate(() => ({
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        focus: document.activeElement === null ? null
+          : document.activeElement.getAttribute('class'),
+      }));
+      assert.strictEqual(entered.overlay, 1,
+        'T8e: 站在 wavedrom 區塊上按 Enter 要把編輯器開起來。Got ' + JSON.stringify(entered));
+      assert.strictEqual(entered.focus, 'ed-wave-panel',
+        'T8e: 用鍵盤開起來的編輯器，鍵盤也要在 dialog 裡。Got ' + JSON.stringify(entered));
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0')), '1p...',
+        'T8e: 從頭到尾沒有碰滑鼠，波形一樣要畫得上去');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 1500));
+      const back = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        return {
+          overlay: document.querySelectorAll('.ed-wave-overlay').length,
+          tag: ae ? ae.tagName : null,
+          type: ae && ae.getAttribute ? ae.getAttribute('data-block-type') : null,
+          selected: document.querySelectorAll('.ed-block.ed-selected').length,
+          onSelected: ae !== null && ae.classList !== undefined &&
+            ae.classList.contains('ed-selected'),
+        };
+      });
+      assert.strictEqual(back.overlay, 0, 'T8e 前提失敗：Escape 要真的關掉編輯器');
+      assert.notStrictEqual(back.tag, 'BODY',
+        'T8e: v3.3.0 backlog 第 6 項的同類缺陷 —— 離開編輯器不得把鍵盤丟在 BODY 上。Got ' +
+        JSON.stringify(back));
+      assert.strictEqual(back.type, 'code',
+        'T8e: 鍵盤要回到它進來時站的那個區塊。Got ' + JSON.stringify(back));
+      assert.strictEqual(back.onSelected, true,
+        'T8e: 而且要看得見 —— .ed-block:focus 沒有外框，藍底才是這個編輯器對「鍵盤在這裡」' +
+        '的表示法。Got ' + JSON.stringify(back));
+
+      // …which is exactly the state Enter opens from, so the way out is the
+      // way back in.
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-overlay').length), 1,
+        'T8e: 交回去的那個狀態就是 Enter 開得起來的狀態，否則鍵盤使用者出來了就回不去');
+      assert.strictEqual(ctx.errs.length, 0, 'T8e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8e the editor opens from the keyboard and gives the keyboard back on the way out — OK');
+    }
+
+    // T8f — arriving arms nothing, and a selection is clamped by the document
+    // it sits on.
+    //
+    // Two halves of one rule: `selection` is what every cycle operation acts
+    // on, so it may never say more than the drawing can honour. Getting there
+    // must not create one (Tab is a traversal, not a choice), and an operation
+    // that shortens the document must not leave one pointing off the end.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      // Tab all the way onto the drawing. It is the LAST focusable in the
+      // dialog, which is why this walks rather than clicking: a click would be
+      // a choice, and the thing under test is what a traversal does.
+      let walked = 0;
+      for (; walked < 60; walked++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'canvas') break;
+      }
+      assert.ok(walked < 60, 'T8f 前提失敗：Tab 走不到畫布');
+      const arrived = await ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          boxes: document.querySelectorAll('.ed-wave-selection').length,
+          rows: document.querySelectorAll('.ed-wave-lane-row.is-selected').length,
+        };
+      });
+      assert.strictEqual(arrived.cell, '0,0',
+        'T8f 前提失敗：Tab 到畫布上要看得到游標。Got ' + JSON.stringify(arrived));
+      assert.strictEqual(arrived.boxes, 0,
+        'T8f: 只是「走到這裡」不得順手做出一個選取 —— 那會讓 刪除 cycle / 複製 ' +
+        '在使用者沒選任何東西的情況下變成上了膛的按鈕。Got ' + JSON.stringify(arrived));
+      assert.strictEqual(arrived.rows, 0,
+        'T8f: lane 列也不得亮成「選到了」。Got ' + JSON.stringify(arrived));
+      // …and the toolbar agrees: with nothing selected, 複製 refuses by name.
+      await pressClick(ctx.page, '.ed-wave-cycle-copy');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status')), '先選一段 cycle 再複製',
+        'T8f: 沒有選取時 複製 必須照舊拒絕');
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      // The other half, on its own page: a real keyboard selection, and then
+      // an operation that makes the document too short to hold it.
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.down('Shift');
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowRight');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 200));
+      const state = () => ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const box = document.querySelector('.ed-wave-selection');
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        const cw = Number(svg.getAttribute('width')) /
+          Number(svg.getAttribute('data-cycle-count'));
+        return {
+          cycles: svg.getAttribute('data-cycle-count'),
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          selCycles: box === null ? 0 : Number(box.getAttribute('width')) / cw,
+          selFrom: box === null ? null : Number(box.getAttribute('x')) / cw,
+          status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+        };
+      });
+      const made = await state();
+      assert.deepStrictEqual(
+        { cycles: made.cycles, cell: made.cell, selCycles: made.selCycles, selFrom: made.selFrom },
+        { cycles: '5', cell: '0,3', selCycles: 3, selFrom: 1 },
+        'T8f 前提失敗：要先有一段跨 3 個 cycle 的選取。Got ' + JSON.stringify(made));
+
+      await pressClick(ctx.page, '.ed-wave-cycle-delete');
+      await new Promise((r) => setTimeout(r, 500));
+      const cut = await state();
+      assert.strictEqual(cut.cycles, '2', 'T8f 前提失敗：那三個 cycle 要真的被刪掉');
+      assert.strictEqual(cut.cell, '0,1',
+        'T8f: 游標被夾回去（第一輪就是這樣）。Got ' + JSON.stringify(cut));
+      assert.strictEqual(cut.selCycles, 1,
+        'T8f: 選取也要一起夾回去。沒有夾的時候：畫面上是兩個 cycle 的圖、一個看不見的' +
+        '四格選取框畫在圖外，而工具列照著那四格動作。Got ' + JSON.stringify(cut));
+      // What the toolbar SAYS it is acting on, and what it then does.
+      await pressClick(ctx.page, '.ed-wave-cycle-copy');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.strictEqual((await state()).status, '複製了 1 個 cycle',
+        'T8f: 工具列必須照著夾回去之後的選取說話');
+      await pressClick(ctx.page, '.ed-wave-cycle-paste');
+      await new Promise((r) => setTimeout(r, 500));
+      assert.strictEqual((await state()).cycles, '3',
+        'T8f: …而且照著它動作 —— 沒有夾的時候這一貼會把文件長回五個 cycle');
+      assert.strictEqual(ctx.errs.length, 0, 'T8f: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8f arriving arms nothing, and a selection is clamped by the document it sits on — OK');
+    }
+
+    // T8g — a block's own buttons keep their own Enter.
+    //
+    // The first cut of the keyboard entry gated on `e.target.closest(
+    // '.ed-block')`, and EVERY block wraps an `.ed-insert` and an `.ed-handle`
+    // <button>. So Enter on the ⠿ of a wavedrom block opened the wave editor
+    // and swallowed the block menu — while SPACE on the same button still
+    // opened the menu. One button, two devices' conventions, two answers: the
+    // v3.3.0 backlog defect this task exists to close, rewritten with the
+    // devices swapped, inside the task itself.
+    //
+    // DOM focus is placed directly because nothing in today's build can put
+    // the keyboard on those buttons (they carry `tabindex="-1"`, and Tab with
+    // nothing focused is deliberately swallowed) — which is also why the
+    // regression was latent rather than live. Assistive technology moves focus
+    // programmatically, and the document-surface follow-up this task hands on
+    // is exactly what would make it reachable by hand.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      await new Promise((r) => setTimeout(r, 300));
+      const focusHandle = () => ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-block[data-block-type="code"] .ed-handle');
+        if (b === null) return null;
+        b.focus();
+        return document.activeElement.className;
+      });
+      assert.strictEqual(await focusHandle(), 'ed-handle',
+        'T8g 前提失敗：那顆 ⠿ 要拿得到焦點');
+      const after = () => ctx.page.evaluate(() => ({
+        menu: document.querySelectorAll('.ed-handle-menu-btn').length,
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+      }));
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 900));
+      const byEnter = await after();
+      // Close whatever opened, then ask the same question with Space.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 600));
+      assert.strictEqual(await focusHandle(), 'ed-handle', 'T8g 前提失敗：再站回那顆 ⠿');
+      await ctx.page.keyboard.press('Space');
+      await new Promise((r) => setTimeout(r, 900));
+      const bySpace = await after();
+      assert.ok(bySpace.menu > 0,
+        'T8g 前提失敗：Space 要真的打得開 ⠿ 選單，這一列才比得出東西。Got ' +
+        JSON.stringify(bySpace));
+      assert.deepStrictEqual(byEnter, bySpace,
+        'T8g: 同一顆按鈕上 Enter 與 Space 必須是同一個答案。Enter=' +
+        JSON.stringify(byEnter) + ' Space=' + JSON.stringify(bySpace));
+      assert.strictEqual(byEnter.overlay, 0,
+        'T8g: 站在 ⠿ 上按 Enter 不得改開波形編輯器 —— 那條路徑沒有 blockSelection，' +
+        '關掉之後鍵盤會落在 body 上。Got ' + JSON.stringify(byEnter));
+      assert.strictEqual(ctx.errs.length, 0, 'T8g: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8g a block\'s own buttons keep their own Enter — OK');
+    }
+
+    // T8h — the rename field and the rail it lives in.
+    //
+    // Two states that both used to end on `document.body` inside a modal. The
+    // field's teardown ran a full `render()`, i.e. a rebuild of the whole rail,
+    // and a rebuild inside a `blur` handler destroys the control the user is
+    // pressing: the mouseup lands on a fresh element, no `click` fires, the
+    // press does nothing, and focus is left nowhere. And the destination the
+    // teardown nominates is `group-<first lane's row>`, a key an insert above
+    // the group renumbers — so the nomination could name something the repaint
+    // never brought back.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      let walked = 0;
+      for (; walked < 60; walked++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-1') break;
+      }
+      assert.ok(walked < 60, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const open = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        lanes: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes'),
+      }));
+      assert.strictEqual(open.input, 1, 'T8h 前提失敗：改名欄位要開著');
+
+      // The press the old teardown ate.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="0"]');
+      await new Promise((r) => setTimeout(r, 600));
+      const pressed = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          lanes: ov.getAttribute('data-wave-lanes'),
+          input: document.querySelectorAll('.ed-wave-group-input').length,
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      assert.strictEqual(pressed.lanes, String(Number(open.lanes) + 1),
+        'T8h: 改名欄位開著時按下的那顆 ＋ 必須真的加一條 lane —— 被吃掉的那一版' +
+        '按了完全沒反應，而使用者要再按一次才知道。Got ' + JSON.stringify(pressed));
+      assert.strictEqual(pressed.input, 0, 'T8h: 而且那個欄位要收掉');
+      assert.notStrictEqual(pressed.tag, 'BODY',
+        'T8h: 鍵盤不得掉到 body 上。Got ' + JSON.stringify(pressed));
+      assert.strictEqual(pressed.inOverlay, true,
+        'T8h: 鍵盤要留在 dialog 裡。Got ' + JSON.stringify(pressed));
+
+      // …and the nominated destination can be renumbered out from under the
+      // teardown. The ＋ above has just moved the group from `from=1` to
+      // `from=2`; rename it, type, and undo THAT insert — the key the teardown
+      // names goes back to `group-1` while the field's own key was `group-2`.
+      let toGroup = 0;
+      for (; toGroup < 70; toGroup++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-2') break;
+      }
+      assert.ok(toGroup < 70, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-group-input').length), 1,
+        'T8h 前提失敗：移位之後的群組也要開得起來');
+      await ctx.page.keyboard.type('ZZ');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 600));
+      const renumbered = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          overlay: document.querySelectorAll('.ed-wave-overlay').length,
+          input: document.querySelectorAll('.ed-wave-group-input').length,
+          lanes: ov.getAttribute('data-wave-lanes'),
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      assert.strictEqual(renumbered.overlay, 1, 'T8h 前提失敗：undo 不關編輯器');
+      assert.strictEqual(renumbered.lanes, open.lanes,
+        'T8h 前提失敗：那一下 Ctrl+Z 要真的退掉剛剛加的那條 lane');
+      assert.strictEqual(renumbered.input, 0, 'T8h: 欄位要收掉');
+      assert.notStrictEqual(renumbered.tag, 'BODY',
+        'T8h: 指定的落點被重新編號掉時，鍵盤要退回 dialog 自己，不是 body。Got ' +
+        JSON.stringify(renumbered));
+      assert.strictEqual(renumbered.inOverlay, true,
+        'T8h: 而且要在 dialog 裡面。Got ' + JSON.stringify(renumbered));
+      // …and keys still arrive: Escape closes it.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-overlay').length), 0,
+        'T8h: 之後的按鍵還要送得到 —— Escape 要關得掉編輯器');
+      assert.strictEqual(ctx.errs.length, 0, 'T8h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8h a rail press with the rename field open is not eaten, and its hand-back cannot name a key that is gone — OK');
+    }
+
+    // T8i — the entry affordance, at the scroll position the toolbar owns.
+    //
+    // `.ed-wave-edit-btn` is `z-index: 12` and `.ed-toolbar` is `z-index: 101`,
+    // so a button placed above the bar's band is not near the toolbar — it is
+    // UNDER it, painted and hit-tested by the bar. The floor was `4` instead of
+    // `--ed-toolbar-h`, and measured at 1200x800 with a 180px diagram scrolled
+    // to `r.top = -60` the button drew at `top: 4`, `elementFromPoint` on its
+    // own centre answered `DIV.ed-toolbar`, and a real click left the editor
+    // closed. With no keyboard way in (see the CHANGELOG's Known issues), that
+    // scroll position had ZERO entry points and nothing on screen said why.
+    //
+    // The roster row two files over pins that this affordance is `position:
+    // fixed` and is raised/hidden on scroll; neither of those can see STACKING,
+    // which is the structural reason five review rounds walked past it.
+    {
+      const TALL_MD = [
+        '# W', '',
+      ].concat(Array.from({ length: 24 }, (_, i) => 'Filler paragraph ' + (i + 1) + '.\n'))
+        .concat([
+          '```wavedrom',
+          '{ signal: [',
+          "  { name: 'clk', wave: 'p....' },",
+          "  ['bus',",
+          "    { name: 'req', wave: '0.1.0' },",
+          "    { name: 'dat', wave: 'x.3.x', data: ['D'] }",
+          '  ],',
+          "  { name: 'ack', wave: '.0..1' },",
+          "  { name: 'gap', wave: '01|10' },",
+          '  {}',
+          '] }',
+          '```', '',
+        ]).concat(Array.from({ length: 24 },
+          (_, i) => 'Trailing paragraph ' + (i + 1) + '.\n'))
+        .concat(['Tail para two.', '']).join('\n');
+      // Filler on BOTH sides on purpose: with text only above it, the diagram
+      // sits near the end of the document and the page runs out of scroll
+      // before its top edge can reach the bar — measured, it stopped at
+      // `top: 318` against a 44px inset, and the row would have been asserting
+      // nothing.
+      const ctx = await newPage(TALL_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      await new Promise((r) => setTimeout(r, 400));
+      const toolbarH = await ctx.page.evaluate(() => parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--ed-toolbar-h')) || 0);
+      assert.ok(toolbarH > 0, 'T8i 前提失敗：--ed-toolbar-h 要有值。Got ' + toolbarH);
+
+      // Scroll until the diagram's TOP edge has gone under the bar while most
+      // of it is still on screen — the position a reader passes through on the
+      // way down the document.
+      const placed = await ctx.page.evaluate((want) => {
+        const el = document.querySelector('.wavedrom-diagram');
+        const before = el.getBoundingClientRect();
+        window.scrollBy(0, before.top - want);
+        const after = el.getBoundingClientRect();
+        return { top: Math.round(after.top), bottom: Math.round(after.bottom),
+                 height: Math.round(after.height) };
+      }, -20);
+      assert.ok(placed.top < toolbarH,
+        'T8i 前提失敗：圖的上緣要真的進到工具列那一帶。Got ' + JSON.stringify(placed));
+      assert.ok(placed.bottom > toolbarH + 40,
+        'T8i 前提失敗：圖還要看得見一大半，滑鼠才碰得到它。Got ' + JSON.stringify(placed));
+
+      // Hover the part of the diagram that is NOT under the bar.
+      await ctx.page.mouse.move(2, 2);
+      await new Promise((r) => setTimeout(r, 60));
+      const hoverAt = await ctx.page.evaluate((inset) => {
+        const r = document.querySelector('.wavedrom-diagram').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: Math.max(r.top, inset) + 30 };
+      }, toolbarH);
+      await ctx.page.mouse.move(hoverAt.x, hoverAt.y);
+      await ctx.page.waitForSelector('.ed-wave-edit-btn:not([hidden])', { timeout: 5000 });
+      const where = await ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-wave-edit-btn');
+        const r = b.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {
+          top: Math.round(r.top),
+          inset: parseFloat(getComputedStyle(document.documentElement)
+            .getPropertyValue('--ed-toolbar-h')) || 0,
+          hitClass: hit === null ? null : hit.className,
+          hitIsButton: hit !== null && hit.classList.contains('ed-wave-edit-btn'),
+        };
+      });
+      assert.ok(where.top >= where.inset,
+        'T8i: 這顆按鈕不得畫進工具列那一帶 —— 那不是「靠近工具列」，是被工具列蓋住。Got ' +
+        JSON.stringify(where));
+      assert.strictEqual(where.hitIsButton, true,
+        'T8i: 按鈕矩形中心的命中測試必須落在按鈕自己身上，否則滑鼠點不到它。Got ' +
+        JSON.stringify(where));
+
+      // …and the real press opens the editor. The hit test alone is not the
+      // claim: the claim is that the only entry point this feature has works
+      // at this scroll position.
+      await pressClick(ctx.page, '.ed-wave-edit-btn');
+      await new Promise((r) => setTimeout(r, 800));
+      const opened = await ctx.page.evaluate(() => ({
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        state: window.__edTestWaveState().open,
+      }));
+      assert.deepStrictEqual(opened, { overlay: 1, state: true },
+        'T8i: 在這個捲動位置按下去必須真的開起來。Got ' + JSON.stringify(opened));
+      assert.strictEqual(ctx.errs.length, 0, 'T8i: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8i the entry affordance is hittable where the toolbar owns the top — OK');
+    }
+
+    // T8j — the two things the editor used to leave the user to find out.
+    //
+    // (a) Escape is a modal's universal close key and here it DISCARDS a whole
+    // session; the header said only「關閉」. (b) A `reg:` / `assign:` block has
+    // no `signal:` lanes, so the editor opens an empty canvas and ＋ answers
+    //「這個動作沒有改變任何東西」— true, and no explanation. The precedent for
+    // both is one panel over: period / phase / hscale already get a visible row
+    // saying the drawing does not model them.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const head = await ctx.page.evaluate(() => {
+        const hint = document.querySelector('[data-wave-escape-hint]');
+        const close = document.querySelector('.ed-wave-close');
+        return {
+          hint: hint === null ? null : hint.textContent,
+          visible: hint !== null && hint.getClientRects().length > 0,
+          closeTitle: close === null ? null : close.title,
+          nolanes: document.querySelector('.ed-wave-overlay')
+            .getAttribute('data-wave-nolanes'),
+          noticeShown: document.querySelectorAll(
+            '.ed-wave-nolanes:not([hidden])').length,
+        };
+      });
+      assert.ok(head.hint !== null && head.hint.indexOf('Esc') !== -1 &&
+        head.hint.indexOf('Ctrl+Z') !== -1,
+        'T8j: 標題列要說 Esc 會放棄、而且一次 Ctrl+Z 拿得回來。Got ' + JSON.stringify(head));
+      assert.strictEqual(head.visible, true, 'T8j: 而且那句話要看得見');
+      assert.ok(head.closeTitle !== null && head.closeTitle.indexOf('保留') !== -1,
+        'T8j: 關閉那顆要說它是保留的那條路。Got ' + JSON.stringify(head));
+      assert.strictEqual(head.nolanes, '0',
+        'T8j 前提失敗：這個 fixture 有 signal: lane，不該掛「沒有 lane」的牌子');
+      assert.strictEqual(head.noticeShown, 0,
+        'T8j: 有 lane 的文件不得出現那條紅字。Got ' + JSON.stringify(head));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      // …and a block this editor genuinely cannot edit says so.
+      const REG_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ reg: [',
+        "  { bits: 8, name: 'data' },",
+        "  { bits: 4, name: 'op' }",
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(REG_MD);
+      await openWave(ctx.page);
+      const said = await ctx.page.evaluate(() => {
+        const ov = document.querySelector('.ed-wave-overlay');
+        const notice = document.querySelector('.ed-wave-nolanes');
+        return {
+          state: ov.getAttribute('data-wave-state'),
+          lanes: ov.getAttribute('data-wave-lanes'),
+          nolanes: ov.getAttribute('data-wave-nolanes'),
+          hidden: notice === null ? null : notice.hidden,
+          text: notice === null ? null : notice.textContent,
+          visible: notice !== null && notice.getClientRects().length > 0,
+        };
+      });
+      assert.strictEqual(said.state, 'ready',
+        'T8j 前提失敗：`reg:` 區塊是讀得回來的，只是沒有這個編輯器能編的 lane');
+      assert.strictEqual(said.lanes, '0', 'T8j 前提失敗：它要真的是 0 條 lane');
+      assert.strictEqual(said.nolanes, '1', 'T8j: 而且編輯器要知道自己是空的');
+      assert.strictEqual(said.hidden, false, 'T8j: 那條說明要顯示出來');
+      assert.strictEqual(said.visible, true, 'T8j: 而且要真的佔得到畫面');
+      assert.ok(said.text.indexOf('reg:') !== -1 && said.text.indexOf('signal:') !== -1,
+        'T8j: 要指名它是什麼區塊、以及這個編輯器只編 signal:。Got ' +
+        JSON.stringify(said.text));
+      assert.ok(said.text.indexOf('MD 原始碼') !== -1,
+        'T8j: 還要說可以從哪裡改它。Got ' + JSON.stringify(said.text));
+      // ＋ still refuses, and now the refusal is not the only thing on screen.
+      await pressClick(ctx.page, '.ed-wave-lane-add');
+      await new Promise((r) => setTimeout(r, 300));
+      const after = await ctx.page.evaluate(() => ({
+        status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+        notice: document.querySelectorAll('.ed-wave-nolanes:not([hidden])').length,
+      }));
+      assert.strictEqual(after.notice, 1,
+        'T8j: 按過 ＋ 之後那條說明還要在。Got ' + JSON.stringify(after));
+      assert.strictEqual(ctx.errs.length, 0, 'T8j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8j the header says which key discards, and a block with no editable lanes says so — OK');
+    }
   }
 
   await browser.close();

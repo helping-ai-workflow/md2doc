@@ -23,6 +23,21 @@ function req(port, method, p, body) {
   });
 }
 
+// v3.4.0 batch2 Task 6 fix round 1 (review F3): every tab gets its own
+// staleness baseline, minted by GET /edit/:id and handed to the page inside
+// window.__ED__. A ping that does not carry it has no baseline to interpret
+// and is answered with the old bare 204, so every staleness assertion below
+// has to speak as a real tab does.
+function clientIdOf(pageBody) {
+  const m = /window\.__ED__ = (\{[\s\S]*?\})<\/script>/.exec(pageBody);
+  assert.ok(m, 'the edit page must embed window.__ED__');
+  const ed = JSON.parse(m[1].replace(/\\u003c/g, '<'));
+  assert.ok(typeof ed.drawioClientId === 'string' && ed.drawioClientId.length > 0,
+    'GET /edit/:id must mint this tab its own drawio staleness client id, got ' +
+    JSON.stringify(ed.drawioClientId));
+  return ed.drawioClientId;
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-srv-'));
   const mdPath = path.join(dir, 'doc.md');
@@ -370,6 +385,308 @@ function req(port, method, p, body) {
       assert.strictEqual(stillAlive.status, 200);
     } finally {
       srvA.close();
+    }
+  }
+
+  // v3.4.0 batch2 Task 6 (Ruling B2-2): the /api/ping heartbeat doubles as a
+  // staleness check for every `.drawio`/`.xml` file the currently open
+  // document references — see server.js's own comment on why this rides the
+  // existing heartbeat instead of a new transport.
+
+  // (a) A document with NO drawio references must not pay anything extra:
+  // the ping fast path must issue ZERO fs.statSync calls (not just "be fast"
+  // — a direct, mechanical proof of the "(a) 沒有 drawio 的文件，心跳不得變
+  // 重" requirement), and must still answer plain 204 exactly as before.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-none-'));
+    const mdPath = path.join(dir, 'plain.md');
+    fs.writeFileSync(mdPath, '# No drawio here\n\nJust a paragraph.\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+      const cid = clientIdOf(page.body);
+
+      const origStatSync = fs.statSync;
+      let statCalls = 0;
+      fs.statSync = function (...args) { statCalls++; return origStatSync.apply(fs, args); };
+      let t0, t1;
+      try {
+        t0 = process.hrtime.bigint();
+        for (let i = 0; i < 20; i++) {
+          const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+          assert.strictEqual(r.status, 204, 'a drawio-free doc must still get a bare 204');
+          assert.strictEqual(r.body, '', '204 must carry no body');
+        }
+        t1 = process.hrtime.bigint();
+      } finally {
+        fs.statSync = origStatSync;
+      }
+      assert.strictEqual(statCalls, 0,
+        '(a): a document with no drawio refs must trigger ZERO fs.statSync calls ' +
+        'from the ping handler — got ' + statCalls + ' over 20 pings');
+      const avgMs = Number(t1 - t0) / 1e6 / 20;
+      console.log('server: (a) no-drawio ping — statSync calls=0, avg ' +
+        avgMs.toFixed(3) + 'ms/ping over 20 pings — OK');
+    } finally {
+      srv.close();
+    }
+  }
+
+  // (main path) A referenced .drawio file changing on disk is picked up: the
+  // heartbeat reports {stale:true} once the mtime moves, and a re-render of
+  // the SAME markdown content (the existing /api/render path — no new
+  // endpoint) reflects the new file contents.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-live-'));
+    const mdPath = path.join(dir, 'diagram.md');
+    const drawioPath = path.join(dir, 'single.drawio');
+    const v1 = fs.readFileSync(path.join(__dirname, 'fixtures', 'single.drawio'), 'utf8');
+    const v2 = v1.replace('SINGLE_BOX', 'CHANGED_BOX');
+    assert.notStrictEqual(v1, v2, 'fixture must actually contain the string being replaced');
+    fs.writeFileSync(drawioPath, v1, 'utf8');
+    const mdSrc = '# Diagram\n\n![d](single.drawio)\n';
+    fs.writeFileSync(mdPath, mdSrc, 'utf8');
+
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+      assert.ok(page.body.includes('class="drawio'),
+        'initial page must have baked the referenced .drawio file');
+      const cid = clientIdOf(page.body);
+
+      // Nothing changed yet — must stay a bare 204.
+      const p0 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+      assert.strictEqual(p0.status, 204, 'unchanged drawio file must not report stale');
+
+      const r0 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r0.status, 200);
+      const parts0 = JSON.parse(r0.body).parts.join('\n');
+      assert.ok(parts0.includes('class="drawio'), 'baseline render must contain the baked drawio block');
+
+      // External edit — a real editor writing over the file, not through
+      // this server. The (mtime, size) stamp is what checkDrawioStale()
+      // compares against; writeFileSync always gives a fresh mtime.
+      fs.writeFileSync(drawioPath, v2, 'utf8');
+
+      const p1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+      assert.strictEqual(p1.status, 200, 'a changed drawio file must be reported, not 204');
+      const j1 = JSON.parse(p1.body);
+      // Fix round 2 (re-review G9): the EXACT response shape is pinned again.
+      // Round 1 replaced `deepStrictEqual(body, {stale:true})` with two field
+      // assertions, which accept any number of extra fields — stronger on the
+      // token's content, weaker on the shape, and the fix report claimed
+      // otherwise. Both halves are asserted now.
+      assert.deepStrictEqual(Object.keys(j1).sort(), ['stale', 'token'],
+        'the stale response must carry exactly {stale, token}, got ' + p1.body);
+      assert.strictEqual(j1.stale, true, 'the stale signal must still say stale, got ' + p1.body);
+      assert.ok(typeof j1.token === 'string' && j1.token.length > 0,
+        'fix round 1 (F2): the stale signal must carry the token the client acks with, got ' + p1.body);
+
+      // The re-bake is available through the EXISTING /api/render path
+      // (Ruling B2-2: no new endpoint) — same content in, different bytes
+      // out, because renderMarkdown() always re-reads referenced files.
+      const r1 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r1.status, 200);
+      const parts1 = JSON.parse(r1.body).parts.join('\n');
+      assert.notStrictEqual(parts1, parts0,
+        're-rendering after the external edit must produce different baked output');
+
+      // ── Fix round 1, review F2: the retry sequence ──────────────────────
+      // This assertion USED TO read "a ping right after that render sees the
+      // baseline the render just advanced — 204". That encoded exactly the
+      // defect F2 names: /api/render runs BEFORE the client has decided
+      // whether it can apply the result, and the client has several bail
+      // paths that fire AFTER the response arrives (its DOM moved
+      // mid-gesture, the user's focus is inside the block). Advancing on the
+      // render meant one external change was silently dropped for the rest
+      // of the session. The baseline now advances on the client's ack and on
+      // nothing else.
+      const p2 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+      assert.strictEqual(p2.status, 200,
+        'F2: a render the client never confirmed applying must NOT advance the baseline');
+      const j2 = JSON.parse(p2.body);
+      assert.deepStrictEqual(Object.keys(j2).sort(), ['stale', 'token'],
+        'G9: every stale response carries exactly {stale, token}, got ' + p2.body);
+      assert.strictEqual(j2.stale, true, 'F2: the second heartbeat must report the same staleness again');
+      assert.strictEqual(j2.token, j1.token,
+        'F2: the token identifies a CONTENT VERSION, not a ping — a refresh slower than one ' +
+        'beat would otherwise always ack a token the server had already superseded, got ' +
+        JSON.stringify({ first: j1.token, second: j2.token }));
+
+      // A wrong/stale ack must not advance anything either.
+      const p3 = await req(srv.port, 'POST', '/api/ping',
+        { fileId: 0, drawioClientId: cid, drawioAck: 'not-the-token' });
+      assert.strictEqual(p3.status, 200, 'F2: an ack that does not match the pending token must not advance the baseline');
+
+      // Second attempt succeeds: the client applied it and says so.
+      const p4 = await req(srv.port, 'POST', '/api/ping',
+        { fileId: 0, drawioClientId: cid, drawioAck: j1.token });
+      assert.strictEqual(p4.status, 204,
+        'F2: once the client confirms the DOM carries that version, the signal stops repeating');
+
+      // ── Fix round 1, review F3: per-tab baselines ───────────────────────
+      // A second tab on the SAME file opens now, with the file already at
+      // v2, so it is NOT stale for that tab...
+      const page2 = await req(srv.port, 'GET', '/edit/0');
+      const cid2 = clientIdOf(page2.body);
+      assert.notStrictEqual(cid2, cid, 'F3: each tab must get its own client id');
+      const q0 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid2 });
+      assert.strictEqual(q0.status, 204, 'F3: a tab painted from the current bytes is not stale');
+
+      // ...and when the file changes again, BOTH tabs are told, not just
+      // whichever one happened to ping first.
+      const v3 = v2.replace('CHANGED_BOX', 'THIRD_BOX');
+      assert.notStrictEqual(v3, v2, 'fixture must actually contain the string being replaced');
+      fs.writeFileSync(drawioPath, v3, 'utf8');
+      const a1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+      assert.strictEqual(a1.status, 200, 'F3: tab A must be told about the change');
+      const b1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid2 });
+      assert.strictEqual(b1.status, 200,
+        'F3: tab B must be told too — the first tab to ping used to eat the one signal, ' +
+        'leaving the second on a stale diagram that looked perfectly healthy');
+
+      // ── Fix round 2, re-review G5: a live tab that was swept re-registers ──
+      // The eviction path itself is not directly drivable here (it needs a
+      // >10-minute gap), but the state it produces IS: a well-formed clientId
+      // with no server-side entry. Round 1 answered that with a bare 204
+      // forever — a tab that looked perfectly healthy and silently never
+      // re-baked again for the life of the session, recoverable only by
+      // reload, with nothing telling the user to reload.
+      const ghost = 'ffffffffffffffffffffffff';
+      const g1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: ghost });
+      assert.strictEqual(g1.status, 200,
+        'G5: a client that is still talking to us is alive by definition — it must get a ' +
+        'baseline back (seeded empty, so it re-syncs once) rather than be permanently deaf');
+      const gj = JSON.parse(g1.body);
+      assert.deepStrictEqual(Object.keys(gj).sort(), ['stale', 'token'],
+        'G5/G9: the re-registered client gets the ordinary stale shape, got ' + g1.body);
+      const g2 = await req(srv.port, 'POST', '/api/ping',
+        { fileId: 0, drawioClientId: ghost, drawioAck: gj.token });
+      assert.strictEqual(g2.status, 204,
+        'G5: and once it acks, it converges like any other tab — one redundant re-render, ' +
+        'not an endless one');
+
+      // ── Fix round 3, re-review2 H4: bounded, and it bounds by EVICTING ──
+      // Round 2 capped by REFUSING, which meant that once the map filled a
+      // genuinely live tab could never re-register and went silently deaf for
+      // the session — G5's own guard rail reproducing G5's symptom. The bound
+      // is now least-recently-seen eviction, so the map stays bounded AND no
+      // live tab is ever turned away.
+      //
+      // `ghost` has just acked, so it answers 204 while its entry survives.
+      // That makes it a probe: if minting more ids than the cap evicts it,
+      // its next ping re-registers with an empty baseline and answers 200
+      // again. 204 would mean the map grew instead of evicting.
+      for (let n = 0; n < 80; n++) {
+        const id = ('c' + n).padEnd(24, '0');
+        const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: id });
+        assert.strictEqual(r.status, 200,
+          'H4: a well-formed client must never be turned away — refusing past a cap is ' +
+          'what made a swept live tab permanently deaf, got ' + r.status + ' at n=' + n);
+      }
+      const evicted = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: ghost });
+      assert.strictEqual(evicted.status, 200,
+        'H4: the least-recently-seen entry must actually be evicted, so the map cannot grow ' +
+        'without bound — a 204 here would mean the oldest entry survived 80 new ones');
+
+      // ── Fix round 1, review F8: the ping body is capped ─────────────────
+      // readJson() refuses an over-limit body by destroying the socket, so
+      // the client sees a connection reset rather than a status. Without the
+      // cap this 64 KB body is simply accepted and answered 204 — which is
+      // what makes "not 204" the assertion that can actually go red here.
+      let bigStatus;
+      try {
+        bigStatus = (await req(srv.port, 'POST', '/api/ping',
+          { fileId: 0, drawioClientId: cid, pad: 'x'.repeat(64 * 1024) })).status;
+      } catch (e) {
+        bigStatus = 'connection-reset: ' + String((e && e.code) || e);
+      }
+      assert.notStrictEqual(bigStatus, 204,
+        'F8: the route that fires every 10s from every open tab must not also be the ' +
+        'most permissive body limit in the server, got ' + bigStatus);
+
+      // ── Fix round 1, review F3: an unknown client degrades to the old
+      // bare 204 rather than to a signal it has no baseline to interpret.
+      const nocid = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(nocid.status, 204,
+        'a ping carrying no client id must still get the old bare 204');
+    } finally {
+      srv.close();
+    }
+    console.log('server: external .drawio edit is detected via /api/ping and re-baked via /api/render — OK');
+  }
+
+  // (b) Safe degrade: the referenced .drawio file disappears out from under
+  // an open session (deleted or renamed outside the editor). Must not throw
+  // anywhere in the request path, and the disappearance itself still counts
+  // as "changed" for staleness purposes.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-gone-'));
+    const mdPath = path.join(dir, 'diagram.md');
+    const drawioPath = path.join(dir, 'single.drawio');
+    fs.copyFileSync(path.join(__dirname, 'fixtures', 'single.drawio'), drawioPath);
+    const mdSrc = '# Diagram\n\n![d](single.drawio)\n';
+    fs.writeFileSync(mdPath, mdSrc, 'utf8');
+
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(page.status, 200);
+      const cid = clientIdOf(page.body);
+
+      fs.unlinkSync(drawioPath);
+
+      const p1 = await req(srv.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+      assert.strictEqual(p1.status, 200,
+        '(b): a deleted drawio file must be reported as changed, not silently ignored');
+      const j1 = JSON.parse(p1.body);
+      assert.deepStrictEqual(Object.keys(j1).sort(), ['stale', 'token'],
+        '(b) G9: the stale response must carry exactly {stale, token}, got ' + p1.body);
+      assert.strictEqual(j1.stale, true, '(b): got ' + p1.body);
+      assert.ok(typeof j1.token === 'string' && j1.token.length > 0, '(b): got ' + p1.body);
+
+      // Must not 500 — resolveAssetPath()/drawioPlaceholderFor() already
+      // degrade to "not a drawio reference" when the file cannot be found;
+      // this just asserts the whole request path survives that unharmed.
+      const r1 = await req(srv.port, 'POST', '/api/render', { fileId: 0, content: mdSrc });
+      assert.strictEqual(r1.status, 200,
+        '(b): re-rendering after the referenced file vanished must not 500');
+      const parts1 = JSON.parse(r1.body).parts.join('\n');
+      assert.ok(!parts1.includes('class="drawio'),
+        '(b): a vanished reference must fall back to the ordinary (broken) image path, not a stale drawio block');
+
+      // Second ping after the degraded re-render must not keep reporting
+      // stale for a file that is consistently gone (stamp null -> null).
+      // Fix round 1 (F2): the ack, not the render, is what closes it out —
+      // the degraded render is exactly a case the client can still fail to
+      // apply, and losing the "your diagram is gone" update permanently is
+      // no better than losing a re-bake.
+      const p2 = await req(srv.port, 'POST', '/api/ping',
+        { fileId: 0, drawioClientId: cid, drawioAck: j1.token });
+      assert.strictEqual(p2.status, 204,
+        '(b): a consistently-missing file must not repeat the stale signal forever');
+    } finally {
+      srv.close();
+    }
+    console.log('server: a vanished .drawio reference degrades safely (no throw, no crash) — OK');
+  }
+
+  // Backward compatibility: a ping with no fileId at all (old client shape,
+  // and the very first assertion earlier in this file) must still work —
+  // no tracked state for `undefined` means the fast "no drawio" path.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-drawio-nofileid-'));
+    const mdPath = path.join(dir, 'plain.md');
+    fs.writeFileSync(mdPath, '# X\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      await req(srv.port, 'GET', '/edit/0');
+      const r = await req(srv.port, 'POST', '/api/ping', {});
+      assert.strictEqual(r.status, 204, 'a ping with no fileId must still bare-204');
+    } finally {
+      srv.close();
     }
   }
 

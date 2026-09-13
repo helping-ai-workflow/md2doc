@@ -79,6 +79,9 @@ async function setup() {
     'Link target paragraph text.', '',
     'A [existing link](https://example.com) here.', '',
     'Rerender reset target word here.', '',
+    // v3.4.0 / v3.3.0 backlog 4 (whitespace-only link selection) fixtures.
+    'Whitespace only link target text.', '',
+    'Whitespace mixed link bold word here.', '',
     // FIX 2 (strikethrough/underline selection-toolbar marks) fixtures.
     'Strike toggle target word here.', '',
     'Strike commit target word here.', '',
@@ -151,13 +154,68 @@ async function newPage(browser) {
   // window is closed by construction rather than merely made narrower.
   await page.evaluateOnNewDocument(() => {
     window.__edInflight = 0;
+    // Which /api/save requests have COMPLETED, and which have been STARTED.
+    //
+    // `__edInflight` answers "is anything happening right now", which is a
+    // different question from "has the save I just asked for landed" — and the
+    // gap between them is real, not theoretical. Ctrl+S does not issue the save
+    // directly: it resolves whatever is open with `switchAwayFrom()` and calls
+    // `save()` only in that promise's `.then`, so between the keypress and the
+    // request ever being sent there is a
+    // window in which nothing is in flight and every quiescence-based wait
+    // releases. (That branch is `switchAwayFrom().then((ok) => { if (ok) save(); })`
+    // spelled inline — deliberately NOT `commitThenSave()`, which is the toolbar
+    // button's path; a source-shape check in test/editor-client.test.js pins the
+    // inline spelling.) Measured by deferring only the DISPATCH of /api/save by
+    // 300 ms:
+    // the S2 T8 cell `li(ol, sole run member) → ul` reported the file as
+    // byte-identical with no banner — a dropped gesture — while the DOM said
+    // `data-list-type="ul"` and the file did change 1.5 s later. The write
+    // landed; the harness read before it did, and then blamed the product.
+    //
+    // Same family as the v3.3.0 counter bug one layer up: that one released on
+    // the response HEADERS instead of the body, this one released on "nothing
+    // in flight" instead of "the thing I asked for is done". A monotonic
+    // counter of completed saves is a question about the save itself, which is
+    // what saveAndRead() actually needs to wait on.
+    //
+    // A COUNT is not enough, and that gap is measured rather than argued: with
+    // one /api/save already in flight and only that one ever issued, a
+    // wait-for-the-counter released on it after 1522 ms while an id-based wait
+    // refused to release at all. So each request takes an id off `__edSaveSeq`
+    // when it is dispatched and pushes that id onto `__edSaveLanded` when it
+    // completes; a waiter snapshots the sequence before the keypress and waits
+    // for an id GREATER than its snapshot, which is a save that started after it
+    // pressed and cannot be somebody else's.
+    //
+    // KNOWN NARROWING, recorded rather than closed: the id is taken at DISPATCH,
+    // not at the keypress. A Ctrl+S pressed but not yet dispatched — the client
+    // issues the save only in `switchAwayFrom()`'s `.then`, so a pending render
+    // can hold it back — leaves the page completely idle, and a waiter that
+    // snapshots there can still be released by that earlier press (measured:
+    // 2231 ms, with the render's dispatch deferred 2500 ms). Unreachable today
+    // because every Ctrl+S in both suites is awaited, which is a property of the
+    // call sites and not of this instrumentation. Closing it costs a token the
+    // helper allocates at the keypress and this wrapper claims.
+    window.__edSaveSeq = 0;
+    window.__edSaveLanded = [];
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
       const url = String(typeof input === 'string' ? input : (input && input.url) || '');
       if (!/\/api\/(render|save)\b/.test(url)) return origFetch.call(this, input, init);
+      const isSave = /\/api\/save\b/.test(url);
+      const saveId = isSave ? ++window.__edSaveSeq : 0;
       window.__edInflight++;
       let settled = false;
-      const settle = () => { if (!settled) { settled = true; window.__edInflight--; } };
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        window.__edInflight--;
+        // Recorded on the SAME event the in-flight counter is released on — the
+        // body having been read, or the safety net below — so a completed save
+        // and a quiet page are decided at one moment and cannot disagree.
+        if (isSave) window.__edSaveLanded.push(saveId);
+      };
       return origFetch.call(this, input, init).then(
         (res) => {
           // Wrap the body readers ON THIS INSTANCE (never the prototype — a
@@ -243,8 +301,20 @@ async function settleEditor(page) {
 // loaded CI runner, the same latent-flake class that failed the v2.9.0
 // publish. The short grace window is kept so scenarios asserting the file did
 // NOT change still give a stray save time to land.
+// `monotonicMs()`, not `Date.now()`, for every deadline and every duration in
+// this file. `Date.now()` is wall-clock and is adjusted under a running process
+// (NTP, a VM resuming, a host waking from suspend); a jump forward retires a
+// deadline early and the wait reports a failure that never happened, a jump
+// back holds it open. MEASURED on this branch, in the sibling suite where the
+// same mistake was load-bearing: a mouse press timed with `Date.now()` came
+// back as **-6341ms** on WSL2 after a clock resync. `performance.now()` here is
+// `perf_hooks.performance` — monotonic from process start — and it is the same
+// spelling the in-page probes use. Wall-clock questions (an `mtimeMs`, a
+// timestamp in a document) still belong to `Date.now()`.
+const monotonicMs = () => performance.now();
+
 async function awaitSaveSettled(page, quietMs = 200) {
-  const deadline = Date.now() + 15000;
+  const deadline = monotonicMs() + 15000;
   for (;;) {
     await settleEditor(page);
     // A Ctrl+S pressed while a commit's /api/render is still in flight issues
@@ -254,7 +324,7 @@ async function awaitSaveSettled(page, quietMs = 200) {
     // go round again if the page became busy inside it.
     await new Promise((r) => setTimeout(r, quietMs));
     const busy = await page.evaluate(() => !!window.__edInflight);
-    if (!busy || Date.now() > deadline) return;
+    if (!busy || monotonicMs() > deadline) return;
   }
 }
 
@@ -1010,6 +1080,115 @@ async function clickCellWithText(page, tableSel, text) {
   await page.mouse.click(box.x, box.y);
 }
 
+// v3.4.0 §2 helper: same real-coordinate-click reasoning as
+// clickCellWithText() above, but addressed by (bodyRowIndex, colIndex)
+// instead of by text — the v3.4.0 §2 "pre-focused cell" regression scenario
+// needs to click a cell BEFORE typing into it changes its text, so it
+// cannot locate the cell by its post-edit content. Types `text` at the
+// resulting caret (end of the cell), same as every other
+// page.keyboard.type() scenario in this file.
+async function typeIntoCell(page, tableSel, rowIndex, colIndex, text) {
+  const box = await page.evaluate((ts, ri, ci) => {
+    const table = document.querySelector(ts + ' table');
+    const r = table.tBodies[0].rows[ri].cells[ci].getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, tableSel, rowIndex, colIndex);
+  await page.mouse.click(box.x, box.y);
+  await page.keyboard.type(text);
+}
+
+// v3.4.0 §2 fixture: enough filler paragraphs to push the table below the
+// fold (same 'pad\n\n'.repeat() scroll-inducing shape the S3 §4.4 "scrolling
+// does not clear the selection" scenario already uses elsewhere in this
+// file), followed by a 3-row/2-column table — enough rows for a real,
+// non-adjacent row move.
+function longDocWithTableRows() {
+  return ['# Doc\n\n' + 'pad\n\n'.repeat(100),
+    '| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', ''];
+}
+
+// v3.4.0 §2 fixture (round 2 — see the scenario comment below for why round 1
+// wasn't enough): `n` body rows, so the TABLE ITSELF is taller than one
+// viewport. Col2 uses 'r<i>' rather than a single letter so `n` is not
+// bounded by the alphabet. Filler paragraphs above it (smaller than
+// longDocWithTableRows()'s — the table's own height does the scrolling work
+// here) still push it below the fold at initial load.
+function tallTableRows(n) {
+  const body = [];
+  for (let i = 1; i <= n; i++) body.push('| ' + i + ' | r' + i + ' |');
+  return ['# Doc\n\n' + 'pad\n\n'.repeat(40),
+    '| Col1 | Col2 |', '|---|---|', ...body, ''];
+}
+
+// v3.4.0 §2 helper: scrolls the table block into view (the fixture below
+// pads enough content above it that it starts below the fold on page load)
+// and returns the resulting scrollY — the position a drag gesture below it
+// must leave alone.
+async function scrollToTable(page, tableSel) {
+  await page.evaluate((ts) => {
+    document.querySelector(ts).scrollIntoView({ block: 'center' });
+  }, tableSel);
+  return page.evaluate(() => window.scrollY);
+}
+
+// v3.4.0 §2 helper (round 2): centers ONE body row (by index) in the
+// viewport, then reads back both window.scrollY and the table's OWN header
+// row's bottom edge. A plain focus() only scrolls the page when its target
+// is actually off-screen — scrollToTable()'s block:'center' on the whole
+// table block does not guarantee the HEADER specifically is off-screen for
+// a short table (the whole block can fit in one viewport with the header
+// still visible, which is exactly what round 1 of this scenario missed:
+// scrollY moved but the header never left the viewport, so focusing it
+// never had to scroll anything). Centering a row deep inside a table built
+// by tallTableRows() puts many rows' worth of height between that row and
+// the header, which is what actually pushes header.getBoundingClientRect()
+// .bottom negative.
+async function scrollRowIntoView(page, tableSel, bodyIndex) {
+  await page.evaluate((ts, bi) => {
+    document.querySelector(ts + ' table').tBodies[0].rows[bi].scrollIntoView({ block: 'center' });
+  }, tableSel, bodyIndex);
+  return page.evaluate((ts) => ({
+    scrollY: window.scrollY,
+    headerBottom: document.querySelector(ts + ' table').tHead.rows[0].getBoundingClientRect().bottom,
+  }), tableSel);
+}
+
+// v3.4.0 §2 helper (round 3 finding): predicts the flat tbody-td join
+// string performRowDrop() leaves behind after dragging body row
+// `fromBodyIndex` to the boundary just after body row `afterBodyIndex`.
+//
+// A round-2 version of this hand-derived the splice WITHOUT the header —
+// `orig.splice(toIndex, 0, moved)` over a body-only array — and got the
+// wrong answer (a `waitForFunction` on it timed out at 30s with zero
+// diagnostic value). Read against the actual source instead of guessing
+// again:
+//   - allRowsOf(tableEl) (client.js ~9203) = [headerRow, ...bodyRows] —
+//     the header occupies index 0, so a body row's real ordinal is its
+//     body index + 1.
+//   - nearestRowDropTarget() (client.js ~10541)'s 'before-row' branch
+//     returns `rowIndex: all.indexOf(rows[i])` for the first body row
+//     whose OWN midline is below the drop clientY. rowBoundaryCoords()
+//     (this file) releases at the BOTTOM edge of body row
+//     `afterBodyIndex` — which is the TOP edge of the next body row
+//     (afterBodyIndex + 1), below that next row's own midline — so
+//     production's toIndex resolves to allRowsOf().indexOf(bodyRow[
+//     afterBodyIndex + 1]) = (afterBodyIndex + 1) + 1 = afterBodyIndex + 2.
+//   - performRowDrop() then does the exact splice reproduced below.
+// Validated against the round-1 3-row result that DID match production
+// (fromBodyIndex=2, afterBodyIndex=0 -> '1,a,3,c,2,b'/'...bPROBE', both
+// observed correct on the real page).
+function expectedRowDragOrder(n, fromBodyIndex, afterBodyIndex) {
+  const all = ['H'];
+  for (let i = 0; i < n; i++) all.push('B' + i);
+  const rowIndex = fromBodyIndex + 1;
+  const toIndex = afterBodyIndex + 2;
+  const moved = all.splice(rowIndex, 1)[0];
+  all.splice(toIndex > rowIndex ? toIndex - 1 : toIndex, 0, moved);
+  return all.filter((tag) => tag !== 'H')
+    .map((tag) => { const v = Number(tag.slice(1)) + 1; return v + ',r' + v; })
+    .join(',');
+}
+
 // Task 5 (hover-edge insert bubbles) helpers: compute the pixel coordinates
 // of a column or row insert boundary from the table's LIVE cell rects — the
 // SAME geometry client.js's own updateTableInsertBubbles() computes, so
@@ -1169,14 +1348,72 @@ async function dragRowTo(page, from, to) {
   await page.mouse.up();
 }
 
+// v3.4.0 §2 helper: composes rowGripCoords()/rowBoundaryCoords()/dragRowTo()
+// above into one call — `fromIndex` is the dragged row's body index,
+// `toIndex` is the boundary-after body index dragRowTo releases at (or -1
+// for "above the header", same convention rowBoundaryCoords() itself uses).
+// Every existing row-drag scenario above does this same three-call sequence
+// inline; this just names it for the two v3.4.0 §2 scenarios below.
+async function dragRow(page, tableSel, fromIndex, toIndex) {
+  const from = await rowGripCoords(page, tableSel, fromIndex);
+  const to = await rowBoundaryCoords(page, tableSel, toIndex);
+  await dragRowTo(page, from, to);
+}
+
 // Ctrl+S then re-read the file from disk — used by the Task 5/6 scenarios
 // below to assert the committed source after a structure op, same
 // keyboard-save mechanic the pre-existing table WYSIWYG scenarios use.
-async function saveAndRead(page, mdPath) {
+/**
+ * Press Ctrl+S and return once THAT save has landed.
+ *
+ * Every Ctrl+S in this file goes through here. Waiting for a quiet page instead
+ * is what produced this repo's intermittent "the gesture did nothing" reds: the
+ * client's Ctrl+S branch does not issue the save directly — it is
+ * `switchAwayFrom().then((ok) => { if (ok) save(); })` spelled inline (NOT
+ * `commitThenSave()`, which is the toolbar button's path), and `save()`'s own
+ * `fetch` is its first statement — so between the keypress and the request
+ * being sent there is a window in which nothing is in flight and every
+ * quiescence-based wait releases. Measured by deferring only the DISPATCH of
+ * /api/save: the old wait released at 233-249 ms and the caller then read a file
+ * the editor had not written, while the file did change 1.5 s later. Same family
+ * as the v3.3.0 counter bug one layer up — that one released on the response
+ * headers instead of the body, this one on "nothing in flight" instead of "the
+ * thing I asked for is done".
+ *
+ * Never passes silently on a timeout: the ONE documented path where Ctrl+S
+ * issues no save is a commit that failed (`switchAwayFrom()` answering false —
+ * again the inline spelling, not `commitThenSave()`),
+ * and that path has already put a banner on screen. Anything else is a real
+ * defect, and returning past it would turn it into "the gesture did nothing",
+ * which is the misdiagnosis this exists to stop.
+ */
+async function pressSaveAndLand(page) {
+  const startedBefore = await page.evaluate(() => window.__edSaveSeq || 0);
   await page.keyboard.down('Control');
   await page.keyboard.press('KeyS');
   await page.keyboard.up('Control');
+  try {
+    await page.waitForFunction(
+      (n) => (window.__edSaveLanded || []).some((id) => id > n),
+      { timeout: 15000 }, startedBefore);
+  } catch (e) {
+    const banner = await page.evaluate(() => {
+      const el = document.querySelector('.ed-conflict');
+      return el ? (el.textContent || '') : null;
+    });
+    if (banner === null) {
+      throw new Error('pressSaveAndLand: Ctrl+S produced no completed /api/save in 15s, ' +
+        'and no banner explains why — the save really did not happen. ' +
+        'Original: ' + (e && e.message));
+    }
+  }
+  // The save has landed; this is now only the paint/settle grace, and it also
+  // covers any follow-on render the commit issued.
   await awaitSaveSettled(page);
+}
+
+async function saveAndRead(page, mdPath) {
+  await pressSaveAndLand(page);
   return fs.readFileSync(mdPath, 'utf8');
 }
 
@@ -1501,6 +1738,20 @@ async function gutterGeometry(page, sel) {
       const dirtyBeforeSave = await page.title();
       assert.ok(dirtyBeforeSave.startsWith('●'), 'sanity: title is dirty after a successful commit');
 
+      // Deliberately NOT pressSaveAndLand(), and NOT because the helper would
+      // fail here. MEASURED on exactly this setup (newPage()'s instrumentation
+      // plus the 500 stub): the helper's wait condition is satisfied after 24 ms
+      // with `__edSaveLanded = [1]`, because a 500 IS a completed fetch — the
+      // instrumentation settles when the body is read or, failing that, on the
+      // clone-armed net, and neither looks at the status. Do not "fix" the
+      // instrumentation to make a failed save not land: that net is what the
+      // 409 path depends on (save()'s 409 branch answers off the status and
+      // never touches the body), and without it `__edInflight` stays pinned and
+      // every settleEditor() after a conflict times out.
+      //
+      // The reason to press directly is that this row's SUBJECT is the banner,
+      // not the write. Waiting for the save first would make the observation
+      // depend on the mechanism being observed.
       await page.keyboard.down('Control');
       await page.keyboard.press('KeyS');
       await page.keyboard.up('Control');
@@ -1812,8 +2063,8 @@ async function gutterGeometry(page, sel) {
       // Once switchAwayFrom() resolves, undo() proceeds with its OWN
       // legitimate, SEQUENCED render request (never concurrent with the
       // commit's) — wait for it to arrive.
-      const deadline = Date.now() + 5000;
-      while (heldRenderRequests.length === 0 && Date.now() < deadline) {
+      const deadline = monotonicMs() + 5000;
+      while (heldRenderRequests.length === 0 && monotonicMs() < deadline) {
         await new Promise((r) => setTimeout(r, 20));
       }
       assert.strictEqual(renderRequestCount, 2,
@@ -4485,10 +4736,7 @@ async function gutterGeometry(page, sel) {
         'commit must not stringify undefined into the DOM'
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText1 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
         'WYSIWYG: Enter-commit + save must update the file on disk');
@@ -4645,10 +4893,7 @@ async function gutterGeometry(page, sel) {
         true,
         'the ⠿ menu must close itself once a conversion is clicked'
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText2 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/^## Heading/m.test(fileText2),
         '轉換成 › 標題 2 must rewrite the heading depth in the source (# -> ##)');
@@ -4703,10 +4948,7 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('SECOND-LINE'),
         { timeout: 5000 }
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText3 = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
         'Shift+Enter\'s <br> must round-trip into the saved markdown source');
@@ -4995,10 +5237,7 @@ async function gutterGeometry(page, sel) {
         'CRITICAL regression: exactly ONE /api/render request for the commit — stale cancel() ' +
         'listeners from earlier open/Esc cycles must not fire a second one');
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextLeak = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLeak.includes('LISTENER-LEAK-REGRESSION-TEXT'),
         'CRITICAL regression: the typed text must persist to disk, not be silently reverted ' +
@@ -5283,10 +5522,7 @@ async function gutterGeometry(page, sel) {
       );
 
       await page.keyboard.press('Escape'); // end the OTHER block's own burst (never committed)
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileText = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileText.includes('Blur commit target text here. BLUR-COMMITTED'),
         'focus-edit-blur must commit to `lines` and persist to disk on save, got:\n' + fileText);
@@ -5543,10 +5779,7 @@ async function gutterGeometry(page, sel) {
         'the selection toolbar must be gone after commit'
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextBold = fs.readFileSync(mdPath, 'utf8');
       assert.ok(/Bold \*\*commit\*\* target word here\./.test(fileTextBold),
         'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
@@ -5624,10 +5857,7 @@ async function gutterGeometry(page, sel) {
         { timeout: 5000 }
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextStrike = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextStrike.includes('Strike ~~commit~~ target word here.'),
         'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
@@ -5665,10 +5895,7 @@ async function gutterGeometry(page, sel) {
         { timeout: 5000 }
       );
 
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextU = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextU.includes('Underline <u>commit</u> target word here.'),
         'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
@@ -5713,10 +5940,7 @@ async function gutterGeometry(page, sel) {
 
       await page.keyboard.press('Enter');
       await page.waitForFunction((s) => !!document.querySelector(s + ' code'), {}, sel);
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextCode = fs.readFileSync(mdPath, 'utf8');
       const expectedFence = '`` Backtick target has a ` mark inside. ``';
       assert.ok(fileTextCode.includes(expectedFence),
@@ -5758,10 +5982,7 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('href="https://example.org"'),
         { timeout: 5000 }
       );
-      await page.keyboard.down('Control');
-      await page.keyboard.press('KeyS');
-      await page.keyboard.up('Control');
-      await awaitSaveSettled(page);
+      await pressSaveAndLand(page);
       const fileTextLink = fs.readFileSync(mdPath, 'utf8');
       assert.ok(fileTextLink.includes('[target](https://example.org)'),
         'sel-toolbar link: the saved source must contain [target](https://example.org), got: ' + fileTextLink);
@@ -5828,6 +6049,84 @@ async function gutterGeometry(page, sel) {
       await page.keyboard.press('Escape');
       await page.close();
       console.log('sel-toolbar: link button on an existing link edits then clears it — OK');
+    }
+
+    // ── v3.4.0 / v3.3.0 backlog 4: a whitespace-only selection must not
+    //    become an <a>. applyMarkToggle()'s wrap branch has always guarded
+    //    on trimRangeToText() before wrapping; applyLinkToggleBody()'s
+    //    new-link branch never had the matching guard, so selecting just
+    //    the ONE space between two words and clicking 🔗 wrote
+    //    `<a href="..."> </a>` — an anchor whose entire content was that
+    //    space — to the surface. Also asserts the URL prompt is never even
+    //    opened (the guard now runs before window.prompt()) and that the
+    //    file on disk is untouched (no commit ever ran) ─────────────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => {
+        window.__promptCalls = 0;
+        window.prompt = () => { window.__promptCalls++; return 'https://probe.example/'; };
+      });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Whitespace only link target');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      // The single space right after "Whitespace" — a whitespace-only
+      // selection, same shape as the v3.3.0 repro ("Alpha bold text
+      // here.", the space after "Alpha").
+      await selectWordInEl(page, editEl, ' ');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-link');
+      await settleEditor(page);
+
+      const wsHtml = await page.evaluate((s) => document.querySelector(s).innerHTML, editEl);
+      assert.ok(!/<a[^>]*>\s*<\/a>/.test(wsHtml),
+        '純空白不得被包進 <a>。Got ' + wsHtml);
+      assert.strictEqual(await page.evaluate(() => window.__promptCalls), 0,
+        'a whitespace-only selection must not even open the URL prompt');
+      assert.strictEqual(fs.readFileSync(mdPath, 'utf8').includes('Whitespace only link target text.'), true,
+        '被拒絕的手勢不得改到磁碟');
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('sel-toolbar: a whitespace-only selection refuses the link button — OK');
+    }
+
+    // ── Same fix, mixed selection: trimRangeToText() TRIMS the range (it
+    //    does not refuse it outright unless the WHOLE selection is
+    //    whitespace), so a selection with leading/trailing whitespace
+    //    around real text must still create a link — just around the text,
+    //    with the surrounding whitespace left outside the <a> ───────────
+    {
+      const page = await newPage(browser);
+      await page.evaluateOnNewDocument(() => { window.prompt = () => 'https://mixed.example/'; });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const sel = await paragraphSelByText(page, 'Whitespace mixed link bold');
+      const editEl = sel + ' > *';
+      await openWysiwyg(page, sel);
+      // " bold " — one leading space (after "link"), the word "bold", one
+      // trailing space (before "word") — trims to just "bold".
+      await selectWordInEl(page, editEl, ' bold ');
+      await page.waitForSelector('.ed-seltb');
+      await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.evaluate((s) => {
+          const a = document.querySelector(s + ' a');
+          return a ? a.getAttribute('href') + '|' + a.textContent : null;
+        }, editEl),
+        'https://mixed.example/|bold',
+        'a mixed whitespace+text+whitespace selection must wrap only the text in <a>, not the surrounding spaces'
+      );
+      assert.strictEqual(
+        await page.evaluate((s) => document.querySelector(s).textContent, editEl),
+        'Whitespace mixed link bold word here.',
+        'the surrounding whitespace must survive outside the <a>, unchanged'
+      );
+
+      await page.keyboard.press('Escape');
+      await page.close();
+      console.log('sel-toolbar: a mixed whitespace+text selection trims to the text before linking — OK');
     }
 
     // ── Task 4 regression fix (review finding): rerenderAll()'s
@@ -6031,10 +6330,7 @@ async function gutterGeometry(page, sel) {
           'no cell must remain focused after the burst commits (cells stay permanently contenteditable, just not focused)'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
 
         assert.ok(fileText.includes('| Name | Note |'), 'header row unchanged, got:\n' + fileText);
@@ -6111,10 +6407,7 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| one<br>two |'),
           'a cell newline must be emitted as the literal <br>, got:\n' + fileText);
@@ -6174,10 +6467,7 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.ok(fileText.includes('| xline1<br>line2 |'),
           'the pasted multi-line cell must commit as ONE physical row containing <br>, got:\n' + fileText);
@@ -6240,10 +6530,7 @@ async function gutterGeometry(page, sel) {
           'every cell must still be contenteditable after Esc — Task 5 arms the whole table once, a burst reverting is not un-arming it'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(tmdPath, 'utf8');
         assert.strictEqual(fileText, torig,
           'Esc must never have touched `lines` — the saved file must be byte-identical to the original, got:\n' + fileText);
@@ -11763,10 +12050,7 @@ async function gutterGeometry(page, sel) {
           'sanity: the burst must still be open (never blurred) right before Ctrl+S'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f1mdPath, 'utf8');
         assert.ok(fileText.includes('EDITED without a blur.'),
@@ -11815,10 +12099,7 @@ async function gutterGeometry(page, sel) {
         const otherSel = await paragraphSelByText(page, 'Trailing paragraph text.');
         await page.click(otherSel); // click OUT of the table — a real blur, no typing anywhere
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f2mdPath, 'utf8');
         assert.strictEqual(fileText, f2orig,
@@ -11970,10 +12251,7 @@ async function gutterGeometry(page, sel) {
         await page.evaluate(() => document.activeElement && document.activeElement.blur());
         await page.waitForFunction(() => document.activeElement === document.body, { timeout: 5000 });
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f4mdPath, 'utf8');
         assert.ok(!fileText.includes('DISCARDED_TYPING'), 'the discarded typing must never reach the saved file, got:\n' + fileText);
@@ -12097,10 +12375,7 @@ async function gutterGeometry(page, sel) {
           'committed — a dropped gesture leaves the heading at H1'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f5mdPath, 'utf8');
         assert.strictEqual(fileText, '## Heading depth target text EDITED\n',
@@ -12172,10 +12447,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the table op'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f6aMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -12239,10 +12511,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must have been COMMITTED (not silently discarded) by the row drop'
         );
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f6bMdPath, 'utf8');
         assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
@@ -12255,6 +12524,255 @@ async function gutterGeometry(page, sel) {
         console.log('Finding 6b: table row drop with a dirty burst open elsewhere commits BOTH — OK');
       } finally {
         f6bSrv.close();
+      }
+    }
+    // ── v3.4.0 backlog #2: onRowInsertBubbleClick()'s afterRowIndex must be
+    //    re-validated against the LIVE table, not blindly trusted — a stale
+    //    index (set by updateTableInsertBubbles() at an earlier hover, no
+    //    longer naming a real row by the time the click lands) must drop the
+    //    gesture with the existing DROPPED_GESTURE_MESSAGE banner, never
+    //    fall through to insertRow()'s `tbody.insertBefore(newRow,
+    //    tbody.firstChild)` branch (that branch is `afterRowIndex: -1`'s
+    //    OWN, deliberate, top-of-table placement — a stale positive index
+    //    must never alias it). That fallback's failure mode (silently guess
+    //    a position) is wrong on its own terms, independent of reachability
+    //    — same policy as performRowDrop()/runDeleteRow() above.
+    //
+    //    ⚠ THIS SCENARIO PINS A DEFENSE-IN-DEPTH BRANCH, NOT A PATH A REAL
+    //    USER CAN REACH TODAY. MEASURED (task-6-report.md, "真實手勢到不到
+    //    得了" section): four real, uninjected gesture sequences were tried
+    //    — grip-menu row delete, an external file push (no such mechanism
+    //    exists in this editor), the original backlog narrative itself (an
+    //    unrelated block's dirty burst forcing a full-render handover), and
+    //    Ctrl+Z after a row insert — and NONE of them left the bubble both
+    //    STALE and CLICKABLE. Two independent, pre-existing mechanisms
+    //    guard this: (a) updateTableInsertBubbles()'s own proximity check
+    //    re-hides the bubble the instant the pointer leaves its
+    //    TB_EDGE_PX zone (reaching a row grip to shrink the table always
+    //    crosses that boundary first), and (b) rerenderAll()'s full-render
+    //    fallback unconditionally calls hideTableInsertBubbles() +
+    //    hideTableGrips() after every full re-render regardless of pointer
+    //    position (covers undo/redo and any other full-render trigger).
+    //    That is WHY this scenario has to force the precondition directly
+    //    (overwriting the bubble's dataset attribute after a real, valid
+    //    hover) instead of driving it out of pure mouse choreography like
+    //    every other scenario in this file — real choreography cannot get
+    //    there, full stop, not because nobody tried hard enough.
+    //
+    //    SIGNPOST FOR THE FUTURE: if this scenario's injection step is ever
+    //    replaced with a real-mouse/real-keyboard sequence that STILL
+    //    reaches the assertions below, that means one of the two guard
+    //    mechanisms above broke — go look at updateTableInsertBubbles()'s
+    //    proximity check and/or rerenderAll()'s unconditional
+    //    hideTableInsertBubbles()/hideTableGrips() cleanup, not at this
+    //    fix. The paragraph-commit check further down stays in place to
+    //    prove ensureTableBurstOpen()'s OTHER-block-commit path is
+    //    otherwise untouched by this fix — same "byte-identical wire
+    //    assertion" spirit as the file's other Finding-6-style scenarios.
+    {
+      const { srv: f7Srv, url: f7Url, mdPath: f7MdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| Name | Note |',
+        '|---|---|',
+        '| Row0 | 0 |',
+        '| Row1 | 1 |',
+        '| Row2 | 2 |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f7Url, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the row-insert click'
+        );
+
+        // A real, valid hover at the LAST body-row boundary (afterRowIndex=2,
+        // after "Row2") — exactly what updateTableInsertBubbles() would
+        // compute for THIS 3-body-row table right now.
+        const { x, y } = await rowBoundaryCoords(page, table0, 2);
+        await page.mouse.move(x, y);
+        await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-row').dataset.afterRowIndex),
+          '2',
+          'sanity: the hover must compute the genuinely valid boundary before it is forced stale'
+        );
+        // Force the stale precondition: an index that names no row on the
+        // CURRENT (3-body-row) table, without touching `hoveredInsertTableEl`
+        // (still the live, attached table from the hover above).
+        await page.evaluate(() => {
+          document.querySelector('.ed-tb-insert-row').dataset.afterRowIndex = '5';
+        });
+        await page.click('.ed-tb-insert-row');
+        // The click's ensureTableBurstOpen() commits the dirty paragraph —
+        // the FIRST commit of the session, therefore a full render (v3.2.0
+        // Task F) that detaches and re-resolves the table — before ever
+        // reaching the stale-index check this fix adds.
+        await settleEditor(page);
+
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/文件已更新/.test(bannerText),
+          'a stale afterRowIndex must drop the gesture via the existing DROPPED_GESTURE_MESSAGE banner, got: ' + bannerText);
+
+        const bodyRowsAfter = await page.evaluate((ts) =>
+          Array.from(document.querySelectorAll(ts + ' table tbody tr')).map((r) => r.cells[0].textContent.trim()),
+          table0);
+        assert.deepStrictEqual(bodyRowsAfter, ['Row0', 'Row1', 'Row2'],
+          'no row may be inserted at all (never at the TOP) when afterRowIndex cannot be relocated, got: ' +
+            JSON.stringify(bodyRowsAfter));
+
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the row insert'
+        );
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await pressSaveAndLand(page);
+
+        const fileText = fs.readFileSync(f7MdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const rowLines = fileText.split('\n').filter((l) => l.startsWith('| Row'));
+        assert.deepStrictEqual(rowLines.map((l) => l.split('|')[1].trim()), ['Row0', 'Row1', 'Row2'],
+          'the saved file must show exactly the original 3 rows (no phantom top row), got rows:\n' + rowLines.join('\n'));
+
+        await page.close();
+        console.log('v3.4.0 backlog #2: a stale row-insert afterRowIndex drops the gesture instead of guessing — OK');
+      } finally {
+        f7Srv.close();
+      }
+    }
+    // ── v3.4.0 backlog #2 sister fix: onColInsertBubbleClick()'s colIndex
+    //    has the SAME structural hazard as afterRowIndex above — set by an
+    //    earlier hover, never re-validated against the live table at click
+    //    time. Unlike afterRowIndex, colIndex has NO legal sentinel value
+    //    (no "-1" case for columns; updateTableInsertBubbles() only ever
+    //    assigns 0..headerCells.length-1), so ANY value that no longer names
+    //    a real column is stale. Left unfixed, insertColumn()'s
+    //    `row.cells[colIndex]` lookup comes back undefined and
+    //    `row.insertBefore(cell, ref ? ref.nextSibling : null)` silently
+    //    APPENDS the new column at the very END of the table instead of
+    //    dropping the gesture.
+    //
+    //    ⚠ THIS SCENARIO ALSO PINS A DEFENSE-IN-DEPTH BRANCH, NOT A PATH A
+    //    REAL USER CAN REACH TODAY — same finding as the row scenario above,
+    //    independently re-verified for the col path (task-6-report.md, "欄
+    //    的可達性" section): the same two guards apply verbatim.
+    //    updateTableInsertBubbles()'s proximity check re-hides
+    //    `.ed-tb-insert-col` the instant the pointer leaves its band
+    //    (reaching the col grip to shrink the table crosses it first — the
+    //    grip sits on the header cell's CENTRE while the bubble's own band
+    //    hugs that cell's RIGHT edge, so there is no way to touch the grip
+    //    without leaving the bubble's zone), and rerenderAll()'s full-render
+    //    fallback unconditionally hides both bubbles and both grips
+    //    regardless of pointer position. Real grip-menu column delete and
+    //    Ctrl+Z-after-insert were both tried and both left the bubble
+    //    `hidden` before a subsequent click could land — same shape as the
+    //    row path's #1 and #4. That is why this scenario forces the
+    //    precondition directly (overwriting the bubble's dataset attribute
+    //    after a real, valid hover) instead of real mouse choreography.
+    //
+    //    SIGNPOST FOR THE FUTURE: same as the row scenario above — if this
+    //    scenario's injection step is ever replaced with a real gesture that
+    //    STILL reaches the assertions below, one of those two guard
+    //    mechanisms broke; go look there, not at this fix.
+    {
+      const { srv: f8Srv, url: f8Url, mdPath: f8MdPath } = await setupTableDoc([
+        'Dirty paragraph target text here.', '',
+        '| ColA | ColB | ColC |',
+        '|---|---|---|',
+        '| a | b | c |',
+        '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(f8Url, { waitUntil: 'networkidle0' });
+
+        const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
+        const pEditEl = pSel + ' > *';
+        const table0 = await tableBlockSel(page, 0);
+
+        await openWysiwyg(page, pSel);
+        await page.keyboard.type(' EDITED');
+        assert.strictEqual(
+          await page.evaluate((s) => document.activeElement === document.querySelector(s), pEditEl),
+          true,
+          'sanity: the paragraph burst must be dirty and open (never blurred) before the col-insert click'
+        );
+
+        // A real, valid hover at the LAST column boundary (colIndex=2,
+        // ColC's right edge) — exactly what updateTableInsertBubbles() would
+        // compute for THIS 3-column table right now.
+        const boundary = await page.evaluate((ts) => {
+          const table = document.querySelector(ts + ' table');
+          const r = table.tHead.rows[0].cells[2].getBoundingClientRect();
+          return { x: r.right, y: table.getBoundingClientRect().top };
+        }, table0);
+        await page.mouse.move(boundary.x, boundary.y);
+        await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelector('.ed-tb-insert-col').dataset.colIndex),
+          '2',
+          'sanity: the hover must compute the genuinely valid boundary before it is forced stale'
+        );
+        // Force the stale precondition: an index that names no column on the
+        // CURRENT (3-column) table, without touching `hoveredInsertTableEl`
+        // (still the live, attached table from the hover above).
+        await page.evaluate(() => {
+          document.querySelector('.ed-tb-insert-col').dataset.colIndex = '9';
+        });
+        await page.click('.ed-tb-insert-col');
+        // The click's ensureTableBurstOpen() commits the dirty paragraph —
+        // the FIRST commit of the session, therefore a full render (v3.2.0
+        // Task F) that detaches and re-resolves the table — before ever
+        // reaching the stale-index check this fix adds.
+        await settleEditor(page);
+
+        await page.waitForSelector('.ed-conflict', { timeout: 5000 });
+        const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/文件已更新/.test(bannerText),
+          'a stale colIndex must drop the gesture via the existing DROPPED_GESTURE_MESSAGE banner, got: ' + bannerText);
+
+        const headerColsAfter = await page.evaluate((ts) =>
+          Array.from(document.querySelectorAll(ts + ' table thead th')).map((c) => c.textContent.trim()),
+          table0);
+        assert.deepStrictEqual(headerColsAfter, ['ColA', 'ColB', 'ColC'],
+          'no column may be inserted at all (never appended at the END) when colIndex cannot be relocated, got: ' +
+            JSON.stringify(headerColsAfter));
+
+        assert.ok(
+          await page.evaluate(() =>
+            document.querySelector('.content').textContent.includes('Dirty paragraph target text here. EDITED')),
+          'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the col insert'
+        );
+
+        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await pressSaveAndLand(page);
+
+        const fileText = fs.readFileSync(f8MdPath, 'utf8');
+        assert.ok(fileText.includes('Dirty paragraph target text here. EDITED'),
+          'the paragraph edit must be saved, got:\n' + fileText);
+        const headerLine = fileText.split('\n').find((l) => l.trim().startsWith('|') && l.includes('ColA'));
+        assert.ok(headerLine, 'header line not found in saved file:\n' + fileText);
+        assert.strictEqual(headerLine.split('|').length - 2, 3,
+          'the saved file must show exactly the original 3 columns (no phantom trailing column), got header line: ' +
+            headerLine);
+
+        await page.close();
+        console.log('v3.4.0 backlog #2 (sister): a stale col-insert colIndex drops the gesture instead of guessing — OK');
+      } finally {
+        f8Srv.close();
       }
     }
 
@@ -16395,10 +16913,7 @@ async function gutterGeometry(page, sel) {
           await armKeyRecorder(page);
           const alpha = await liBlockSelByText(page, 'alpha');
           await openWysiwyg(page, alpha);
-          await page.keyboard.down('Control');
-          await page.keyboard.press('KeyS');
-          await page.keyboard.up('Control');
-          await awaitSaveSettled(page);
+          await pressSaveAndLand(page);
           const state = await page.evaluate((s) => {
             const surf = document.querySelector(s + ' > .ed-li-text');
             return {
@@ -22948,7 +23463,7 @@ async function gutterGeometry(page, sel) {
     //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
     //    client.js's own comment on that seam), which is the only way to reach
     //    that swap without going through a commit first. The bar must still be
-    //    there, still be the ONLY one, still carry the whole 22-button roster
+    //    there, still be the ONLY one, still carry the whole 23-button roster
     //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
     //    the tracked block on every rerender, so what a post-rerender click
     //    meets is the model's documented no-block state (undo / redo /
@@ -22968,8 +23483,8 @@ async function gutterGeometry(page, sel) {
             bars: document.querySelectorAll('.ed-toolbar').length,
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
           })),
-          { bars: 1, btns: 22 },
-          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
+          { bars: 1, btns: 23 },
+          'sanity: exactly one toolbar carrying the 23-button roster before any rerender');
 
         await page.evaluate(() => window.__edTestForceRerender());
         await settleEditor(page);
@@ -22980,8 +23495,8 @@ async function gutterGeometry(page, sel) {
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
             attached: document.body.contains(document.querySelector('.ed-toolbar')),
           })),
-          { bars: 1, btns: 22, attached: true },
-          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
+          { bars: 1, btns: 23, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 23 buttons, still on document.body');
 
         assert.strictEqual(
           await page.evaluate(() =>
@@ -23050,10 +23565,7 @@ async function gutterGeometry(page, sel) {
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
           { timeout: 5000 });
 
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/Toolbar bold \*\*target\*\* word here\./.test(fileText),
           'toolbar Bold must reach the saved source as **target**, got: ' + fileText);
@@ -23168,10 +23680,7 @@ async function gutterGeometry(page, sel) {
           'the block that was pasted INTO must be left byte-identical — structure lands below it, never inside it');
 
         await settleEditor(page);
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/\n## x\n/.test(fileText),
           'the converted markdown must reach the saved source as `## x`, got: ' + JSON.stringify(fileText));
@@ -23233,10 +23742,7 @@ async function gutterGeometry(page, sel) {
           'the re-render must have resolved assets/dropped.png off the disk and inlined those exact bytes');
 
         await settleEditor(page);
-        await page.keyboard.down('Control');
-        await page.keyboard.press('KeyS');
-        await page.keyboard.up('Control');
-        await awaitSaveSettled(page);
+        await pressSaveAndLand(page);
         const fileText = fs.readFileSync(mdPath, 'utf8');
         assert.ok(/\n!\[\]\(assets\/dropped\.png\)\n/.test(fileText),
           'the drop must reach the saved source as ![](assets/dropped.png), got: ' + JSON.stringify(fileText));
@@ -23709,6 +24215,576 @@ async function gutterGeometry(page, sel) {
       } finally {
         srv.close();
       }
+    }
+
+    // ── v3.4.0 §2: a table drag must not throw the page at the header ──────
+    // restoreTableFocus() falls back to cells[0] — the first header cell —
+    // whenever cellIndex is -1, then focus()es it; a plain .focus() with no
+    // `{ preventScroll: true }` scrolls its target into view (this file's
+    // own applyFullRender()/rebuildBlockSelection() comments document that
+    // exact browser behaviour elsewhere). Both restoreTableFocus() call
+    // sites (performRowDrop, performColDrop) compute activeIndex the same
+    // way: null when the drag never focused any cell first, which is -1.
+    // performBlockDrop() and performListItemDrop() call neither focus() nor
+    // scrollIntoView() at all — a drag gesture not manufacturing a focus is
+    // already this file's convention on those two other drag paths.
+    //
+    // Placed at the very end of the file, after every pre-existing
+    // scenario, rather than inline with the other row-drag tests above:
+    // this file has no per-scenario try/catch (one `(async () => {...})()
+    // .catch((e) => { ...; process.exit(1); })` around the whole run), so
+    // any assertion or timeout in these two new scenarios would abort
+    // every scenario after it. Two rounds of getting this fixture wrong
+    // already cost a 30s timeout mid-file; keeping them last means a third
+    // miss only costs itself, not the ~350 scenarios that used to follow.
+    //
+    // This scenario reproduces the user-reported symptom directly: scroll
+    // so the table's HEADER is off-screen, drag a body row with no cell
+    // pre-focused, and measure window.scrollY and document.activeElement
+    // afterward.
+    //
+    // ROUND 1 (a 3-row table, scrollToTable()'s block:'center' on the
+    // whole block) DID reproduce the focus defect (`active` came back
+    // `TH.cell-narrow ed-wys-cell`) but NOT the scroll-jump symptom:
+    // `after.scrollY === before` held, because focus() only scrolls when
+    // its target is actually off-screen, and a 3-row table's header is
+    // still on-screen even centered.
+    // ROUND 2 (tallTableRows()/scrollRowIntoView() below, which DID push
+    // the header off-screen — that precondition passed) hung a 30s
+    // `waitForFunction` on a hand-derived `expectedOrder` that turned out
+    // wrong (see expectedRowDragOrder()'s comment above for the actual
+    // header-offset bug and how it was found), so the timeout carried zero
+    // diagnostic value. Round 3 fixes the prediction AND replaces the
+    // open-ended wait with a bounded grace + a real-value assertion, so a
+    // wrong prediction shows up as a fast, informative diff instead of
+    // another blind 30s timeout.
+    {
+      const N = 40;
+      const fromIndex = N - 1; // last row
+      const afterIndex = N - 4; // drop boundary after body row (N-4)
+      const { srv: tsrv, url: turl } = await setupTableDoc(tallTableRows(N));
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        const { scrollY: before, headerBottom } = await scrollRowIntoView(page, table0, fromIndex);
+        assert.ok(headerBottom < 0,
+          'precondition: 拖曳發生時表頭必須已經捲出視窗（bottom < 0），否則 focus() 不會捲動，' +
+          '這一列量不到使用者回報的症狀. Got headerBottom=' + headerBottom);
+
+        await dragRow(page, table0, fromIndex, afterIndex);
+        await settleEditor(page);
+        // Bounded grace for the (local, no-network) DOM rebuild to land —
+        // NOT an open-ended waitForFunction on the predicted order: if the
+        // prediction is wrong again, this must fail fast with the real
+        // value, not burn another 30s telling us nothing.
+        await new Promise((r) => setTimeout(r, 500));
+
+        const actualOrder = await page.evaluate((s) =>
+          Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0);
+        const expectedOrder = expectedRowDragOrder(N, fromIndex, afterIndex);
+        assert.strictEqual(actualOrder, expectedOrder,
+          '拖曳後的實際列序與預期不符（診斷用，非產品缺陷斷言）. Got ' + actualOrder);
+
+        const after = await page.evaluate(() => ({
+          scrollY: window.scrollY,
+          active: document.activeElement
+            ? document.activeElement.tagName + '.' + (document.activeElement.className || '')
+            : null,
+          armed: !!document.activeElement && document.activeElement.classList.contains('ed-wys-cell'),
+        }));
+        assert.strictEqual(after.scrollY, before,
+          '拖曳不得改變捲動位置. Got ' + JSON.stringify(after));
+        // Review fix (M5): a purely negative assertion (!/^TH/) also passes
+        // when activeElement is null (focus dropped to <body> entirely) —
+        // add the positive half so "focus landed on SOME armed cell" is
+        // actually checked, not just "not a TH".
+        assert.ok(after.armed,
+          '拖曳後必須有作用中的 .ed-wys-cell，不能整個掉焦到 <body>. Got ' + JSON.stringify(after));
+        // !/^TH/ is this FIXTURE's invariant, not a general one: this drag
+        // (fromIndex=N-1 to just after N-4) never crosses the header
+        // boundary, so the landed cell can never legitimately be a TH here.
+        // A drag that promotes a body row ABOVE the header (see the
+        // separate "pure move" scenarios elsewhere in this file) SHOULD
+        // land on a TH — that row really did become the new header.
+        assert.ok(!/^TH/.test(after.active || ''),
+          '拖曳不得把焦點放到表頭儲存格. Got ' + JSON.stringify(after));
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2): a drag with no pre-focused cell and the header scrolled off-screen leaves the scroll position alone — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // The other half — must NOT regress: a drag started from a cell that WAS
+    // genuinely focused (and edited) before the gesture began must still
+    // restore focus to that same cell afterward. currentBurst.activeCellEl
+    // is non-null here, so activeIndex is >= 0 and restoreTableFocus() must
+    // still be called. Kept at the very end alongside the scenario above,
+    // same reasoning (this file's single top-level catch aborts every
+    // scenario after the first failure).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(longDocWithTableRows());
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+        await scrollToTable(page, table0);
+
+        await typeIntoCell(page, table0, 1, 1, 'PROBE'); // body row "2"/"b" 的 Col2 儲存格
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, 'bPROBE',
+          'precondition: typeIntoCell 必須真的把焦點放在那格並打進文字. Got ' + cellBefore);
+
+        await dragRow(page, table0, 2, 0); // "3"/"c" -> right after body row 0 ("1"/"a")
+        await settleEditor(page);
+        await new Promise((r) => setTimeout(r, 500));
+
+        const actualOrder = await page.evaluate((s) =>
+          Array.from(document.querySelectorAll(s + ' tbody td')).map((c) => c.textContent).join(','), table0);
+        assert.strictEqual(actualOrder, '1,a,3,c,2,bPROBE',
+          '拖曳後的實際列序與預期不符（診斷用，非產品缺陷斷言）. Got ' + actualOrder);
+
+        const cellAfter = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellAfter, cellBefore,
+          '拖曳前有作用中儲存格時，焦點必須回到同一格. Got ' + cellAfter);
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2): a drag started from an edited cell keeps that cell focused — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // ── v3.4.0 §2 review follow-up (Important): the round-7 stale-index fix
+    // has two genuinely different code paths (performRowDrop()'s (row, col)
+    // seat vs. performColDrop()'s simpler post-reorder indexOf()), and
+    // NEITHER of the two scenarios above exercises either one: scenario 1
+    // has no pre-focused cell (goes through ensureTableBurstOpen()'s
+    // forDrag branch, never reaches the stale-index code at all), scenario
+    // 2's row drag never crosses the header (retagCell() never recreates
+    // the edited cell, so even the NAIVE "capture a cell reference before
+    // the reorder, focus it after" fix would have passed this one too).
+    // Case A below exercises performColDrop()'s fix specifically; Case B
+    // exercises performRowDrop()'s (row, col)-seat fix in the ONE case a
+    // plain post-reorder cell reference can't handle — the edited cell's
+    // OWN row crosses the header boundary, so its element gets recreated
+    // (TH -> TD) by retagCell() mid-rebuild.
+    //
+    // Both were confirmed RED against `a7b4e32^` (the commit immediately
+    // before this whole fix) via one-shot probe scripts before being
+    // written as scenarios here — see runs/t2-caseA-colDrag-probe.js and
+    // runs/t2-caseB-rowDrag-headerCross-probe.js in this task's SDD
+    // directory, and their -OLD.log/-HEAD.log outputs.
+
+    // Case A: a column drag started from an edited cell (pre-existing
+    // burst, NOT the forDrag path) must keep focus on that same cell — the
+    // performColDrop() half of the round-7 fix. Pre-fix this landed on "b"
+    // (a DIFFERENT cell — the pre-reorder ordinal, read after the column
+    // swap, named a different column's cell in the same row).
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(
+        ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await typeIntoCell(page, table0, 1, 0, 'PROBE'); // body row "2"/col0 -> "2PROBE"
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, '2PROBE',
+          'precondition: typeIntoCell 必須真的把焦點放在那格並打進文字. Got ' + cellBefore);
+
+        // Swap Col1/Col2 — colGripCoords(page, table0, 1) dragged to just
+        // before Col1's own left edge, same geometry the pre-existing Task
+        // 8 column-drag scenario above uses.
+        const from = await colGripCoords(page, table0, 1);
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const r = table.tHead.rows[0].cells[0].getBoundingClientRect();
+          return { x: r.left + 1, y: table.getBoundingClientRect().top - 2 };
+        }, table0);
+        await page.mouse.move(from.x, from.y);
+        await page.mouse.down();
+        await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 5 });
+        await page.mouse.move(to.x, to.y, { steps: 5 });
+        await page.mouse.up();
+        await page.waitForFunction((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim() === 'Col2',
+          {}, table0);
+        await settleEditor(page);
+
+        const cellAfter = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellAfter, cellBefore,
+          'Case A: 欄拖曳前有作用中儲存格時，焦點必須回到同一格（performColDrop() 的 stale-index 修法）. Got ' + cellAfter);
+
+        await page.close();
+        console.log('table col drag (v3.4.0 §2 review Case A): a drag started from an edited cell keeps that cell focused — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // Case B: a row drag that PROMOTES a different row above the header,
+    // where the edited cell is IN the header being demoted — the ONE case
+    // performRowDrop()'s (row, col)-seat fix (vs. a naive cell-reference
+    // fix) is actually necessary for: retagCell() recreates that cell's
+    // element (TH -> TD) mid-rebuild. Pre-fix this landed on "c" (the
+    // DRAGGED row's own cell) and was still a TH.
+    {
+      const { srv: tsrv, url: turl } = await setupTableDoc(
+        ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(turl, { waitUntil: 'networkidle0' });
+        const table0 = await tableBlockSel(page, 0);
+
+        await clickCellWithText(page, table0, 'Col2');
+        await page.keyboard.type('PROBE'); // header's own "Col2" cell -> "Col2PROBE"
+        const cellBefore = await page.evaluate(() =>
+          document.activeElement ? document.activeElement.textContent : null);
+        assert.strictEqual(cellBefore, 'Col2PROBE',
+          'precondition: 點擊＋輸入必須真的把焦點放在表頭那格並打進文字. Got ' + cellBefore);
+
+        const from = await rowGripCoords(page, table0, 2); // "3"/"c"
+        // Review fix: NOT rowBoundaryCoords(page, table0, -1) — that helper
+        // uses the header row's own BOTTOM edge, which nearestRowDropTarget()
+        // (client.js) does NOT classify as 'above-header' (that mode needs
+        // clientY <= the header's own MIDLINE: `hr.top + hr.height / 2`; the
+        // bottom edge is always below it). Dropping at the bottom edge falls
+        // through to the ordinary 'before-row' branch instead — inserts as
+        // the new first BODY row, never touches the header at all. This is
+        // exactly the "升格沒發生" branch this comment's own diagnostic
+        // probe (runs/t2-caseB-diag-probe.js) confirmed: headerFirstCellText
+        // stayed "Col1", bodyOrder became "3,c,1,a,2,b". Every OTHER
+        // pre-existing scenario in this file that genuinely promotes a row
+        // computes the header's own midline directly (see the "Task 6: 純
+        // 搬移 + 位置決定表頭身分" scenario above) — do the same here.
+        const to = await page.evaluate((s) => {
+          const table = document.querySelector(s + ' table');
+          const hr = table.tHead.rows[0].getBoundingClientRect();
+          return { x: table.getBoundingClientRect().left, y: hr.top + hr.height / 2 };
+        }, table0);
+        await dragRowTo(page, from, to);
+        await settleEditor(page);
+        // Bounded grace + read-actual-then-assert, NOT an open-ended
+        // waitForFunction on a predicted value — the same "settle + grace +
+        // read + assert" shape scenarios 1/2 above already use. An
+        // unbounded wait on a value that never arrives is exactly the round-2
+        // mistake this task already paid a 30s timeout for once; it must not
+        // repeat here.
+        await new Promise((r) => setTimeout(r, 500));
+
+        const headerFirstCellText = await page.evaluate((s) =>
+          document.querySelector(s + ' table thead tr').cells[0].textContent.trim(), table0);
+        assert.strictEqual(headerFirstCellText, '3',
+          'Case B 前置：拖曳必須真的把 "3" 升格成新表頭，否則量不到 retagCell() 重建那顆儲存格的情境（診斷用，非產品缺陷斷言）. Got ' + headerFirstCellText);
+
+        const after = await page.evaluate(() => ({
+          text: document.activeElement ? document.activeElement.textContent : null,
+          tag: document.activeElement ? document.activeElement.tagName : null,
+        }));
+        assert.strictEqual(after.text, cellBefore,
+          'Case B: 列拖曳把作用中儲存格所在的那列升格/降格時，焦點必須回到同一格（performRowDrop() 的 (row,col) 修法）. Got ' + JSON.stringify(after));
+        assert.strictEqual(after.tag, 'TD',
+          'Case B: 被降成本文的那列，儲存格必須真的變成 TD（retagCell() 重建過）. Got ' + JSON.stringify(after));
+
+        await page.close();
+        console.log('table row drag (v3.4.0 §2 review Case B): a drag promoting a DIFFERENT row keeps focus on the demoted header cell, now a TD — OK');
+      } finally { tsrv.close(); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 §3: 儲存按鈕的完整迴路 — starts disabled on a clean doc, lights
+    // up on an UNCOMMITTED edit (the harder of the two dirty paths:
+    // switchAwayFrom() must resolve/commit this very burst before save()
+    // itself ever runs — same precondition Ctrl+S already has, see save()'s
+    // own dispatch comment in lib/editor/client.js), persists exactly that
+    // edit to disk, goes back to disabled once saved, and — the point of
+    // this whole task — gives the caret back to the SAME text position it
+    // left, not BODY. quote/code/line already strand it there
+    // unconditionally (backlog #6, still open) and undo/redo/image do it
+    // whenever a burst was left open; `save` must not become a fourth name
+    // on that list.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: s4srv, url: s4url, mdPath: s4mdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s4url, { waitUntil: 'networkidle0' });
+        const btn = '.ed-toolbar [data-ed-tb="save"]';
+
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), true,
+          '乾淨的文件上，儲存按鈕必須是灰的');
+
+        const sel = await paragraphSelByText(page, 'alpha');
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PROBE');
+        await settleEditor(page);
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), false,
+          '打字之後（即使還沒提交）儲存按鈕必須亮起');
+
+        const caretBefore = await page.evaluate(() => {
+          const s = getSelection();
+          return { node: s.anchorNode && s.anchorNode.textContent, off: s.anchorOffset };
+        });
+
+        await page.click(btn);
+        await settleEditor(page);
+        // Belt-and-braces grace beyond settleEditor()'s __edInflight wait —
+        // the caret-restore path runs synchronously after commitThenSave()
+        // resolves, so this is not waiting on anything unbounded; it is the
+        // same bounded "settle then read the actual value" shape every
+        // other scenario in this file uses, never an open-ended
+        // waitForFunction on a predicted value.
+        await new Promise((r) => setTimeout(r, 300));
+
+        assert.strictEqual(fs.readFileSync(s4mdPath, 'utf8'), '# Doc\n\nalpha PROBE\n',
+          '按下儲存之後，還沒提交的編輯必須先被提交、再落磁碟');
+        assert.strictEqual(await page.$eval(btn, (b) => b.disabled), true,
+          '存檔成功之後按鈕必須變回灰的');
+
+        const caretAfter = await page.evaluate(() => {
+          const s = getSelection();
+          return { node: s.anchorNode && s.anchorNode.textContent, off: s.anchorOffset };
+        });
+        assert.deepStrictEqual(caretAfter, caretBefore,
+          'backlog #6：save 按鈕不得把 caret 丟在 BODY 或任何別的位置。Got ' +
+          JSON.stringify(caretAfter) + ' want ' + JSON.stringify(caretBefore));
+        assert.strictEqual(
+          await page.evaluate(() => document.activeElement === document.body), false,
+          'caret 不得停在 BODY');
+
+        await page.close();
+        console.log('save button (v3.4.0 §3): lights up on an uncommitted edit, ' +
+          'saves it, and gives the caret back — OK');
+      } finally { s4srv.close(); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 §3 review C1: the caret rescue must also cover a NON-collapsed
+    // selection at click time — captureCaretForSave() used to bail out on
+    // `!sel.isCollapsed` entirely, so a burst dirtied by typing and then
+    // trimmed with Shift+ArrowLeft (fixing a typo is exactly this gesture)
+    // left restoreCaretForSave() with nothing to work from: MEASURED before
+    // this fix, save's click left activeElement on BODY and every
+    // subsequent keystroke was silently discarded — precisely backlog #6's
+    // own symptom, reached through `save` instead of quote/code/line.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: s5srv, url: s5url, mdPath: s5mdPath } =
+        await setupTableDoc(['# Doc', '', 'alpha', '']);
+      try {
+        const page = await newPage(browser);
+        await page.goto(s5url, { waitUntil: 'networkidle0' });
+        const btn = '.ed-toolbar [data-ed-tb="save"]';
+
+        const sel = await paragraphSelByText(page, 'alpha');
+        const editEl = sel + ' > *';
+        await openWysiwyg(page, sel);
+        await page.keyboard.press('End');
+        await page.keyboard.type(' PROBE'); // "alpha PROBE", caret at offset 11
+        await settleEditor(page);
+
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.up('Shift'); // selects "OBE" — focus end lands at offset 8
+        await new Promise((r) => setTimeout(r, 150));
+
+        const preClick = await page.evaluate(() => {
+          const s = getSelection();
+          return {
+            collapsed: s.isCollapsed,
+            text: s.toString(),
+            dis: document.querySelector('.ed-toolbar [data-ed-tb="save"]').disabled,
+          };
+        });
+        assert.deepStrictEqual(preClick, { collapsed: false, text: 'OBE', dis: false },
+          '前提失敗：必須真的立起一段非空選取，而且 save 必須是亮的，got ' + JSON.stringify(preClick));
+
+        await page.click(btn);
+        await settleEditor(page);
+        await new Promise((r) => setTimeout(r, 300));
+
+        assert.strictEqual(fs.readFileSync(s5mdPath, 'utf8'), '# Doc\n\nalpha PROBE\n',
+          '非 collapsed 選取時按下儲存，還沒提交的編輯照樣必須先提交再落磁碟');
+
+        const isBody = await page.evaluate(() => document.activeElement === document.body);
+        assert.strictEqual(isBody, false,
+          'C1：非 collapsed 選取時按下儲存，caret 不得掉到 BODY（backlog #6 的症狀本體）');
+
+        // 不只是「不是 BODY」——鍵盤使用者必須真的還能打字，字必須落在正確位置
+        // （focus 端的 offset 8：'alpha PR' 與 'OBE' 之間）。
+        await page.keyboard.type('Z');
+        await new Promise((r) => setTimeout(r, 200));
+        const afterType = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
+        assert.strictEqual(afterType, 'alpha PRZOBE',
+          'C1：save 之後打的字必須真的進得去畫面、而且落在正確位置，不是被靜默吞掉。Got ' +
+          JSON.stringify(afterType));
+
+        await page.close();
+        console.log('save button (v3.4.0 §3 review C1): a NON-collapsed selection also gets its caret back — OK');
+      } finally { s5srv.close(); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 Task 7 item 5: Escape out of a raw editor is recoverable with
+    // the very next Ctrl+Z. Same "discard, but not forever" contract v3.3.0
+    // already gave burst Escape (see `discardedBurst`'s own comment in
+    // client.js) — openRawEditor() cannot reuse that mechanism (it tears its
+    // OWN surface down on open, `blockEl.innerHTML = ''`), so client.js
+    // carries a separate, value-keyed twin (`discardedRawEdit`). Two
+    // surfaces, one each below: a WYSIWYG-eligible paragraph reached via
+    // ⠿ → MD 原始碼 (typed directly into the raw textarea — a WYSIWYG-armed
+    // paragraph's OWN Escape is the burst substrate, already covered
+    // elsewhere), and a degraded code block opened directly.
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: t7srv, url: t7url, mdPath: t7mdPath } = await setupTableDoc([
+        '# Doc', '', 'Alpha bold text here.', '', '```js', "console.log('a');", '```', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t7url, { waitUntil: 'networkidle0' });
+
+        // Surface A: paragraph via ⠿ → MD 原始碼.
+        const paraSel = await paragraphSelByText(page, 'Alpha bold text here.');
+        await clickGutterMenuItem(page, paraSel, 'MD 原始碼');
+        await page.waitForSelector(paraSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(paraSel + ' textarea.ed-raw');
+        await page.keyboard.type(' MYWORDS');
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        const rawGoneA = await page.evaluate(
+          (s) => !document.querySelector(s + ' textarea.ed-raw'), paraSel);
+        assert.ok(rawGoneA, 'Escape 必須關掉 raw 編輯器');
+        const diskAfterEscapeA = fs.readFileSync(t7mdPath, 'utf8');
+        assert.ok(!diskAfterEscapeA.includes('MYWORDS'),
+          'Escape 語意不變：丟棄的文字不得落到磁碟。got:\n' + diskAfterEscapeA);
+
+        await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
+        await settleEditor(page);
+        const restoredA = await page.evaluate((s) => {
+          const ta = document.querySelector(s + ' textarea.ed-raw');
+          return ta ? ta.value : null;
+        }, paraSel);
+        assert.ok(restoredA !== null && restoredA.includes('MYWORDS'),
+          'Ctrl+Z 必須重開 raw 編輯器並把 Escape 丟掉的文字放回去。Got ' + JSON.stringify(restoredA));
+
+        // Leave this session cleanly (discard again, not restoring) before
+        // moving to the second surface.
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        // Surface B: a degraded code block, opened directly (no gutter menu
+        // needed — code blocks are never WYSIWYG-eligible).
+        const codeSel = '.ed-block[data-block-type="code"]';
+        await page.click(codeSel);
+        await settleEditor(page);
+        const codeHasRaw = await page.evaluate(
+          (s) => !!document.querySelector(s + ' textarea.ed-raw'), codeSel);
+        if (!codeHasRaw) await page.click(codeSel); // first click may only resolve surface A's leftover state
+        await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(codeSel + ' textarea.ed-raw');
+        await page.keyboard.type('RAWWORDS');
+        await page.keyboard.press('Escape');
+        await settleEditor(page);
+
+        const diskAfterEscapeB = fs.readFileSync(t7mdPath, 'utf8');
+        assert.ok(!diskAfterEscapeB.includes('RAWWORDS'),
+          'code block 的 Escape 語意不變：丟棄的文字不得落到磁碟。got:\n' + diskAfterEscapeB);
+
+        await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
+        await settleEditor(page);
+        const restoredB = await page.evaluate(
+          (s) => { const ta = document.querySelector(s + ' textarea.ed-raw'); return ta ? ta.value : null; },
+          codeSel);
+        assert.ok(restoredB !== null && restoredB.includes('RAWWORDS'),
+          'code block 的 Ctrl+Z 也必須把丟掉的文字放回去。Got ' + JSON.stringify(restoredB));
+
+        await page.close();
+        console.log('Task 7 item 5: Escape out of the raw editor is recoverable with Ctrl+Z (paragraph via gutter + degraded code block) — OK');
+      } finally { t7srv.close(); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v3.4.0 Task 7 item 1: repairing a swallowed fence's closing marker via
+    // the raw editor must not duplicate the tail it frees, on disk. Root
+    // cause (see client.js's applyPatch(), right above the
+    // `if (activeEditor && activeEditor.blockEl) { ... }` guard added for
+    // this fix): the repair spawns a NEW block (the freed trailing
+    // paragraph), so it commits via the PATCH path — and until this fix,
+    // applyPatch()'s removeChild() of THIS EDITOR'S OWN (now-replaced) block
+    // fired a synchronous focusout that reentered commit() a second time
+    // before the outer commit had nulled `activeEditor`, re-writing the
+    // stale, un-shrunk textarea value over the block's new (shrunk) range.
+    // Reproducing needs the patch path specifically, which needs a PRIOR
+    // successful commit in the same session — the very first commit always
+    // falls back to a full render (see applyRenderResult()'s own comment) —
+    // hence the warm-up edit below. IMPORTANT: this means the defect does
+    // NOT reproduce on a freshly opened document with no prior commit in the
+    // session — repairing a swallowed fence as the very FIRST edit after
+    // page load is safe (fallback path). Driving this scenario without the
+    // warm-up step will NOT turn it red; do not read that as "already
+    // fixed" or "backlog description wrong".
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      const { srv: t7bsrv, url: t7burl, mdPath: t7bmdPath } = await setupTableDoc([
+        '# Doc', '', 'Intro paragraph.', '', '```js', "console.log('a');", '',
+        'Trailing paragraph text.', '',
+      ]);
+      try {
+        const page = await newPage(browser);
+        await page.goto(t7burl, { waitUntil: 'networkidle0' });
+
+        // Warm-up: a real commit on a DIFFERENT block, so the repair below
+        // goes through applyPatch() rather than the always-fallback first
+        // commit of the session.
+        const introSel = await paragraphSelByText(page, 'Intro paragraph.');
+        await clickGutterMenuItem(page, introSel, 'MD 原始碼');
+        await page.waitForSelector(introSel + ' textarea.ed-raw', { timeout: 5000 });
+        await page.focus(introSel + ' textarea.ed-raw');
+        await page.keyboard.type(' WARM');
+        await page.keyboard.down('Control'); await page.keyboard.press('Enter'); await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        // Repair the swallowed fence: add the closing marker right after the
+        // one real line of code — this is what frees the trailing paragraph
+        // back into its own block.
+        const codeSel = '.ed-block[data-block-type="code"]';
+        await page.click(codeSel);
+        await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
+        const repaired = "```js\nconsole.log('a');\n```\n\nTrailing paragraph text.";
+        await page.evaluate((sel, val) => {
+          const ta = document.querySelector(sel + ' textarea.ed-raw');
+          ta.value = val;
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
+        }, codeSel, repaired);
+        await page.focus(codeSel + ' textarea.ed-raw');
+        await page.keyboard.down('Control'); await page.keyboard.press('Enter'); await page.keyboard.up('Control');
+        await settleEditor(page);
+
+        await pressSaveAndLand(page);
+
+        const after = fs.readFileSync(t7bmdPath, 'utf8');
+        const tailOccurrences = after.split('Trailing paragraph text.').length - 1;
+        assert.strictEqual(tailOccurrences, 1,
+          '補回收尾圍欄不得把被吞掉的尾巴在磁碟上複製一份。got:\n' + after);
+        assert.strictEqual(after,
+          "# Doc\n\nIntro paragraph. WARM\n\n```js\nconsole.log('a');\n```\n\nTrailing paragraph text.\n",
+          '修好之後的磁碟內容應逐位元組吻合預期。got:\n' + after);
+
+        const rawLeft = await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length);
+        assert.strictEqual(rawLeft, 0, '修復提交之後不得留下殭屍 raw 編輯器');
+
+        await page.close();
+        console.log('Task 7 item 1: repairing a swallowed fence no longer duplicates the tail on disk — OK');
+      } finally { t7bsrv.close(); }
     }
 
     console.log('editor-client-runtime.test.js OK');

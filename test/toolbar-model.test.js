@@ -16,7 +16,7 @@ function ok(cond, msg) {
 // --- BUTTONS roster ----------------------------------------------------------
 
 ok(Array.isArray(tm.BUTTONS), 'BUTTONS is an array');
-eq(tm.BUTTONS.length, 22, '22 顆按鈕齊全');
+eq(tm.BUTTONS.length, 23, '23 顆按鈕齊全（v3.4.0 §3 多了 save）');
 
 const ids = tm.BUTTONS.map((b) => b.id);
 eq(new Set(ids).size, ids.length, 'button ids have no duplicates');
@@ -35,8 +35,8 @@ ok(tm.BUTTONS.every((b) => Object.isFrozen(b)), 'every button object is frozen')
 
 // --- GROUPS --------------------------------------------------------------
 
-eq(tm.GROUPS, ['history', 'block', 'inline', 'indent', 'insert', 'view'],
-  'six groups, spec render order');
+eq(tm.GROUPS, ['file', 'history', 'block', 'inline', 'indent', 'insert', 'view'],
+  'seven groups, spec render order (v3.4.0 §3 adds file at the front)');
 
 // GROUPS 攤平後（依 GROUPS 順序抓出屬於每個 group 的 button id）等於 BUTTONS 的 id 集合
 const flattened = [];
@@ -55,6 +55,7 @@ for (const b of tm.BUTTONS) {
 
 // exact roster from spec §4 table, per-group in render order
 const expectedByGroup = {
+  file: ['save'],
   history: ['undo', 'redo'],
   block: ['headings', 'quote', 'code', 'list', 'ordered-list', 'check'],
   inline: ['bold', 'italic', 'strike', 'inline-code', 'link'],
@@ -68,7 +69,7 @@ for (const g of tm.GROUPS) {
 }
 
 // `export▾` was pulled out of scope (no browser-reachable export path).
-ok(!ids.includes('export'), 'export is not part of the 22 (moved out of scope)');
+ok(!ids.includes('export'), 'export is not part of the 23 (moved out of scope)');
 
 // --- deriveState: every button gets an entry --------------------------------
 
@@ -392,6 +393,58 @@ function baseCtx(overrides) {
     ', declared toggle: ' + JSON.stringify(declaredToggles));
   assert.strictEqual(tm.BUTTONS.every((b) => typeof b.toggle === 'boolean'), true,
     '每顆按鈕都要有 toggle 欄位（不得 undefined）');
+}
+
+// v3.4.0 §3: 儲存按鈕
+{
+  const save = tm.BUTTONS.find((b) => b.id === 'save');
+  assert.ok(save, 'BUTTONS 必須有 save');
+  assert.strictEqual(save.group, 'file', 'save 屬於 file 群組');
+  assert.strictEqual(save.toggle, false, 'save 不是 toggle');
+  assert.strictEqual(tm.GROUPS[0], 'file',
+    'file 群組排在最前。Got ' + JSON.stringify(tm.GROUPS));
+  assert.deepStrictEqual(tm.GROUPS.slice(1),
+    ['history', 'block', 'inline', 'indent', 'insert', 'view'],
+    '既有群組順序不得改變');
+
+  // 髒 / 乾淨
+  const dirty = tm.deriveState({ mode: 'edit', blockType: 'paragraph', dirty: true });
+  assert.strictEqual(dirty.save.disabled, false, '有未存檔變更時 save 必須可按');
+  const clean = tm.deriveState({ mode: 'edit', blockType: 'paragraph', dirty: false });
+  assert.strictEqual(clean.save.disabled, true, '沒有變更時 save 必須是灰的');
+
+  // 沒有任何 block 時（rerenderAll 之後的歸零狀態）仍要能存
+  const noBlock = tm.deriveState({ mode: 'edit', blockType: null, dirty: true });
+  assert.strictEqual(noBlock.save.disabled, false,
+    'save 不得因為沒有作用中 block 就變灰 —— 未存檔的變更跟游標在哪無關');
+
+  // 原始碼模式：save 是第三個豁免
+  const src = tm.deriveState({ mode: 'source', blockType: null, dirty: true });
+  assert.strictEqual(src.save.disabled, false,
+    '原始碼模式照樣可以有未存檔變更，儲存按鈕必須留著');
+  const srcClean = tm.deriveState({ mode: 'source', blockType: null, dirty: false });
+  assert.strictEqual(srcClean.save.disabled, true,
+    '原始碼模式下沒有變更時仍然是灰的 —— 豁免的是「不被模式強制變灰」，' +
+    '不是「永遠亮著」');
+
+  // 其餘按鈕在原始碼模式下仍然全灰（不得被這次改動放寬）
+  for (const b of tm.BUTTONS) {
+    if (b.id === 'preview' || b.id === 'outline' || b.id === 'save') continue;
+    assert.strictEqual(src[b.id].disabled, true,
+      '原始碼模式下 ' + b.id + ' 仍必須是灰的');
+  }
+
+  // deriveState() 尾端的 source 模式覆寫從 `!==` 條件式改寫成逐一 `continue`
+  // 之後，preview / outline 必須仍然被明確設成 disabled === false —— 不是
+  // 「保留主迴圈算出來、剛好也是 false 的值」。這裡刻意換一個跟上面 `src`
+  // 不同的 ctx（有 block、非 null blockType），確保這條斷言測的是 source
+  // 覆寫本身的賦值，而不是「這顆按鈕從頭到尾沒有人動過」的巧合。
+  const srcWithBlock = tm.deriveState({ mode: 'source', blockType: 'heading',
+    headingDepth: 2, dirty: false });
+  assert.strictEqual(srcWithBlock.preview.disabled, false,
+    'source 模式下 preview 必須明確是 disabled === false（覆寫改寫後不得退化）');
+  assert.strictEqual(srcWithBlock.outline.disabled, false,
+    'source 模式下 outline 必須明確是 disabled === false（覆寫改寫後不得退化）');
 }
 
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');

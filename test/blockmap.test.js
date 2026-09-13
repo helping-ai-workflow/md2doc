@@ -499,4 +499,64 @@ assert.deepStrictEqual(
     'nested list mapped after it, got ' + JSON.stringify(sane));
 }
 
+// ── backlog #13: a top-level PARAGRAPH's raw can carry a synthesised
+// internal newline ────────────────────────────────────────────────────────
+//
+// Not in childListStartOffsets()'s family at all — this is buildBlockMap()'s
+// TOP-LEVEL loop trusting a 'paragraph' token's `t.raw` newline count, which
+// marked (14.1.4) can inflate by one for a paragraph whose LAST line is an
+// over-indented (tab, or >=4-space) lazy continuation immediately followed
+// by a line marked's tokenizer inspects to decide whether it closes the
+// paragraph as a setext heading. MEASURED: raw comes back as 'a\n\n\tb\n'
+// (3 newlines) for the 2 real source lines 'a' and '\tb' — an internal
+// blank line that names nothing in the source. Every block from the
+// terminator onward then named the line ABOVE its real one, and the second
+// li's startLine landed on an actual BLANK line — this is what "startLine
+// falls on a non-marker line" meant; it is not inside any list item's own
+// search, it is the CURSOR arriving at the list already one line late.
+{
+  const md = 'a\n\tb\n---\n- x\n- y\n\ntail\n';
+  const lines = md.split('\n');
+  const { blocks, lineCount } = buildBlockMap(md);
+  assert.strictEqual(lineCount, 8);
+  const expected = [
+    ['paragraph', 1, 2],
+    ['hr', 3, 3],
+    ['li', 4, 4],
+    ['li', 5, 5],
+    ['paragraph', 7, 7],
+  ];
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.type, b.startLine, b.endLine]), expected,
+    'a paragraph ending in an over-indented lazy continuation, immediately ' +
+    'followed by --- , must not shift every later block down one line, got ' +
+    JSON.stringify(blocks));
+  // Oracle rule (i): no block's startLine or endLine may name a blank line —
+  // this is the direct, general form of what the pre-fix map violated (the
+  // second li's startLine on line 6, which is '').
+  blocks.forEach((b) => {
+    assert.notStrictEqual(lines[b.startLine - 1].trim(), '',
+      'block ' + b.id + ' (' + b.type + ') startLine ' + b.startLine + ' must not be blank');
+    assert.notStrictEqual(lines[b.endLine - 1].trim(), '',
+      'block ' + b.id + ' (' + b.type + ') endLine ' + b.endLine + ' must not be blank');
+  });
+}
+
+// Same family, a different terminator: a bare table-SEPARATOR-shaped line
+// ('|---|' — no header row above it, so marked tokenizes it as its own
+// paragraph, not a 'table') triggers the identical marked quirk (both it and
+// '---' are dash-shaped text marked's setext-underline lookahead inspects)
+// — pinned separately so a fix that narrowly special-cased literal '---'
+// would still be caught.
+{
+  const md = 'a\n\tb\n|---|\n\ntail\n';
+  const { blocks } = buildBlockMap(md);
+  assert.deepStrictEqual(
+    blocks.map((b) => [b.type, b.startLine, b.endLine]),
+    [['paragraph', 1, 2], ['paragraph', 3, 3], ['paragraph', 5, 5]],
+    'a table-separator-shaped line right after the same over-indented lazy ' +
+    'continuation must not shift the following blocks down a line, got ' +
+    JSON.stringify(blocks));
+}
+
 console.log('blockmap.test.js OK');

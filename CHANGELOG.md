@@ -3,6 +3,793 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.4.0 — 2026-09-13（批次 1＋2＋3／3）
+
+**下面列的是這一版的全部三批。** v3.4.0 的設計刻意把工作切成三批，
+任何一批做完停下來都是一個完整可發的狀態：批次 1 是「使用者回報的新缺陷 ＋ 儲存按鈕
+＋ v3.3.0 留下的 13 項 backlog」，批次 2 是 drawio 內嵌檢視，批次 3 是 wavedrom 的
+GUI 波形編輯。**三批都寫完了。**
+
+批次 1 是 13 個 task、40 顆 commit（口徑排除 `a499e30`，那是中途機器送修時為了讓進行中
+的 SDD 狀態跨機器存活而補的一顆 bookkeeping commit，記的是 spec／plan／進度檔，不是任何
+一個 task 的產出，見它自己的 commit message）。**批次 1 的段落寫完之後又多了三顆**：
+`b6d0f81`——最終複查抓到的一個真缺陷，下面那條「窄視窗開側欄時，背後的頁面不能再捲了」
+只修好了 `.sidebar-toggle` 那條路，而 `.sidebar-toggle` 在編輯模式是 `display:none`；
+編輯模式唯一走得到的入口是工具列的 ☰，它走另一支函式，當時只設 `document.body` 而沒有
+鏡射到 `documentElement`，於是原本那個症狀在編輯模式一直沒被修到（今天兩處都鏡射了）；
+`9a6fe03`——三句被程式碼否證的敘述，其中一句的結果就是下面 Known issues 裡 `.ed-seltb`
+那一條；`3fbb269`——把送修期間暫時納入版控的 SDD 工作狀態重新移出版控，跟 `a499e30`
+一樣是 bookkeeping，同樣不計。
+
+批次 2 是 6 個 task、10 顆 commit（`c63f7f6`..`6360f19`，不含這一顆 CHANGELOG 本身），
+沒有任何一顆被排除。其中 5 顆屬於同一個 task——被引用的 `.drawio` 在磁碟上被改動後重烤
+——第一顆是機制本身，後四顆是四輪複查的修正；最後那一顆（`6360f19`）**一個運算式都沒改**，
+因為那一輪抓到的三件事全部是「註解或報告寫的話與程式碼不符」。
+
+批次 3 是 8 個 task、34 顆 commit（`8cd2ab6`..`20e078b`，不含這一顆 CHANGELOG 本身），
+沒有任何一顆被排除。**形狀值得說出來：8 顆 `feat`、22 顆 `fix`、2 顆 `test`、2 顆
+`docs`**——每一顆功能後面平均跟著 2.75 輪複查修正，而其中兩顆 `docs` 一個運算式都
+沒改，跟批次 2 最後那一顆同樣是「敘述與程式碼不符」的更正。
+
+批次 1 的方法跟 v3.3.0 一樣不是重讀 diff，而是把每一條 backlog 重新驅動出來再修。過程中有
+**兩條 backlog 條目的形狀描述被證明是錯的**——一條連症狀本體都寫錯（記的是「會產生
+`\*` 跳脫」，實際上沒有任何路徑會吐出反斜線），一條被誤分類成「這一版讓它更容易踩
+到的缺陷」而其實今天用真實手勢到不了。另外有**四個從來沒有人知道的既存缺陷是修別的
+東西時被量出來的**：拖曳列之後接下來每一個按鍵會寫進錯的儲存格、`stripHtmlTags()`
+會把 HTML 註解裡的字滲進永久連結、段落的合成 `raw` 讓它之後每一個 block 的行號位移
+一行、以及一條「編輯模式下側欄僅剩的入口」的斷言其實一直靠 5px 的餘裕在過。每一條的
+實測數字都寫在它自己那一段裡。
+
+### Breaking
+
+- **`package.json` 加上了 `exports`，所以 `lib/**` 不再能用套件名深層 require。**
+  可以 `require('@helping-ai-workflow/md2doc')`（＝ `lib/md2doc.js`，`renderMarkdown`）
+  與 `require('@helping-ai-workflow/md2doc/package.json')`；其餘一律
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`，包含以前湊巧會過的
+  `…/md2doc/lib/md2doc.js`（同一個模組的第二種拼法）與
+  `…/md2doc/lib/editor/*.js`。CLI（`bin`）與 `preinstall` 不受影響，兩者都不走
+  `exports` 解析；`vendor/drawio/viewer-static.min.js` 也不受影響，它是用
+  `path.join(__dirname, …)` 讀檔而不是 require 的。
+  **為什麼是現在：**這一版新增了四個模組（`wave-codec` / `wave-geometry` /
+  `wave-store` / `wave-ui`），它們的具名匯出——`lanePath` 家族、`laneTrace`、每一條
+  patch recipe 的簽名——在這一批裡總共走了十一輪修正才定形。沒有 `exports` 的話，
+  發版的那一刻它們全部變成永久的公開面，下一版動其中任何一個簽名都是 breaking。
+  這是唯一一個「加上去本身不是 breaking」的時機。repo 內沒有任何東西走這條路：
+  `lib/`、`bin/`、`scripts/` 與 44 個測試檔的每一個 require 都是相對路徑（實測 60 處
+  `require('../…')`，套件名 0 處）。
+- **heading 的錨點（slug）變了，外部指向舊錨點的連結會斷。** `## Alpha & Beta` 的
+  錨點從 `#alpha-amp-beta` 變成 `#alpha-beta`，`## C < D > E` 從 `#c-lt-d-gt-e`
+  變成 `#c-d-e`。根因是 `marked` 的 lexer 對同一個 heading 給出兩種跳脫狀態——
+  `heading.text` 是原始字串，走 inline token 的那條路拿到的是已跳脫的
+  （`"Alpha &amp; Beta "`）——而 `renderer.heading` 寫的是
+  `stripHtmlTags(flattenTokenText(token.tokens) || token.text || '')`，**同一個 `||`
+  的兩邊跳脫狀態不一致**。三個下游同時吃到已跳脫的字串：`slugifyHeading()` 把實體
+  名稱 `amp` / `lt` / `gt` 當成單字併進錨點，`renderTocNodes()` 的 `escapeHtml()`
+  跳第二次（目錄上看到的是字面的 `&amp;`），section index 也跟著錯。
+  **舊錨點是缺陷的產物，不是設計。** 留著它等於把 bug 當契約——每一份新產出的文件都
+  會繼續帶著 `amp` / `lt` / `gt` 這種沒有人會手打的錨點，而且目錄上的雙重跳脫是使用者
+  直接看得到的錯字。所以這一版改掉，並在這裡明講會斷什麼。
+  修法連帶暴露了一個**既存、無聲、沒有任何測試會抓到的缺陷**：`flattenTokenText()`
+  改回傳未跳脫文字之後，`stripHtmlTags()` 原本的 `/<[^>]*>/g` 會把字面上的 `< D >`
+  當成標籤整段吃掉（`#c-d-e` 實際會變成 `#c-e`）。收緊成
+  `/<\/?[a-zA-Z][^<>]*>/g` 之後又冒出第二個：`## Section <!-- note --> Title` 的
+  錨點從 `#section-title` 變成 `#section-note-title`——**HTML 註解裡的字滲進永久連結，
+  不報錯，也不會讓任何既有測試變紅**。最後補了 `<!--[\s\S]*?-->` 分支，
+  `stripHtmlTags()` 的三個呼叫點一起受益。原本想把剝除搬進 `flattenTokenText()` 的
+  `html` 分支（結構上更乾淨），量過之後放棄：`collectCellText()` 的 `cell.text` 與
+  `renderer.heading` 的 `token.text` 是兩條**不經 token 化**的後備支，搬進去等於讓
+  那兩條路完全不跑剝除。`<!DOCTYPE` 與 `<?` 仍未涵蓋，已寫進程式碼註解。
+
+### Added
+
+- **工具列有儲存按鈕了（`💾`，最左邊的新 `file` 群組）。** 先前存檔只有 `Ctrl+S`
+  一條路，髒狀態只表現在分頁標題的 ●。**按鈕本身就是儲存狀態指示器**：乾淨時
+  disabled 並視覺淡化，髒的時候亮起——而它讀的是 `client.js` 既有的那一個
+  `dirtyDepth !== 0 || burstHasUncommittedEdit()`，與標題 ● 同源，沒有另造一套真相
+  （這次順手把它抽成 `documentIsDirty()`，讓 `setDirty()` 與工具列共用）。點擊走的
+  是同一支 `save()`，一行邏輯都沒複製。**不自動存檔這一點沒有改。**
+  它也是 `Alt+F10` 鍵盤游標走得到的按鈕，而且**按完之後 caret 會回到按之前的位置**
+  ——這一條是刻意不沿用 `undo` / `redo` 的既有做法，因為那條路自己就有同一個缺陷
+  （見下方「quote／code／line」那一條）。第一版的救援只涵蓋 collapsed 的 caret
+  （`if (!sel.isCollapsed) return null`），實測「打字（未 commit）→ `Shift+←`×3 →
+  點儲存」之後 `activeElement` 是 BODY、**接下來打的字完全沒有進去**；改成讀
+  `sel.focusNode` / `focusOffset` 之後 collapsed 路徑自動涵蓋，整個 guard 拿掉而不是
+  加分支。
+  加這一顆按鈕的**真實後果比預期寬**，兩件都只有端到端的網看得到：工具列名冊常數
+  22→23 散在四個測試檔裡（其中一處不是字面的 22，而是 `editor-journey.test.js` 的
+  `TB_ROWS` 完整性斷言）；以及它成為 `BUTTON_DEFS` 裡**第一顆「有條件啟用」的按鈕**，
+  於是每一個髒文件的 `Alt+F10` 跳躍次數與 enabled 計數都位移一格（五處）。後者的處理
+  不是把計數 15 改成 16，而是**把 `save` 從那些哨兵的計數裡排除**，讓 `enabled` 回到
+  「與 save 存不存在、與髒不髒都無關」的原始語意——`save` 自己會不會隨髒度正確點亮，
+  另外有專屬場景把關。
+
+### Fixed
+
+- **拖曳表格的列或欄，畫面會跳到表頭——而且那只是四個缺陷裡最看得見的一個。**
+  使用者回報的是「拖完跳到表頭」，查下去底下疊了四件事。
+  第一，**同一顆儲存格被 `focus()` 了兩次**：`ensureTableBurstOpen()` 自己會對
+  `cells[0]`（也就是表頭那一格）對焦一次，`restoreTableFocus()` 接著又對焦一次、
+  而且不帶 `preventScroll`。外部探針量到的順序是
+  `focus({preventScroll:true})` → `focus()` → `scroll-event`，`scrollY` 從 2754
+  掉到 1517。兩次都要處理：拖曳路徑改挑**第一個 body 儲存格**而不是表頭那一格，
+  第二次補上 `preventScroll`。`ensureTableBurstOpen()` 的政策**不能改**——它的 7 個
+  呼叫端裡有 5 個非拖曳的依賴那次對焦（`insertColumn()` / `insertRow()` 自己完全不
+  設焦點，而且 `currentBurst` 唯一的產生路徑就是那次 focus → `focusin` →
+  `startTableBurst()`，拿掉等於整個操作不會發生），所以加的是拖曳專屬的參數。
+  第二，**擋在中間的那道 `if (activeIndex >= 0)` 是恆真的死碼**。`activeCellEl` 在
+  建立 `currentBurst` 的同一個賦值式裡就一定被設好，而 `ensureTableBurstOpen()` 只在
+  burst 確實屬於這個表格時才回非 null——`activeIndex` 在那兩個呼叫點結構上永遠 `>= 0`。
+  留著一段看起來在防什麼、實際永遠成立的判斷比沒有更糟，已換成記錄「為何恆真、這條路
+  行不通別再試、真正的來源是哪次 focus」的註解。
+  第三，**一個既存的資料正確性缺陷**：`performRowDrop()` / `performColDrop()` 的
+  `activeIndex` 在 `rebuildTableSections()` **之前**用序位算出來，卻在重排**之後**才
+  拿去找格子。編輯某一格、拖一列、放開，焦點就落到另一格，**接下來每一個按鍵都寫進錯
+  的儲存格，而畫面看起來一切正常**。它一直沒被抓到，是因為那個場景從來沒跑到過——
+  這支測試檔沒有 per-scenario try/catch，前面的場景每次先倒就結束了。修法先量了
+  `rebuildTableSections()` 到底是搬還是重建：`<tr>` 只是 `appendChild()` 搬動、從不
+  重建；`<td>`/`<th>` 同 tag 時 `retagCell()` 直接回傳原物件，**但跨表頭／本文邊界時
+  會重建**——所以列那條要用「列＋欄」座標重新定位，欄那條只要把序位計算搬到重排之後。
+  （量的時候用的是 JS expando 屬性而不是 HTML attribute，因為 `retagCell()` 會複製
+  attribute，用 attribute 根本測不出「是不是同一顆物件」。）
+  第四，`restoreTableFocus()` 的 `cellIndex < 0` fallback 現在真的打得到了，而它落在
+  `cells[0]`＝表頭，在拖曳路徑上是錯的落點；改成優先挑 body 第一格。
+- **一個表格手勢會落到隔壁那張表上。** v3.3.0 對這條路試過兩次證偽、兩次都失敗，
+  所以它一直掛在「未裁定的調查」。這一版驅動出來了，而且證明了為什麼前兩次會失敗：
+  先前走的是**泡泡點擊**，提交在 `mousedown` 就被 focusout 觸發，click 跑到時 render
+  已經落地、泡泡已經清掉，復原分支根本沒機會被走到。打得開那扇門的是 **grip 拖曳**
+  ——grip 的 `pointerdown` 有 `preventDefault()`，髒的 textarea 不失焦、不提早提交，
+  而 `tePointer.hit.tableEl` 是 pointerdown 抓的硬參照、`hideTableGrips()` 不清它。
+  三個形狀實測 `detached: true`。
+  復原時用來認表的錨點只有 `startLine` 一個數字，行號一變就認到別張表。23 萬份亂數
+  掃描量到的「改到別張表」件數是這一條最重要的數據，因為它同時否決了一個看起來很自然
+  的半套修法——`startLine` 單獨（修前）**302 件**；只改成複合錨點而 identity 不動
+  **1,275 件，四倍糟**；複合錨點 ＋ 強 identity 12 件；出貨版（三段齊全）**0 件**。
+  三段是複合錨點、`tableIdentityOf()` 改成雜湊每一列每一格、以及「identity 相同的表
+  不只一張時一律拒絕猜」。ablation 跑出來的歸因跟直覺不同：**安全性由最後那道唯一性
+  閘門一段獨力承擔**（拿掉它 12 件，拿掉另外兩段各自都還是 0 件），另兩段貢獻的是完成
+  率（+64,655 / +31,126 次能正常完成的手勢）。第三段關掉的那條路 v3.3.0 本來是綠的，
+  **是第一版修法自己帶進來的危害**，一併關掉。
+- **兩個相鄰的同 tag 行內標記會互相吞掉，第一個標記整個從你的檔案裡消失。**
+  backlog 記的是「會產生 `\*` 跳脫」——查下去**沒有任何路徑會吐出反斜線**，那句
+  `\*` 是寫筆記的人為了在散文裡顯示星號而做的 markdown 轉義，不是對輸出位元組的主張。
+  真正的缺陷是 `<em>a</em><em>b</em>` 序列化成 `*a**b*`，兩個 `*` 黏成一個 CommonMark
+  delimiter run，`marked` 重新解析時**第一個標記整個不見**。100 個上下文的暴力掃描：
+  **同 tag 相鄰 50/50 全壞、跨 tag 相鄰 50/50 全正常**。修法是在邊界插一個看不見的
+  `<!-- -->`，實際插入率 75/12516 個標記＝**0.60%**，4 輪往返固定不動點、不累積、
+  不汙染 slug。
+  第一版守衛**只看輸出字串的星號，於是把跨 tag 的情況也一起插了**——過度插入率估 1.3%，
+  而那 1.3% 不是理論值，它就在 journey 的既有場景裡（`*it****al* bold**` 被改成
+  `*it*<!-- -->***al* bold**`）。那條期望值是正確且驗證過的形狀，所以修的是守衛不是
+  測試：改成追蹤 `lastMarkTag`（每一層記住最近收尾的是 EM 還是 STRONG），**只在即將
+  開的 tag 等於剛收尾的 tag 時才插**。副作用是好的——文字節點非空時一律重設，於是原本
+  為了防「字面星號接斜體」假觸發而加的 regex 整支可以移除（`escapeText()` 本來就不會
+  留下活的尾端星號，那條 regex 一直是多餘的）。
+- **一個段落只要帶著過縮排的 lazy continuation、後面又緊接 `---`，它之後每一個 block
+  的行號就全部位移一行。** `startLine` 是每一次 gutter 動作與每一次 commit 的位址，
+  位移一行是**會寫錯行**的等級，不是純視覺。根因在 `buildBlockMap()` 頂層迴圈的
+  `cursor += rawNewlines`：marked 14.1.4 把 `"a\n    b\n"` 這種段落的 `raw` 合成成
+  `"a\n\n    b\n"`（3 個換行、2 行原始碼），頂層無條件信任它。**這個檔案自己的註解
+  早就寫過這個危害，但只防了 item 內的 `text` token，頂層那一圈沒有對應的防線。**
+  修法只對頂層的 `'paragraph'` token 改用 `t.text` 的換行數；試過把 `'heading'` 也
+  納入，量到 ATX heading 合法摺入尾隨空行、`.text` 還原不回來，所以排除。
+  這一條先前被判成「已不復現」，翻案靠的是方法而不是運氣：定向的手工良構 fixture
+  各跑 5 萬份是 0 違反（所以「我的 fixture 集合裡沒有」不等於「不存在」），改成
+  **6 萬份亂數行湯 ＋ 三條明寫的 oracle**（startLine／endLine 不落空行、blocks 不重疊
+  遞增、li 落在 marker 行）之後：**修前 125 份違反、修後 0 份**，132 份新舊輸出有差異。
+- **在 raw 編輯器裡打的字，按 Escape 就沒了，`Ctrl+Z` 也救不回來。** Escape 的語意
+  仍然是丟棄，改掉的是「丟掉的東西要停放得回來」。修法不能沿用 burst 那一套：
+  `openRawEditor()` 開起來時會把自己的 DOM 拆掉，**以節點為鍵的停放撐不過去**，所以
+  新的 `discardedRawEdit` 是 `discardedBurst` 的**以值為鍵**的雙生體，停放
+  `{blockId, range, startLine, endLine, source, value, caret}`，`undo()` 先試
+  `restoreDiscardedRawEdit()` 再落回一般 undo。失效規則沿用 `discardedBurst` 的同一組
+  呼叫點，另加一條新的：**兩個停放互斥**——若不互斥，舊 burst 的 staleness guard 在
+  期間沒有 render 時會通過，`undo()` 會真的答錯更舊的那一份。
+  **這一條對 rangeMode（單一 li、多區塊）結構性失效，見下方 Known issues。**
+- **對一個已被吞噬的 code block 重開 raw 編輯器去補 fence，會把尾巴在磁碟上複製一份。**
+  跟 F10（吞噬本身）不同根因——這是從吞噬狀態復原時自己的路。根因是這一批第二次撞到
+  的同一族：**同步 `focusout` 在 DOM detach 時重入**。`applyFullRender()` 在 DOM swap
+  **之前**就無條件清掉 `activeEditor`（旁邊就有一段 v3.2.1 的註解在描述這個危害），
+  但 `applyPatch()` 只在 `removeChild()` **之後**才清；raw-edit commit 生出新 block
+  時，編輯器自己的 block 落在 `replaceSpan` 內 ⇒ `removeChild()` 同步觸發 focusout ⇒
+  重入 `commit()` ⇒ 用還沒縮過的 textarea 內容蓋掉該 block 的新範圍。實測：修前一次
+  `Ctrl+Enter` 打出 3 次 `/api/render`，修後 2 次，多的那一次只能來自同步重入。
+  修法**刻意保留**「編輯器在 `replaceSpan` 之外時存活」的既有行為，那是設計不是漏網。
+  **要重現它必須同一個 session 裡先有一次成功提交**（才會走 patch 路徑而不是全量重繪），
+  在全新開啟的文件上不會發生——這個前提已經寫進程式碼註解與測試註解，因為不寫的話
+  下一個照 backlog 敘述試的人會失敗，然後誤判成「已經好了」。
+- **對純空白的選取按 🔗，會把那段空白包進 `<a>` 裡。** 粗體／斜體那條路在包起來之前
+  有一個「整段都是空白就不要動」的守衛，新建連結那條路沒有。修前實測：在
+  `Alpha bold text here.` 裡選 `Alpha` 後面那一個空白、按 🔗、網址填 `https://probe/`，
+  段落變成 `Alpha<a href="https://probe/"> </a>bold text here.`。守衛加在
+  `prompt()` **之前**（不會先問一個註定要丟掉的網址），回 `false` 符合呼叫端文件化的
+  「returns TRUE iff this call actually reached a `window.prompt()`」契約——回 `true`
+  會讓呼叫端誤以為開了 modal、去等一個永遠不會來的 `blurred` promise。混合選取
+  （`" bold "`）是驗過不是假設的：`trimRangeToText()` 原地修剪傳進去的 range，守衛
+  之後緊接的 `extractRangeInto()` 用的正是同一個已修剪的 range，所以只有 `bold` 會被
+  包進去、空白留在外面。
+- **列／欄插入泡泡的座標過期時，現在是把手勢丟掉並升起 banner，不是猜一個位置。**
+  原本的 fallback 是 `tbody.insertBefore(newRow, tbody.firstChild)`——定位失敗就
+  **靜默把列插到最上面**；欄那條更糟，`row.cells[colIndex]` 回 `undefined` 之後
+  `insertBefore(cell, ref ? ref.nextSibling : null)` 會**靜默把新欄插到最後一欄**，
+  而且連守衛都沒有。**這條路今天用真實手勢到不了**（理由與那個分類的更正見下方
+  Known issues），修法保留的理由與可達性無關：那個失敗模式本身就是錯的。列與欄兩條
+  一起修——不對稱本身就是危害，未來讀的人看到「列有守衛、欄沒有」會合理推論欄是刻意
+  豁免，而那個推論是錯的、也沒有東西會糾正他。
+- **`quote` / `code` / `line` 按完把 caret 留在 BODY，鍵盤使用者出不來；surface 上有
+  未 commit 的編輯時 `undo` / `redo` / `image` 也一樣。** 這一條的答案是分裂的，而且
+  是量出來的：`undo` / `redo` / `image` 真的可以共用儲存按鈕那一對 caret
+  capture/restore（同樣的失敗形狀、同樣類型的目標 block）；`quote` / `code` / `line`
+  **不行**——`armEditables()` 從來不 arm quote／code／hr，那些 block 根本沒有
+  contenteditable 表面，caret walker 走進去什麼都找不到。它們真正的修法是開該 block
+  自己的 `openRawEditor()`，也就是「剛插入的 code block」已經在用的同一套。
+  `line`（hr）那個缺口還不在原本假設的那條路上：不是 `focusInsertedBlock()` 的分支，
+  而是 `insertBlockBelow()` 自己的 `kind === 'line'` 分支——那裡有一段前一個 task
+  誠實寫下的「不在範圍內」註解，是一條死碼路徑。
+  修法的作用域收窄過一次：原本放在四個手勢家族共用的 `restoreAfterStructuralOp()`，
+  實測 duplicate／delete 也跟著從 BODY 變成 raw 編輯器——**在破壞性手勢之後自動彈出
+  raw editor 會踩到「Escape 丟掉未 commit 編輯」那個當時還沒修的缺口**，所以改成只開給
+  `convertBlockViaMenu()`。
+- **`H▾` 下拉的六個項目現在鍵盤操作得到。** 順帶修掉一個很諷刺的東西：做出來的鍵盤
+  游標標記 `data-ed-tb-menu-cursor` **沒有任何 CSS**，也就是那個游標看不見——正是下面
+  那一條「沒有可見信號」的缺陷本身。現在它命中
+  `outline: 2px solid rgb(110,168,254)`，對照手足按鈕是 `3px none`。
+- **側欄抽屜有鍵盤入口了。** 先前這版只給了「打開」抽屜的路，沒有給「進到抽屜裡面」
+  的路。**這一條與下一條互相踩過一次**：把焦點送進搜尋框卻沒關掉工具列的 keynav，
+  工具列會繼續吃方向鍵——而 `Home` / `End` 正是下一條這次新吃的鍵。修前那個狀態幾乎
+  不可能出現（點工具列外任何東西都會 `exitToolbarKeynav()`），這一條讓它變成常態：
+  使用者得打一個字才能脫身，而那個字又會升起下一條新加的 banner。改成按參考排除
+  `sourceTextarea` 而不是排除所有 focused `TEXTAREA`——後者會打壞「source textarea
+  持有焦點時用方向鍵走 outline↔preview」這條合法路徑。
+- **工具列的鍵盤游標不再被一般按鍵靜靜地丟掉。** 修前實測 `ArrowUp` / `ArrowDown` /
+  `Tab` / `Home` / `End` / `a` / `Backspace` 七顆，按下去游標外框與 keynav 標記同時
+  消失、沒有任何訊息。`Alt+F10` 在畫面上造成的唯一差別就是那個外框，所以它一消失，
+  工具列看起來就跟按 `Alt+F10` 之前一模一樣。修法刻意做成兩半：`Home` / `End` 改成
+  真的在工具列上導航（有用，不只是無害），**其餘迷走按鍵仍然交還控制權但升起可見的
+  banner**。理由是「列舉每一顆無處可去的按鍵」無法被審計完整性——只做前者，永遠不知道
+  有沒有漏掉第八顆；加信號則對所有沒列舉到的按鍵都成立。`Tab` 與 `Escape` 例外：
+  `Tab` 是 ARIA toolbar pattern 規定的離開手勢，**為一個合法動作升紅色橫幅是錯的方向**，
+  兩者都改成安靜退出，banner 自己也接 Escape 關閉。
+- **任何 banner 升起時，整條工具列都按不到。** 修前實測兩條獨立的觸發路徑，都是
+  **23/23 顆按鈕的 `elementFromPoint` 全部回 banner**；而且缺陷範圍比 backlog 寫的寬
+  ——`showBanner()` 是唯一的產生點，所以 conflict / render-failed / save-failed /
+  dropped-gesture / structural-refusal / swallow / keynav-exit **全部家族同時成立**。
+  修法**沒有動 z-index**，而是把 banner 從 `top: 0` 移到 `top: var(--ed-toolbar-h)`
+  ——沿用 `.ed-te-menu` / `.ed-seltb` 已經在用的同一個地板值。移下來之後會蓋住共用同一個
+  地板的四個動態浮層，所以 `showBanner()` 開頭把那四個收起來；**那四行是用 ablation
+  證明載重的**（暫時拿掉之後 H▾ 選單真的被蓋住）。
+  這個缺陷從頭到尾是滑鼠問題：工具列按鈕是 `tabindex="-1"`、本來就不走 Tab（只走
+  `Alt+F10`）。**但 banner 自己的 ✕ 鍵盤也走不到**，那是另一條既有規則造成的，見下方
+  Known issues。
+- **站在 ＋ 泡泡上不再讓 ⠿ grip 消失。** `updateTableEdgeGrips()` 的守衛沒有列入
+  `.ed-tb-insert`。代價是純視覺的——而且比原本估計的更弱：`.ed-handle` 的宣告自陳
+  「Only ever a visibility toggle (opacity), never display or pointer-events」，
+  也就是連可點擊性都沒有少。
+- **窄視窗開側欄時，背後的頁面不能再捲了。** 先前是「缺一個鎖」而不是「鎖被打敗」。
+  第一版把兩條鎖規則放在 base scope，但抽屜只存在於 `@media (max-width:1080px)`，
+  而且沒有任何 resize handler 會清掉 `data-sidebar-open`——窄視窗開抽屜、拉寬，
+  桌面版就會同時得到既有的全視窗灰 scrim 與**這次新加的整頁不能捲**。
+  （同一份檔案裡已經有一段量測過的警語在講這件事，講的正是同一個屬性。）改成把規則
+  搬進 `@media (max-width:1080px)`，而不是加 resize handler——精準對症、不碰 JS，
+  而且**不會順手把那個既有、範圍外的灰 scrim 缺陷一起修掉**（它該獨立立項）。
+- **工具列加到 23 顆之後 ☰ 在 800px 寬的視窗裡按不到了——而 22 顆時它只剩 5px 的餘裕。**
+  儲存按鈕加在最左邊，把最右邊的 `outline`（☰）擠出可視範圍。量到的是：800×900 下
+  `scrollWidth` 1026、溢出 226px、☰ 中心 (846, 22)、`elementFromPoint()` 回
+  **`null`** ⇒ 是溢出問題不是遮蔽問題（那兩種的修法完全不同）。
+  **這一條真正的發現在對照組**：把儲存按鈕拿掉跑 22 顆，溢出 175px、☰ 中心 (795, 22)
+  ——**只卡在視窗內側 5px**。也就是說「編輯模式下 ☰ 是側欄僅剩的入口、必須不捲動就點
+  得到」這條斷言，一直是靠 5px 的安全邊際在過，沒有人知道。**儲存按鈕沒有製造脆弱，
+  它只是把一個本來就在的脆弱推倒。** 修法是 `.ed-toolbar` 的 flex `gap` 6px → 3px，
+  ☰ 中心回到 (765, 22)、命中自己，安全邊際 **35px**。更根治的做法（把 `view` 群組
+  釘在右側不隨捲動離開）記進了 backlog。
+
+### Known issues
+
+這一批的驗證基礎是 40 個測試檔（新增 `test/table-anchor-recovery.test.js`），其中兩套
+是長跑的 puppeteer 套件。最後一次全綠：`editor-client-runtime.test.js` **366 OK**、
+`editor-journey.test.js` **126 OK**，AssertionError 0。這一批往 runtime 那支加了 1,038
+行、journey 那支 1,031 行，上面每一條缺陷幾乎都是靠這兩支釘住的。
+
+下面同樣分成**兩類，而且差別是有意義的**——延後的缺陷有人會去修、修完就不見了；
+刻意接受的邊界不是缺陷，將來也還會在那裡。
+
+**裁定延後到 v3.4.x 的缺陷。** 會把資料弄髒的（優先）：
+
+- **`lib/editor/paste-md.js` 的貼上路徑走 turndown，帶著與「相鄰同 tag 標記互吞」
+  完全相同的根因，而且是活的。** 實測 `<p><em><code>code</code></em><em>text</em></p>`
+  貼進來序列化成 `` "_`code`__text_" ``，第一個 `<em>` 同樣消失。（`list-md.js` 與
+  `table-md.js` 查過沒有這個洞——一個 item／一個 cell 一次 `serializeInline`，累積字串
+  橫跨全部 sibling，守衛在那裡是有效的。）
+- **`inline-md.js` 的守衛對透明 SPAN 穿透漏檢**（`<em>a</em><span><em>b</em></span>`）。
+  既有缺口，不是這一批造成的——用修改前的版本跑同一個形狀，兩版輸出逐位元組相同。
+- **`discardedRawEdit` 對 rangeMode（單一 li、多區塊）結構性失效。**
+  `cancelAndMaybeDiscard()` 先建 stash、接著 `await restore()`，而 rangeMode 分支走
+  `safeRerenderAll()` → `rerenderAll()` → **`dropDiscardedRawEdit()`** ⇒ stash 建立後
+  兩行就被自己的 Escape 路徑清掉；多區塊另有獨立的阻擋（guard 拿第一個 block 的 id 去
+  比整段 span，必然不等）。也就是說那個 stash 分支對每一個 rangeMode session 都是死碼。
+  **非 regression**（修之前那些面一樣全丟），但危害在誤導：下一個人很可能在 li 上試一次、
+  發現沒回來、誤判整個機制壞掉。
+- **`Ctrl+S` 自己有一模一樣的 caret 缺口**（`switchAwayFrom().then(save)` 的 commit
+  重繪造成），而它才是鍵盤使用者的主要存檔路徑。修法已知——把儲存按鈕那一對
+  capture/restore 套上去就是了；這一批沒做，是因為 `test/editor-client.test.js` 有一條
+  regex 逐字釘住那段原始碼，改它超出當時 task 的範圍。
+
+可達性／鍵盤：
+
+- **鍵盤沒有任何非滑鼠的手段關掉 conflict / save-failed banner。** 實測從普通段落打字
+  → Enter → 升起 banner → **連按 60 次 Tab，焦點一次都沒離開那個段落**。根因是一條
+  既有的通用 Tab 攔截規則（v2.11.1 acceptance, escape class A）：
+  `if ((inBlock && !control) || nothingFocused) { e.preventDefault(); return; }`。
+  沒有一起修是因為修它牽涉 a11y 設計決策（banner 出現時要不要搶焦點？要不要專屬快捷
+  鍵？），不該在一個 task 的尾巴倉促決定。這一批已經修掉比較嚴重的那一半——banner
+  不再遮住工具列，鍵盤使用者可以繼續工作，banner 只是留在畫面上。
+- **逃生路的回程仍然不還原 caret。** `Alt+F10 → preview → Enter` 進 source textarea
+  之後回來，caret 不回原位。source textarea 的 caret 是**原始字元偏移**，而儲存按鈕
+  那套用的是 block-id + text-offset ——**不是同一個座標系**，需要自己的對映與測試。
+  理由已寫進 `activateToolbarCursor()` 的註解。
+- **側欄抽屜只補了入口沒補出口**：抽屜裡按 `Escape` 沒有作用，caret 也不回文件。
+- **工具列的鍵盤游標在 `H▾` 選完一個項目之後會無聲漂移。**
+- `redo` 與 quote／code／line 在有髒 burst 時的行為今天是對的，**但沒有 journey 列
+  釘住它**。
+
+程式碼形狀（不影響使用者，但會影響下一個修這裡的人）：
+
+- **工具列的 `view` 群組沒有釘在右側不隨捲動離開。** 這比上面那個 gap 6px→3px 更根治
+  ——gap 那一版是在不能跑長套件的情況下選的、風險小且已實測的做法。
+- **`restoreTableFocus()` 的 API 仍然收序位而不是 cell 物件。** 收物件更貼合這一批修正
+  的意圖，但那是 API 改形，範圍比當時那個 task 大。
+- **「同 tag 合併」（`<em>a</em><em>b</em>` → `*ab*`）這個零位元組的替代方案沒有採用。**
+  現在的守衛插一個看不見的 `<!-- -->`，實測插入率 0.60%；合併法完全不留位元組，但它
+  要在 **DOM 上前瞻**，遇到 `<em>a</em><span></span><em>b</em>` 就得重新實作整套透明
+  節點規則——守衛現在是對**輸出字串**判斷的。
+
+**已知且刻意接受的邊界**（不是缺陷，將來也還會在，但要讓使用者知道）：
+
+- **列／欄插入泡泡的座標過期之後，今天用真實手勢到不了。** v3.3.0 把這一條列成「這版
+  修好泡泡的可達性、把那個資料缺陷的曝光面放大了」——**那個分類是錯的**。泡泡的
+  可見性由兩層獨立機制守住：proximity-hide（每次 `mousemove` 重算，沒有例外分支）與
+  `applyFullRender()` 裡無條件執行的 `hideTableInsertBubbles()`（前面沒有任何 `if`）。
+  唯一能讓過期的值撐到點擊落下的方式，是「造成過期的事件」與「點擊本身」是同一個事件。
+  四條真實手勢全部失敗且各有機制解釋（其中「外部推送」那條是用讀碼排除的：這個編輯器
+  沒有任何 push／live-reload，唯一相關的衝突處理是 `location.reload()`，整頁重載、
+  JS 狀態歸零，邏輯上不可能製造那個前提）。而那兩層守護分別是 `863a894`（2026-08-29）
+  與 `b38bc51`（2026-08-26），**都早於 v3.3.0**——當時的量測沒有涵蓋「泡泡可見性」
+  這個維度。守衛還是加了（理由見上方 Fixed），但它釘住的是**防禦分支**，測試要靠注入
+  dataset 才走得到。**哪天有人能用真實手勢走到那條路，代表那兩層守護破了。**
+- **`handleTableCellFocusIn()` 是「表格手勢落到隔壁那張表」的姊妹路徑，帶著同一個洞而且
+  沒有唯一性閘門**——雙胞胎那一格會把 caret 放進別張表的同座標格。**沒有驅動出重現**，
+  按這個 repo 的標準不算已證實的缺陷，所以列在這裡而不是上面。
+- **`.ed-seltb`（選取浮動工具列）在特定捲動位置會被 conflict/save-failed banner 蓋住
+  它的全部 6 顆按鈕。** backlog #8 把 `.ed-conflict` 移到 `top: var(--ed-toolbar-h)`
+  之後，實測掃 66 個捲動落點，**17 個落點上 `.ed-seltb` 的 top 落在那條帶子內（最低
+  14.75px）**——修前 `top: 0` 在同樣落點是 0 顆被蓋住，所以這是修法帶來的幾何殘留，
+  不是既有缺陷。根因是 `.ed-seltb` 的真正下限是 `positionSelToolbar()` 裡的
+  `margin = 4` 這個本地常數，跟 `--ed-toolbar-h` 無關（見 `lib/md2doc.js`
+  `.ed-conflict` 規則旁的 Final-review I1 修正註解），而 `showBanner()` 關掉的四個
+  動態浮層（`.ed-te-grip` / `.ed-tb-insert` / `.ed-te-menu` / `.ed-toolbar-menu`）
+  不含 `.ed-seltb`。**兩次嘗試都沒能驅動出「真 banner 與活著的 .ed-seltb 同框」**：
+  burst 內的粗體切換不打 `/api/render`（不會觸發 conflict/save-failed banner），
+  `Ctrl+S` 的 `switchAwayFrom()` 會先拆掉 seltb 才進 save。按這個 repo 的標準，未證實
+  的活缺陷不改行為，所以列在這裡而不是上面。
+- **工具列的 flex gap 現在是 3px。** 桌面滑鼠場景沒問題（整個 v3.3.0 的手勢本來就建立
+  在 hover 上），觸控裝置上會偏擠。用 35px vs 5px 的安全邊際換的。
+- **v3.3.0 那六項原封不動**：F10 吞噬偵測的兩個沉默缺口、trim-to-EOF 那個逐位元組無法
+  分辨的內在誤判、`unlocatable` 降級路徑在真實語料上量不到、按下的起點落在既有選取
+  範圍內時 Chromium 走的是拖曳文字手勢、點進程式碼區塊 caret 一律落在第 2 行、以及
+  `Alt+F10` 會不會被真實瀏覽器或 OS 攔截在自動化環境裡原理上驗不出來。設計上它們
+  就沒有「修好」這個終點。
+
+### Added（批次 2：drawio 內嵌檢視）
+
+- **`![](x.drawio)` 與 `![](x.xml)` 現在會變成圖，不再是一個破掉的 `<img>`。** 每一頁在
+  **建置時**就烤成一份靜態 SVG 寫進輸出的 HTML：頁面上沒有 drawio 引擎、沒有 `<script src>`、
+  也沒有任何一個為了畫這張圖而發出去的請求。實測一份同時引用兩頁檔與單頁檔的文件，輸出裡
+  `viewer.diagrams.net` 命中 0 次、`viewer-static` 命中 0 次，整份 HTML 裡唯一的 `http`
+  字串是 SVG 的 namespace `http://www.w3.org/2000/svg`——那是識別字，不是連線。
+- **`![描述](x.drawio)` 的 alt 文字會變成那顆圖的無障礙名稱**（`aria-label`）。作者本來
+  就寫了名字，沒有理由丟掉它。單頁的圖用 `role="img"`；多頁的圖用 `role="group"`，因為
+  頁籤列的按鈕就長在同一顆盒子裡面，`role="img"` 會把它們整組從無障礙樹上藏掉。沒寫 alt
+  就兩個屬性都不生——一個空的名字比沒有名字更糟。
+- **`#SheetName` 與 `#N` 選頁。** `![](x.drawio#Flow)` 與 `![](x.drawio#2)` 指到同一頁；
+  名字不存在、或數字超出範圍時退回第一頁，不報錯。
+- **多頁檔滑鼠移上去會浮出頁籤列**，切頁只是把 `hidden` 屬性搬一格——每一頁的 SVG 在建置時
+  就全部烤進 DOM 了，所以**網路線拔掉照樣切得動**。單頁檔完全不付這個代價：頁籤列的 CSS 與
+  script 都掛在「真的解出 ≥2 頁」這個旗標上，單頁文件的輸出裡連 `drawio-sheetbar` 這串字
+  都不會出現——嚴格到註解也不行（Task 5 的第一版就是因為註解裡寫了這個 class 名，讓守衛
+  測試變紅）。
+- **圖接進既有的 lightbox**，點一下放大，跟 mermaid／graphviz／WaveDrom 同一條路。多頁檔
+  點開的是**你當下在看的那一頁**：`lightboxSourceOf()` 為 `.drawio` 走一條專屬分支去找
+  `.drawio-page:not([hidden])`，沿用原本的 `querySelector('svg')` 會永遠拿到 DOM 順序最前
+  面的第 1 頁。
+- **`--edit` 模式下，被引用的 `.drawio`／`.xml` 在磁碟上被改掉之後會自己重烤**，不必重新
+  整理分頁。走的是編輯器**既有的 10 秒 ping 心跳**，不是新的推送通道——這個 stack 裡沒有
+  WebSocket、沒有 SSE、也沒有 `fs.watch`，為了這一件事發明一條推送通道不划算。**延遲直接
+  說出來：最多十秒。** 比對用的是 `(mtimeMs, size)` 而不是只有 mtime（WSL 的 DrvFs 與 SMB
+  分享上，落在同一個時間刻度裡的改寫用 mtime 比不出來）；基準線是 **per-tab** 的，而且只有
+  在那個分頁回報「我的 DOM 真的換上了那批位元組」之後才前進——所以任何一次因為你正在那個
+  區塊裡打字、正在拖曳而放棄的更新都是**延後，不是丟掉**，下一拍會再報一次。連續被放棄時
+  重試會退避（`min(10000 × 2ⁿ, 160000)`），**最多退到 160 秒**才再試一次；換到的是「一次
+  卡住的重烤不會每 10 秒就再開一次 headless Chromium」。重烤之後**你當下看的那一頁會被
+  保留**（頁名唯一時用頁名認，否則用位置認）；那一頁真的不見了才會退回第一頁，而且會
+  告訴你。
+- **沒有 drawio 的文件一毛錢都不用付。** 建置端：`bakeDrawio()` 在字串裡看不到
+  `data-drawio-src=` 就直接短路返回，headless Chromium 是 lazy 的，從來不會被啟動（一份
+  純文字 ＋ 表格的文件實測 0.09 秒渲染完）。編輯端：`/api/ping` 對沒有 drawio 參照的文件
+  是純 Map 查找、**零 `fs.statSync`**，多出來的只有一次 body parse，而那個 body 的上限是
+  8 KB 而不是 `readJson()` 預設的 50 MB——它是唯一一條每 10 秒、每個開著的分頁都會打的
+  路由，沒有理由順便是全伺服器最寬鬆的那一條。
+- **反過來說，有 drawio 的文件在 `--edit` 裡每次 commit 都付得到。** `POST /api/render`
+  每一次都重跑一次完整的烤製：每次呼叫都自己開一顆 headless Chromium，把被引用到的每一個
+  檔案的每一頁重烤一次，沒有任何以 `(路徑, stamp)` 為鍵的快取。**實測**（同一台機器，
+  `renderMarkdown(..., {editMode:true})` 本身，各跑三次）：一張兩頁的 `.drawio` ＝
+  1332／945／1060 毫秒，三張同樣的圖 ＝ 2275／2289／2797 毫秒，完全沒有 drawio 的同一份
+  文件 ＝ 15／1／1 毫秒。也就是**每一張兩頁的圖替每一次 commit 加上大約一秒**。症狀會長得
+  像「編輯器變慢了」，跟 drawio 連不起來——所以寫在這裡。快取化是 v3.5 的事（要用的 stamp
+  就在隔壁一個函式，`drawio.drawioStampOf`）。
+- **`.xml` 看的是根元素，不是副檔名。** 根元素是 `<mxfile>` 或 `<mxGraphModel>` 才當成圖；
+  其他 `.xml`（`<catalog>`、設定檔、任何東西）**行為與這一批之前完全相同**，照舊落回原本的
+  圖片路徑、照舊印 `[WARN] not a known image extension, left as-is`。判別會跳過前面的 XML
+  宣告、DOCTYPE 與註解，而且 `<mxfilex>` 這種前綴撞名的標籤不會誤判。副檔名是 `.drawio`
+  但內容不是 drawio 時會多印一句警告——那個副檔名是一個承諾，`.xml` 沒有。
+
+**為什麼是建置時烤 SVG，而不是把 viewer 內嵌進輸出。** vendor 進來的 viewer 是
+4,151,717 bytes（約 4.0 MB），內嵌等於每一份輸出 HTML 都背一份；而且它開頭有 **14 個
+`window.X = window.X || "https://…"` 形式的遠端路徑預設值**——11 個指向 diagrams.net 的
+基礎設施（`mxBasePath`、`mxImageBasePath`、`STENCIL_PATH`、`SHAPES_PATH`、`STYLE_PATH`、
+`GRAPH_IMAGE_PATH`、`DRAW_MATH_URL`、`PROXY_URL`、`DRAWIO_LIGHTBOX_URL`、`EXPORT_URL`、
+`VSS_CONVERT_URL`），3 個指向 github／gitlab（`DRAWIO_GITHUB_URL`、`DRAWIO_GITHUB_API_URL`、
+`DRAWIO_GITLAB_URL`）。內嵌 viewer 等於讀者一離線圖就破，而「一份單檔 HTML，寄給誰、在
+哪台機器上、有沒有網路都打得開」正是 md2doc 存在的理由。**這是 md2doc 與 VSCode 擴充套件
+的根本差異**：擴充套件活在一個永遠有 editor host 的環境裡，md2doc 的輸出沒有 host，
+只有一個檔案。
+
+**代價說清楚：這顆 viewer 進的是每一次安裝。** `package.json` 的 `files` 收了 `vendor/`，
+所以 `npm install @helping-ai-workflow/md2doc` 每個人都會拿到它，**包括從來不碰 `.drawio`
+的人**。數字分兩種、不要混：**下載**是壓縮後的量，viewer 自己 gzip 後 854 KB（整包
+`npm pack` 1.4 MB）；**磁碟**上解開才是 4,151,717 bytes。替代方案是 postinstall 去下載，但那會打破「離線裝得起來」這件事，所以不換。
+那份 viewer 是 Apache-2.0 的第三方程式碼，不是 md2doc 自己的 MIT 原始碼：授權全文與逐項
+的第三方清單跟著它一起進 tarball（`vendor/drawio/LICENSE`、`vendor/drawio/NOTICE`），
+根目錄另有一份 `THIRD-PARTY-NOTICES.md` 當作授權掃描的入口。
+
+### Known issues（批次 2）
+
+`node test/drawio.test.js` 綠（EXIT=0）。下面每一條都是**刻意接受的邊界**，不是待修清單
+——它們要嘛是「建置時烤成 SVG」這個選擇的代價，要嘛是「重烤是一個背景計時器、不是使用者
+手勢」這個事實的代價。
+
+- **靜態 SVG 沒有圖層切換。** drawio 檔裡的圖層在輸出裡是攤平的一張圖，沒有任何東西可以按。
+  圖層切換需要一個活著的 viewer，而那就是上面那 4 MB ＋ 14 個遠端預設值。**這是選擇建置時
+  渲染的代價，不是待修的缺陷**，將來也還會在。
+- **只有檢視，沒有編輯。** md2doc 不會讓你改圖；圖的來源永遠是磁碟上那個 `.drawio`／`.xml`
+  檔案，你用 draw.io 改它，md2doc 負責讓畫面跟上。
+- **點圖不會收掉你開在別處的原始碼編輯器。** 你在某一段打開了原始碼編輯，然後去點另一段的
+  圖——那個編輯器會留著沒收，內容還在。一般圖片、mermaid、graphviz、WaveDrom 本來就是
+  這樣，`.drawio` 這次只是跟它們一致。
+- **同一張圖同時發生兩件事時，你只會被告知其中一件。** 例如你畫過註記的那張圖被改掉、而且
+  你當時看的那一頁也被刪掉——畫面上只會出現講註記的那一句，另一句在 60 秒後無聲丟掉。
+  不是「後者蓋掉前者」：banner 沒有自動消失，所以**先來的贏**，而先來的是註記那一句。
+  跳回第一頁這件事本身在畫面上看得出來。
+- **你正在拖表格的列或欄時，圖會比平常晚一點才更新。** 分兩種情況，代價差很多：心跳響的
+  時候你**已經在拖**，那一拍在送出請求之前就放棄，**完全不付錢、也不累積退避**，下一個
+  10 秒心跳照常再試；只有「請求已經送出去、你才開始拖」會走到送出之後的那道放棄，那次才
+  算一次付過錢的失敗、才會累積退避（第一次是 20 秒），整體大約半分鐘。而且那張表**不必是
+  圖所在的那一張**——「有沒有人正在拖」這個狀態是全域的。兩種情況都會自己更新，不需要做
+  任何事。
+- **一行裡放兩張圖、其中一個檔案被刪掉時，留下來的那張圖會安靜地跳回 markdown 裡指定的
+  那一頁**（沒寫 `#` 就是第一頁）。如果那張圖是多頁的、而你當時看的不是那一頁，頁面會自己
+  換掉，而且不會有任何說明——一個區塊裡圖的數量變了之後，「位置」就不再能識別任何東西，
+  寧可不說，也不要給一句猜錯的說明。
+- **畫在圖片上的註記，會因為同一段落裡的 drawio 被改而一起消失，訊息還會怪到 drawio 頭上。**
+  同一個段落裡同時有一張圖片和一張 drawio，你在圖片上畫了記號，然後那張 drawio 在磁碟上被
+  改掉——你畫在圖片上的記號也會不見，而跳出來的說明寫的是「這張 drawio 圖在磁碟上被改過…
+  已移除」。記號本來就只存在這次閱讀期間（重新整理就沒了），錯的只有歸咎的對象。
+- **引用一個「還不存在」的 `.drawio`，它之後被畫出來時畫面不會自己跟上。**
+  `drawioPlaceholderFor()` 在檔案解不到的時候就回頭了，回頭的位置在「把這個路徑記進待
+  監看清單」之前——所以那個參照從來沒有進過 `state.refs`，`/api/ping` 也就從來不會去
+  stat 它。這正好踩在最自然的寫作順序上：先在 markdown 裡寫 `![](arch.drawio)`，再去
+  draw.io 把圖畫出來。畫好之後開著的那個分頁**整個 session 都不會發現**。任何一次不相干
+  的編輯都會把它救回來（下一次 `/api/render` 會重新解析那個參照），所以症狀是間歇的、
+  看起來莫名其妙。
+- **同一份文件開兩個分頁，其中一個把圖刪掉並 commit 之後，另一個分頁就不再收到那張圖的
+  更新了。** 「哪些路徑要 stat」這份清單是 **per-file** 的（`drawioWatch` 以 `fileId`
+  為鍵），而基準線是 per-tab 的；`trackDrawioRefs()` 在每一次 `/api/render` 都會整份
+  覆寫它。於是分頁 A 刪掉 `![](arch.drawio)` 並 commit 之後，這份文件的待監看清單變成
+  空的，`checkDrawioStale()` 對**還在顯示那張圖的分頁 B** 也一律回答「沒有變化」。
+  重新整理分頁 B 就會恢復。
+- **開分頁時是單頁、session 中途才變成多頁的檔案，不會長出頁籤列，要重新整理那個分頁才有。**
+  頁籤列的 script 只會被注入到「開啟當下就 ≥2 頁」的文件裡——這正是「單頁不付多頁代價」
+  那條規則的另一面。
+
+### Added（批次 3：wavedrom GUI 波形編輯）
+
+- **滑到一張已渲染的 wavedrom 圖上，圖的右上角會浮出「編輯波形」，按下去開一個圖形
+  介面的時序圖編輯器。** 畫面分兩半：左邊是 md2doc 自己畫的手繪波形，右邊是
+  **wavedrom 引擎本人**渲染同一份文件的預覽。能做的事：11 顆電位筆刷
+  （`0 1 x z p n h l u d =`）、插入／刪除 cycle、複製與兩種貼上（插入、覆蓋）、
+  lane 改名／上下搬移／刪除／在指定位置新增、群組改名、head／foot 文字，外加編輯器
+  自己的復原／重做。
+- **為什麼手繪那一半不是去操作引擎畫出來的 DOM。** md2doc 把 wavedrom pin 在
+  **3.5.0**（`package.json` 的 `dependencies`），而引擎的輸出沒有給外人用的契約——
+  唯一抓得住的把手是 `RenderWaveForm()` 自己編號生成的 id
+  （`wavelane_draw_<lane>_<index>`，`node_modules/wavedrom/lib/render-wave-lane.js`）。
+  建立在那上面的互動會在升版時無聲壞掉，而且壞法是「圖還在、手勢打不中」。所以編輯層
+  畫自己的 SVG，而 `brickOf` 把每一個電位對應到**引擎自己的 brick 符號**——兩邊會不會
+  分歧，正是右邊那個預覽存在的理由。預覽刻意渲染在 index `9000` 而不是 0：
+  `RenderWaveForm(index, …)` 拿 index 去命名 `svgcontent_<i>`／`waves_<i>`／
+  `lanes_<i>`／`gmarks_<i>`，而文件自己那張圖已經佔了 0；程式碼裡記著當時的量測
+  ——`(0, …, notFirstSignal=false)` 240 個重複 id、`(0, …, true)` 20 個、
+  `(9000, …, true)` 0 個。
+- **寫回檔案的是最小 patch，不是重新序列化。** WaveJSON 不是 JSON——真實的 wavedrom
+  區塊會用不加引號的 key、單引號字串、尾逗號、`//` 與 `/* */` 註解，`JSON.parse`
+  這四種全部拒收——所以 `lib/editor/wave-codec.js` 是一支自己寫的遞迴下降 parser，
+  而且它替每一個值記下那個值在原始碼裡的半開區間 `[start, end)`。改一條 lane 的波形
+  就只有那一段位元組被換掉，**作者的縮排、引號字元與註解原封不動**。進來的東西一律
+  不正規化：`0..0` 與 `0...` 在 wavedrom 畫出來不一樣，會「順手整理」的 parser 是在
+  毀資料。
+- **局部改不掉的時候會說出來，不會改寫整個區塊。** 這是這一層唯一允許的失敗方式：
+  `wave-store` 要嘛給出一個只動改過那幾個位元組的 patch，要嘛拒絕；沒有第三條路。
+  拒絕時狀態列先說，接著升起一個 banner 指名它寫不回去的那幾行，等使用者確認——
+  而且那次手勢**不會**被偷偷回捲，畫面上的圖與檔案裡的位元組不一致這件事是明講的。
+- **每一個手勢寫回一次，不是攢一整個 session 再寫。** 拒絕率隨「寫回前累積的結構性
+  op 數」上升，實作端量到 1-3 個 op **8.0%**、1-6 個 op **17.0%**，複查端用自己的
+  產生器獨立量到 **6.6%（266/4000）** 與 **18.8%（2257/12000）**——同一個形狀。
+  那些拒絕是對的（它們取代的是靜默損壞），所以讓它們稀少的辦法是不讓編輯堆起來；
+  堆到第十次編輯才收到的拒絕，使用者得自己二分找出是哪一下。
+- **Escape 丟掉整個 session，而且一次 `Ctrl+Z` 拿得回來。** 丟棄的語意跟 v3.3.0 的
+  其他地方一樣沒有改，改的是「丟掉的東西要停放得回來」——`discardedWaveEdit` 是
+  `discardedBurst`／`discardedRawEdit` 的第三個兄弟，三個互斥（一次只有一個編輯
+  session），`undo()` 依序問過三個再落回一般 undo。session 中間如果落了一次
+  `Ctrl+S`，它的 commit 就不能直接從堆疊上 pop 掉（那會毀掉磁碟被寫成的那個狀態），
+  改成送一顆**還原 commit**：文件回到 session 開始的位置，堆疊只增不減，所以
+  `dirtyDepth` 永遠是正的、不可能從下面穿過零。代價是一顆 `●` 要用一次 `Ctrl+S`
+  清掉——而那是**真的**，磁碟上確實還躺著剛剛被丟棄的那張圖。
+- **整個編輯器只用鍵盤就能操作——但今天要打開它仍然需要一次指標動作**（見下方
+  Known issues，這一條不要讀成「鍵盤支援做完了」）。手繪區有自己的儲存格游標，
+  方向鍵移動、`Shift+方向鍵` 選一段 cycle、按一個筆刷鍵就整段塗完；游標會被畫布
+  重繪與 lane 搬移帶著走（靠的是 store 自己對「哪一條 lane 是哪一條」的回答
+  `laneTrace()`，不是行號——兩份「哪條是哪條」的實作會讓游標畫在一條 lane 上、
+  patch 卻寫進另一條）。從 block selection 按 Enter 開啟的 session，關掉時鍵盤會
+  回到那個 block 上。
+- **這個編輯器是 modal，而「誰擁有畫面」是一個關於狀態的問題，不是關於事件的問題。**
+  舊的問法是「這個事件落在 overlay 裡面嗎」，那答不出來——實測 overlay 剛開起來時
+  `document.activeElement` 是 `document.body`，於是每一個按鍵都打在 body 上，後面
+  那份文件還握著它們。改成 `waveEditorIsModal()` 之後，背後文件的整套編輯手勢
+  （工具列鍵盤模式、block selection 的 Tab／Delete／Backspace、undo／redo、Escape）
+  在 overlay 開著時一律被擋掉，頁面捲動被鎖住，**唯一放行的全域手勢是 `Ctrl+S`**
+  ——它是保護工作的反射動作。`Ctrl+P`／`Ctrl+F`／`Ctrl+A`／`F5` 這個檔案裡本來就
+  沒有 handler，那道閘門是一句裸 `return`、沒有 `preventDefault()`，瀏覽器自己的
+  行為不受影響。
+- **讀不回來的區塊不會假裝可以編。** parse 失敗時開的是一個「這個區塊讀不回來」的
+  面板，印出錯誤訊息、offset、換算成行／列，以及那一行的原文——一個孤零零的 offset
+  不是人能拿來做事的東西。
+
+### Fixed（批次 3；兩條都是 v3.3.0 今天就在出貨的既存缺陷）
+
+這兩條都與波形無關，是做批次 3 時驅動產品、問「螢幕上這份與磁碟上那份到底同不同」
+問出來的。兩條都在 `v3.3.0` 的 tag 上逐字可查：那一版的 `lib/editor/lineops.js` 裡
+`markSaved()` 不收任何參數（`this._savedDepth = this._done.length`），而 `dirtyDepth`
+就是一句減法（`this._done.length - this._savedDepth`）——下面兩條講的正是這兩行。
+
+- **越過存檔點的一次復原，會讓文件回報自己已經存檔了。** 存檔點原本是用 undo 堆疊的
+  **深度**記的：存檔時記下 `_done.length`，之後比較現在的深度等不等於它。深度是可以
+  **從下面穿回來**的——復原到存檔點以下，再做一次編輯，`_done.length` 就又回到那個
+  數字，而那是一條完全不同的歷史分支。四張網同時破：分頁標題的 ● 熄掉、儲存按鈕
+  變灰、`beforeunload` 不再攔你，而「檔案在磁碟上被改過」那張 banner 的 Reload
+  是一句直接的 `location.reload()`——它不會再問一次，就把那份工作丟掉了。
+  修法有兩半。第一，**存檔標記在歷史分岔越過它的那一刻就被作廢**（設成 `null`）
+  ——那一刻精確地就是「深度比標記還淺時發生了一次 `push()`」，也就是 `UndoStack.push()`
+  裡那段新增的判斷。單純的 undo **不**作廢：undo 之後 redo 會把同一批 op 放回去，標記
+  指的還是同一個狀態，所以分岔的不是回捲本身，是取代了被回捲那條分支的那次 push。
+  第二，**問題本身改成是非題**：`isDirty()` 回答「記憶體與磁碟是否不同」這一個布林，
+  而不是一個距離；`dirtyDepth` 留著給診斷與測試，標記作廢時它回一個刻意永遠不等於 0
+  的值。**「不髒」從此只有一個意思：記憶體等於磁碟上那份。** 一個會從下面穿過零的
+  計數器表達不了這句話。
+- **存檔會把「回覆抵達那一刻剛好是什麼狀態」標成已存檔。** 在存檔往返中間按一次
+  `Ctrl+Z`，編輯器就會相信磁碟上那份等於螢幕上這份：● 熄掉、`beforeunload` 不再攔，
+  **而且因為那次存檔剛把檔案的時間戳推新了，「磁碟被別人改過」那道檢查也抓不到**
+  ——關掉分頁，磁碟上留下一筆使用者明確復原掉的編輯。三張網一起失效。
+  修法是**收據**：`saveToken()` 在請求出發**之前**取，記的是「我正要寫進磁碟的是這些
+  位元組」——深度，加上那個深度邊界上那顆 op 的**物件 identity**。單靠深度不夠：
+  使用者可以在往返期間 undo 再重打，堆疊回到同一個深度卻握著不同的 op，實測那個組合
+  會把磁碟從來沒有裝過的位元組標成已存檔。op 物件由每一次 commit 現造，所以 identity
+  是精確的指紋，代價是一個 reference。回覆抵達時 `markSaved(token)` 拿收據去對；對不上
+  就作廢標記而不是硬標，**它唯一會犯的錯是多警告**。
+  這一條修完之後又拆掉了一道自己一度加上去的防護：「比較新的請求送出後就丟掉舊的
+  回覆」。那個前提是錯的——伺服器在 `baseMtimeMs` 對不上時一律回 **409 且什麼都不寫**
+  （`lib/editor/server.js` 的 `/api/save`），而 `mtimeMs` 只有 200 那一支會寫；所以
+  第一個回覆還在路上時送出的第二個請求**必然**帶著過期的基準、**必然** 409、**必然**
+  沒寫到任何東西。**描述磁碟現況的是第一個回覆，丟掉它才是缺陷。** 實測帶著那道防護：
+  打字、`Ctrl+S`、`Ctrl+Z`、`Ctrl+S` → 第一個 200 被丟棄、`markSaved()` 從未執行、
+  文件讀起來是乾淨的而編輯還在磁碟上；連 undo 都不用，連按兩次 `Ctrl+S` 就會讓
+  `mtimeMs` 永遠停在過期值，之後每一次存檔都 409，唯一的出路是 banner 的重新載入。
+
+### Fixed（批次 3 的最終複查）
+
+- **唯一的入口在一個很普通的捲動位置被工具列吃掉。** 「編輯波形」是
+  `z-index: 12`，工具列是 `z-index: 101`，而那顆按鈕的 `top` 地板寫的是 `4` 而不是
+  `--ed-toolbar-h`——所以它不是「靠近工具列」，是**被工具列蓋住**：畫得出來、看不見、
+  點不到。實測（1200×800、一張高 180px 的圖捲到 `r.top = −60`）：按鈕畫在 `top: 4`，
+  對它自己的矩形中心做 `elementFromPoint` 回的是 `DIV.ed-toolbar`，真的按下去
+  `__edTestWaveState().open` 仍是 `false`；壞掉的捲動區間對一張 180px 的圖約 174px，
+  十條 lane 的圖接近 300px，正好是由上往下讀文件會經過的地方。**而鍵盤入口今天不存在**
+  （見下方 Known issues），所以在那個捲動位置這個功能的入口數是 0。
+  同一個檔案裡 `.ed-te-menu` 與 `.ed-seltb` 早就讀 `--ed-toolbar-h` 當地板，批次 1 也
+  才用同一個值修過同一族的 banner 缺陷——這次把那個數字抽成 `toolbarTopInset()`，三處
+  共用同一個來源，下一個浮動元件讀它而不是重新發現它。journey 多了一列把「圖的上緣進到
+  工具列那一帶時，按鈕的命中測試要落在按鈕自己身上、而且按下去真的開得起來」釘住；
+  名冊那條覆蓋率斷言只看得到 `position: fixed` 與捲動後 raised/gone/live，看不到疊放，
+  那是五輪複查走過去的結構性原因。
+- **GUI 新增的成員不跟這份檔案的引號風格走。** 引號保留一直只對**被替換的 span**
+  成立（它繼承它取代的那一段），而**插入**的成員沒有 span 可繼承，一律寫雙引號——於是
+  通篇單引號的 WaveJSON 裡會多出一行 `{ name: "rst", … }`。文件仍然正確、仍然解析得
+  回來，但那不是作者寫的檔案，而這個模組的全部重點就是「沒必要動的位元組要保持作者
+  寫的樣子」。現在插入的值會照**這份原始碼自己**的引號風格寫（從 parse 出來的 span
+  數，所以單引號字串裡或註解裡的 `"` 不會投票；平手與完全沒有字串走雙引號，也就是
+  改動前的行為）。
+- **Escape 會丟掉整個 session，而畫面上一個字都沒說。** 標題列原本只有「波形編輯器」
+  與「關閉」。Escape 是 modal 的通用關閉鍵，在這裡卻是破壞性的，救回來的路（一次
+  `Ctrl+Z`）做得很紮實但沒有任何提示——畫了十分鐘的人按下那個鍵，圖就沒了。這一批
+  自己的標準是「破壞性的結果與安全的結果不可以都是沉默的」（drawio 那張「這一頁已經
+  不在了」的橫幅、以及拒絕通知，都是這條規則），所以現在標題列直接寫著
+  `Esc＝放棄這次編輯（按一次 Ctrl+Z 可以拿回來）`，而「關閉」那顆的 title 是
+  「保留這次編輯並關閉」。
+
+### Known issues（批次 3）
+
+這一批把測試檔從 41 個加到 **44 個**（新增 `test/wave-codec.test.js`、
+`test/wave-geometry.test.js`、`test/wave-store.test.js`，三個都在 `package.json` 的
+`test` script 裡，44 筆對 44 檔）；`lib/`、`test/` 與 `package.json` 合計
+**+16,407／−149 行**（`git diff --numstat 7f03037 -- lib test package.json`，含最終
+複查那一輪）。另外新增一個**不是測試**的檔案 `test/tools/extract-journey-rows.js`：
+它把 journey 套件裡的情境按原樣切出來、附行號與 sha256，讓「我跑的那幾列就是檔案裡
+的那幾列」變成可以事後重算的事（兩支長跑套件依 `CLAUDE.md` 不由代理人執行，所以單獨
+驅動一列本來就得自己拼 harness，而手抄進 harness 的那一刻就不再是檔案說的話了）。
+它不在 `test` script 裡，也不跑瀏覽器。
+`dependencies` 逐位元組未動。`package.json` 這一批的改動有兩處：那三個新檔進
+`test` script，以及最終複查加上的 `exports`（見上方 Breaking）。
+寫這一段時實跑並觀察到綠的是 `node test/drawio.test.js`、`node test/wave-codec.test.js`、
+`node test/wave-geometry.test.js`、`node test/wave-store.test.js`，四支 **EXIT=0**；
+`npm test` 與兩支長跑 puppeteer 套件（`editor-client-runtime.test.js`、
+`editor-journey.test.js`）**這一段沒有跑**，所以這裡不宣稱它們的結果。
+
+**可達性——這一條不要讀成「鍵盤支援做完了」。**
+
+- **編輯器開起來之後可以完全用鍵盤操作，但把它打開這件事今天需要一次指標動作。**
+  追蹤名稱 `v3.4.0-followup-keyboard-entry-to-content`。
+  **缺的是什麼**：`.content` 裡面沒有任何東西是鍵盤到得了的。沒有一條鍵盤路徑能把
+  DOM 焦點放到一個 `.ed-block` 上，而那是每一個 block 級手勢的起點狀態。實測（實作端
+  量過、複查端再量過一次）：冷開的頁面上按 Tab，焦點哪裡都不去（被 `client.js` 自己
+  那條「沒有任何東西被 focus」的分支 `preventDefault()` 掉）；在已經 armed 的段落裡
+  按 Tab 被清單縮排接走；冷頁上按 `Shift+ArrowDown`，`stepSelectionFocus()` 因為沒有
+  種子而回 false；從 burst 裡按 Escape 出來，焦點落在 BODY。**block selection 今天
+  只能用 Shift+Click 或指標拖曳生出來。**
+  **它擋住什麼**：(1) 這一批做的 Enter 入口——從 block selection 進得去、從這一批新增
+  的「關掉之後 Enter 再開」也進得去，但**第一次**進去仍然要付一次指標動作；(2) gutter
+  的 `.ed-insert`／`.ed-handle` 都是 `tabindex="-1"`，今天拿不到鍵盤，所以它們的
+  Enter／Space 分歧目前是潛伏的——任何讓 gutter 變成 Tab 可達的修法都會讓那一整類
+  同時轉活，兩者必須一起設計；(3) 其餘每一個 block 級手勢：⠿ 選單、＋ 插入、對選取
+  按 Delete／Backspace，以及原始碼編輯器。
+  **修法必須涵蓋什麼**：冷頁上焦點的種子（大概是第一個 block，或使用者最後碰過的那個）；
+  Tab 在 block 層到底是什麼意思的裁定（今天在兩條分支被刻意吞掉、在第三條被清單縮排
+  接走）；roving `tabindex` 與 `applySelectionClasses()` 的互動（後者會把每一個 block
+  的 `tabindex` 剝掉，因而讓被 focus 的那個失焦）；以及**「被 focus 但沒有被選取」的
+  block 今天完全沒有可見標記**——`.ed-block.ed-selected:focus` 是 `outline: none`，
+  因為底色才是這個編輯器的「鍵盤在這裡」語彙。它還必須保住這一批靠著的兩條既有契約：
+  armed 表面裡的 `Shift+↑↓` 仍然是瀏覽器的文字選取手勢，表格儲存格裡的 Tab 仍然是
+  表格的。
+- **用滑鼠打開的 session，關掉時焦點落在 `document.body`。** 「把鍵盤交回去」
+  （`giveKeyboardBackToWaveBlock()`）只對 `seam.reselect === true` 的 session 生效
+  ——也就是那些帶著一個站在看得見位置的鍵盤進來的。hover 點開的 session 不會被硬塞
+  一個它沒有要求過的選取，所以它結束在它開始的地方。
+
+**這個編輯器本來就不模型化的事（不是待修清單）。**
+
+- **`period`、`phase` 與 `config.hscale` 不在手繪那張圖的模型裡，而它會說出來。**
+  三者都會改變引擎畫出來的東西，手繪那一半全部不理會——量測記在
+  `lib/editor/wave-ui.js` 的 toolbar 註解裡：`{wave:'0101'}` 引擎 8 個半 brick、
+  手繪 4 個 cycle；加上 `period:2` 引擎 16、手繪 4 不變；加上 `phase:0.5` 引擎 7、
+  手繪 4 不位移；`config.hscale:2` 引擎 16、手繪 4 不變。做一顆控制項去改一個畫布
+  根本不理會的屬性是三個選項裡最糟的一個：它邀請使用者把兩張圖弄到不一致，然後給他
+  看那張有自信的錯圖。所以**控制項拿掉了**，改成帶著這三者之一的文件會被明講
+  「左邊的手繪波形不表現它們，以右邊的 WaveDrom 預覽為準」。
+- **只認 `signal:`，而且會說出來。** wavedrom 的 `reg:`（bit field）與 `assign:`
+  （邏輯式）文件 parse 得回來，但對這個編輯器來說是 0 條 lane——實測 `{reg:[…]}` 與
+  `{assign:[…]}` 的 `lanePaths()` 都是 `[]`，而 `addLane()` 對它們回傳原封不動的文件。
+  最終複查抓到的是**畫面上沒有解釋這件事**：開起來是一張空畫布，按 `＋` 只得到狀態列
+  一句「這個動作沒有改變任何東西」——那句話是真的，但它解釋不了為什麼，而一個看起來
+  壞掉的編輯器比一個說得出自己做不到什麼的編輯器更糟。現在它照 `period` / `phase` /
+  `config.hscale` 那條先例辦：畫面上一整列說明，指名這個區塊用的是 `reg:` 還是
+  `assign:`、說這個編輯器只編 `signal:` 的 lane、並指向「⠿ → MD 原始碼」。
+- **圖上的大手勢是放大，右上角的小按鈕才是編輯。** `.wavedrom-diagram` 同時是
+  lightbox 的目標（`lib/md2doc.js` 的 `LIGHTBOX_TARGETS`），編輯模式明著讓那一發
+  點擊過去。最終複查把它跟上面那條入口缺陷綁在一起提出來是對的：按鈕被工具列蓋住時，
+  使用者瞄準它卻得到放大鏡，症狀因此更難懂。**決定是維持現狀**，理由兩條：放大是
+  reader 早於這一批就有的行為，改動它是 reader 側的行為變更而不是這個編輯器的；而
+  真正會讓人困惑的那一半——按鈕點不到——已經修掉並釘住了，剩下的「點圖＝放大」是
+  一個非破壞性、一按 Escape 就退出的結果。
+- **`data`（bus 標籤文字）、`edge`／`node`（箭頭標註）與 `config` 的其餘欄位不能從
+  GUI 改。** `data` 標籤是**讀出來畫上去**的，改不了；`edge` 完全沒有進到這一層。
+  這些欄位在最小 patch 的寫回路徑上沒有損壞風險——沒有人去碰它們——但要改就得回去
+  改原始碼。
+- **手繪與預覽「逐 cycle 一致」那道檢查看不見高度錯了，也看不見顏色錯了。** 兩件都
+  量過：把每一個 `x` 方塊畫成 band 高度的**一半**（cycle 與 class 都不變），
+  `shapeCount` 16 不變、`painted === expected`，**綠**。顏色則是由程式碼直接裁定的
+  ——分類器只讀 `el.tagName` 與 `cls.indexOf('ed-wave-clock')`，兩邊都不曾取樣
+  `fill`／`stroke`／computed style，所以 `ed-wave-bus-3` 畫成 `ed-wave-bus-9` 比起來
+  是 `bus === bus`。一個把每一條 band 砍半的版面退化，會頂著「手繪波形與 WaveDrom
+  預覽逐 cycle 一致」這個名字出貨。（「多畫一個形狀」那一半已經關掉了：現在有一條
+  `paintedCounts` 的斷言。）
+
+**codec 的「原樣回傳」是合約，不是疏漏。** 索引型 op（`setCell(doc, laneIndex, …)`、
+`removeLane`、`insertCycles`、`deleteCycles`、`pasteCycles` …）對超界、對不是一個字元
+的筆刷、對型別根本不對的引數，一律回**同一個文件物件**：不丟例外、不猜。這是這個
+檔案兩半共用的承諾（解析那一半對壞來源回 `{ok:false}` 而不是 throw），也是上層
+`wave-store.apply()` 判斷「有沒有改動」的依據——它比的就是物件 identity——以及 UI 那條
+「一個手勢頂多讓狀態列說一句話，不會變成 page-level error」的性質。
+代價誠實寫在這裡：呼叫端拿不到「你傳錯了」與「這裡本來就沒東西可改」的差別（前者是
+bug，後者是游標走到 lane 盡頭、剪貼簿是空的這種再正常不過的狀態）。需要那個差別的
+呼叫端問得到，判準跟這個檔案自己用的一樣：`Number.isInteger(i)`。最終複查提出的
+「讓型別錯誤改成丟例外」評估過後不採用——它會同時推翻上面那條寫下來的承諾、
+`test/wave-codec.test.js` 裡釘住它的六條斷言，以及 UI 那條性質；改成把**型別**那一格
+也用斷言釘住，所以它現在是一個在案的決定而不是引數檢查的副產品。
+
+**存檔路徑上刻意留下的窗口與痕跡（都不會讓未存檔的工作被回報成已存檔）。**
+
+- **重繪失敗時的回捲，是把那次來不及顯示的編輯放到 redo 堆疊上**——所以接下來按
+  「重做」會把一次從來沒有出現在畫面上的編輯再套一次。`rollbackFailedRender()` 走的是
+  `stack.undo()`，而 `UndoStack.undo()` 無條件把 pop 出來的 op 推進 `_undone`。
+  旁邊就有一支 `discardTop()` 做的正是「pop 掉而且**不**放進 `_undone`」，它是這條路
+  將來該用的東西。
+- **伺服器把位元組寫進磁碟的那一刻，到編輯器被告知的那一刻之間，編輯器還不知道檔案
+  已經變了。** `mtimeMs` 與 `markSaved()` 都只在 200 那一支執行。沒有東西會遺失
+  ——回覆會把它結清——但未存檔指示器可以落後一整趟往返的時間。
+- **連按兩次 `Ctrl+S` 之後，可能會留下一張「檔案在磁碟上被改過」的通知，而它來自那個
+  什麼都沒寫的第二個請求。** 第二個請求必然帶著過期的 `baseMtimeMs`、必然 409、
+  必然沒寫到東西，而 409 那一支會升起 conflict banner；第一個回覆後到的 200 現在會
+  正常結清（見上方 Fixed），所以文件不會卡住，剩下的只是那張過期的通知。關掉它是
+  安全的。
+
+**md2doc 的 HTML 輸出會把 wavedrom 區塊的內容當成 JavaScript 執行——這件事早於
+v3.4.0，而且這一批沒有改變它。**
+
+`lib/md2doc.js` 把 code block 的內容**原樣**吐進 `<script type="WaveDrom">`（沒有
+跳脫，第 924 行，最後一次改動是 2026-08-25）；wavedrom 自己的
+`lib/process-all.js` 掃出每一個 `type` 是 `wavedrom` 的元素，交給 `lib/eva.js`，
+而那支做的是 `eval('(' + TheTextBox.innerHTML + ')')`。**實測**：把
+`{signal:[{name:(function(){window.__md2docProbe=1;return "clk";})(),wave:"p..."}]}`
+放進一個 wavedrom 區塊、產出 HTML、用 headless Chromium 打開——`window.__md2docProbe`
+是 `1`，而那個 IIFE 的回傳值變成了 lane 的名字。**所以一份 markdown 的 wavedrom 區塊
+等同於一段會在每一個開啟輸出 HTML 的人的瀏覽器裡執行的腳本。**
+
+既有的緩解手段是 **`--bake-svg`**，而它的作用要講精確：它拿掉的是**會執行的那個東西**，
+不是**被執行的那個東西**。同一份文件實測，`--bake-svg` 之後輸出裡
+`data-md2doc-diagram-engine` 的引擎 script 從 **3 個變成 0 個**，而
+`<script type="WaveDrom">` 仍然是 **1 個**（原始碼還在，只是沒有人再去 eval 它）；
+同一個探針在烤過的輸出裡**沒有**執行。但它是在建置時被執行過的——烤出來的 SVG 上寫著
+`clk`，那正是那段 IIFE 的回傳值。**也就是說 `--bake-svg` 把 eval 從每一個讀者的機器
+搬到作者自己的機器，不是消滅它。**
+
+**這一批新寫的 parser 不是渲染的那一個，所以它不改變上面任何一句話。**
+`lib/editor/wave-codec.js` 完全不建立執行期程式碼、不 import 任何東西
+（`test/wave-codec.test.js` 會 grep 它有沒有出現那些拼法），但畫出讀者看到的那張圖
+的是 wavedrom 引擎，不是它。
+
+### 這一版還沒做的
+
+- **批次 3 原本的範圍裡，`edge` 標註沒有做。** 「滑到已渲染的圖上出現 Edit、塗電位、
+  增刪 cycle、lane 改名與重排、最小 patch 寫回」都做了（見上方 Added），**畫 edge
+  標註沒有**——`edge` 完全沒有進到編輯層。
+
+先前就記錄過、到今天仍然成立的：
+
+- **§3 雙向同步仍未做。** 外部程式改了 markdown 檔案，開著的編輯器分頁不會反映那次
+  改動，仍然要重新整理頁面。批次 2 的 drawio 重烤是這條規則唯一的例外，而且它只涵蓋
+  **被引用的 `.drawio`／`.xml` 檔**——重烤送回伺服器的 markdown 是分頁自己記憶體裡的
+  那一份，不是磁碟上的那一份。
+- **`export▾` 仍然缺。** 工具列這一版變成 23 顆按鈕，但多的那一顆是 `save`。
+- **每一個結構性的清單手勢都會整份重繪**（清單裡按 Enter、Backspace 併回或刪除項目、
+  ＋ 新增項目、⠿ 建立副本或上下搬移），這仍是刻意保留的 fallback，不是退化。
+- **light／dark 主題切換沒有做**，這一批也沒有開始做。
+
 ## v3.3.0 — 2026-09-10
 
 v3.2.1 出貨時，Known issues 裡誠實列了十三個「用產品」審查席位在一次就座裡找出來、
