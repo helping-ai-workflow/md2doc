@@ -2,6 +2,11 @@
 const assert = require('assert');
 const { replaceLines, insertLines, shiftBlocks, UndoStack } =
   require('../lib/editor/lineops.js');
+// The wave editor's own discard predicate, for the agreement sweep at the end
+// of this file: a wave session is the one path in the product that replaces the
+// redo branch wholesale, so the sweep drives the REAL decision rather than a
+// re-implementation of it. `client.js` exports only its pure core in node.
+const { waveDiscardIsSafe } = require('../lib/editor/client.js');
 
 const src = ['a', 'b', 'c', 'd', 'e'];
 
@@ -403,6 +408,18 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
     st.disk = st.lines.join('\n');
     assert.strictEqual(st.stack.markSaved(t2), true, 'the newer receipt is accepted');
     assert.strictEqual(st.stack.isDirty(), false, 'and memory matches disk');
+    // fix 5 / R3: the pin restored, with the message corrected. The EXPECTATION
+    // was always right — an older receipt applied after a newer one leaves the
+    // document dirty — and it was deleted in fix 4 only because its old message
+    // justified the supersede guard, which was wrong. The expectation is the
+    // only unit-level pin on "older receipt after newer", and that is precisely
+    // the shape the coarse-mtime regime (see the sweep's own note) leaves
+    // unguarded, so it is worth keeping on its own terms.
+    st.stack.markSaved(t1);
+    assert.strictEqual(st.stack.isDirty(), true,
+      'an older receipt applied late reads DIRTY, not clean — its depth is ' +
+      'behind the stack, so the document is treated as having moved since that ' +
+      'save. Over-warning, which is the only direction a late reply may err in');
   }
 
   // The no-argument form is unchanged: "right here, right now".
@@ -425,7 +442,7 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
 }
 
 // ---------------------------------------------------------------------------
-// v3.4.0 batch3 Task 7 fix 4 — the question the suite never asked, asked
+// v3.4.0 batch3 Task 7 fix 4/5 — the question the suite never asked, asked
 // exhaustively: **does `isDirty()` agree with "memory equals disk"?**
 //
 // Four consecutive full-suite runs were green while a defect sat on the save
@@ -434,112 +451,223 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
 // before that one) and none watched the agreement itself. A source-text guard
 // cannot see a wrong premise; this can.
 //
-// The model below is the real one, not a sketch: the real `UndoStack`, the real
-// `replaceLines`, the real server rule (`server.js`'s /api/save answers 409
-// whenever `baseMtimeMs` does not match the file, and writes nothing), and the
-// real client rule (`mtimeMs` has exactly one writer, the 200 branch). Replies
-// may be delivered in either order, so every interleaving of concurrent saves
-// is reached.
+// The model is the real one, not a sketch: the real `UndoStack`, the real
+// `replaceLines`, the real `waveDiscardIsSafe`, the real server rule
+// (`server.js`'s /api/save answers 409 whenever `baseMtimeMs` does not match
+// the file, and writes nothing), and the real client rule (`mtimeMs` has
+// exactly one writer, the 200 branch).
 //
-// The invariant is checked only once a sequence has SETTLED — no reply
-// outstanding. While a request is in flight the server may already have written
-// bytes the client has not been told about, and the client cannot know; that
-// window is optimistic by construction, is recorded in the known issues rather
-// than asserted away, and the fix-3 receipt is what makes it close correctly.
+// ── What it does and does not cover (fix 5 / R5) ──────────────────────────
 //
-// The CONTROL is the load-bearing half. The same sweep is run against a model
-// that includes the supersede guard `save()` briefly carried, and asserted to
-// find violations — so a green above means the sweep can see this class of
-// defect, not that it cannot see anything.
+// Sweep A resolves the server synchronously at `send`, so request ARRIVAL order
+// is fixed at send order; what it varies exhaustively is the order the client
+// is TOLD (`replyFIFO`/`replyLIFO`). Sweep B exists because that is not the same
+// thing as "every interleaving": it splits `send` from `serveFIFO`/`serveLIFO`
+// so the server can process a later request first. Between them, request
+// arrival order, service order and reply order are all varied.
+//
+// ── The axiom, and where it is false (fix 5 / R2) ─────────────────────────
+//
+// Both sweeps assume every accepted write advances the file's `mtimeMs`, which
+// is what makes a second in-flight save a guaranteed 409. **On a real
+// filesystem that is not true.** MEASURED this session, 300 back-to-back
+// write+rename pairs through the same path `server.js` uses:
+//   ext4, the repo directory : 150 of 299 consecutive pairs shared an mtimeMs
+//   ext4, /tmp               : 150 of 299
+//   smallest non-zero delta  : ~0.23 ms
+// In the regime the axiom excludes the shipped code DOES settle-under-warn —
+// swept below and recorded rather than asserted away. Reaching it needs two
+// saves inside that window: there is no autosave in this product (`save()` has
+// exactly two callers, the Ctrl+S keydown and the toolbar button), and a human
+// cannot press Ctrl+S twice inside a quarter of a millisecond, so no user
+// reaches it today. If an autosave or a retry loop is ever added, this stops
+// being theoretical and `baseMtimeMs` needs a stronger fingerprint than an
+// mtime.
+//
+// The invariant is asserted only once a sequence has SETTLED — no request and
+// no reply outstanding. While one is in flight the server may already have
+// written bytes the client has not been told about, and the client cannot know;
+// that window is optimistic by construction, carried as a known issue, and the
+// fix-3 receipt is what makes it close correctly.
+//
+// ── The controls are the load-bearing half ────────────────────────────────
+//
+// Every assertion of 0 below is paired with the same sweep run against a
+// deliberately broken client, asserted to find violations. A sweep that cannot
+// fail proves nothing, and both directions are asserted (fix 5 / R6): an
+// over-refusing receipt produces no under-warns at all and is caught only by
+// the over-warn count.
 // ---------------------------------------------------------------------------
 {
-  const sweep = (withSupersedeGuard, maxLen) => {
+  const sweep = (o) => {
+    const serverAtSend = !o.serverOrdering;
     const deliver = (w, i) => {
-      if (w.inflight.length === 0) return;
-      const r = w.inflight.splice(i, 1)[0];
+      if (w.replies.length === 0) return;
+      const r = w.replies.splice(i, 1)[0];
       if (r.status !== 200) return;
-      if (withSupersedeGuard && r.seq !== w.saveSeq) return;
+      if (o.supersede && r.seq !== w.saveSeq) return;   // the deleted guard
       w.mtimeMs = r.mtimeMs;
-      w.stack.markSaved(r.token);
+      if (o.naiveMark) w.stack.markSaved(); else w.stack.markSaved(r.token);
     };
-    const gestures = {
-      edit(w) {
-        w.n++;
-        const text = 'p' + w.n;
-        w.stack.push({ startLine: 3, endLine: 3, before: [w.lines[2]], after: [text] });
-        w.lines = replaceLines(w.lines, 3, 3, [text]).lines;
-      },
+    const serve = (w, q) => {
+      if (q.baseMtimeMs !== w.server.mtime) { w.replies.push({ status: 409, seq: q.seq }); return; }
+      w.server.content = q.content;
+      if (!o.coarseMtime) w.server.mtime += 1;
+      w.replies.push({ status: 200, seq: q.seq, token: q.token, mtimeMs: w.server.mtime });
+    };
+    const push = (w, text) => {
+      w.stack.push({ startLine: 3, endLine: 3, before: [w.lines[2]], after: [text] });
+      w.lines = replaceLines(w.lines, 3, 3, [text]).lines;
+    };
+    const G = {
+      edit(w) { w.n++; push(w, 'p' + w.n); },
       undo(w) { const r = w.stack.undo(w.lines); if (r) w.lines = r.lines; },
       redo(w) { const r = w.stack.redo(w.lines); if (r) w.lines = r.lines; },
       send(w) {
-        // Ctrl+S: take the receipt, post, and let the server answer on arrival.
-        const token = w.stack.saveToken();
-        const seq = ++w.saveSeq;
-        if (w.mtimeMs !== w.server.mtime) {
-          w.inflight.push({ status: 409, token, seq });   // writes nothing
-          return;
-        }
-        w.server.content = w.lines.join('\n');
-        w.server.mtime += 1;
-        w.inflight.push({ status: 200, token, seq, mtimeMs: w.server.mtime });
+        const q = { token: w.stack.saveToken(), seq: ++w.saveSeq,
+                    content: w.lines.join('\n'), baseMtimeMs: w.mtimeMs };
+        if (serverAtSend) serve(w, q); else w.requests.push(q);
       },
       replyFIFO(w) { deliver(w, 0); },
-      replyLIFO(w) { deliver(w, w.inflight.length - 1); },
+      replyLIFO(w) { deliver(w, w.replies.length - 1); },
     };
-    const names = Object.keys(gestures);
-    const out = { sequences: 0, steps: 0, settledUnder: 0, settledOver: 0,
-                  windowUnder: 0, example: null };
+    if (o.serverOrdering) {
+      G.serveFIFO = (w) => { if (w.requests.length) serve(w, w.requests.shift()); };
+      G.serveLIFO = (w) => { if (w.requests.length) serve(w, w.requests.pop()); };
+    }
+    if (o.wave) {
+      // fix 5 / R7: a wave session is the one path in the product that replaces
+      // `_undone` wholesale, so it belongs in the alphabet. Modelled on
+      // finishWaveSession()'s escape path verbatim — real `waveDiscardIsSafe`,
+      // real `discardTop` loop, real `setRedoTail`, real revert commit — as one
+      // atomic gesture, because the overlay owns the keyboard for its whole
+      // life and no other gesture can interleave with it.
+      G.waveEsc = (w) => {
+        const seam = { baseDepth: w.stack.depth, ops: 0 };
+        const baseLines = w.lines, baseTail = w.stack.redoTail();
+        w.n++; push(w, 'w' + w.n); seam.ops++;
+        w.n++; push(w, 'w' + w.n); seam.ops++;
+        if (waveDiscardIsSafe(w.stack, seam)) {
+          for (let i = 0; i < seam.ops; i++) w.stack.discardTop(w.lines);
+          w.lines = baseLines;
+        } else { push(w, baseLines[2]); }
+        w.stack.setRedoTail(baseTail);
+      };
+    }
+    const names = Object.keys(G);
+    const out = { alphabet: names.length, sequences: 0, steps: 0, settledUnder: 0,
+                  settledOver: 0, windowUnder: 0,
+                  under: null, underLen: Infinity, over: null, overLen: Infinity };
     const run = (path) => {
       const w = { stack: new UndoStack(), lines: ['# H', '', 'p0'], mtimeMs: 1000,
-                  server: { content: '# H\n\np0', mtime: 1000 }, inflight: [],
-                  n: 0, saveSeq: 0 };
-      for (const g of path) {
-        gestures[g](w);
+                  server: { content: '# H\n\np0', mtime: 1000 },
+                  requests: [], replies: [], n: 0, saveSeq: 0 };
+      for (let k = 0; k < path.length; k++) {
+        G[path[k]](w);
         out.steps++;
+        if (w.requests.length !== 0 || w.replies.length !== 0) {
+          if (!w.stack.isDirty() && w.lines.join('\n') !== w.server.content) out.windowUnder++;
+          continue;
+        }
         const agree = w.lines.join('\n') === w.server.content;
         const dirty = w.stack.isDirty();
-        if (w.inflight.length !== 0) { if (!dirty && !agree) out.windowUnder++; continue; }
         if (!dirty && !agree) {
           out.settledUnder++;
-          if (out.example === null) out.example = path.join(' > ');
-        } else if (dirty && agree) out.settledOver++;
+          // fix 5 / R4: the SHORTEST, kept by length — a DFS-first example is
+          // whatever the walk order happens to reach and calling it shortest
+          // was simply false.
+          if (k + 1 < out.underLen) { out.underLen = k + 1; out.under = path.slice(0, k + 1).join(' > '); }
+        } else if (dirty && agree) {
+          out.settledOver++;
+          if (k + 1 < out.overLen) { out.overLen = k + 1; out.over = path.slice(0, k + 1).join(' > '); }
+        }
       }
     };
     const walk = (path) => {
       if (path.length > 0) { run(path); out.sequences++; }
-      if (path.length === maxLen) return;
+      if (path.length === o.depth) return;
       for (const n of names) walk(path.concat([n]));
     };
     walk([]);
     return out;
   };
 
-  // Depth 7 over 6 gestures: 335,922 sequences, 2,284,278 assertion steps.
-  // MEASURED in this session: the whole file runs in 0.62 s, so this is
-  // affordable in a fast suite. That number is a timing, not a budget — if it
-  // grows, the depth is what to lower.
-  const shipped = sweep(false, 7);
-  assert.strictEqual(shipped.sequences, 335922, 'fixture: the sweep must be exhaustive');
-  assert.strictEqual(shipped.steps, 2284278, 'fixture: and every step checked');
-  assert.strictEqual(shipped.settledUnder, 0,
+  // ── Sweep A: reply ordering, depth 7 over 6 gestures ────────────────────
+  // 335,922 sequences / 2,284,278 assertion steps, MEASURED at ~0.3 s.
+  const A = sweep({ depth: 7 });
+  assert.strictEqual(A.sequences, 335922, 'fixture: sweep A must be exhaustive');
+  assert.strictEqual(A.steps, 2284278, 'fixture: and every step checked');
+  assert.strictEqual(A.settledUnder, 0,
     'isDirty() must never answer false over a document that differs from disk, ' +
-    'in ANY settled interleaving of edits, undo, redo and concurrent saves. ' +
-    'Got ' + shipped.settledUnder + ', e.g. ' + shipped.example);
+    'in ANY settled interleaving of edits, undo, redo and concurrent save ' +
+    'replies. Got ' + A.settledUnder + ', shortest: ' + A.under);
+  assert.strictEqual(A.settledOver, 0,
+    'and it must not answer true over a document that MATCHES disk either — ' +
+    'this direction is what catches a receipt that over-refuses (measured: a ' +
+    'timelineOpAt() that stops spanning _undone gives 0 under-warns and 654 ' +
+    'over-warns here). Got ' + A.settledOver + ', shortest: ' + A.over);
 
-  // THE CONTROL: the same sweep against the supersede guard `save()` briefly
-  // carried. It must find violations, or the row above is proving nothing.
-  const guarded = sweep(true, 7);
-  assert.ok(guarded.settledUnder > 0,
-    'the sweep must be able to SEE this class of defect — with the supersede ' +
-    'guard modelled it has to report settled under-warns, or its 0 above is ' +
-    'a statement about the sweep rather than about the code');
-  assert.strictEqual(guarded.settledUnder, 344,
-    'and the count is the measured one. Got ' + guarded.settledUnder +
-    ', first at: ' + guarded.example);
-  assert.ok(/send > undo > send > reply/.test(guarded.example),
-    'the shortest shape it finds is the measured one — a save, an undo, a ' +
-    'second save that 409s, and the FIRST reply then discarded as "superseded". ' +
-    'Got ' + guarded.example);
+  // Control 1 — the supersede guard `save()` briefly carried.
+  const Asup = sweep({ depth: 7, supersede: true });
+  assert.strictEqual(Asup.settledUnder, 344,
+    'the sweep must SEE the supersede guard. Got ' + Asup.settledUnder);
+  assert.strictEqual(Asup.under, 'edit > send > undo > send > replyFIFO > replyFIFO',
+    'and its shortest shape is the measured one — a save, an undo, a second ' +
+    'save that 409s, and the FIRST reply then discarded as "superseded". Got ' +
+    Asup.under);
+
+  // Control 2 — the round-3 defect: mark the moment, not the receipt.
+  const Anaive = sweep({ depth: 7, naiveMark: true });
+  assert.strictEqual(Anaive.settledUnder, 46520,
+    'and it must SEE a markSaved() that ignores its receipt. Got ' + Anaive.settledUnder);
+  assert.strictEqual(Anaive.under, 'send > edit > replyFIFO',
+    'shortest: a save, an edit inside the round trip, then the reply. Got ' + Anaive.under);
+
+  // ── Sweep B: the SERVER may process a later request first ───────────────
+  // Depth 6 over 8 gestures: 299,592 sequences / 1,754,760 steps, ~0.22 s.
+  const B = sweep({ depth: 6, serverOrdering: true });
+  assert.strictEqual(B.sequences, 299592, 'fixture: sweep B must be exhaustive');
+  assert.strictEqual(B.settledUnder, 0,
+    'reordering at the SERVER must not produce a false clean either. Got ' +
+    B.settledUnder + ', shortest: ' + B.under);
+  assert.strictEqual(B.settledOver, 0,
+    'nor a false dirty. Got ' + B.settledOver + ', shortest: ' + B.over);
+  const Bnaive = sweep({ depth: 6, serverOrdering: true, naiveMark: true });
+  assert.strictEqual(Bnaive.settledUnder, 5456,
+    'and sweep B must be able to fail too. Got ' + Bnaive.settledUnder);
+
+  // ── Sweep A + a wave session (fix 5 / R7) ───────────────────────────────
+  // Depth 7 over 7 gestures: 960,799 sequences / 6,565,468 steps, ~1.3 s.
+  const W = sweep({ depth: 7, wave: true });
+  assert.strictEqual(W.sequences, 960799, 'fixture: the wave sweep must be exhaustive');
+  assert.strictEqual(W.settledUnder, 0,
+    'a wave session that is escaped must not make the document read clean over ' +
+    'bytes disk does not hold. Got ' + W.settledUnder + ', shortest: ' + W.under);
+  // …and this one DOES over-warn, deliberately and documented: an escaped
+  // session gives back bytes, depth and the redo branch but cannot give back a
+  // save marker that `push()` invalidated. Pinned as the measured count, not
+  // asserted to 0, because asserting 0 here would be asserting a lie.
+  assert.strictEqual(W.settledOver, 136,
+    'the accepted over-warn from an escaped wave session — see unwindWaveOps()’s ' +
+    'own docblock. Got ' + W.settledOver);
+  assert.strictEqual(W.over, 'edit > send > undo > replyFIFO > waveEsc > redo',
+    'and its shortest shape is the documented one: the marker is invalidated ' +
+    'inside the session and the redo then lands back on the saved bytes. Got ' + W.over);
+
+  // ── The regime the axiom excludes (fix 5 / R2) ──────────────────────────
+  // Same sweep, with writes that do NOT advance the file mtime — which is what
+  // this filesystem does for roughly half of all back-to-back saves. RECORDED,
+  // not asserted to 0: the shipped code really does under-warn here, and
+  // pretending otherwise is what an axiom stated as fact would do.
+  const coarse = sweep({ depth: 6, coarseMtime: true });
+  assert.strictEqual(coarse.settledUnder, 6,
+    'measurement, not a guarantee: with a filesystem whose mtime does not move ' +
+    'between two back-to-back writes, a second in-flight save is no longer a ' +
+    'guaranteed 409 and the shipped code under-warns. Unreachable today (no ' +
+    'autosave; a human cannot press Ctrl+S twice inside ~0.23 ms). Got ' +
+    coarse.settledUnder + ', shortest: ' + coarse.under);
+  assert.strictEqual(coarse.under, 'send > edit > send > undo > replyLIFO > replyFIFO',
+    'and it needs two sends with nothing between them but the edit. Got ' + coarse.under);
 }
 
 console.log('lineops.test.js OK');

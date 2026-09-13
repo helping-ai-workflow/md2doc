@@ -6366,6 +6366,101 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: N5-inflight a Ctrl+Z inside a save round-trip is not marked as saved — OK');
   }
+  // ── N5-two-saves: 兩個存檔同時在路上時，第一個 200 的效果必須留下來 ─────
+  //
+  // v3.4.0 batch3 Task 7 fix 5（R1）。這條路徑上曾經有一道「有更新的請求就把
+  // 舊的回覆丟掉」的守衛，前提是錯的：server 對任何過期的 `baseMtimeMs` 一律
+  // 回 409 而且不寫檔，而 client 的 `mtimeMs` 只有 200 那一支在寫 —— 所以第
+  // 二個請求必然帶著過期的 baseline、必然 409、必然什麼都沒寫。被丟掉的那一
+  // 個，正好是唯一描述磁碟現況的那一個。
+  //
+  // 它之所以能一路綠著出貨，是因為守著它的是一條「原始碼長什麼樣」的斷言 ——
+  // 換個名字（實測 `reqSeq`）整套 fast suite 依然 EXIT 0。這一列改成守【性質】：
+  // 真的讓兩個請求同時在路上，然後看第一個 200 的效果有沒有留下來。
+  {
+    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
+    await ctx.page.evaluate(() => {
+      const orig = window.fetch;
+      window.__saveSent = 0;
+      window.__saveStatus = [];
+      window.fetch = function (input, init) {
+        const url = String(typeof input === 'string' ? input : (input && input.url) || '');
+        if (!/\/api\/save\b/.test(url)) return orig.call(this, input, init);
+        const nth = ++window.__saveSent;
+        return orig.call(this, input, init).then((res) => {
+          window.__saveStatus.push(nth + ':' + res.status);
+          // 只押住第一個回覆，第二個照常 —— 這樣兩個請求會同時在路上，而且
+          // 第一個 200 是【後】到的那一個。
+          if (nth !== 1) return res;
+          return new Promise((r) => setTimeout(() => r(res), 2500));
+        });
+      };
+    });
+
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' FIRST');
+    await new Promise((r) => setTimeout(r, 250));
+    const ctrlS = async () => {
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyS');
+      await ctx.page.keyboard.up('Control');
+    };
+    await ctrlS();
+    // 等到第一個請求真的送出去（它的回覆被押著），再送第二個。
+    let sent = 0;
+    for (let i = 0; i < 80; i++) {
+      sent = await ctx.page.evaluate(() => window.__saveSent);
+      if (sent >= 1) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.strictEqual(sent, 1,
+      'N5-two-saves 前提失敗：第一個 /api/save 要真的送出去。0 = Ctrl+S 沒送出' +
+      '存檔請求。Got ' + sent);
+    const diskAfterFirst = fs.readFileSync(ctx.mdPath, 'utf8');
+    assert.strictEqual(diskAfterFirst, '# Doc\n\nAlpha paragraph. FIRST\n',
+      'N5-two-saves 前提失敗：第一個請求已經把檔案寫出去了（回覆只是還沒到），' +
+      'got ' + JSON.stringify(diskAfterFirst));
+
+    await ctrlS();                       // 第二個：baseline 過期，必然 409
+    await new Promise((r) => setTimeout(r, 1200));
+    const statusMid = await ctx.page.evaluate(() => window.__saveStatus.slice());
+    assert.ok(statusMid.indexOf('2:409') !== -1,
+      'N5-two-saves 前提失敗：第二個請求必須是 409（baseline 過期、什麼都沒寫）。' +
+      'Got ' + JSON.stringify(statusMid));
+
+    // …讓被押住的第一個 200 到達。它是【最後】到的那一個，而它必須算數。
+    await new Promise((r) => setTimeout(r, 2500));
+    const after = await ctx.page.evaluate(() => ({
+      title: document.title,
+      status: window.__saveStatus.slice(),
+      text: document.querySelector('.content').textContent || '',
+    }));
+    assert.ok(after.status.indexOf('1:200') !== -1,
+      'N5-two-saves 前提失敗：第一個請求要真的是 200。Got ' + JSON.stringify(after.status));
+    assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), diskAfterFirst,
+      'N5-two-saves 前提失敗：磁碟上還是第一個請求寫的那一份');
+    assert.ok(after.text.indexOf('FIRST') !== -1, 'N5-two-saves 前提失敗：字還在畫面上');
+    assert.strictEqual(after.title.indexOf('●'), -1,
+      'N5-two-saves：後到的那個 200 必須算數 —— 記憶體跟磁碟一模一樣，● 就要熄掉。' +
+      '把它當成「被更新的請求取代了」而丟掉，文件會永遠標成髒的、而且 mtimeMs ' +
+      '永遠停在舊值，之後每一次 Ctrl+S 都 409。Got ' + JSON.stringify(after.title));
+
+    // 而且基準線真的更新了：下一次存檔不得再 409。
+    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.type(' SECOND');
+    await new Promise((r) => setTimeout(r, 250));
+    const md = await saveAndRead(ctx);
+    assert.strictEqual(md, '# Doc\n\nAlpha paragraph. FIRST SECOND\n',
+      'N5-two-saves：下一次 Ctrl+S 必須存得進去 —— 丟掉那個 200 會讓 mtimeMs ' +
+      '停在舊值，這一發就會變成 409。Got ' + JSON.stringify(md));
+    const finalStatus = await ctx.page.evaluate(() => window.__saveStatus.slice());
+    assert.ok(finalStatus.indexOf('3:200') !== -1,
+      'N5-two-saves：而且它是 200，不是 409。Got ' + JSON.stringify(finalStatus));
+    assert.strictEqual(ctx.errs.length, 0,
+      'N5-two-saves：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: N5-two-saves a reply that lands after a newer request still counts — OK');
+  }
   // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
   // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
   // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提

@@ -529,12 +529,30 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // `baseMtimeMs` and `mtimeMs` has one writer, so the second request writes
   // nothing — and the guard therefore discarded the one reply that described the
   // file. Two measured failures, both under-warns, both on the ordinary Ctrl+S
-  // path; the driven agreement sweep in test/lineops.test.js is what actually
-  // covers this now, and this line only stops the idea coming back.
-  assert.ok(!/saveSeq/.test(save),
-    'save() must not drop a reply because a newer request exists — a newer ' +
-    'request cannot have written anything (server.js 409s on a stale baseline), ' +
-    'so the dropped reply is the only one that describes disk');
+  // path.
+  //
+  // fix 5 / R1: this used to ban the NAME. Measured, re-adding the identical
+  // logic as `reqSeq` left every fast suite at EXIT 0 — a guard that stops one
+  // spelling of an idea is not a guard. What is pinned instead is the SHAPE:
+  // between the reply arriving and the receipt being marked, `save()` may take
+  // exactly the two exits it has always had — the network-error catch and the
+  // malformed-JSON one. Any third early return in that span is a decision not to
+  // believe a reply that did land, whatever it is called, and this refuses it.
+  // The behaviour is driven in test/editor-journey.test.js's N5-two-saves row,
+  // which holds two real requests and asserts the first 200's effect survives.
+  // Comments in this span talk about returns, so they come off first — and the
+  // count is of the `return` TOKEN, not of standalone `return;` lines: a guard
+  // written as `if (mine !== latest) return;` puts it on the same line as its
+  // condition, which is exactly how the one that shipped was written.
+  const replyToMark = save.slice(fetchAt, markAt)
+    .split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  const earlyExits = (replyToMark.match(/\breturn\b/g) || []).length;
+  assert.strictEqual(earlyExits, 2,
+    'between the /api/save request and stack.markSaved(token) there may be ' +
+    'exactly two returns — the network-error catch and the malformed-JSON ' +
+    'one. A third means a reply that DID land is being discarded on some ' +
+    'condition, which is how the supersede guard shipped; renaming it does not ' +
+    'change that. Got ' + earlyExits);
 }
 
 // fix 2 / MUST-FIX 1 — may a wave session's commits be popped? DRIVEN against a
