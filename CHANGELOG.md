@@ -42,6 +42,21 @@ GUI 波形編輯。**三批都寫完了。**
 
 ### Breaking
 
+- **`package.json` 加上了 `exports`，所以 `lib/**` 不再能用套件名深層 require。**
+  可以 `require('@helping-ai-workflow/md2doc')`（＝ `lib/md2doc.js`，`renderMarkdown`）
+  與 `require('@helping-ai-workflow/md2doc/package.json')`；其餘一律
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`，包含以前湊巧會過的
+  `…/md2doc/lib/md2doc.js`（同一個模組的第二種拼法）與
+  `…/md2doc/lib/editor/*.js`。CLI（`bin`）與 `preinstall` 不受影響，兩者都不走
+  `exports` 解析；`vendor/drawio/viewer-static.min.js` 也不受影響，它是用
+  `path.join(__dirname, …)` 讀檔而不是 require 的。
+  **為什麼是現在：**這一版新增了四個模組（`wave-codec` / `wave-geometry` /
+  `wave-store` / `wave-ui`），它們的具名匯出——`lanePath` 家族、`laneTrace`、每一條
+  patch recipe 的簽名——在這一批裡總共走了十一輪修正才定形。沒有 `exports` 的話，
+  發版的那一刻它們全部變成永久的公開面，下一版動其中任何一個簽名都是 breaking。
+  這是唯一一個「加上去本身不是 breaking」的時機。repo 內沒有任何東西走這條路：
+  `lib/`、`bin/`、`scripts/` 與 44 個測試檔的每一個 require 都是相對路徑（實測 60 處
+  `require('../…')`，套件名 0 處）。
 - **heading 的錨點（slug）變了，外部指向舊錨點的連結會斷。** `## Alpha & Beta` 的
   錨點從 `#alpha-amp-beta` 變成 `#alpha-beta`，`## C < D > E` 從 `#c-lt-d-gt-e`
   變成 `#c-d-e`。根因是 `marked` 的 lexer 對同一個 heading 給出兩種跳脫狀態——
@@ -587,13 +602,50 @@ GUI 波形編輯。**三批都寫完了。**
   文件讀起來是乾淨的而編輯還在磁碟上；連 undo 都不用，連按兩次 `Ctrl+S` 就會讓
   `mtimeMs` 永遠停在過期值，之後每一次存檔都 409，唯一的出路是 banner 的重新載入。
 
+### Fixed（批次 3 的最終複查）
+
+- **唯一的入口在一個很普通的捲動位置被工具列吃掉。** 「編輯波形」是
+  `z-index: 12`，工具列是 `z-index: 101`，而那顆按鈕的 `top` 地板寫的是 `4` 而不是
+  `--ed-toolbar-h`——所以它不是「靠近工具列」，是**被工具列蓋住**：畫得出來、看不見、
+  點不到。實測（1200×800、一張高 180px 的圖捲到 `r.top = −60`）：按鈕畫在 `top: 4`，
+  對它自己的矩形中心做 `elementFromPoint` 回的是 `DIV.ed-toolbar`，真的按下去
+  `__edTestWaveState().open` 仍是 `false`；壞掉的捲動區間對一張 180px 的圖約 174px，
+  十條 lane 的圖接近 300px，正好是由上往下讀文件會經過的地方。**而鍵盤入口今天不存在**
+  （見下方 Known issues），所以在那個捲動位置這個功能的入口數是 0。
+  同一個檔案裡 `.ed-te-menu` 與 `.ed-seltb` 早就讀 `--ed-toolbar-h` 當地板，批次 1 也
+  才用同一個值修過同一族的 banner 缺陷——這次把那個數字抽成 `toolbarTopInset()`，三處
+  共用同一個來源，下一個浮動元件讀它而不是重新發現它。journey 多了一列把「圖的上緣進到
+  工具列那一帶時，按鈕的命中測試要落在按鈕自己身上、而且按下去真的開得起來」釘住；
+  名冊那條覆蓋率斷言只看得到 `position: fixed` 與捲動後 raised/gone/live，看不到疊放，
+  那是五輪複查走過去的結構性原因。
+- **GUI 新增的成員不跟這份檔案的引號風格走。** 引號保留一直只對**被替換的 span**
+  成立（它繼承它取代的那一段），而**插入**的成員沒有 span 可繼承，一律寫雙引號——於是
+  通篇單引號的 WaveJSON 裡會多出一行 `{ name: "rst", … }`。文件仍然正確、仍然解析得
+  回來，但那不是作者寫的檔案，而這個模組的全部重點就是「沒必要動的位元組要保持作者
+  寫的樣子」。現在插入的值會照**這份原始碼自己**的引號風格寫（從 parse 出來的 span
+  數，所以單引號字串裡或註解裡的 `"` 不會投票；平手與完全沒有字串走雙引號，也就是
+  改動前的行為）。
+- **Escape 會丟掉整個 session，而畫面上一個字都沒說。** 標題列原本只有「波形編輯器」
+  與「關閉」。Escape 是 modal 的通用關閉鍵，在這裡卻是破壞性的，救回來的路（一次
+  `Ctrl+Z`）做得很紮實但沒有任何提示——畫了十分鐘的人按下那個鍵，圖就沒了。這一批
+  自己的標準是「破壞性的結果與安全的結果不可以都是沉默的」（drawio 那張「這一頁已經
+  不在了」的橫幅、以及拒絕通知，都是這條規則），所以現在標題列直接寫著
+  `Esc＝放棄這次編輯（按一次 Ctrl+Z 可以拿回來）`，而「關閉」那顆的 title 是
+  「保留這次編輯並關閉」。
+
 ### Known issues（批次 3）
 
 這一批把測試檔從 41 個加到 **44 個**（新增 `test/wave-codec.test.js`、
 `test/wave-geometry.test.js`、`test/wave-store.test.js`，三個都在 `package.json` 的
-`test` script 裡）；`lib/`、`test/` 與 `package.json` 合計 **+16,008／−145 行**。
-`dependencies` 逐位元組未動——`package.json` 這一批唯一的改動就是把那三個新檔加進
-`test` script。
+`test` script 裡，44 筆對 44 檔）；`lib/`、`test/` 與 `package.json` 合計
+**+16,407／−149 行**（`git diff --numstat 7f03037 -- lib test package.json`，含最終
+複查那一輪）。另外新增一個**不是測試**的檔案 `test/tools/extract-journey-rows.js`：
+它把 journey 套件裡的情境按原樣切出來、附行號與 sha256，讓「我跑的那幾列就是檔案裡
+的那幾列」變成可以事後重算的事（兩支長跑套件依 `CLAUDE.md` 不由代理人執行，所以單獨
+驅動一列本來就得自己拼 harness，而手抄進 harness 的那一刻就不再是檔案說的話了）。
+它不在 `test` script 裡，也不跑瀏覽器。
+`dependencies` 逐位元組未動。`package.json` 這一批的改動有兩處：那三個新檔進
+`test` script，以及最終複查加上的 `exports`（見上方 Breaking）。
 寫這一段時實跑並觀察到綠的是 `node test/drawio.test.js`、`node test/wave-codec.test.js`、
 `node test/wave-geometry.test.js`、`node test/wave-store.test.js`，四支 **EXIT=0**；
 `npm test` 與兩支長跑 puppeteer 套件（`editor-client-runtime.test.js`、
@@ -639,10 +691,21 @@ GUI 波形編輯。**三批都寫完了。**
   根本不理會的屬性是三個選項裡最糟的一個：它邀請使用者把兩張圖弄到不一致，然後給他
   看那張有自信的錯圖。所以**控制項拿掉了**，改成帶著這三者之一的文件會被明講
   「左邊的手繪波形不表現它們，以右邊的 WaveDrom 預覽為準」。
-- **只認 `signal:`。** wavedrom 的 `reg:`（bit field）與 `assign:`（邏輯式）文件
-  parse 得回來，但對這個編輯器來說是 0 條 lane——實測 `{reg:[…]}` 與 `{assign:[…]}`
-  的 `lanePaths()` 都是 `[]`，而 `addLane()` 對它們回傳原封不動的文件。也就是說那兩種
-  區塊開起來是一張空的畫布，什麼都做不了。
+- **只認 `signal:`，而且會說出來。** wavedrom 的 `reg:`（bit field）與 `assign:`
+  （邏輯式）文件 parse 得回來，但對這個編輯器來說是 0 條 lane——實測 `{reg:[…]}` 與
+  `{assign:[…]}` 的 `lanePaths()` 都是 `[]`，而 `addLane()` 對它們回傳原封不動的文件。
+  最終複查抓到的是**畫面上沒有解釋這件事**：開起來是一張空畫布，按 `＋` 只得到狀態列
+  一句「這個動作沒有改變任何東西」——那句話是真的，但它解釋不了為什麼，而一個看起來
+  壞掉的編輯器比一個說得出自己做不到什麼的編輯器更糟。現在它照 `period` / `phase` /
+  `config.hscale` 那條先例辦：畫面上一整列說明，指名這個區塊用的是 `reg:` 還是
+  `assign:`、說這個編輯器只編 `signal:` 的 lane、並指向「⠿ → MD 原始碼」。
+- **圖上的大手勢是放大，右上角的小按鈕才是編輯。** `.wavedrom-diagram` 同時是
+  lightbox 的目標（`lib/md2doc.js` 的 `LIGHTBOX_TARGETS`），編輯模式明著讓那一發
+  點擊過去。最終複查把它跟上面那條入口缺陷綁在一起提出來是對的：按鈕被工具列蓋住時，
+  使用者瞄準它卻得到放大鏡，症狀因此更難懂。**決定是維持現狀**，理由兩條：放大是
+  reader 早於這一批就有的行為，改動它是 reader 側的行為變更而不是這個編輯器的；而
+  真正會讓人困惑的那一半——按鈕點不到——已經修掉並釘住了，剩下的「點圖＝放大」是
+  一個非破壞性、一按 Escape 就退出的結果。
 - **`data`（bus 標籤文字）、`edge`／`node`（箭頭標註）與 `config` 的其餘欄位不能從
   GUI 改。** `data` 標籤是**讀出來畫上去**的，改不了；`edge` 完全沒有進到這一層。
   這些欄位在最小 patch 的寫回路徑上沒有損壞風險——沒有人去碰它們——但要改就得回去
@@ -655,6 +718,19 @@ GUI 波形編輯。**三批都寫完了。**
   是 `bus === bus`。一個把每一條 band 砍半的版面退化，會頂著「手繪波形與 WaveDrom
   預覽逐 cycle 一致」這個名字出貨。（「多畫一個形狀」那一半已經關掉了：現在有一條
   `paintedCounts` 的斷言。）
+
+**codec 的「原樣回傳」是合約，不是疏漏。** 索引型 op（`setCell(doc, laneIndex, …)`、
+`removeLane`、`insertCycles`、`deleteCycles`、`pasteCycles` …）對超界、對不是一個字元
+的筆刷、對型別根本不對的引數，一律回**同一個文件物件**：不丟例外、不猜。這是這個
+檔案兩半共用的承諾（解析那一半對壞來源回 `{ok:false}` 而不是 throw），也是上層
+`wave-store.apply()` 判斷「有沒有改動」的依據——它比的就是物件 identity——以及 UI 那條
+「一個手勢頂多讓狀態列說一句話，不會變成 page-level error」的性質。
+代價誠實寫在這裡：呼叫端拿不到「你傳錯了」與「這裡本來就沒東西可改」的差別（前者是
+bug，後者是游標走到 lane 盡頭、剪貼簿是空的這種再正常不過的狀態）。需要那個差別的
+呼叫端問得到，判準跟這個檔案自己用的一樣：`Number.isInteger(i)`。最終複查提出的
+「讓型別錯誤改成丟例外」評估過後不採用——它會同時推翻上面那條寫下來的承諾、
+`test/wave-codec.test.js` 裡釘住它的六條斷言，以及 UI 那條性質；改成把**型別**那一格
+也用斷言釘住，所以它現在是一個在案的決定而不是引數檢查的副產品。
 
 **存檔路徑上刻意留下的窗口與痕跡（都不會讓未存檔的工作被回報成已存檔）。**
 

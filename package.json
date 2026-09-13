@@ -14,6 +14,10 @@
     "diagrams.net"
   ],
   "main": "lib/md2doc.js",
+  "exports": {
+    ".": "./lib/md2doc.js",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "md2doc": "bin/md2doc.js"
   },

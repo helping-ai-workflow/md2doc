@@ -2342,4 +2342,74 @@ const RSRC = [
     '作者自己的空 group 是他的，不准跟著被收掉');
 }
 
+// 新增的成員要跟著這份原始碼的引號風格走（v3.4.0 final review, RESIDUE 5）
+//
+// 被【替換】的值一直都會繼承它取代的那一段 span 的引號；被【插入】的成員沒有
+// span 可以繼承，以前一律寫雙引號，於是通篇單引號的檔案會多出一行
+// `{ name: "rst", … }`。文件仍然正確、仍然解析得回來 —— 但那不是作者寫的檔案，
+// 而這個模組的全部重點就是「沒必要動的位元組要保持作者寫的樣子」。
+{
+  for (const [q, other] of [["'", '"'], ['"', "'"]]) {
+    const SRC = ['{ signal: [',
+                 '  { name: ' + q + 'clk' + q + ', wave: ' + q + 'p.' + q + ' },',
+                 ']}'].join('\n');
+    const r = C.parseSource(SRC);
+    assert.strictEqual(r.ok, true, '前提：fixture 要解析得出來。Got ' + JSON.stringify(r));
+    const out = C.patchSource(SRC, r, [
+      { op: 'insert', path: ['signal', 1], value: { name: 'rst', wave: '0' } },
+    ]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    const added = out.text.split('\n').find((l) => l.indexOf('rst') !== -1);
+    assert.ok(added !== undefined, '新的那一條要真的寫進去。Got ' + JSON.stringify(out.text));
+    assert.ok(added.indexOf(q + 'rst' + q) !== -1,
+      '新成員要用這份檔案自己的引號（' + q + '）。Got ' + JSON.stringify(added));
+    assert.strictEqual(added.indexOf(other), -1,
+      '不得混進另一種引號。Got ' + JSON.stringify(added));
+    // …而原本那一行逐字不動。
+    assert.ok(out.text.indexOf('{ name: ' + q + 'clk' + q + ', wave: ' + q + 'p.' + q + ' }') !== -1,
+      '既有那一行不得被改寫。Got ' + JSON.stringify(out.text));
+  }
+  // 平手（完全沒有字串）走雙引號，也就是這個改動之前的行為。
+  const NOSTR = '{ signal: [ { wave: 0 } ] }';
+  const rn = C.parseSource(NOSTR);
+  if (rn.ok === true) {
+    const on = C.patchSource(NOSTR, rn, [
+      { op: 'insert', path: ['signal', 1], value: { name: 'n' } },
+    ]);
+    if (on.ok === true) {
+      assert.ok(on.text.indexOf('"n"') !== -1,
+        '沒有字串可以投票時沿用雙引號。Got ' + JSON.stringify(on.text));
+    }
+  }
+}
+
+// 索引型 op 對「不可能是本意」的引數也是原樣回傳，而且那是【合約】不是疏漏
+// （v3.4.0 final review, RESIDUE 6）
+//
+// 上面那一段已經釘住超界與壞字元；這一段釘住的是【型別】錯誤走同一條路：
+// 不丟例外、不猜、回同一個物件。這個模組的解析那一半也是這樣（壞來源回
+// `{ok:false}` 而不是 throw），`mapLane()` 的註解把它寫成整個檔案的承諾，
+// 而上面那一層（wave-store 的 `apply`）就是靠「回傳同一個物件」判斷有沒有改動的。
+//
+// 代價是誠實寫在這裡：呼叫端拿不到「你傳錯了」與「這裡沒東西可改」的差別。
+// 想要那個差別的呼叫端自己問得到 —— 判準就是 `Number.isInteger(i)` ——
+// 而讓這些 op 改成丟例外會同時推翻一條寫下來的承諾、六條既有斷言，
+// 以及 UI 那條「一個手勢頂多讓狀態列說一句話」的性質。
+{
+  const doc = { signal: [{ name: 'a', wave: '01' }] };
+  for (const bad of [undefined, null, NaN, '0', 1.5, -1, {}]) {
+    assert.strictEqual(C.setCell(doc, bad, 0, '1'), doc,
+      'setCell 的 laneIndex = ' + JSON.stringify(bad) + ' 必須原樣回傳');
+    assert.strictEqual(C.setCell(doc, 0, bad, '1'), doc,
+      'setCell 的 cycle = ' + JSON.stringify(bad) + ' 必須原樣回傳');
+    assert.strictEqual(C.removeLane(doc, bad), doc,
+      'removeLane(' + JSON.stringify(bad) + ') 必須原樣回傳');
+    assert.strictEqual(C.insertCycles(doc, bad, 1), doc,
+      'insertCycles 的 at = ' + JSON.stringify(bad) + ' 必須原樣回傳');
+    assert.strictEqual(C.deleteCycles(doc, 0, bad), doc,
+      'deleteCycles 的 count = ' + JSON.stringify(bad) + ' 必須原樣回傳');
+  }
+  assert.strictEqual(C.setCell(doc, 0, 0, 5), doc, '筆刷不是字串也一樣原樣回傳');
+}
+
 console.log('wave-codec.test.js OK');

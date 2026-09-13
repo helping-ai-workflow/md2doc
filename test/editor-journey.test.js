@@ -12671,6 +12671,199 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8h a rail press with the rename field open is not eaten, and its hand-back cannot name a key that is gone — OK');
     }
+
+    // T8i — the entry affordance, at the scroll position the toolbar owns.
+    //
+    // `.ed-wave-edit-btn` is `z-index: 12` and `.ed-toolbar` is `z-index: 101`,
+    // so a button placed above the bar's band is not near the toolbar — it is
+    // UNDER it, painted and hit-tested by the bar. The floor was `4` instead of
+    // `--ed-toolbar-h`, and measured at 1200x800 with a 180px diagram scrolled
+    // to `r.top = -60` the button drew at `top: 4`, `elementFromPoint` on its
+    // own centre answered `DIV.ed-toolbar`, and a real click left the editor
+    // closed. With no keyboard way in (see the CHANGELOG's Known issues), that
+    // scroll position had ZERO entry points and nothing on screen said why.
+    //
+    // The roster row two files over pins that this affordance is `position:
+    // fixed` and is raised/hidden on scroll; neither of those can see STACKING,
+    // which is the structural reason five review rounds walked past it.
+    {
+      const TALL_MD = [
+        '# W', '',
+      ].concat(Array.from({ length: 24 }, (_, i) => 'Filler paragraph ' + (i + 1) + '.\n'))
+        .concat([
+          '```wavedrom',
+          '{ signal: [',
+          "  { name: 'clk', wave: 'p....' },",
+          "  ['bus',",
+          "    { name: 'req', wave: '0.1.0' },",
+          "    { name: 'dat', wave: 'x.3.x', data: ['D'] }",
+          '  ],',
+          "  { name: 'ack', wave: '.0..1' },",
+          "  { name: 'gap', wave: '01|10' },",
+          '  {}',
+          '] }',
+          '```', '',
+        ]).concat(Array.from({ length: 24 },
+          (_, i) => 'Trailing paragraph ' + (i + 1) + '.\n'))
+        .concat(['Tail para two.', '']).join('\n');
+      // Filler on BOTH sides on purpose: with text only above it, the diagram
+      // sits near the end of the document and the page runs out of scroll
+      // before its top edge can reach the bar — measured, it stopped at
+      // `top: 318` against a 44px inset, and the row would have been asserting
+      // nothing.
+      const ctx = await newPage(TALL_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      await new Promise((r) => setTimeout(r, 400));
+      const toolbarH = await ctx.page.evaluate(() => parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--ed-toolbar-h')) || 0);
+      assert.ok(toolbarH > 0, 'T8i 前提失敗：--ed-toolbar-h 要有值。Got ' + toolbarH);
+
+      // Scroll until the diagram's TOP edge has gone under the bar while most
+      // of it is still on screen — the position a reader passes through on the
+      // way down the document.
+      const placed = await ctx.page.evaluate((want) => {
+        const el = document.querySelector('.wavedrom-diagram');
+        const before = el.getBoundingClientRect();
+        window.scrollBy(0, before.top - want);
+        const after = el.getBoundingClientRect();
+        return { top: Math.round(after.top), bottom: Math.round(after.bottom),
+                 height: Math.round(after.height) };
+      }, -20);
+      assert.ok(placed.top < toolbarH,
+        'T8i 前提失敗：圖的上緣要真的進到工具列那一帶。Got ' + JSON.stringify(placed));
+      assert.ok(placed.bottom > toolbarH + 40,
+        'T8i 前提失敗：圖還要看得見一大半，滑鼠才碰得到它。Got ' + JSON.stringify(placed));
+
+      // Hover the part of the diagram that is NOT under the bar.
+      await ctx.page.mouse.move(2, 2);
+      await new Promise((r) => setTimeout(r, 60));
+      const hoverAt = await ctx.page.evaluate((inset) => {
+        const r = document.querySelector('.wavedrom-diagram').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: Math.max(r.top, inset) + 30 };
+      }, toolbarH);
+      await ctx.page.mouse.move(hoverAt.x, hoverAt.y);
+      await ctx.page.waitForSelector('.ed-wave-edit-btn:not([hidden])', { timeout: 5000 });
+      const where = await ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-wave-edit-btn');
+        const r = b.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {
+          top: Math.round(r.top),
+          inset: parseFloat(getComputedStyle(document.documentElement)
+            .getPropertyValue('--ed-toolbar-h')) || 0,
+          hitClass: hit === null ? null : hit.className,
+          hitIsButton: hit !== null && hit.classList.contains('ed-wave-edit-btn'),
+        };
+      });
+      assert.ok(where.top >= where.inset,
+        'T8i: 這顆按鈕不得畫進工具列那一帶 —— 那不是「靠近工具列」，是被工具列蓋住。Got ' +
+        JSON.stringify(where));
+      assert.strictEqual(where.hitIsButton, true,
+        'T8i: 按鈕矩形中心的命中測試必須落在按鈕自己身上，否則滑鼠點不到它。Got ' +
+        JSON.stringify(where));
+
+      // …and the real press opens the editor. The hit test alone is not the
+      // claim: the claim is that the only entry point this feature has works
+      // at this scroll position.
+      await pressClick(ctx.page, '.ed-wave-edit-btn');
+      await new Promise((r) => setTimeout(r, 800));
+      const opened = await ctx.page.evaluate(() => ({
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        state: window.__edTestWaveState().open,
+      }));
+      assert.deepStrictEqual(opened, { overlay: 1, state: true },
+        'T8i: 在這個捲動位置按下去必須真的開起來。Got ' + JSON.stringify(opened));
+      assert.strictEqual(ctx.errs.length, 0, 'T8i: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8i the entry affordance is hittable where the toolbar owns the top — OK');
+    }
+
+    // T8j — the two things the editor used to leave the user to find out.
+    //
+    // (a) Escape is a modal's universal close key and here it DISCARDS a whole
+    // session; the header said only「關閉」. (b) A `reg:` / `assign:` block has
+    // no `signal:` lanes, so the editor opens an empty canvas and ＋ answers
+    //「這個動作沒有改變任何東西」— true, and no explanation. The precedent for
+    // both is one panel over: period / phase / hscale already get a visible row
+    // saying the drawing does not model them.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const head = await ctx.page.evaluate(() => {
+        const hint = document.querySelector('[data-wave-escape-hint]');
+        const close = document.querySelector('.ed-wave-close');
+        return {
+          hint: hint === null ? null : hint.textContent,
+          visible: hint !== null && hint.getClientRects().length > 0,
+          closeTitle: close === null ? null : close.title,
+          nolanes: document.querySelector('.ed-wave-overlay')
+            .getAttribute('data-wave-nolanes'),
+          noticeShown: document.querySelectorAll(
+            '.ed-wave-nolanes:not([hidden])').length,
+        };
+      });
+      assert.ok(head.hint !== null && head.hint.indexOf('Esc') !== -1 &&
+        head.hint.indexOf('Ctrl+Z') !== -1,
+        'T8j: 標題列要說 Esc 會放棄、而且一次 Ctrl+Z 拿得回來。Got ' + JSON.stringify(head));
+      assert.strictEqual(head.visible, true, 'T8j: 而且那句話要看得見');
+      assert.ok(head.closeTitle !== null && head.closeTitle.indexOf('保留') !== -1,
+        'T8j: 關閉那顆要說它是保留的那條路。Got ' + JSON.stringify(head));
+      assert.strictEqual(head.nolanes, '0',
+        'T8j 前提失敗：這個 fixture 有 signal: lane，不該掛「沒有 lane」的牌子');
+      assert.strictEqual(head.noticeShown, 0,
+        'T8j: 有 lane 的文件不得出現那條紅字。Got ' + JSON.stringify(head));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    {
+      // …and a block this editor genuinely cannot edit says so.
+      const REG_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ reg: [',
+        "  { bits: 8, name: 'data' },",
+        "  { bits: 4, name: 'op' }",
+        '] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      const ctx = await newPage(REG_MD);
+      await openWave(ctx.page);
+      const said = await ctx.page.evaluate(() => {
+        const ov = document.querySelector('.ed-wave-overlay');
+        const notice = document.querySelector('.ed-wave-nolanes');
+        return {
+          state: ov.getAttribute('data-wave-state'),
+          lanes: ov.getAttribute('data-wave-lanes'),
+          nolanes: ov.getAttribute('data-wave-nolanes'),
+          hidden: notice === null ? null : notice.hidden,
+          text: notice === null ? null : notice.textContent,
+          visible: notice !== null && notice.getClientRects().length > 0,
+        };
+      });
+      assert.strictEqual(said.state, 'ready',
+        'T8j 前提失敗：`reg:` 區塊是讀得回來的，只是沒有這個編輯器能編的 lane');
+      assert.strictEqual(said.lanes, '0', 'T8j 前提失敗：它要真的是 0 條 lane');
+      assert.strictEqual(said.nolanes, '1', 'T8j: 而且編輯器要知道自己是空的');
+      assert.strictEqual(said.hidden, false, 'T8j: 那條說明要顯示出來');
+      assert.strictEqual(said.visible, true, 'T8j: 而且要真的佔得到畫面');
+      assert.ok(said.text.indexOf('reg:') !== -1 && said.text.indexOf('signal:') !== -1,
+        'T8j: 要指名它是什麼區塊、以及這個編輯器只編 signal:。Got ' +
+        JSON.stringify(said.text));
+      assert.ok(said.text.indexOf('MD 原始碼') !== -1,
+        'T8j: 還要說可以從哪裡改它。Got ' + JSON.stringify(said.text));
+      // ＋ still refuses, and now the refusal is not the only thing on screen.
+      await pressClick(ctx.page, '.ed-wave-lane-add');
+      await new Promise((r) => setTimeout(r, 300));
+      const after = await ctx.page.evaluate(() => ({
+        status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+        notice: document.querySelectorAll('.ed-wave-nolanes:not([hidden])').length,
+      }));
+      assert.strictEqual(after.notice, 1,
+        'T8j: 按過 ＋ 之後那條說明還要在。Got ' + JSON.stringify(after));
+      assert.strictEqual(ctx.errs.length, 0, 'T8j: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8j the header says which key discards, and a block with no editable lanes says so — OK');
+    }
   }
 
   await browser.close();
