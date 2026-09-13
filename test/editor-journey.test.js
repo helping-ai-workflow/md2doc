@@ -10082,6 +10082,13 @@ async function main() {
             const cls = el.getAttribute('class') || '';
             return cls.indexOf('ed-wave-grid') === -1 &&
               cls.indexOf('ed-wave-selection') === -1 &&
+              // Task 8's cell cursor, excluded on the same ground as the
+              // selection box beside it: both are CHROME saying where the next
+              // gesture will land, neither is a brick the engine has an opinion
+              // about. It is drawn from the moment either device touches the
+              // drawing, so leaving it in would make every count below one too
+              // high the instant this row's own `paintCell` runs.
+              cls.indexOf('ed-wave-cursor') === -1 &&
               cls.indexOf('ed-wave-gap') === -1 &&
               cls.indexOf('ed-wave-buslabel') === -1 &&
               cls.indexOf('ed-wave-edge') === -1;
@@ -11833,6 +11840,389 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T7j: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T7j the revert-commit Escape hands back the redo branch too — OK');
+    }
+
+    // ── Task 8: the keyboard ───────────────────────────────────────────
+    //
+    // v3.3.0's backlog carried FOUR accessibility defects with one cause — the
+    // interaction surface was designed without the keyboard and the keyboard
+    // was added afterwards — and this batch produced a fifth and a sixth of the
+    // same family. The rows below are the four questions that family is always
+    // asking: can it be OPENED, can the surface itself be OPERATED, does a
+    // repaint leave the keyboard somewhere the user can see, and does the way
+    // out land anywhere at all.
+
+    // T8a — the drawing takes a keyboard cursor, and one keystroke paints where
+    // that cursor is.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const at = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          count: document.querySelectorAll('[data-ed-wave-cursor]').length,
+          published: ov.getAttribute('data-wave-cursor'),
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      const opened = await at();
+      assert.strictEqual(opened.cell, null,
+        'T8a 前提失敗：還沒有人按鍵盤，畫布上不該先有一個游標。Got ' + JSON.stringify(opened));
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 200));
+      const entered = await at();
+      assert.strictEqual(entered.cell, '0,0',
+        'T8a: 第一下方向鍵是「進畫布」，停在 0,0，不得順便移動一格。Got ' +
+        JSON.stringify(entered));
+      assert.strictEqual(entered.key, 'canvas',
+        'T8a: 進了畫布，鍵盤就要真的落在畫布上。Got ' + JSON.stringify(entered));
+      assert.strictEqual(entered.count, 1,
+        'T8a: 游標只能有一個。Got ' + JSON.stringify(entered));
+      assert.strictEqual(entered.published, entered.cell,
+        'T8a: overlay 公布的游標位置與畫出來的那一格必須是同一個答案。Got ' +
+        JSON.stringify(entered));
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual((await at()).cell, '0,1', 'T8a: 右鍵走一個 cycle');
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      const walked = await at();
+      assert.strictEqual(walked.cell, '3,1',
+        'T8a: 下鍵走 lane。Got ' + JSON.stringify(walked));
+      const row = await ctx.page.evaluate(() => Array.from(
+        document.querySelectorAll('.ed-wave-lane-row.is-selected'))
+        .map((el) => el.getAttribute('data-lane')));
+      assert.deepStrictEqual(row, ['3'],
+        'T8a: lane 列表要跟著游標亮，否則使用者只能從畫布上猜自己在第幾條。Got ' +
+        JSON.stringify(row));
+
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const painted = await ctx.page.evaluate(() => ({
+        wave3: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-3'),
+        brush: document.querySelector('.ed-wave-brush.is-on').getAttribute('data-brush'),
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        patch: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-patch'),
+      }));
+      assert.strictEqual(painted.wave3, '.10.1',
+        'T8a: 電位要落在游標那一格（ack 的 cycle 1）。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.brush, '1',
+        'T8a: 那個鍵也要把筆刷選起來。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.gestures, '1',
+        'T8a: 一個按鍵是一個手勢。Got ' + JSON.stringify(painted));
+      assert.strictEqual(painted.patch, 'ok',
+        'T8a: 那個手勢自己就要產出 patch。Got ' + JSON.stringify(painted));
+      const after = await at();
+      assert.strictEqual(after.cell, '3,1',
+        'T8a: 重畫過後游標要留在原地。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.key, 'canvas',
+        'T8a: 重畫換掉整個 <svg>，鍵盤不得跟著掉到 body 上 —— F7 / T6h 同一類。Got ' +
+        JSON.stringify(after));
+
+      const md = await saveAndRead(ctx);
+      assert.ok(md.indexOf("wave: '.10.1'") !== -1,
+        'T8a: 鍵盤畫的東西必須跟滑鼠畫的一樣寫得回檔案。Got:\n' + md);
+      assert.strictEqual(ctx.errs.length, 0, 'T8a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8a the drawing takes a keyboard cursor and one keystroke paints where it is — OK');
+    }
+    // T8b — Shift+←/→ selects a run along the lane, and ONE keystroke paints
+    // all of it.
+    for (const extend of [true, false]) {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const cell = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return c === null ? null : c.getAttribute('data-cell');
+      });
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      assert.strictEqual(await cell(), '3,1',
+        'T8b 前提失敗：兩半都必須從同一格出發，否則它們比的不是同一件事');
+
+      if (extend) {
+        await ctx.page.keyboard.down('Shift');
+        for (let i = 0; i < 3; i++) {
+          await ctx.page.keyboard.press('ArrowRight');
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        await ctx.page.keyboard.up('Shift');
+        await new Promise((r) => setTimeout(r, 150));
+        assert.strictEqual(await cell(), '3,4',
+          'T8b: Shift+→ 也要把游標帶過去，選取不是獨立於游標的第二個東西');
+        const span = await ctx.page.evaluate(() => {
+          const svg = document.querySelector('.ed-wave-canvas');
+          const box = document.querySelector('.ed-wave-selection');
+          const cw = Number(svg.getAttribute('width')) /
+            Number(svg.getAttribute('data-cycle-count'));
+          return box === null ? null : {
+            cycles: Number(box.getAttribute('width')) / cw,
+            lane: Number(box.getAttribute('y')) /
+              (Number(svg.getAttribute('height')) / Number(svg.getAttribute('data-lane-count'))),
+          };
+        });
+        assert.deepStrictEqual(span, { cycles: 4, lane: 3 },
+          'T8b: 選取框必須真的蓋住那四個 cycle、而且在游標那一條 lane 上。Got ' +
+          JSON.stringify(span));
+      }
+
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const wave3 = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-3'));
+      // MEASURED in this session against the pinned codec: `.0..1` painted at
+      // cycle 1 ALONE comes back `.10.1` — the `0` is written out explicitly at
+      // cycle 2 so the cycles after the brush keep the level they had — and
+      // painted across cycles 1–4 it is `.1...`. Both halves of the walk are
+      // run because a build that ignored Shift still gets the first two
+      // characters right, and a row that only asserted those would be green on
+      // it.
+      assert.strictEqual(wave3, extend ? '.1...' : '.10.1',
+        'T8b(' + (extend ? 'Shift 選一段' : '單格') + '): 畫出來的範圍不對。Got ' +
+        JSON.stringify(wave3));
+      assert.strictEqual(ctx.errs.length, 0, 'T8b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+    }
+    console.log('journey: wave/T8b Shift+arrow selects a run and one keystroke paints all of it — OK');
+    // T8c — the cursor survives every repaint, is clamped by the document it
+    // sits on, and is scrolled back into the clip when it walks off it.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const at = () => ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          published: ov.getAttribute('data-wave-cursor'),
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+          lanes: ov.getAttribute('data-wave-lanes'),
+          cycles: ov.getAttribute('data-wave-cycles'),
+          scrollLeft: document.querySelector('.ed-wave-canvas-wrap').scrollLeft,
+        };
+      });
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      for (let i = 0; i < 5; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const homed = await at();
+      assert.strictEqual(homed.scrollLeft, 0, 'T8c 前提失敗：還沒往右走，欄位不該先捲過');
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 200));
+      const bottom = await at();
+      assert.strictEqual(bottom.cell, '5,4',
+        'T8c 前提失敗：要走到最後一條 lane 的最後一個 cycle。Got ' + JSON.stringify(bottom));
+      // The drawing is wider than its column at this viewport (MEASURED in this
+      // session: clientWidth 230 against a 240px drawing at 5 cycles), so the
+      // last cycle is off the clip and walking onto it has to bring the view.
+      assert.ok(bottom.scrollLeft > 0,
+        'T8c: 游標走出欄位的裁切範圍時必須把畫面帶過去 —— 否則鍵盤游標在一個' +
+        '使用者看不到的地方。Got ' + JSON.stringify(bottom));
+
+      // The lane the cursor is standing on is removed underneath it.
+      await pressClick(ctx.page, '.ed-wave-lane-remove[data-focus-key="lane-remove-5"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const shrunk = await at();
+      assert.strictEqual(shrunk.lanes, '5', 'T8c 前提失敗：那一條 lane 要真的被刪掉');
+      assert.strictEqual(shrunk.cell, '4,4',
+        'T8c: 文件變短了，游標要被夾回最後一條 lane，不能指在不存在的列上。Got ' +
+        JSON.stringify(shrunk));
+      assert.strictEqual(shrunk.published, shrunk.cell,
+        'T8c: 公布的位置與畫出來的那一格不得分家。Got ' + JSON.stringify(shrunk));
+      assert.notStrictEqual(shrunk.tag, 'BODY',
+        'T8c: 刪掉一條 lane 之後鍵盤不得掉到 body 上。Got ' + JSON.stringify(shrunk));
+      assert.strictEqual(shrunk.inOverlay, true,
+        'T8c: 鍵盤必須還在 dialog 裡。Got ' + JSON.stringify(shrunk));
+
+      // The pointer and the keyboard are the same cursor.
+      await paintCell(ctx.page, 2, 2, 'x');
+      const clicked = await at();
+      assert.strictEqual(clicked.cell, '2,2',
+        'T8c: 用滑鼠按過的那一格就是鍵盤接下來會畫的那一格。Got ' + JSON.stringify(clicked));
+      assert.strictEqual(clicked.key, 'canvas',
+        'T8c: 按過畫布之後鍵盤就在畫布上。Got ' + JSON.stringify(clicked));
+
+      // …and a toolbar cycle operation acts on the keyboard's own selection.
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 200));
+      await pressClick(ctx.page, '.ed-wave-cycle-delete');
+      await new Promise((r) => setTimeout(r, 400));
+      const cut = await at();
+      assert.strictEqual(cut.cycles, '4',
+        'T8c: 工具列的「刪除 cycle」必須吃得到鍵盤做出來的選取 —— 在這之前只有拖曳' +
+        '做得出選取，這顆按鈕對鍵盤使用者是死的。Got ' + JSON.stringify(cut));
+      assert.strictEqual(cut.cell, '2,3',
+        'T8c: cycle 少了一個，游標要被夾回去。Got ' + JSON.stringify(cut));
+      assert.notStrictEqual(cut.tag, 'BODY',
+        'T8c: 按完工具列按鈕鍵盤不得掉到 body 上。Got ' + JSON.stringify(cut));
+      assert.strictEqual(ctx.errs.length, 0, 'T8c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8c the cell cursor survives every repaint, and is clamped and scrolled into view — OK');
+    }
+    // T8d — Escape is layered: the rail's rename field first, the editor
+    // second. Before this, Escape at that field ran the editor's own
+    // `close('escape')`, which DISCARDS — so backing out of a half-typed group
+    // name threw away every gesture of the session.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      const painted = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0'));
+      assert.strictEqual(painted, '1p...',
+        'T8d 前提失敗：這一列要先有一個真的會被丟掉的手勢。Got ' + JSON.stringify(painted));
+
+      // Tab all the way to the rail tag — the group rename is reachable by
+      // keyboard, which is how this row presses it.
+      let walked = 0;
+      for (; walked < 60; walked++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-1') break;
+      }
+      assert.ok(walked < 60, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const opened = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+      }));
+      assert.strictEqual(opened.input, 1,
+        'T8d 前提失敗：Enter 要把群組名稱變成可以打字的欄位。Got ' + JSON.stringify(opened));
+      assert.strictEqual(opened.key, 'group-input-1',
+        'T8d 前提失敗：而且鍵盤要落在那個欄位裡。Got ' + JSON.stringify(opened));
+
+      await ctx.page.keyboard.type('ZZ');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 400));
+      const first = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        overlay: document.querySelectorAll('.ed-wave-overlay').length,
+        title: document.querySelector('.ed-wave-group')
+          ? document.querySelector('.ed-wave-group').textContent : null,
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        wave0: document.querySelector('.ed-wave-canvas') === null ? null
+          : document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
+        state: window.__edTestWaveState(),
+      }));
+      assert.strictEqual(first.input, 0, 'T8d: 第一次 Escape 關掉子面板');
+      assert.strictEqual(first.overlay, 1,
+        'T8d: 編輯器本身要還在 —— 取消一次改名不是取消整個 session。Got ' +
+        JSON.stringify(first));
+      assert.strictEqual(first.title, 'bus',
+        'T8d: 取消掉的名字不得留下來。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.key, 'group-1',
+        'T8d: 欄位收掉之後鍵盤要回到它蓋住的那顆鈕上。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.wave0, '1p...',
+        'T8d: 而且這個 session 畫過的東西一筆都不能少。Got ' + JSON.stringify(first));
+      assert.strictEqual(first.state.open, true, 'T8d: 頁面自己也要認為編輯器還開著');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 800));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-overlay').length), 0,
+        'T8d: 第二次 Escape 才關編輯器');
+      assert.strictEqual(ctx.errs.length, 0, 'T8d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8d Escape closes the rename field first and the editor second — OK');
+    }
+    // T8e — the editor opens from the keyboard, and leaving it hands the
+    // keyboard back to the block it came from instead of stranding it on BODY.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.waitForSelector('.wavedrom-diagram');
+      await new Promise((r) => setTimeout(r, 300));
+      // A block selection, then walked with the keyboard onto the diagram.
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.click('.ed-block[data-block-id="0"]');
+      await ctx.page.click('.ed-block[data-block-id="2"]');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('ArrowUp');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 250));
+      const standing = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        return { type: ae.getAttribute ? ae.getAttribute('data-block-type') : null,
+          selected: document.querySelectorAll('.ed-block.ed-selected').length };
+      });
+      assert.strictEqual(standing.type, 'code',
+        'T8e 前提失敗：鍵盤要站在那個 wavedrom 區塊上。Got ' + JSON.stringify(standing));
+
+      await ctx.page.keyboard.press('Enter');
+      await ctx.page.waitForSelector('.ed-wave-overlay', { timeout: 5000 });
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.activeElement.className), 'ed-wave-panel',
+        'T8e: 用鍵盤開起來的編輯器，鍵盤也要在 dialog 裡');
+
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-canvas',
+        (el) => el.getAttribute('data-wave-0')), '1p...',
+        'T8e: 從頭到尾沒有碰滑鼠，波形一樣要畫得上去');
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 1500));
+      const back = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        return {
+          overlay: document.querySelectorAll('.ed-wave-overlay').length,
+          tag: ae ? ae.tagName : null,
+          type: ae && ae.getAttribute ? ae.getAttribute('data-block-type') : null,
+          selected: document.querySelectorAll('.ed-block.ed-selected').length,
+          onSelected: ae !== null && ae.classList !== undefined &&
+            ae.classList.contains('ed-selected'),
+        };
+      });
+      assert.strictEqual(back.overlay, 0, 'T8e 前提失敗：Escape 要真的關掉編輯器');
+      assert.notStrictEqual(back.tag, 'BODY',
+        'T8e: v3.3.0 backlog 第 6 項的同類缺陷 —— 離開編輯器不得把鍵盤丟在 BODY 上。Got ' +
+        JSON.stringify(back));
+      assert.strictEqual(back.type, 'code',
+        'T8e: 鍵盤要回到它進來時站的那個區塊。Got ' + JSON.stringify(back));
+      assert.strictEqual(back.onSelected, true,
+        'T8e: 而且要看得見 —— .ed-block:focus 沒有外框，藍底才是這個編輯器對「鍵盤在這裡」' +
+        '的表示法。Got ' + JSON.stringify(back));
+
+      // …which is exactly the state Enter opens from, so the way out is the
+      // way back in.
+      await ctx.page.keyboard.press('Enter');
+      await ctx.page.waitForSelector('.ed-wave-overlay', { timeout: 5000 });
+      assert.strictEqual(ctx.errs.length, 0, 'T8e: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8e the editor opens from the keyboard and gives the keyboard back on the way out — OK');
     }
   }
 
