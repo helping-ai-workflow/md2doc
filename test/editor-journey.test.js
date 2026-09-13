@@ -12066,8 +12066,10 @@ async function main() {
       assert.strictEqual(shrunk.cell, '4,4',
         'T8c: 文件變短了，游標要被夾回最後一條 lane，不能指在不存在的列上。Got ' +
         JSON.stringify(shrunk));
-      assert.strictEqual(shrunk.published, shrunk.cell,
-        'T8c: 公布的位置與畫出來的那一格不得分家。Got ' + JSON.stringify(shrunk));
+      assert.strictEqual(shrunk.published, shrunk.cell === null ? '' : shrunk.cell,
+        'T8c: overlay 公布的位置與【真的畫出來的】那一格必須是同一個決定 —— 公布值' +
+        '現在是在畫 rect 的那個分支裡算出來的，不是另外從 cursor 讀一次。Got ' +
+        JSON.stringify(shrunk));
       assert.notStrictEqual(shrunk.tag, 'BODY',
         'T8c: 刪掉一條 lane 之後鍵盤不得掉到 body 上。Got ' + JSON.stringify(shrunk));
       assert.strictEqual(shrunk.inOverlay, true,
@@ -12122,6 +12124,60 @@ async function main() {
         JSON.stringify(beforeMove) + ' after=' + JSON.stringify(moved.names));
       assert.deepStrictEqual(moved.rows, ['1'],
         'T8c: rail 的高亮也要一起走。Got ' + JSON.stringify(moved));
+
+      // …and BACK again, which is where the first attempt at this broke. It
+      // swapped the two indexes on the way out and nothing swapped them back,
+      // so ▲ then Ctrl+Z left both marks one row off — pointing at the
+      // neighbour, with nothing on screen to say so — and the next brush key
+      // painted a lane the user was not looking at. The marks are carried by
+      // lane IDENTITY now, through the one funnel every store movement takes,
+      // so undo needs no rule of its own.
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 500));
+      const undoneMove = await ctx.page.evaluate(() => {
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return {
+          cell: c === null ? null : c.getAttribute('data-cell'),
+          names: Array.from(document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value),
+        };
+      });
+      assert.deepStrictEqual(undoneMove.names, beforeMove,
+        'T8c 前提失敗：Ctrl+Z 要真的把 lane 順序放回去。Got ' + JSON.stringify(undoneMove));
+      assert.strictEqual(undoneMove.cell, '2,3',
+        'T8c: 搬回去了，游標也要跟著回去。Got ' + JSON.stringify(undoneMove));
+      assert.strictEqual(undoneMove.names[2], beforeMove[2],
+        'T8c: 游標那一列還是同一條 lane');
+
+      // The assertion that actually costs something: the next brush key has to
+      // edit THAT lane. A cursor one row off looks identical on screen.
+      const paintedRow = await ctx.page.evaluate(() => {
+        // A Tab would do this too — the drawing is a tab stop — but it is 30
+        // controls away from the button the ▲ left the keyboard on.
+        document.querySelector('.ed-wave-canvas').focus();
+        const svg = document.querySelector('.ed-wave-canvas');
+        const n = Number(svg.getAttribute('data-lane-count'));
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(svg.getAttribute('data-wave-' + i));
+        return out;
+      });
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 500));
+      const afterPaint = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const n = Number(svg.getAttribute('data-lane-count'));
+        const out = [];
+        for (let i = 0; i < n; i++) out.push(svg.getAttribute('data-wave-' + i));
+        return out;
+      });
+      const changed = afterPaint.map((w, i) => (w === paintedRow[i] ? null : i))
+        .filter((i) => i !== null);
+      assert.deepStrictEqual(changed, [2],
+        'T8c: 搬移再 undo 之後，下一個電位鍵必須落在游標【看起來】在的那一條 lane 上，' +
+        '不是它的鄰居。before=' + JSON.stringify(paintedRow) + ' after=' +
+        JSON.stringify(afterPaint));
       assert.strictEqual(ctx.errs.length, 0, 'T8c: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8c the cell cursor survives every repaint, and is clamped and scrolled into view — OK');
@@ -12191,19 +12247,17 @@ async function main() {
         wave0: document.querySelector('.ed-wave-canvas') === null ? null
           : document.querySelector('.ed-wave-canvas').getAttribute('data-wave-0'),
       }));
+      // Order matters here, and it is the order of what a wrong state can
+      // still satisfy. First the two premises — the undo happened and nothing
+      // closed — because without them the delivery check below would compare
+      // `1p...` with `1p...` and pass on a page where nothing happened at all.
       assert.strictEqual(undone.overlay, 1, 'T8d 前提失敗：undo 不關編輯器');
       assert.strictEqual(undone.wave0, 'p....',
         'T8d 前提失敗：那一下 Ctrl+Z 要真的退掉剛剛畫的那一格。Got ' + JSON.stringify(undone));
-      assert.strictEqual(undone.input, 0,
-        'T8d: 重畫會把改名欄位拆掉，所以它必須先被收掉，而不是留一個掉在文件外的元素。Got ' +
-        JSON.stringify(undone));
-      assert.notStrictEqual(undone.tag, 'BODY',
-        'T8d: 改名到一半按 Ctrl+Z，鍵盤不得掉到 body 上。Got ' + JSON.stringify(undone));
-      assert.strictEqual(undone.key, 'group-1',
-        'T8d: 而且要回到那個欄位蓋住的鈕上。Got ' + JSON.stringify(undone));
-      // …and the keyboard is not merely SOMEWHERE — the next keystroke has to
-      // actually arrive. This is the half that the wedge failed: focus read
-      // BODY, which looks survivable, and then every key was swallowed.
+      // Then DELIVERY, before anything about where the keyboard is: a focus
+      // that reads BODY looks survivable, and the wedge was that every key
+      // after it was swallowed. This is the assertion that survives a misleading
+      // state, so it goes first of the two.
       await ctx.page.keyboard.down('Control');
       await ctx.page.keyboard.press('KeyY');
       await ctx.page.keyboard.up('Control');
@@ -12213,6 +12267,15 @@ async function main() {
       assert.strictEqual(redone, '1p...',
         'T8d: 下一個按鍵必須還送得到頁面上 —— 卡死的那個版本在這裡什麼都收不到。Got ' +
         JSON.stringify(redone));
+      // …and only then where it is. Both halves are real: this one fails on a
+      // build that delivers keys but leaves the cursor nowhere visible.
+      assert.strictEqual(undone.input, 0,
+        'T8d: 重畫會把改名欄位拆掉，所以它必須先被收掉，而不是留一個掉在文件外的元素。Got ' +
+        JSON.stringify(undone));
+      assert.notStrictEqual(undone.tag, 'BODY',
+        'T8d: 改名到一半按 Ctrl+Z，鍵盤不得掉到 body 上。Got ' + JSON.stringify(undone));
+      assert.strictEqual(undone.key, 'group-1',
+        'T8d: 而且要回到那個欄位蓋住的鈕上。Got ' + JSON.stringify(undone));
 
       // Re-open the field (the keyboard is back on its button) for the
       // layering half.
@@ -12498,6 +12561,115 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T8g: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8g a block\'s own buttons keep their own Enter — OK');
+    }
+
+    // T8h — the rename field and the rail it lives in.
+    //
+    // Two states that both used to end on `document.body` inside a modal. The
+    // field's teardown ran a full `render()`, i.e. a rebuild of the whole rail,
+    // and a rebuild inside a `blur` handler destroys the control the user is
+    // pressing: the mouseup lands on a fresh element, no `click` fires, the
+    // press does nothing, and focus is left nowhere. And the destination the
+    // teardown nominates is `group-<first lane's row>`, a key an insert above
+    // the group renumbers — so the nomination could name something the repaint
+    // never brought back.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      let walked = 0;
+      for (; walked < 60; walked++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-1') break;
+      }
+      assert.ok(walked < 60, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const open = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-group-input').length,
+        lanes: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes'),
+      }));
+      assert.strictEqual(open.input, 1, 'T8h 前提失敗：改名欄位要開著');
+
+      // The press the old teardown ate.
+      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="0"]');
+      await new Promise((r) => setTimeout(r, 600));
+      const pressed = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          lanes: ov.getAttribute('data-wave-lanes'),
+          input: document.querySelectorAll('.ed-wave-group-input').length,
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      assert.strictEqual(pressed.lanes, String(Number(open.lanes) + 1),
+        'T8h: 改名欄位開著時按下的那顆 ＋ 必須真的加一條 lane —— 被吃掉的那一版' +
+        '按了完全沒反應，而使用者要再按一次才知道。Got ' + JSON.stringify(pressed));
+      assert.strictEqual(pressed.input, 0, 'T8h: 而且那個欄位要收掉');
+      assert.notStrictEqual(pressed.tag, 'BODY',
+        'T8h: 鍵盤不得掉到 body 上。Got ' + JSON.stringify(pressed));
+      assert.strictEqual(pressed.inOverlay, true,
+        'T8h: 鍵盤要留在 dialog 裡。Got ' + JSON.stringify(pressed));
+
+      // …and the nominated destination can be renumbered out from under the
+      // teardown. The ＋ above has just moved the group from `from=1` to
+      // `from=2`; rename it, type, and undo THAT insert — the key the teardown
+      // names goes back to `group-1` while the field's own key was `group-2`.
+      let toGroup = 0;
+      for (; toGroup < 70; toGroup++) {
+        await ctx.page.keyboard.press('Tab');
+        const k = await ctx.page.evaluate(() => {
+          const ae = document.activeElement;
+          return ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null;
+        });
+        if (k === 'group-2') break;
+      }
+      assert.ok(toGroup < 70, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-group-input').length), 1,
+        'T8h 前提失敗：移位之後的群組也要開得起來');
+      await ctx.page.keyboard.type('ZZ');
+      await ctx.page.keyboard.down('Control');
+      await ctx.page.keyboard.press('KeyZ');
+      await ctx.page.keyboard.up('Control');
+      await new Promise((r) => setTimeout(r, 600));
+      const renumbered = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        const ov = document.querySelector('.ed-wave-overlay');
+        return {
+          overlay: document.querySelectorAll('.ed-wave-overlay').length,
+          input: document.querySelectorAll('.ed-wave-group-input').length,
+          lanes: ov.getAttribute('data-wave-lanes'),
+          tag: ae ? ae.tagName : null,
+          inOverlay: ov.contains(ae),
+        };
+      });
+      assert.strictEqual(renumbered.overlay, 1, 'T8h 前提失敗：undo 不關編輯器');
+      assert.strictEqual(renumbered.lanes, open.lanes,
+        'T8h 前提失敗：那一下 Ctrl+Z 要真的退掉剛剛加的那條 lane');
+      assert.strictEqual(renumbered.input, 0, 'T8h: 欄位要收掉');
+      assert.notStrictEqual(renumbered.tag, 'BODY',
+        'T8h: 指定的落點被重新編號掉時，鍵盤要退回 dialog 自己，不是 body。Got ' +
+        JSON.stringify(renumbered));
+      assert.strictEqual(renumbered.inOverlay, true,
+        'T8h: 而且要在 dialog 裡面。Got ' + JSON.stringify(renumbered));
+      // …and keys still arrive: Escape closes it.
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 700));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-overlay').length), 0,
+        'T8h: 之後的按鍵還要送得到 —— Escape 要關得掉編輯器');
+      assert.strictEqual(ctx.errs.length, 0, 'T8h: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8h a rail press with the rename field open is not eaten, and its hand-back cannot name a key that is gone — OK');
     }
   }
 
