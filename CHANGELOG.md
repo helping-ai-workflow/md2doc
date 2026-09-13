@@ -3,9 +3,9 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.4.0 — 未發布（批次 1＋2＋3／3）
+## v3.4.0 — 2026-09-13（批次 1＋2＋3／3）
 
-**這一版還沒發，而下面列的是它的全部三批。** v3.4.0 的設計刻意把工作切成三批，
+**下面列的是這一版的全部三批。** v3.4.0 的設計刻意把工作切成三批，
 任何一批做完停下來都是一個完整可發的狀態：批次 1 是「使用者回報的新缺陷 ＋ 儲存按鈕
 ＋ v3.3.0 留下的 13 項 backlog」，批次 2 是 drawio 內嵌檢視，批次 3 是 wavedrom 的
 GUI 波形編輯。**三批都寫完了。**
