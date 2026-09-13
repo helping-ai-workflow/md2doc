@@ -10,6 +10,9 @@ const os = require('os');
 const puppeteer = require('puppeteer');
 const { createEditorServer } = require('../lib/editor/server.js');
 const { renderMarkdown } = require('../lib/md2doc.js');
+// The wave rows that ask about the SAVED block parse it back instead of
+// matching its bytes — see `waveLaneNames()` below for what that bought.
+const waveCodec = require('../lib/editor/wave-codec.js');
 
 const CLIENT_SRC = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
 
@@ -9959,6 +9962,32 @@ async function main() {
       return at;
     };
 
+    // The saved block, parsed back: the lane names in the codec's display order.
+    //
+    // For rows that ask a question about the DOCUMENT — how many lanes are in
+    // the file? — rather than about the bytes. Matching emitted text with a
+    // quote character baked into the pattern is exactly how T7d broke: it
+    // asserted `md.match(/name: ""/g).length === 1`, and when the writer
+    // learned to follow the source file's own quote style (v3.4.0's final
+    // review, RESIDUE 5) this single-quoted fixture started producing
+    // `name: ''` — zero matches, red row, and the PRODUCT was right. The fence
+    // markers are the author's bytes, not the writer's, so finding the block by
+    // them is stable in a way the member spelling is not.
+    const waveLaneNames = (md) => {
+      const block = md.match(/```wavedrom\n([\s\S]*?)\n```/);
+      assert.ok(block !== null,
+        'waveLaneNames 前提失敗：存回去的檔案裡要有一個 wavedrom 區塊。Got:\n' + md);
+      const parsed = waveCodec.parseSource(block[1]);
+      assert.strictEqual(parsed.ok, true,
+        'waveLaneNames 前提失敗：寫回去的區塊必須還解析得回來。Got ' +
+        JSON.stringify(parsed) + '\n' + md);
+      return waveCodec.lanePaths(parsed.doc).map((path) => {
+        let v = parsed.doc;
+        for (const seg of path) v = v[seg];
+        return (v === null || typeof v !== 'object') ? null : v.name;
+      });
+    };
+
     // A real press-drag-release across a range of cycles.
     const dragCells = async (page, lane, from, to) => {
       const a = await cellPoint(page, lane, from);
@@ -11267,7 +11296,13 @@ async function main() {
       // 'p....' 的第 2 格塗成 1，第 3 格的重複符號因此失去它在重複的東西，
       // codec 把它展開回 p —— 這個值是本 session 直接跑 wave-store 量到的，
       // 不是推算的。
-      assert.ok(md.indexOf("wave: 'p.1p.'") !== -1,
+      // The VALUE is the assertion; the quote character is not. A replaced
+      // span inherits the quote of the bytes it replaced, so this pattern is
+      // true of this fixture today either way — but T7d was pinned to an
+      // emitted quote and broke the moment the writer got smarter, so every
+      // wave-text assertion in this file now matches the value and lets the
+      // file spell it however it spells it.
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(md),
         'T7a: 改動必須落到磁碟，而且是就地改那一個字串。Got:\n' + md);
       assert.strictEqual(ctx.errs.length, 0, 'T7a: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -11316,7 +11351,7 @@ async function main() {
         'T7b: 拿回來的編輯是一筆真的、還沒存檔的改動');
 
       const md = await saveAndRead(ctx);
-      assert.ok(md.indexOf("wave: 'p.1p.'") !== -1,
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(md),
         'T7b: 拿回來的必須是【畫過的那份】，不是一個空編輯器。Got:\n' + md);
       assert.ok(md.indexOf('// 主時脈') !== -1, 'T7b: 註解一樣要活著');
       assert.notStrictEqual(md, before, 'T7b: 而且它真的跟原檔不一樣');
@@ -11451,9 +11486,20 @@ async function main() {
 
       // 磁碟上只能有寫得回去的那一步。
       const md = await saveAndRead(ctx);
-      const added = md.match(/name: ""/g) || [];
-      assert.strictEqual(added.length, 1,
-        'T7d: 檔案裡只能有第一次插入的那一條 lane。Got:\n' + md);
+      // 問的是【文件】不是位元組：這一列要知道「被拒絕的那一次插入有沒有偷偷
+      // 進檔案」，那是一個關於 lane 數量的問題。原本寫成
+      // `md.match(/name: ""/g).length === 1` —— 雙引號寫死在 pattern 裡 ——
+      // 於是 GUI 改成跟著來源檔的引號風格寫之後，這個通篇單引號的 fixture
+      // 產出 `name: ''`，命中 0 次、整列紅掉，而產品是對的。解析回來之後
+      // 引號、逗號、縮排怎麼變都不影響這個問題的答案。
+      const names = waveLaneNames(md);
+      const blank = names.filter((n) => n === '').length;
+      assert.strictEqual(blank, 1,
+        'T7d: 檔案裡只能有第一次插入的那一條 lane（名字是空字串的那條）。Got ' +
+        JSON.stringify(names) + '\n' + md);
+      assert.strictEqual(names.length, 7,
+        'T7d: 總數必須是原本 6 條加上寫得回去的那一條 —— 被拒絕的第二次不得留下痕跡。Got ' +
+        JSON.stringify(names) + '\n' + md);
       assert.ok(md.indexOf('// 主時脈') !== -1, 'T7d: 註解一樣要活著');
       assert.strictEqual(ctx.errs.length, 0, 'T7d: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -11478,7 +11524,7 @@ async function main() {
       await openWave(ctx.page);
       await paintCell(ctx.page, 0, 2, '1');
       const saved = await saveAndRead(ctx);
-      assert.ok(saved.indexOf("wave: 'p.1p.'") !== -1,
+      assert.ok(/wave: ['"]p\.1p\.['"]/.test(saved),
         'T7e 前提失敗：這一發 Ctrl+S 必須真的把波形寫進磁碟。Got:\n' + saved);
       const afterSave = await ctx.page.evaluate(() => window.__edTestWaveState());
       assert.strictEqual(afterSave.dirty, false,
@@ -11689,7 +11735,7 @@ async function main() {
       const md = await saveAndRead(ctx);
       assert.ok(md.indexOf('EDITED') !== -1,
         'T7g: 被丟掉的 wave session 不得連使用者原本的 redo 一起吃掉。Got:\n' + md);
-      assert.ok(md.indexOf("wave: 'p....'") !== -1,
+      assert.ok(/wave: ['"]p\.\.\.\.['"]/.test(md),
         'T7g: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
       assert.strictEqual(ctx.errs.length, 0, 'T7g: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -11861,7 +11907,7 @@ async function main() {
       const md = await saveAndRead(ctx);
       assert.ok(md.indexOf('EDITED') !== -1,
         'T7j: session 中間存過檔的 Escape 一樣不得吃掉使用者原本的 redo。Got:\n' + md);
-      assert.ok(md.indexOf("wave: 'p....'") !== -1,
+      assert.ok(/wave: ['"]p\.\.\.\.['"]/.test(md),
         'T7j: 而被 Escape 掉的波形不得跟著回來。Got:\n' + md);
       assert.strictEqual(ctx.errs.length, 0, 'T7j: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -11974,7 +12020,7 @@ async function main() {
         JSON.stringify(after));
 
       const md = await saveAndRead(ctx);
-      assert.ok(md.indexOf("wave: '.10.1'") !== -1,
+      assert.ok(/wave: ['"]\.10\.1['"]/.test(md),
         'T8a: 鍵盤畫的東西必須跟滑鼠畫的一樣寫得回檔案。Got:\n' + md);
       assert.strictEqual(ctx.errs.length, 0, 'T8a: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();

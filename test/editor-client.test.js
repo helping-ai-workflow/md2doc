@@ -649,8 +649,13 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
                    { id: 2, type: 'paragraph', startLine: 9, endLine: 9 }];
   const st = { lines: lines0, blocks: blocks0, stack: new UndoStack() };
   // One lane added: the fence BODY (4..6) grows by one line.
+  // The body the GUI would really have produced for「＋ one lane」on this
+  // block: single-quoted, because v3.4.0 made an inserted member follow the
+  // source file's own quote style. Nothing here asserts on the quote — this is
+  // an INPUT to commitRangeEdit — but a fixture that depicts an output format
+  // the product no longer emits is a trap for the next reader.
   const r = commitRangeEdit(st, 4, 6,
-    ['{ signal: [', '  { name: "", wave: "x" },', "  { name: 'a', wave: '01' }", '] }'].join('\n'));
+    ['{ signal: [', "  { name: '', wave: 'x' },", "  { name: 'a', wave: '01' }", '] }'].join('\n'));
   assert.notStrictEqual(r.op, null, 'fixture: the body edit must really commit');
   st.lines = r.lines;
   assert.strictEqual(st.lines.length, 10, 'fixture: the document grew by one line');
