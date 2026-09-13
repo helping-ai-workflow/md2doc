@@ -3,12 +3,12 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.4.0 — 未發布（批次 1＋2／3）
+## v3.4.0 — 未發布（批次 1＋2＋3／3）
 
-**這一版還沒發，而且下面列的是它的前兩批。** v3.4.0 的設計刻意把工作切成三批，
+**這一版還沒發，而下面列的是它的全部三批。** v3.4.0 的設計刻意把工作切成三批，
 任何一批做完停下來都是一個完整可發的狀態：批次 1 是「使用者回報的新缺陷 ＋ 儲存按鈕
 ＋ v3.3.0 留下的 13 項 backlog」，批次 2 是 drawio 內嵌檢視，批次 3 是 wavedrom 的
-GUI 波形編輯。**批次 3 一行都還沒寫。**
+GUI 波形編輯。**三批都寫完了。**
 
 批次 1 是 13 個 task、40 顆 commit（口徑排除 `a499e30`，那是中途機器送修時為了讓進行中
 的 SDD 狀態跨機器存活而補的一顆 bookkeeping commit，記的是 spec／plan／進度檔，不是任何
@@ -25,6 +25,11 @@ GUI 波形編輯。**批次 3 一行都還沒寫。**
 沒有任何一顆被排除。其中 5 顆屬於同一個 task——被引用的 `.drawio` 在磁碟上被改動後重烤
 ——第一顆是機制本身，後四顆是四輪複查的修正；最後那一顆（`6360f19`）**一個運算式都沒改**，
 因為那一輪抓到的三件事全部是「註解或報告寫的話與程式碼不符」。
+
+批次 3 是 8 個 task、34 顆 commit（`8cd2ab6`..`20e078b`，不含這一顆 CHANGELOG 本身），
+沒有任何一顆被排除。**形狀值得說出來：8 顆 `feat`、22 顆 `fix`、2 顆 `test`、2 顆
+`docs`**——每一顆功能後面平均跟著 2.75 輪複查修正，而其中兩顆 `docs` 一個運算式都
+沒改，跟批次 2 最後那一顆同樣是「敘述與程式碼不符」的更正。
 
 批次 1 的方法跟 v3.3.0 一樣不是重讀 diff，而是把每一條 backlog 重新驅動出來再修。過程中有
 **兩條 backlog 條目的形狀描述被證明是錯的**——一條連症狀本體都寫錯（記的是「會產生
@@ -479,11 +484,224 @@ GUI 波形編輯。**批次 3 一行都還沒寫。**
   頁籤列的 script 只會被注入到「開啟當下就 ≥2 頁」的文件裡——這正是「單頁不付多頁代價」
   那條規則的另一面。
 
+### Added（批次 3：wavedrom GUI 波形編輯）
+
+- **滑到一張已渲染的 wavedrom 圖上，圖的右上角會浮出「編輯波形」，按下去開一個圖形
+  介面的時序圖編輯器。** 畫面分兩半：左邊是 md2doc 自己畫的手繪波形，右邊是
+  **wavedrom 引擎本人**渲染同一份文件的預覽。能做的事：11 顆電位筆刷
+  （`0 1 x z p n h l u d =`）、插入／刪除 cycle、複製與兩種貼上（插入、覆蓋）、
+  lane 改名／上下搬移／刪除／在指定位置新增、群組改名、head／foot 文字，外加編輯器
+  自己的復原／重做。
+- **為什麼手繪那一半不是去操作引擎畫出來的 DOM。** md2doc 把 wavedrom pin 在
+  **3.5.0**（`package.json` 的 `dependencies`），而引擎的輸出沒有給外人用的契約——
+  唯一抓得住的把手是 `RenderWaveForm()` 自己編號生成的 id
+  （`wavelane_draw_<lane>_<index>`，`node_modules/wavedrom/lib/render-wave-lane.js`）。
+  建立在那上面的互動會在升版時無聲壞掉，而且壞法是「圖還在、手勢打不中」。所以編輯層
+  畫自己的 SVG，而 `brickOf` 把每一個電位對應到**引擎自己的 brick 符號**——兩邊會不會
+  分歧，正是右邊那個預覽存在的理由。預覽刻意渲染在 index `9000` 而不是 0：
+  `RenderWaveForm(index, …)` 拿 index 去命名 `svgcontent_<i>`／`waves_<i>`／
+  `lanes_<i>`／`gmarks_<i>`，而文件自己那張圖已經佔了 0；程式碼裡記著當時的量測
+  ——`(0, …, notFirstSignal=false)` 240 個重複 id、`(0, …, true)` 20 個、
+  `(9000, …, true)` 0 個。
+- **寫回檔案的是最小 patch，不是重新序列化。** WaveJSON 不是 JSON——真實的 wavedrom
+  區塊會用不加引號的 key、單引號字串、尾逗號、`//` 與 `/* */` 註解，`JSON.parse`
+  這四種全部拒收——所以 `lib/editor/wave-codec.js` 是一支自己寫的遞迴下降 parser，
+  而且它替每一個值記下那個值在原始碼裡的半開區間 `[start, end)`。改一條 lane 的波形
+  就只有那一段位元組被換掉，**作者的縮排、引號字元與註解原封不動**。進來的東西一律
+  不正規化：`0..0` 與 `0...` 在 wavedrom 畫出來不一樣，會「順手整理」的 parser 是在
+  毀資料。
+- **局部改不掉的時候會說出來，不會改寫整個區塊。** 這是這一層唯一允許的失敗方式：
+  `wave-store` 要嘛給出一個只動改過那幾個位元組的 patch，要嘛拒絕；沒有第三條路。
+  拒絕時狀態列先說，接著升起一個 banner 指名它寫不回去的那幾行，等使用者確認——
+  而且那次手勢**不會**被偷偷回捲，畫面上的圖與檔案裡的位元組不一致這件事是明講的。
+- **每一個手勢寫回一次，不是攢一整個 session 再寫。** 拒絕率隨「寫回前累積的結構性
+  op 數」上升，實作端量到 1-3 個 op **8.0%**、1-6 個 op **17.0%**，複查端用自己的
+  產生器獨立量到 **6.6%（266/4000）** 與 **18.8%（2257/12000）**——同一個形狀。
+  那些拒絕是對的（它們取代的是靜默損壞），所以讓它們稀少的辦法是不讓編輯堆起來；
+  堆到第十次編輯才收到的拒絕，使用者得自己二分找出是哪一下。
+- **Escape 丟掉整個 session，而且一次 `Ctrl+Z` 拿得回來。** 丟棄的語意跟 v3.3.0 的
+  其他地方一樣沒有改，改的是「丟掉的東西要停放得回來」——`discardedWaveEdit` 是
+  `discardedBurst`／`discardedRawEdit` 的第三個兄弟，三個互斥（一次只有一個編輯
+  session），`undo()` 依序問過三個再落回一般 undo。session 中間如果落了一次
+  `Ctrl+S`，它的 commit 就不能直接從堆疊上 pop 掉（那會毀掉磁碟被寫成的那個狀態），
+  改成送一顆**還原 commit**：文件回到 session 開始的位置，堆疊只增不減，所以
+  `dirtyDepth` 永遠是正的、不可能從下面穿過零。代價是一顆 `●` 要用一次 `Ctrl+S`
+  清掉——而那是**真的**，磁碟上確實還躺著剛剛被丟棄的那張圖。
+- **整個編輯器只用鍵盤就能操作——但今天要打開它仍然需要一次指標動作**（見下方
+  Known issues，這一條不要讀成「鍵盤支援做完了」）。手繪區有自己的儲存格游標，
+  方向鍵移動、`Shift+方向鍵` 選一段 cycle、按一個筆刷鍵就整段塗完；游標會被畫布
+  重繪與 lane 搬移帶著走（靠的是 store 自己對「哪一條 lane 是哪一條」的回答
+  `laneTrace()`，不是行號——兩份「哪條是哪條」的實作會讓游標畫在一條 lane 上、
+  patch 卻寫進另一條）。從 block selection 按 Enter 開啟的 session，關掉時鍵盤會
+  回到那個 block 上。
+- **這個編輯器是 modal，而「誰擁有畫面」是一個關於狀態的問題，不是關於事件的問題。**
+  舊的問法是「這個事件落在 overlay 裡面嗎」，那答不出來——實測 overlay 剛開起來時
+  `document.activeElement` 是 `document.body`，於是每一個按鍵都打在 body 上，後面
+  那份文件還握著它們。改成 `waveEditorIsModal()` 之後，背後文件的整套編輯手勢
+  （工具列鍵盤模式、block selection 的 Tab／Delete／Backspace、undo／redo、Escape）
+  在 overlay 開著時一律被擋掉，頁面捲動被鎖住，**唯一放行的全域手勢是 `Ctrl+S`**
+  ——它是保護工作的反射動作。`Ctrl+P`／`Ctrl+F`／`Ctrl+A`／`F5` 這個檔案裡本來就
+  沒有 handler，那道閘門是一句裸 `return`、沒有 `preventDefault()`，瀏覽器自己的
+  行為不受影響。
+- **讀不回來的區塊不會假裝可以編。** parse 失敗時開的是一個「這個區塊讀不回來」的
+  面板，印出錯誤訊息、offset、換算成行／列，以及那一行的原文——一個孤零零的 offset
+  不是人能拿來做事的東西。
+
+### Fixed（批次 3；兩條都是 v3.3.0 今天就在出貨的既存缺陷）
+
+這兩條都與波形無關，是做批次 3 時驅動產品、問「螢幕上這份與磁碟上那份到底同不同」
+問出來的。兩條都在 `v3.3.0` 的 tag 上逐字可查：那一版的 `lib/editor/lineops.js` 裡
+`markSaved()` 不收任何參數（`this._savedDepth = this._done.length`），而 `dirtyDepth`
+就是一句減法（`this._done.length - this._savedDepth`）——下面兩條講的正是這兩行。
+
+- **越過存檔點的一次復原，會讓文件回報自己已經存檔了。** 存檔點原本是用 undo 堆疊的
+  **深度**記的：存檔時記下 `_done.length`，之後比較現在的深度等不等於它。深度是可以
+  **從下面穿回來**的——復原到存檔點以下，再做一次編輯，`_done.length` 就又回到那個
+  數字，而那是一條完全不同的歷史分支。四張網同時破：分頁標題的 ● 熄掉、儲存按鈕
+  變灰、`beforeunload` 不再攔你，而「檔案在磁碟上被改過」那張 banner 的 Reload
+  是一句直接的 `location.reload()`——它不會再問一次，就把那份工作丟掉了。
+  修法有兩半。第一，**存檔標記在歷史分岔越過它的那一刻就被作廢**（設成 `null`）
+  ——那一刻精確地就是「深度比標記還淺時發生了一次 `push()`」，也就是 `UndoStack.push()`
+  裡那段新增的判斷。單純的 undo **不**作廢：undo 之後 redo 會把同一批 op 放回去，標記
+  指的還是同一個狀態，所以分岔的不是回捲本身，是取代了被回捲那條分支的那次 push。
+  第二，**問題本身改成是非題**：`isDirty()` 回答「記憶體與磁碟是否不同」這一個布林，
+  而不是一個距離；`dirtyDepth` 留著給診斷與測試，標記作廢時它回一個刻意永遠不等於 0
+  的值。**「不髒」從此只有一個意思：記憶體等於磁碟上那份。** 一個會從下面穿過零的
+  計數器表達不了這句話。
+- **存檔會把「回覆抵達那一刻剛好是什麼狀態」標成已存檔。** 在存檔往返中間按一次
+  `Ctrl+Z`，編輯器就會相信磁碟上那份等於螢幕上這份：● 熄掉、`beforeunload` 不再攔，
+  **而且因為那次存檔剛把檔案的時間戳推新了，「磁碟被別人改過」那道檢查也抓不到**
+  ——關掉分頁，磁碟上留下一筆使用者明確復原掉的編輯。三張網一起失效。
+  修法是**收據**：`saveToken()` 在請求出發**之前**取，記的是「我正要寫進磁碟的是這些
+  位元組」——深度，加上那個深度邊界上那顆 op 的**物件 identity**。單靠深度不夠：
+  使用者可以在往返期間 undo 再重打，堆疊回到同一個深度卻握著不同的 op，實測那個組合
+  會把磁碟從來沒有裝過的位元組標成已存檔。op 物件由每一次 commit 現造，所以 identity
+  是精確的指紋，代價是一個 reference。回覆抵達時 `markSaved(token)` 拿收據去對；對不上
+  就作廢標記而不是硬標，**它唯一會犯的錯是多警告**。
+  這一條修完之後又拆掉了一道自己一度加上去的防護：「比較新的請求送出後就丟掉舊的
+  回覆」。那個前提是錯的——伺服器在 `baseMtimeMs` 對不上時一律回 **409 且什麼都不寫**
+  （`lib/editor/server.js` 的 `/api/save`），而 `mtimeMs` 只有 200 那一支會寫；所以
+  第一個回覆還在路上時送出的第二個請求**必然**帶著過期的基準、**必然** 409、**必然**
+  沒寫到任何東西。**描述磁碟現況的是第一個回覆，丟掉它才是缺陷。** 實測帶著那道防護：
+  打字、`Ctrl+S`、`Ctrl+Z`、`Ctrl+S` → 第一個 200 被丟棄、`markSaved()` 從未執行、
+  文件讀起來是乾淨的而編輯還在磁碟上；連 undo 都不用，連按兩次 `Ctrl+S` 就會讓
+  `mtimeMs` 永遠停在過期值，之後每一次存檔都 409，唯一的出路是 banner 的重新載入。
+
+### Known issues（批次 3）
+
+這一批把測試檔從 41 個加到 **44 個**（新增 `test/wave-codec.test.js`、
+`test/wave-geometry.test.js`、`test/wave-store.test.js`，三個都在 `package.json` 的
+`test` script 裡）；`lib/`、`test/` 與 `package.json` 合計 **+16,008／−145 行**。
+`dependencies` 逐位元組未動——`package.json` 這一批唯一的改動就是把那三個新檔加進
+`test` script。
+寫這一段時實跑並觀察到綠的是 `node test/drawio.test.js`、`node test/wave-codec.test.js`、
+`node test/wave-geometry.test.js`、`node test/wave-store.test.js`，四支 **EXIT=0**；
+`npm test` 與兩支長跑 puppeteer 套件（`editor-client-runtime.test.js`、
+`editor-journey.test.js`）**這一段沒有跑**，所以這裡不宣稱它們的結果。
+
+**可達性——這一條不要讀成「鍵盤支援做完了」。**
+
+- **編輯器開起來之後可以完全用鍵盤操作，但把它打開這件事今天需要一次指標動作。**
+  追蹤名稱 `v3.4.0-followup-keyboard-entry-to-content`。
+  **缺的是什麼**：`.content` 裡面沒有任何東西是鍵盤到得了的。沒有一條鍵盤路徑能把
+  DOM 焦點放到一個 `.ed-block` 上，而那是每一個 block 級手勢的起點狀態。實測（實作端
+  量過、複查端再量過一次）：冷開的頁面上按 Tab，焦點哪裡都不去（被 `client.js` 自己
+  那條「沒有任何東西被 focus」的分支 `preventDefault()` 掉）；在已經 armed 的段落裡
+  按 Tab 被清單縮排接走；冷頁上按 `Shift+ArrowDown`，`stepSelectionFocus()` 因為沒有
+  種子而回 false；從 burst 裡按 Escape 出來，焦點落在 BODY。**block selection 今天
+  只能用 Shift+Click 或指標拖曳生出來。**
+  **它擋住什麼**：(1) 這一批做的 Enter 入口——從 block selection 進得去、從這一批新增
+  的「關掉之後 Enter 再開」也進得去，但**第一次**進去仍然要付一次指標動作；(2) gutter
+  的 `.ed-insert`／`.ed-handle` 都是 `tabindex="-1"`，今天拿不到鍵盤，所以它們的
+  Enter／Space 分歧目前是潛伏的——任何讓 gutter 變成 Tab 可達的修法都會讓那一整類
+  同時轉活，兩者必須一起設計；(3) 其餘每一個 block 級手勢：⠿ 選單、＋ 插入、對選取
+  按 Delete／Backspace，以及原始碼編輯器。
+  **修法必須涵蓋什麼**：冷頁上焦點的種子（大概是第一個 block，或使用者最後碰過的那個）；
+  Tab 在 block 層到底是什麼意思的裁定（今天在兩條分支被刻意吞掉、在第三條被清單縮排
+  接走）；roving `tabindex` 與 `applySelectionClasses()` 的互動（後者會把每一個 block
+  的 `tabindex` 剝掉，因而讓被 focus 的那個失焦）；以及**「被 focus 但沒有被選取」的
+  block 今天完全沒有可見標記**——`.ed-block.ed-selected:focus` 是 `outline: none`，
+  因為底色才是這個編輯器的「鍵盤在這裡」語彙。它還必須保住這一批靠著的兩條既有契約：
+  armed 表面裡的 `Shift+↑↓` 仍然是瀏覽器的文字選取手勢，表格儲存格裡的 Tab 仍然是
+  表格的。
+- **用滑鼠打開的 session，關掉時焦點落在 `document.body`。** 「把鍵盤交回去」
+  （`giveKeyboardBackToWaveBlock()`）只對 `seam.reselect === true` 的 session 生效
+  ——也就是那些帶著一個站在看得見位置的鍵盤進來的。hover 點開的 session 不會被硬塞
+  一個它沒有要求過的選取，所以它結束在它開始的地方。
+
+**這個編輯器本來就不模型化的事（不是待修清單）。**
+
+- **`period`、`phase` 與 `config.hscale` 不在手繪那張圖的模型裡，而它會說出來。**
+  三者都會改變引擎畫出來的東西，手繪那一半全部不理會——量測記在
+  `lib/editor/wave-ui.js` 的 toolbar 註解裡：`{wave:'0101'}` 引擎 8 個半 brick、
+  手繪 4 個 cycle；加上 `period:2` 引擎 16、手繪 4 不變；加上 `phase:0.5` 引擎 7、
+  手繪 4 不位移；`config.hscale:2` 引擎 16、手繪 4 不變。做一顆控制項去改一個畫布
+  根本不理會的屬性是三個選項裡最糟的一個：它邀請使用者把兩張圖弄到不一致，然後給他
+  看那張有自信的錯圖。所以**控制項拿掉了**，改成帶著這三者之一的文件會被明講
+  「左邊的手繪波形不表現它們，以右邊的 WaveDrom 預覽為準」。
+- **只認 `signal:`。** wavedrom 的 `reg:`（bit field）與 `assign:`（邏輯式）文件
+  parse 得回來，但對這個編輯器來說是 0 條 lane——實測 `{reg:[…]}` 與 `{assign:[…]}`
+  的 `lanePaths()` 都是 `[]`，而 `addLane()` 對它們回傳原封不動的文件。也就是說那兩種
+  區塊開起來是一張空的畫布，什麼都做不了。
+- **`data`（bus 標籤文字）、`edge`／`node`（箭頭標註）與 `config` 的其餘欄位不能從
+  GUI 改。** `data` 標籤是**讀出來畫上去**的，改不了；`edge` 完全沒有進到這一層。
+  這些欄位在最小 patch 的寫回路徑上沒有損壞風險——沒有人去碰它們——但要改就得回去
+  改原始碼。
+- **手繪與預覽「逐 cycle 一致」那道檢查看不見高度錯了，也看不見顏色錯了。** 兩件都
+  量過：把每一個 `x` 方塊畫成 band 高度的**一半**（cycle 與 class 都不變），
+  `shapeCount` 16 不變、`painted === expected`，**綠**。顏色則是由程式碼直接裁定的
+  ——分類器只讀 `el.tagName` 與 `cls.indexOf('ed-wave-clock')`，兩邊都不曾取樣
+  `fill`／`stroke`／computed style，所以 `ed-wave-bus-3` 畫成 `ed-wave-bus-9` 比起來
+  是 `bus === bus`。一個把每一條 band 砍半的版面退化，會頂著「手繪波形與 WaveDrom
+  預覽逐 cycle 一致」這個名字出貨。（「多畫一個形狀」那一半已經關掉了：現在有一條
+  `paintedCounts` 的斷言。）
+
+**存檔路徑上刻意留下的窗口與痕跡（都不會讓未存檔的工作被回報成已存檔）。**
+
+- **重繪失敗時的回捲，是把那次來不及顯示的編輯放到 redo 堆疊上**——所以接下來按
+  「重做」會把一次從來沒有出現在畫面上的編輯再套一次。`rollbackFailedRender()` 走的是
+  `stack.undo()`，而 `UndoStack.undo()` 無條件把 pop 出來的 op 推進 `_undone`。
+  旁邊就有一支 `discardTop()` 做的正是「pop 掉而且**不**放進 `_undone`」，它是這條路
+  將來該用的東西。
+- **伺服器把位元組寫進磁碟的那一刻，到編輯器被告知的那一刻之間，編輯器還不知道檔案
+  已經變了。** `mtimeMs` 與 `markSaved()` 都只在 200 那一支執行。沒有東西會遺失
+  ——回覆會把它結清——但未存檔指示器可以落後一整趟往返的時間。
+- **連按兩次 `Ctrl+S` 之後，可能會留下一張「檔案在磁碟上被改過」的通知，而它來自那個
+  什麼都沒寫的第二個請求。** 第二個請求必然帶著過期的 `baseMtimeMs`、必然 409、
+  必然沒寫到東西，而 409 那一支會升起 conflict banner；第一個回覆後到的 200 現在會
+  正常結清（見上方 Fixed），所以文件不會卡住，剩下的只是那張過期的通知。關掉它是
+  安全的。
+
+**md2doc 的 HTML 輸出會把 wavedrom 區塊的內容當成 JavaScript 執行——這件事早於
+v3.4.0，而且這一批沒有改變它。**
+
+`lib/md2doc.js` 把 code block 的內容**原樣**吐進 `<script type="WaveDrom">`（沒有
+跳脫，第 924 行，最後一次改動是 2026-08-25）；wavedrom 自己的
+`lib/process-all.js` 掃出每一個 `type` 是 `wavedrom` 的元素，交給 `lib/eva.js`，
+而那支做的是 `eval('(' + TheTextBox.innerHTML + ')')`。**實測**：把
+`{signal:[{name:(function(){window.__md2docProbe=1;return "clk";})(),wave:"p..."}]}`
+放進一個 wavedrom 區塊、產出 HTML、用 headless Chromium 打開——`window.__md2docProbe`
+是 `1`，而那個 IIFE 的回傳值變成了 lane 的名字。**所以一份 markdown 的 wavedrom 區塊
+等同於一段會在每一個開啟輸出 HTML 的人的瀏覽器裡執行的腳本。**
+
+既有的緩解手段是 **`--bake-svg`**，而它的作用要講精確：它拿掉的是**會執行的那個東西**，
+不是**被執行的那個東西**。同一份文件實測，`--bake-svg` 之後輸出裡
+`data-md2doc-diagram-engine` 的引擎 script 從 **3 個變成 0 個**，而
+`<script type="WaveDrom">` 仍然是 **1 個**（原始碼還在，只是沒有人再去 eval 它）；
+同一個探針在烤過的輸出裡**沒有**執行。但它是在建置時被執行過的——烤出來的 SVG 上寫著
+`clk`，那正是那段 IIFE 的回傳值。**也就是說 `--bake-svg` 把 eval 從每一個讀者的機器
+搬到作者自己的機器，不是消滅它。**
+
+**這一批新寫的 parser 不是渲染的那一個，所以它不改變上面任何一句話。**
+`lib/editor/wave-codec.js` 完全不建立執行期程式碼、不 import 任何東西
+（`test/wave-codec.test.js` 會 grep 它有沒有出現那些拼法），但畫出讀者看到的那張圖
+的是 wavedrom 引擎，不是它。
+
 ### 這一版還沒做的
 
-- **批次 3：wavedrom 的 GUI 波形編輯**（滑到已渲染的圖上出現 Edit，用滑鼠塗電位、
-  增刪 cycle、lane 改名與重排、畫 edge 標註，存檔以最小 patch 寫回 code block）
-  ——**一行都還沒寫**。這一批的量體單獨接近整個 v3.3.0。
+- **批次 3 原本的範圍裡，`edge` 標註沒有做。** 「滑到已渲染的圖上出現 Edit、塗電位、
+  增刪 cycle、lane 改名與重排、最小 patch 寫回」都做了（見上方 Added），**畫 edge
+  標註沒有**——`edge` 完全沒有進到編輯層。
 
 先前就記錄過、到今天仍然成立的：
 
