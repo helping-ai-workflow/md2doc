@@ -3,6 +3,32 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.4.2 — 2026-09-14
+
+### Fixed
+
+- **把清單項目貼到別的位置，前後會長出空行，然後那一項就縮不動了。**
+  空行是看得見的那一半。看不見的那一半才是「縮不動」的機制：**空行會讓清單變成
+  loose**，`marked` 於是把每一項都包進 `<p>`，`serializeBlocks()` 對每一項回
+  `'P'`，**整個 run 降級成唯讀**——而且沒有任何提示條。所以症狀不是「Tab 被拒絕」
+  而是「Tab 沒反應」，沒有錯誤、沒有解釋、也沒有東西可以拿去搜尋。
+  根因在 `commitBlockInsertion()`：它**無條件**寫一行前置空行。那對段落是對的，對
+  清單項目是錯的。`insertListItemAfter()` 與 `duplicateListItems()` 早就為了這件事
+  繞開它——**貼上是唯一繞不開的呼叫端**，因為它帶著任意貼上的行，而用 run 重新序列化
+  去吸收那些行會**重寫使用者的位元組**（marker 寬度、序號，以及 `duplicateListItems()`
+  自己註解記下的 `~5px` → `\~5px` 跳脫陷阱）。所以貼上維持原始行寫入，改成把前置
+  空行關掉：`commitBlockInsertion()` 多一個 opt-in 的 `tight`。
+  開啟條件**兩半都要成立**：呼叫端判定內容是清單形狀（`pasteIsAllListLines()`——
+  清單行、其縮排延續行、以及貼上內容內部的空行都算「屬於這個清單」，但清單後面接
+  一個段落就不算），而 `insertBlockBelow()` 判定目的地是清單項目。下一行若不是清單行
+  仍然會寫尾端空行，否則 run 後面那個段落會被吸進最後一項裡。其餘七個呼叫端一行未動，
+  預設契約由回歸測試釘住。
+  `LIST_LINE_RE` 釘的是 **`marked` 本人**（`buildBlockMap`），不是 `list-md.js` 的
+  兄弟 regex——兩條 regex 互相同意只證明它們是互相抄的。這條測試第一版就抓到真分歧：
+  `"\t- tabbed"` regex 說是、lexer 說不是。查下去**是判準錯了不是 regex 錯了**：孤立
+  一行的 tab 縮排會被當成 code block，但這條 regex 的每一個使用場合都在清單 run 內部，
+  在那裡它就是巢狀項目。縮排的案例因此改成直接斷言並寫明上下文。
+
 ## v3.4.1 — 2026-09-14
 
 **批次 2 把 `.drawio` / `.xml` 教會了渲染，卻沒有把插入那條路一起納入範圍。** 這是
