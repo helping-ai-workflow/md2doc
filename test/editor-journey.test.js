@@ -13546,6 +13546,37 @@ async function main() {
 
       // (b) press the label text again: the SAME field opens, and this time
       // Enter commits into the RIGHT slot.
+      //
+      // v3.5.0 Task 11 fix round 4: this second press is ALSO the
+      // regression proof for round 4's own fix, made explicit rather than
+      // incidental — the first press above left `selection` standing on
+      // cycle 2 (Escape's `cancel()` never touches it), so `.ed-wave-
+      // selection` is still drawn over this exact cell when this press
+      // lands. Reviewer-measured: that rect's right edge (with its 1px
+      // stroke) sits at x≈144.5, the label's own centre is x=144 — the
+      // press used to land on the selection rect's stroke instead of the
+      // text, `ev.target` was never `.ed-wave-buslabel`, and the field
+      // never opened. Checked here BEFORE the press, not just proved by the
+      // press succeeding afterward, so a future change that makes the
+      // selection stop covering the label could not turn this into a
+      // silently-vacuous assertion.
+      const selCoversLabel = await ctx.page.evaluate(() => {
+        const sel = document.querySelector('.ed-wave-selection');
+        const label = document.querySelector('.ed-wave-buslabel');
+        if (sel === null || label === null) return null;
+        const s = sel.getBoundingClientRect();
+        const l = label.getBoundingClientRect();
+        const lx = l.left + l.width / 2;
+        const ly = l.top + l.height / 2;
+        return { present: true, coversLabelCentre: lx >= s.left && lx <= s.right &&
+          ly >= s.top && ly <= s.bottom };
+      });
+      assert.ok(selCoversLabel !== null,
+        'T11a 前提失敗：這一步之前 .ed-wave-selection 跟 .ed-wave-buslabel 都要在畫面上');
+      assert.strictEqual(selCoversLabel.coversLabelCentre, true,
+        'T11a 前提失敗：這次按下去之前，選取框必須真的蓋住標籤——不然下面這次按壓沒有驗到 ' +
+        'round 4 要防的那個迴歸。Got ' + JSON.stringify(selCoversLabel));
+
       await clickAt(await labelPoint());
       field = await fieldState();
       assert.strictEqual(field && field.key, 'data-input-2-2',
