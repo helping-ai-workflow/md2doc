@@ -2456,4 +2456,44 @@ const RSRC = [
   console.log('wave-codec: parseEdge/formatEdge 互為反函數 — OK');
 }
 
+// ── v3.5.0 Task 2: node 字母 ─────────────────────────────────────────────
+// 釘死的不變量：node 字串的索引是 CELL、不是 cycle。'.' 與 '|' 都佔一個
+// cell，而 '.' 在 wave 裡不是「重複前一個字元」（v3.4.0 對 3.5.0 實測）。
+{
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"01.x",node:".b.c"},{name:"d",wave:"0|1",node:"..e"}],' +
+    'edge:["b~>c setup"]}').doc;
+
+  assert.deepStrictEqual(C.nodesOf(doc), {
+    b: { at: 0, cell: 1 },
+    c: { at: 0, cell: 3 },
+    e: { at: 1, cell: 2 },
+  }, 'node 的索引是 cell，含 . 與 | 都各佔一格');
+
+  // 已經有字母的格子回既有字母，不配新的。
+  const same = C.ensureNode(doc, 0, 1);
+  assert.strictEqual(same.letter, 'b');
+  assert.strictEqual(same.doc, doc, '沒有改變就要回原本那個 doc（=== 判斷）');
+
+  // 沒有字母的格子配一個沒用過的。
+  const fresh = C.ensureNode(doc, 1, 0);
+  assert.notStrictEqual(fresh.doc, doc);
+  assert.ok(/^[A-Za-z]$/.test(fresh.letter));
+  assert.ok(['b', 'c', 'e'].indexOf(fresh.letter) === -1, '不得重用已存在的字母');
+  assert.strictEqual(C.nodesOf(fresh.doc)[fresh.letter].cell, 0);
+  assert.strictEqual(C.nodesOf(fresh.doc).b.cell, 1, '別條 lane 的字母不得被動到');
+
+  // node 字串比 cell 短的時候要補 '.'。
+  const padded = C.ensureNode(C.parseSource('{signal:[{name:"a",wave:"0123"}]}').doc, 0, 2);
+  assert.strictEqual(padded.doc.signal[0].node, '..' + padded.letter);
+
+  // pruneNodes 只清沒有 edge 引用的。
+  const pruned = C.pruneNodes(fresh.doc);
+  assert.deepStrictEqual(Object.keys(C.nodesOf(pruned)).sort(), ['b', 'c'],
+    'e 與新配的字母都沒有 edge 引用，要被清掉；b/c 被引用，要留');
+  assert.strictEqual(C.pruneNodes(pruned), pruned, '沒有可清的就回原 doc');
+
+  console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
+}
+
 console.log('wave-codec.test.js OK');
