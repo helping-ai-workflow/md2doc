@@ -2669,4 +2669,23 @@ const RSRC = [
   console.log('wave-codec: BRUSHES 每一顆都能用鍵盤直接打出來（isBrushKey，不只數量）— OK');
 }
 
+// ── v3.5.0 Task 11: data 槽 ──────────────────────────────────────────────
+// 只有 '=' 與 '2'-'9' 消耗資料槽；'.' 與 '|' 不消耗（v3.4.0 對 3.5.0 實測）。
+{
+  const doc = C.parseSource('{signal:[{name:"b",wave:"x=.=|=",data:["p","q","r"]}]}').doc;
+  const lane = doc.signal[0];
+  assert.strictEqual(C.dataSlotOf(lane, 0), null, 'x 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 1), 0, '第一個 = 是第 0 槽');
+  assert.strictEqual(C.dataSlotOf(lane, 2), null, '. 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 3), 1, '第二個 = 是第 1 槽');
+  assert.strictEqual(C.dataSlotOf(lane, 4), null, '| 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 5), 2);
+
+  const set = C.setDataAt(doc, 0, 1, 'NEW');
+  assert.deepStrictEqual(set.signal[0].data, ['p', 'NEW', 'r']);
+  assert.strictEqual(C.setDataAt(doc, 0, 9, 'x').signal[0].data.length, 10,
+    '超出長度時補空字串，不得留洞');
+  console.log('wave-codec: data 槽對應與寫入 — OK');
+}
+
 console.log('wave-codec.test.js OK');
