@@ -2695,4 +2695,211 @@ const RSRC = [
   console.log('wave-codec: data 槽對應與寫入 — OK');
 }
 
+// ── v3.5.0 Task 12: groupLanes / ungroupLanes ─────────────────────────────
+{
+  const FLAT = function () {
+    return {
+      signal: [
+        { name: 'a', wave: '01' },
+        { name: 'b', wave: '01' },
+        { name: 'c', wave: '01' },
+        { name: 'd', wave: '01' },
+      ],
+    };
+  };
+
+  // 連續多選：量過的結果，不是猜的 —— 見上面 groupLanes/ungroupLanes 之前跑過
+  // 的手動量測，這裡把同一組斷言釘住。
+  {
+    const doc = FLAT();
+    const [a, b, c, d] = doc.signal;
+    const out = C.groupLanes(doc, [1, 2], 'mygrp');
+    assert.deepStrictEqual(laneShape(out), ['a', ['mygrp', 'b', 'c'], 'd'],
+      '連續選 1,2 要變成一個新群組，位置在原本 b 站的地方');
+    assert.strictEqual(out.signal[0], a, '沒被選到的 lane 原物件要原封不動地留著');
+    assert.strictEqual(out.signal[1][1], b, '群組裡的 lane 必須是同一個物件（remapOrigins 靠 identity 認人）');
+    assert.strictEqual(out.signal[1][2], c);
+    assert.strictEqual(out.signal[2], d);
+    assert.strictEqual(doc.signal.length, 4, '原本的 doc 不得被改到');
+  }
+
+  // 順序打亂也要照顯示順序組（sorted，不是呼叫端給的順序）
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [2, 1], 'g');
+    assert.deepStrictEqual(laneShape(out), ['a', ['g', 'b', 'c'], 'd']);
+  }
+
+  // 不連續多選：拒絕，回原 doc（identity），不是「群組中間那一段」
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [0, 2], 'x');
+    assert.strictEqual(out, doc,
+      '不連續的選取（0 與 2，跳過 1）必須原封不動地拒絕，不能悄悄把 0,1,2 都包進去');
+  }
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.groupLanes(doc, [0, 3], 'x'), doc, '頭尾不連續一樣要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [1, 1], 'x') === doc, true,
+      '重複的編號當成不連續處理，一起拒絕');
+  }
+
+  // 無效輸入：型別、越界、空集合都回原 doc
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.groupLanes(doc, [0, 1], 5), doc, 'label 不是字串要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [0, 1], null), doc);
+    assert.strictEqual(C.groupLanes(doc, [], 'x'), doc, '空集合沒東西可群組');
+    assert.strictEqual(C.groupLanes(doc, [4], 'x'), doc, '越界的編號要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [-1, 0], 'x'), doc);
+    assert.strictEqual(C.groupLanes(doc, 'nope', 'x'), doc, 'ats 不是陣列要拒絕');
+    assert.strictEqual(C.groupLanes(null, [0], 'x'), null, '不是文件也不丟例外');
+  }
+
+  // 單條也可以群組成一個只有一條 lane 的群組——codec 本身不禁止，UI 另有自己的門檻
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [2], 'solo');
+    assert.deepStrictEqual(laneShape(out), ['a', 'b', ['solo', 'c'], 'd']);
+  }
+
+  // 空字串 label 合法：跟新增 lane 一樣先建立、之後再讓使用者改名
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [0, 1], '');
+    assert.strictEqual(out.signal[0][0], '');
+  }
+
+  // 選取整個既有群組的全部 lane，加上後面緊接著的一條 —— 原群組被吃光收掉，
+  // 新群組落在原群組原本站的位置，銜接後面那條也一起進來
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c], d] };
+    // 攤平：a=0, b=1, c=2, d=3
+    const out = C.groupLanes(doc, [1, 2, 3], 'outer');
+    assert.deepStrictEqual(laneShape(out), ['a', ['outer', 'b', 'c', 'd']],
+      'G 的兩條 lane 全被選走，G 本身要跟著消失，新群組頂替它原本的位置');
+    assert.strictEqual(out.signal[1][1], b);
+    assert.strictEqual(out.signal[1][2], c);
+    assert.strictEqual(out.signal[1][3], d);
+  }
+
+  // 巢狀群組全部被吃光：往上一路收，跟 removeLane 對空 group 的規則一致
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', ['Inner', b, c]]] };
+    const out = C.groupLanes(doc, [0, 1], 'newlabel');
+    assert.deepStrictEqual(laneShape(out), [['newlabel', 'b', 'c']],
+      'Inner 與 Outer 都被選光了，兩層都要收掉，只留新群組');
+  }
+
+  // 橫跨群組邊界的部分選取：群組沒被選光（b 還留著），選取跨進跨出視為「不能表達
+  // 成一段陣列切片」——拒絕，不得悄悄把 c 從 G 挖出來、把 d 從 signal 挖出來
+  // 兜成一個新陣列（那個新陣列在 WaveJSON 裡沒有對應的容器）。
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const e = { name: 'e', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c, e], d] };
+    // 攤平：a=0, b=1, c=2, e=3, d=4 —— 選 c,e,d（2,3,4），G 沒被選光（b 還在）
+    const out = C.groupLanes(doc, [2, 3, 4], 'x');
+    assert.strictEqual(out, doc, '跨越沒被選光的群組邊界要拒絕，不是猜著兜');
+  }
+
+  // ── ungroupLanes ──────────────────────────────────────────────────────
+
+  // 解散剛剛建立的群組，往返要回到原本的攤平形狀（且是同一批 lane 物件）
+  {
+    const doc = FLAT();
+    const [a, b, c, d] = doc.signal;
+    const grouped = C.groupLanes(doc, [1, 2], 'mygrp');
+    const back = C.ungroupLanes(grouped, 1); // 1 = 群組裡第一條（b）的攤平編號
+    assert.deepStrictEqual(laneShape(back), ['a', 'b', 'c', 'd']);
+    assert.strictEqual(back.signal[0], a);
+    assert.strictEqual(back.signal[1], b);
+    assert.strictEqual(back.signal[2], c);
+    assert.strictEqual(back.signal[3], d);
+  }
+
+  // at 是群組裡的任何一條，不只是第一條，答案要一樣
+  {
+    const doc = FLAT();
+    const grouped = C.groupLanes(doc, [1, 2], 'mygrp'); // b,c 在群組裡，攤平編號都是 1,2
+    assert.deepStrictEqual(laneShape(C.ungroupLanes(grouped, 1)), ['a', 'b', 'c', 'd']);
+    assert.deepStrictEqual(laneShape(C.ungroupLanes(grouped, 2)), ['a', 'b', 'c', 'd'],
+      '指群組裡的第二條一樣要能解散整個群組');
+  }
+
+  // 不在任何群組裡的 lane：ungroupLanes 沒東西可拆，原封不動回來
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.ungroupLanes(doc, 0), doc, '頂層的 lane 不在任何群組裡');
+  }
+
+  // 越界 / 非文件：原封不動，不丟例外
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.ungroupLanes(doc, 99), doc);
+    assert.strictEqual(C.ungroupLanes(doc, -1), doc);
+    assert.strictEqual(C.ungroupLanes(null, 0), null);
+  }
+
+  // 只解散最直接包住那條 lane 的那一層，不動更外層——巢狀群組的骨架要留著
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', ['Inner', b, c]]] };
+    const out = C.ungroupLanes(doc, 0); // b,c 在 Outer 底下的 Inner 裡
+    assert.deepStrictEqual(laneShape(out), [['Outer', 'b', 'c']],
+      'Inner 被拆掉，b/c 直接掛回 Outer 底下；Outer 自己還在');
+  }
+
+  // 拆掉群組不會動到群組裡本身還有的巢狀子群組——只剝掉最外面那一層陣列與標題
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', b, ['Inner', c]]] };
+    const out = C.ungroupLanes(doc, 0); // b 是 Outer 的直接 lane
+    assert.deepStrictEqual(laneShape(out), ['b', ['Inner', 'c']],
+      'Outer 被拆掉；b 落到頂層，Inner 這個子群組原封不動地跟著留下');
+  }
+
+  // 沒有標題（作者手寫的裸陣列）：不強求第一格是字串，仍然可以拆
+  {
+    const b = { name: 'b', wave: '01' };
+    const doc = { signal: [[b]] };
+    const out = C.ungroupLanes(doc, 0);
+    assert.deepStrictEqual(laneShape(out), ['b']);
+  }
+
+  // 跟 moveLane 的互動：新群組建立後，既有的跨群組搬移規則要照常運作
+  // （Task 12 brief 步驟 6：確認在群組的新結構下，moveLane 仍然正確）
+  {
+    const doc = FLAT();
+    const grouped = C.groupLanes(doc, [1, 2], 'G'); // a, [G,b,c], d
+    assert.deepStrictEqual(laneShape(grouped), ['a', ['G', 'b', 'c'], 'd']);
+    assert.deepStrictEqual(laneShape(C.moveLane(grouped, 3, 2)),
+      ['a', ['G', 'b', 'd', 'c']], '把 d 搬進群組尾巴前面');
+    assert.deepStrictEqual(laneShape(C.moveLane(grouped, 1, 3)),
+      ['a', ['G', 'c'], 'd', 'b'],
+      '把群組裡的 b 搬到群組外面（to=3 是「拿掉 b 之後」的第 3 個位置，也就是尾端，b 落在 d 後面）');
+    assert.strictEqual(C.moveLane(grouped, 1, 1), grouped, '搬到自己原地是 no-op');
+    // 把群組僅剩的兩條都搬出去之後，群組應該跟著消失（既有 moveLane 規則，
+    // 不是這次新加的，但群組是 groupLanes 剛造出來的，值得再釘一次）
+    const movedOut1 = C.moveLane(grouped, 1, 0);
+    assert.deepStrictEqual(laneShape(movedOut1), ['b', 'a', ['G', 'c'], 'd']);
+    const movedOut2 = C.moveLane(movedOut1, 2, 0);
+    assert.deepStrictEqual(laneShape(movedOut2), ['c', 'b', 'a', 'd'],
+      'G 只剩的最後一條也搬走之後，空掉的 G 要跟著消失');
+  }
+
+  console.log('wave-codec: groupLanes / ungroupLanes — OK');
+}
+
 console.log('wave-codec.test.js OK');
