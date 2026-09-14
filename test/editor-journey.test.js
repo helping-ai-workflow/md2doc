@@ -13447,21 +13447,31 @@ async function main() {
       console.log('journey: wave/T9d three refused endpoint drops each leave the undo depth untouched — OK');
     }
 
-    // ── v3.5.0 Task 11 fix round 1: bus data label 就地編，真機場景 ─────────
+    // ── v3.5.0 Task 11 fix round 2: bus data label 就地編，真機場景 ─────────
     //
     // MEASURED against the pinned codec BEFORE writing any assertion here
-    // (see this task's own fix-round-1 report for the full trace): in
+    // (see this task's own fix-round-2 report for the full trace): in
     // `WAVE_MD`'s own `dat` lane (`wave: 'x.3.x'`, `data: ['D']`), flattened
     // lane index 2 (`clk`=0, the group's `req`=1, `dat`=2 — `waveLaneNames`
     // above already pins this same order), cycle 2 is the run's own
     // EXPLICIT owner (`codec.dataSlotOf` = slot 0) and cycle 3 is a HELD
     // CONTINUATION of that same run (`dataSlotOf` = null, `levelsOf` = '3',
-    // a bus level — not `x`). Fix round 1's own defect, reviewer-traced: a
-    // press on cycle 3 fell straight through `wave-ui.js`'s paint-arming
-    // code with nothing catching it, silently turning that continuation
-    // into a fresh explicit value cycle and shifting every later label one
-    // slot right. This scenario presses cycle 3 FIRST — the regression
-    // cell, not the easy one — before ever touching cycle 2.
+    // a bus level — not `x`). `drawLane` merges the two into ONE polygon and
+    // draws ONE `<text class="ed-wave-buslabel">` centred on the pair, so
+    // there is exactly one label on screen for this run regardless of which
+    // of its two cycles a press's x-coordinate happens to resolve to.
+    //
+    // Round 1 opened the field on a press anywhere in that box and was
+    // reviewer-found to be its own regression: T6b paints an `N` onto a bus
+    // cell with the mouse, and a gesture that swallows every press in the
+    // box left no pointer route to repaint one at all. Round 2's rule is
+    // "the label TEXT is the target, the box paints" — `labelPoint` below
+    // finds `.ed-wave-buslabel`'s own on-screen centre (which is NOT the
+    // same point as either cycle's own centre — `cellPoint(2,2)` sits at the
+    // canvas-local x of cycle 2's own midpoint, `cellPoint(2,3)` at cycle
+    // 3's, and the shared label sits AT THE BOUNDARY between them, centred
+    // on the whole two-cycle run), and `cellPoint` below is reused exactly
+    // as it always has been for "press the box, away from the text".
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
@@ -13474,23 +13484,38 @@ async function main() {
           focused: document.activeElement === el,
         };
       });
-      const clickCell = async (lane, cycle) => {
-        const at = await cellPoint(ctx.page, lane, cycle);
-        await ctx.page.mouse.move(at.x, at.y);
+      // The label text's own on-screen centre — never a cycle's. Asserts
+      // the element actually exists first: an absent label (drawLane skips
+      // the `<text>` entirely for an empty string — see its own comment)
+      // would otherwise read as "click missed everything" rather than as
+      // the test's own precondition failing.
+      const labelPoint = async () => {
+        const box = await ctx.page.evaluate(() => {
+          const t = document.querySelector('.ed-wave-buslabel');
+          if (t === null) return null;
+          const r = t.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        assert.ok(box !== null,
+          'labelPoint 前提失敗：畫布上找不到 .ed-wave-buslabel（dat 這條 lane 應該有一個「D」）');
+        return box;
+      };
+      const clickAt = async (pt) => {
+        await ctx.page.mouse.move(pt.x, pt.y);
         await ctx.page.mouse.down();
         await ctx.page.mouse.up();
         await new Promise((r) => setTimeout(r, 250));
       };
 
-      // (a) the continuation cell: pressing it must open the OWNING cell's
-      // field (cycle 2, not cycle 3) — never arm a paint.
-      await clickCell(2, 3);
+      // (a) press the label TEXT: must open the OWNING cell's field (cycle
+      // 2's slot 0) — resolveBusTarget's answer for this run, regardless of
+      // whether the text's own x happens to resolve to cycle 2 or cycle 3.
+      await clickAt(await labelPoint());
       let field = await fieldState();
       assert.ok(field !== null,
-        'T11a: 按 continuation 那一格必須開出標籤欄位，不能什麼都沒發生（沒發生＝正在悄悄落回塗格）');
+        'T11a: 按標籤文字必須開出欄位，不能什麼都沒發生');
       assert.strictEqual(field.key, 'data-input-2-2',
-        'T11a: 開出來的欄位必須是「擁有這個槽」的 cycle 2，不是被按下去的 cycle 3。Got ' +
-        JSON.stringify(field));
+        'T11a: 開出來的欄位必須是「擁有這個槽」的 cycle 2。Got ' + JSON.stringify(field));
       assert.strictEqual(field.value, 'D',
         'T11a: 欄位要預填目前的標籤。Got ' + JSON.stringify(field));
       assert.strictEqual(field.focused, true, 'T11a: 鍵盤要落在欄位裡');
@@ -13510,26 +13535,22 @@ async function main() {
       assert.strictEqual(afterEscape.undoDisabled, true,
         'T11a: 取消不該讓復原鈕變成可按。Got ' + JSON.stringify(afterEscape));
 
-      // Proved against the SAVED bytes, not just the live DOM: the wave
-      // string is byte-identical and the label untouched — the continuation
-      // cycle was never repainted with the current brush.
+      // Proved against the SAVED bytes, not just the live DOM.
       let md = await saveAndRead(ctx);
       let doc = parseWaveBlock(md);
       let dat = doc.signal[1][2];
       assert.strictEqual(dat.wave, 'x.3.x',
-        'T11a: 按 continuation 格再取消之後，wave 必須一個字元都沒動——fix round 1 之前這裡會被畫筆蓋掉。Got ' +
-        JSON.stringify(dat));
+        'T11a: 取消之後 wave 必須一個字元都沒動。Got ' + JSON.stringify(dat));
       assert.deepStrictEqual(dat.data, ['D'],
         'T11a: 取消之後 data 也不該動。Got ' + JSON.stringify(dat));
 
-      // (b) the owning cell itself, pressed directly: the SAME field opens,
-      // and this time Enter commits into the RIGHT slot.
-      await clickCell(2, 2);
+      // (b) press the label text again: the SAME field opens, and this time
+      // Enter commits into the RIGHT slot.
+      await clickAt(await labelPoint());
       field = await fieldState();
       assert.strictEqual(field && field.key, 'data-input-2-2',
-        'T11a: 直接按擁有槽的那一格，也要開出同一個欄位。Got ' + JSON.stringify(field));
-      assert.strictEqual(field.value, 'D',
-        'T11a: 欄位預填值要跟按 cycle 3 開出來的一樣（同一個槽）');
+        'T11a: 再按一次標籤文字，也要開出同一個欄位。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, 'D', 'T11a: 欄位預填值要跟第一次按開的一樣（同一個槽）');
 
       await ctx.page.keyboard.type('NEWVAL');
       await ctx.page.keyboard.press('Enter');
@@ -13553,8 +13574,65 @@ async function main() {
 
       assert.strictEqual(ctx.errs.length, 0, 'T11a: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
-      console.log('journey: wave/T11a a press on a held continuation opens the owning cell\'s field ' +
-        'instead of painting it, and the field\'s own Enter/Escape both behave — OK');
+      console.log('journey: wave/T11a a press on the label TEXT opens the owning cell\'s field, ' +
+        'and the field\'s own Enter/Escape both behave — OK');
+    }
+
+    // T11b — fix round 2's own regression guard: a press on the BOX of a
+    // bus cell — away from the label text, exactly where `paintCell`
+    // presses every other cell in this file — still PAINTS. Without this
+    // row, the next change to touch `onCanvasDown`'s bus branch could widen
+    // the click target back to the whole cell (round 1's own shape) and
+    // nothing here would catch it; T6b above already covers "painting a bus
+    // cell with the mouse still works" for a SINGLE clean cell, this row
+    // covers it again on the SAME merged run T11a just edited, so the two
+    // gestures (label click vs. box click) are proven disjoint on one
+    // concrete diagram rather than on two different ones that never had to
+    // agree.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      // cellPoint(2,2) is cycle 2's own centre — measured above (this
+      // fixture's own comment block) to sit well clear of the run's shared
+      // label, which is centred on the run's boundary, not on either cycle.
+      await pressClick(ctx.page, '.ed-wave-brush[data-brush="0"]');
+      const at = await cellPoint(ctx.page, 2, 2);
+      await ctx.page.mouse.move(at.x, at.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const after = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        wave2: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-2'),
+      }));
+      assert.strictEqual(after.input, 0,
+        'T11b: 按盒子本體（不是文字）不該開出標籤欄位。Got ' + JSON.stringify(after));
+      assert.ok(after.wave2 !== null && after.wave2[2] === '0',
+        'T11b: 按盒子本體要真的塗上去——cycle 2 要變成畫筆的 0，不是被欄位手勢吃掉。Got ' +
+        JSON.stringify(after));
+
+      // MEASURED against the real codec before writing this assertion —
+      // `C.setCellRange({signal:[{wave:'x.3.x',data:['D']}]}, 0, 2, 2, '0')`
+      // gives `'x.03x'`, NOT the naively-expected `'x.0.x'`: painting cycle
+      // 2 alone anchors cycle 3 (`anchorAfter` in wave-codec.js) into an
+      // explicit `3` so its OWN displayed level survives cycle 2 changing
+      // out from under it — the continuation the codec is protecting is
+      // exactly the one this scenario is pressing past. `data` stays `['D']`
+      // too (the label moves with the run's surviving explicit cell, cycle
+      // 3), but this row only asserts `wave` — proving a paint reached disk
+      // is the whole of what T11b exists for.
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.03x',
+        'T11b: 存回去的 wave 也要反映那次塗格，不是只有畫面上看起來塗到。Got ' + JSON.stringify(dat));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11b a press on a bus cell\'s BOX — away from its label — ' +
+        'still paints, never opens the field — OK');
     }
   }
 
