@@ -2078,12 +2078,23 @@ function countInCode(source, needle) {
   assert.strictEqual(count("input.accept = 'image/png,image/jpeg,image/gif,image/webp,.drawio,.xml'"), 1,
     'the file dialog must accept .drawio and .xml alongside the raster MIME types');
 
-  // The pre-flight refusal must not be MIME-only any more: a .drawio has no
-  // media type at all, so extFor() alone never lets the request leave.
-  assert.strictEqual(count("assetLib.extFor(blob.type) || DRAWIO_NAME_RE.test(blob.name || '')"), 1,
-    'the local pre-check must let a name-matched .drawio/.xml reach the server');
+  // "Is this file insertable" must exist ONCE and be asked at every gate. The
+  // first cut of v3.4.1 widened the dialog and the uploader but left the
+  // `drop` filter MIME-only, and that filter runs BEFORE insertImages(): a
+  // dropped .drawio was discarded with no banner, no request and no failure —
+  // which looks exactly like the feature not existing. Three call sites,
+  // one predicate, one regex.
+  assert.strictEqual(count('function insertableFile(f) {'), 1,
+    'the insertable-file rule must be defined exactly once');
   assert.strictEqual(count('const DRAWIO_NAME_RE = /\\.(drawio|xml)$/i;'), 1,
     'the accepted diagram extensions must be written down exactly once on this side');
+  assert.strictEqual(count('insertableFile('), 4,
+    'the predicate must be defined once and asked at all three gates ' +
+    '(the drop filter, clipboardItemsOf and uploadImageBlob)');
+  assert.strictEqual(count('files.filter(insertableFile)'), 1,
+    'the drop filter must use the shared predicate, not a MIME-only test of its own');
+  assert.strictEqual(count('if (!insertableFile(blob)) {'), 1,
+    'the uploader must use the shared predicate too');
 
   // A refusal from /api/asset must reach the user as its own reason. Picking
   // an .xml that is not a diagram is an ordinary mistake, and the content gate

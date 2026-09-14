@@ -23816,10 +23816,23 @@ async function gutterGeometry(page, sel) {
           }));
         }, sel, '<notes><item>not a diagram</item></notes>');
 
-        await page.waitForFunction(
-          () => !!document.querySelector('.ed-conflict'), { timeout: 10000 });
-        const refusal = await page.evaluate(
-          () => document.querySelector('.ed-conflict').textContent);
+        // act -> settle -> grace -> READ -> assert, never a bare
+        // waitForFunction: the first cut of this scenario waited for
+        // `.ed-conflict` and timed out with `Timeout 10000ms exceeded`, which
+        // says nothing at all. The real answer was that the `drop` filter had
+        // discarded the file before insertImages() ever ran -- no banner, no
+        // request, nothing -- and a timeout cannot tell that apart from a
+        // banner that rendered one millisecond late. Reading the value prints
+        // it. (CLAUDE.md, "The Two Long Puppeteer Suites".)
+        await settleEditor(page);
+        await new Promise((r) => setTimeout(r, 300));
+        const refusal = await page.evaluate(() => {
+          const el = document.querySelector('.ed-conflict');
+          return el ? el.textContent : null;
+        });
+        assert.ok(refusal !== null,
+          'a refused upload must SAY so -- a silently discarded file is ' +
+          'indistinguishable from the feature not existing');
         assert.ok(/draw\.io/i.test(refusal),
           "the refusal must carry the server's own reason, got: " + JSON.stringify(refusal));
         assert.ok(!fs.existsSync(path.join(dir, 'assets')) ||
@@ -23839,7 +23852,12 @@ async function gutterGeometry(page, sel) {
         }, sel, MXFILE);
 
         await page.waitForFunction(
-          () => document.querySelectorAll('.content .drawio').length === 1, { timeout: 20000 });
+          () => document.querySelectorAll('.content .drawio').length === 1, { timeout: 20000 })
+          .catch(() => {});
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.content .drawio').length), 1,
+          'the dropped .drawio must render as a diagram -- if this is 0, read the ' +
+          'banner text printed by the refusal half above');
 
         await settleEditor(page);
         await pressSaveAndLand(page);

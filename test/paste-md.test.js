@@ -149,6 +149,26 @@ eq(
   'plainOnly + image present + NO text flavour at all -> falls through to image'
 );
 
+// v3.4.1: a file with no MIME at all -- a .drawio -- arrives under the fixed
+// 'file' key, because this map is keyed by MIME and that file has none. The
+// rule for WHICH files are insertable lives in client.js's insertableFile();
+// what is pinned here is only that the key is looked at.
+eq(
+  pm.pickPayload({ file: 'BLOB' }, false),
+  { kind: 'image', blob: 'BLOB' },
+  "a MIME-less file under the 'file' key is picked up like an image"
+);
+eq(
+  pm.pickPayload({ file: 'BLOB', 'text/html': '<p>x</p>' }, false),
+  { kind: 'markdown', value: 'x' },
+  "html still wins over a 'file' payload -- same precedence as image/*"
+);
+eq(
+  pm.pickPayload({ file: 'BLOB', 'text/plain': 'p' }, true),
+  { kind: 'text', value: 'p' },
+  "plainOnly still wins over a 'file' payload -- same precedence as image/*"
+);
+
 eq(
   pm.pickPayload({}, false),
   { kind: 'text', value: '' },
