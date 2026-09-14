@@ -13116,16 +13116,39 @@ async function main() {
       // focus trap (`modalRoots()`), so this always lands somewhere inside
       // it; the cap is generous headroom over the toolbar's own control
       // count (brushes + cycle ops + undo/redo + arm + meta fields + close).
+      //
+      // Fix round 1: the canvas is an `<svg>` (`d.createElementNS(SVGNS,
+      // 'svg')` in wave-ui.js), and on an SVG element `.className` is an
+      // `SVGAnimatedString` OBJECT, not a string — read as a string it stringifies
+      // to `"[object SVGAnimatedString]"`, which this loop's old
+      // `ed-wave-canvas` regex could never match. That silently broke the
+      // probe, not the product: focus was landing on the canvas the whole
+      // time, the loop just could not recognise it, so it kept pressing
+      // Tab and finally reported whichever ordinary HTML button it
+      // happened to stop on 80 presses later. Confirmed empirically before
+      // this fix (see task-9-report.md's fix-round section) — on a real
+      // SVG element `typeof el.className === 'object'` while
+      // `el.getAttribute('class')` and `el.dataset.focusKey` both answer
+      // correctly, and `getAttribute()` itself works identically on HTML
+      // and SVG elements either way. `data-focus-key` is what the product
+      // already tags the canvas with for exactly this purpose
+      // (`canvas.setAttribute('data-focus-key', 'canvas')`,
+      // `lib/editor/wave-ui.js`), so that is what this reads now instead
+      // of `.className`.
       let onCanvas = false;
       let lastActive = null;
       for (let i = 0; i < 80; i++) {
-        lastActive = await ctx.page.evaluate(() =>
-          (document.activeElement && document.activeElement.className) || '');
-        if (/(^|\s)ed-wave-canvas(\s|$)/.test(lastActive)) { onCanvas = true; break; }
+        lastActive = await ctx.page.evaluate(() => {
+          const el = document.activeElement;
+          if (!el) return null;
+          return { focusKey: el.getAttribute('data-focus-key'), tag: el.tagName };
+        });
+        if (lastActive !== null && lastActive.focusKey === 'canvas') { onCanvas = true; break; }
         await ctx.page.keyboard.press('Tab');
       }
       assert.strictEqual(onCanvas, true,
-        'T9b 前提失敗：Tab 了 80 次鍵盤還沒踏上畫布，最後停在「' + lastActive + '」');
+        'T9b 前提失敗：Tab 了 80 次鍵盤還沒踏上畫布，最後停在「' +
+        JSON.stringify(lastActive) + '」');
 
       // Tabbing onto the canvas fires its own `focus` listener, which calls
       // `enterDrawing()` and plants the cursor at (0,0) — real product
