@@ -2544,4 +2544,40 @@ const RSRC = [
   console.log('wave-codec: add/update/removeEdge — OK');
 }
 
+// ── v3.5.0 Task 4: moveEdgeEnd ───────────────────────────────────────────
+{
+  // 兩條 edge 共用字母 b。
+  const shared = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c one","b-c two"]}').doc;
+
+  // 分岔：搬第 0 條的 from，b 被第 1 條也引用 → 目標放新字母，只有第 0 條改綁。
+  const forked = C.moveEdgeEnd(shared, 0, 'from', 0, 3);
+  const forkedEntries = forked.edge;
+  assert.strictEqual(forkedEntries[1], 'b-c two',
+    '沒有被拖的那一條，位元組必須一模一樣');
+  const e0 = C.parseEdge(forkedEntries[0]);
+  assert.notStrictEqual(e0.from, 'b', '被拖的那一條必須改綁到新字母');
+  assert.strictEqual(C.nodesOf(forked)[e0.from].cell, 3, '新字母落在目標格');
+  assert.strictEqual(C.nodesOf(forked).b.cell, 1, '原字母留在原位給另一條用');
+
+  // 獨佔：只有一條 edge 用 c，搬它 → 原地搬移，名字不變。
+  const solo = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c only"]}').doc;
+  const moved = C.moveEdgeEnd(solo, 0, 'to', 1, 0);
+  assert.strictEqual(moved.edge[0], 'b~>c only',
+    '獨佔的字母原地搬移，entry 本身一個位元組都不該變');
+  assert.strictEqual(C.nodesOf(moved).c.cell, 0, '字母真的搬到新格子了');
+
+  // 三種 no-op：回原 doc（=== 相同），呼叫端據此不推 undo。
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 1, 3), solo, '拖回原來那一格');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 0, 1), solo, '拖到自己另一端 = a~>a');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 99, 0), solo, '目標 lane 不存在');
+  assert.strictEqual(C.moveEdgeEnd(solo, 9, 'to', 1, 0), solo, 'edge 索引越界');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'sideways', 1, 0), solo, 'end 只能是 from/to');
+
+  console.log('wave-codec: moveEdgeEnd 分岔／原地兩條路 — OK');
+}
+
 console.log('wave-codec.test.js OK');
