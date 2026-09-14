@@ -594,4 +594,42 @@ const FLAT = {
     'prototype 是 null 的物件是合法的設定物件（跟 codec 的 isPlainObject 同一條線）');
 }
 
+// ── v3.5.0 Task 5: edge 幾何 ─────────────────────────────────────────────
+{
+  const C = require('../lib/editor/wave-codec.js');
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c setup"]}').doc;
+  const layout = G.layoutOf(doc);
+  const edges = G.edgeLayout(doc, layout, C);
+
+  assert.strictEqual(edges.length, 1);
+  assert.strictEqual(edges[0].index, 0);
+  assert.strictEqual(edges[0].edge.shape, '~>');
+
+  // 端點落在該格的正中央——與 cellRect 同一個運算式算出來的，不另算一份。
+  const r0 = G.cellRect(layout, 0, 1);
+  assert.strictEqual(edges[0].from.x, r0.x + r0.width / 2);
+  assert.strictEqual(edges[0].from.y, r0.y + r0.height / 2);
+
+  assert.ok(typeof edges[0].d === 'string' && edges[0].d.charAt(0) === 'M',
+    'path 必須是 SVG d 字串');
+
+  // 反函數：把手矩形產生的位置，命中要找得回同一個端點。
+  for (const end of ['from', 'to']) {
+    const rect = G.edgeHandleRect(edges[0][end]);
+    const hit = G.edgeHandleAt(edges, rect.x + rect.width / 2, rect.y + rect.height / 2);
+    assert.deepStrictEqual(hit, { index: 0, end: end },
+      '把手中心點必須命中它自己（' + end + '）');
+  }
+  assert.strictEqual(G.edgeHandleAt(edges, -999, -999), null, '離很遠不得命中');
+
+  // 引用到不存在字母的 edge 要被跳過，不得丟例外。
+  const dangling = C.parseSource('{signal:[{name:"a",wave:"01"}],edge:["q~>r x"]}').doc;
+  assert.deepStrictEqual(G.edgeLayout(dangling, G.layoutOf(dangling), C), [],
+    '字母不存在的 edge 畫不出來，但不得讓整張圖倒掉');
+
+  console.log('wave-geometry: edge 幾何與把手命中互為反函數 — OK');
+}
+
 console.log('wave-geometry.test.js OK');
