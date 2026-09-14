@@ -10343,6 +10343,64 @@ async function main() {
         'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
         '\nengine: ' + JSON.stringify(after.engine));
 
+      // v3.5.0 Task 10 fix round 2: `P`/`N` are supposed to look different
+      // from `p`/`n` — that is the whole point of the task that widened
+      // `BRUSHES` to 22 — but until this row nothing asserted it. Neither
+      // long suite reads `data-clock-edge-<i>` or `.ed-wave-clock-arrow` at
+      // all (fix round 2's own review finding), so the arrow-drawing code
+      // in `drawLane` could be deleted outright and every suite would still
+      // stay green. `clk` (lane 0) is still five plain `p` cycles here —
+      // the emptying step below has not run yet — so it is the ABSENCE
+      // half of the pin, for free, off the untouched fixture. Painting `P`
+      // onto `req` (lane 1) and `N` onto `dat` (lane 2) is the PRESENCE
+      // half. Both halves are needed: presence alone would also pass an
+      // implementation that draws the arrow on every clock cycle, which
+      // would make `P` and `p` identical again, just in the other
+      // direction — exactly the regression `P`/`N` were added to fix.
+      //
+      // `req`/`dat` cycle 2 (currently a plain explicit level, `1` and `3`),
+      // not `ack`/`gap` — checked directly against `wave-codec.js` first,
+      // not assumed. `ack` starts with a bare repeater (`.0..1`), and
+      // `wave-codec.js`'s own `ABSOLUTE_CHARS` comment records that a
+      // repeater at cycle 0 makes the PAIR it forms with the next character
+      // draw as `x` unless that character is one of `pnhl` — `P`/`N` are
+      // not on that list, so painting `P` at `ack` cycle 1 measured back as
+      // `levelsOf` == `x`, erasing the very thing under test. `gap`
+      // (`01|10`) has its own trap: cycle 2 is a `|`, and `levelsOf` carries
+      // a `|`'s cycle forward from whatever precedes it, so painting `N` at
+      // cycle 1 measured back as TWO edge entries (`1:N 2:N`) — correct per
+      // `levelsOf`'s own contract, but not the clean single-entry presence
+      // pin this row wants. `req`/`dat` avoid both traps: neither starts
+      // with a repeater and neither has a `|`.
+      await paintCell(ctx.page, 1, 2, 'P');
+      await paintCell(ctx.page, 2, 2, 'N');
+      const edgeMarks = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        return {
+          clk: svg.getAttribute('data-clock-edge-0'),
+          req: svg.getAttribute('data-clock-edge-1'),
+          dat: svg.getAttribute('data-clock-edge-2'),
+          arrows: svg.querySelectorAll('.ed-wave-clock-arrow').length,
+        };
+      });
+      assert.strictEqual(edgeMarks.clk, '',
+        'T6b: clk lane 全部都是小寫 p，不該留下任何箭頭記號（absence half）。Got ' +
+        JSON.stringify(edgeMarks.clk));
+      assert.strictEqual(edgeMarks.req, '2:P',
+        'T6b: 塗上去的 P 必須在 data-clock-edge-1 的 cycle 2 留下記號（presence half）。' +
+        'Got ' + JSON.stringify(edgeMarks.req));
+      assert.strictEqual(edgeMarks.dat, '2:N',
+        'T6b: 塗上去的 N 必須在 data-clock-edge-2 的 cycle 2 留下記號（presence half，' +
+        'N 是鏡射幾何，跟 P 分開釘住才抓得到只有一邊算錯正負號）。Got ' +
+        JSON.stringify(edgeMarks.dat));
+      // …and the actual painted SHAPE count agrees: exactly one triangle per
+      // P/N cycle, not zero (the attribute could be right while nothing is
+      // drawn) and not more than two (an implementation that also arrowed
+      // clk's plain p cycles would still pass the three assertions above).
+      assert.strictEqual(edgeMarks.arrows, 2,
+        'T6b: 畫面上真正畫出來的 .ed-wave-clock-arrow 必須剛好 2 個（一個 P 一個 N，clk 的 p 沒有）。' +
+        'Got ' + edgeMarks.arrows);
+
       // The gap axis is only covered if the fixture actually HAS one drawn, on
       // a lane this comparison names.
       assert.ok(after.engineGaps.some((x) => x !== ''),
