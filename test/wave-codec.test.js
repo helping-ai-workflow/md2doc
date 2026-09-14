@@ -2580,4 +2580,49 @@ const RSRC = [
   console.log('wave-codec: moveEdgeEnd 分岔／原地兩條路 — OK');
 }
 
+// ── v3.5.0 Task 4 fix round 1: Critical 1 / Critical 2 / self-loop pin ──
+{
+  // CRITICAL 1 repro: 原地搬移撞到目標格已經有別的字母（'e'）時，不能直接蓋掉它
+  // ——那是把 'f~>e note' 那條線的錨點無聲拔掉。正確答案是併進分岔路：重用已經
+  // 佔著那格的字母，把被拖的這條改綁過去，原字母 c 因為不再被任何 edge 引用，
+  // 由 pruneNodes 清掉。
+  const occupied = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"},' +
+    '{name:"w",wave:"0123",node:"f.e."}],edge:["b~>c only","f~>e note"]}').doc;
+
+  const landed = C.moveEdgeEnd(occupied, 0, 'to', 2, 2); // 拖 edge0 的 to 到 w 的 cell2，那格已經住著 'e'
+  assert.strictEqual(landed.edge[1], 'f~>e note',
+    '沒被拖的那一條，位元組必須一模一樣');
+  assert.strictEqual(C.nodesOf(landed).e.cell, 2,
+    '被佔的字母 e 不能被蓋掉，必須還在原地');
+  const moved0 = C.parseEdge(landed.edge[0]);
+  assert.strictEqual(moved0.to, 'e',
+    '撞到已佔格子時要重用那個字母（併進分岔路），不是發明第三種行為');
+  assert.strictEqual(C.nodesOf(landed).c, undefined,
+    '舊字母 c 不再被任何 edge 引用，pruneNodes 該把它清掉');
+
+  // CRITICAL 2 repro：原地搬移那條路沒有 cell 上界，跟 ensureNode 用不同答案。
+  // z 這條 lane 只有 4 格（0..3），拖到 cell 50 必須被當成不存在的目標，回原 doc。
+  const bounded = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c only"]}').doc;
+  assert.strictEqual(C.moveEdgeEnd(bounded, 0, 'to', 1, 50), bounded,
+    '原地搬移必須跟 ensureNode 用同一顆 isIndex(_, cells.length) 上界，不能真的搬到格子外面');
+
+  // IMPORTANT 3 pin：self-loop（b~>b）的兩個端點都算「被共用」——即使只有這一條
+  // edge，from 跟 to 同一個字母也貢獻了 2 個 sharers，所以搬其中一端一定要分岔，
+  // 不可以原地搬移（那會把兩端一起拖走）。
+  const loop = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."}],edge:["b~>b loop"]}').doc;
+  const forkedLoop = C.moveEdgeEnd(loop, 0, 'from', 0, 3);
+  const lf = C.parseEdge(forkedLoop.edge[0]);
+  assert.notStrictEqual(lf.from, 'b',
+    'self-loop 搬其中一端必須分岔，不能原地搬移把兩端一起拖走');
+  assert.strictEqual(lf.to, 'b', '沒被拖的那一端字母不變');
+  assert.strictEqual(C.nodesOf(forkedLoop)[lf.from].cell, 3, '新字母落在目標格');
+  assert.strictEqual(C.nodesOf(forkedLoop).b.cell, 1, '原字母 b 留在原位給沒被拖的那一端用');
+
+  console.log('wave-codec: moveEdgeEnd fix round 1（撞格重用／cell 上界／self-loop）— OK');
+}
+
 console.log('wave-codec.test.js OK');
