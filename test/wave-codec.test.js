@@ -2493,6 +2493,26 @@ const RSRC = [
     'e 與新配的字母都沒有 edge 引用，要被清掉；b/c 被引用，要留');
   assert.strictEqual(C.pruneNodes(pruned), pruned, '沒有可清的就回原 doc');
 
+  // 上界：cell 不可超過這條 lane 實際的 wave 長度（跟 setCell/insertCycles
+  // 用同一套 isIndex(_, readLane(lane).cells.length)，不是第二個答案）。
+  const doc2 = C.parseSource('{signal:[{name:"a",wave:"01.x"}]}').doc; // 4 cells: 0..3
+  const oob = C.ensureNode(doc2, 0, 4); // 剛好比最後一格多 1
+  assert.strictEqual(oob.doc, doc2, 'cell 超過 lane 長度要回原 doc（=== 判斷）');
+  assert.strictEqual(oob.letter, null, '超界不配字母');
+
+  const atEdge = C.ensureNode(doc2, 0, 3); // 最後一格仍合法
+  assert.notStrictEqual(atEdge.doc, doc2);
+  assert.strictEqual(atEdge.letter, 'a');
+  assert.deepStrictEqual(C.nodesOf(atEdge.doc).a, { at: 0, cell: 3 },
+    '最後一格仍要能正常配字母');
+
+  // pool 前段字母已被占用時必須跳過去，拿第一個還沒被用過的，不能撞名。
+  const taken = C.parseSource(
+    '{signal:[{name:"x",wave:"0123",node:"a.b."}]}').doc; // a@0, b@2；cell3 空
+  const picked = C.ensureNode(taken, 0, 3);
+  assert.strictEqual(picked.letter, 'c',
+    'a/b 已被占用時要跳過去拿第一個空字母，不可撞名');
+
   console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
 }
 
