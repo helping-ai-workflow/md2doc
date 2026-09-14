@@ -13446,6 +13446,116 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T9d three refused endpoint drops each leave the undo depth untouched — OK');
     }
+
+    // ── v3.5.0 Task 11 fix round 1: bus data label 就地編，真機場景 ─────────
+    //
+    // MEASURED against the pinned codec BEFORE writing any assertion here
+    // (see this task's own fix-round-1 report for the full trace): in
+    // `WAVE_MD`'s own `dat` lane (`wave: 'x.3.x'`, `data: ['D']`), flattened
+    // lane index 2 (`clk`=0, the group's `req`=1, `dat`=2 — `waveLaneNames`
+    // above already pins this same order), cycle 2 is the run's own
+    // EXPLICIT owner (`codec.dataSlotOf` = slot 0) and cycle 3 is a HELD
+    // CONTINUATION of that same run (`dataSlotOf` = null, `levelsOf` = '3',
+    // a bus level — not `x`). Fix round 1's own defect, reviewer-traced: a
+    // press on cycle 3 fell straight through `wave-ui.js`'s paint-arming
+    // code with nothing catching it, silently turning that continuation
+    // into a fresh explicit value cycle and shifting every later label one
+    // slot right. This scenario presses cycle 3 FIRST — the regression
+    // cell, not the easy one — before ever touching cycle 2.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      const fieldState = () => ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return el === null ? null : {
+          key: el.getAttribute('data-focus-key'),
+          value: el.value,
+          focused: document.activeElement === el,
+        };
+      });
+      const clickCell = async (lane, cycle) => {
+        const at = await cellPoint(ctx.page, lane, cycle);
+        await ctx.page.mouse.move(at.x, at.y);
+        await ctx.page.mouse.down();
+        await ctx.page.mouse.up();
+        await new Promise((r) => setTimeout(r, 250));
+      };
+
+      // (a) the continuation cell: pressing it must open the OWNING cell's
+      // field (cycle 2, not cycle 3) — never arm a paint.
+      await clickCell(2, 3);
+      let field = await fieldState();
+      assert.ok(field !== null,
+        'T11a: 按 continuation 那一格必須開出標籤欄位，不能什麼都沒發生（沒發生＝正在悄悄落回塗格）');
+      assert.strictEqual(field.key, 'data-input-2-2',
+        'T11a: 開出來的欄位必須是「擁有這個槽」的 cycle 2，不是被按下去的 cycle 3。Got ' +
+        JSON.stringify(field));
+      assert.strictEqual(field.value, 'D',
+        'T11a: 欄位要預填目前的標籤。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.focused, true, 'T11a: 鍵盤要落在欄位裡');
+
+      // Escape cancels: no write, no undo step, the field is gone.
+      await ctx.page.keyboard.type('SHOULD-NOT-LAND');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+      const afterEscape = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+      }));
+      assert.strictEqual(afterEscape.input, 0, 'T11a: Escape 之後欄位要收掉');
+      assert.strictEqual(afterEscape.gestures, '0',
+        'T11a: Escape 取消不該推任何 commit。Got ' + JSON.stringify(afterEscape));
+      assert.strictEqual(afterEscape.undoDisabled, true,
+        'T11a: 取消不該讓復原鈕變成可按。Got ' + JSON.stringify(afterEscape));
+
+      // Proved against the SAVED bytes, not just the live DOM: the wave
+      // string is byte-identical and the label untouched — the continuation
+      // cycle was never repainted with the current brush.
+      let md = await saveAndRead(ctx);
+      let doc = parseWaveBlock(md);
+      let dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.3.x',
+        'T11a: 按 continuation 格再取消之後，wave 必須一個字元都沒動——fix round 1 之前這裡會被畫筆蓋掉。Got ' +
+        JSON.stringify(dat));
+      assert.deepStrictEqual(dat.data, ['D'],
+        'T11a: 取消之後 data 也不該動。Got ' + JSON.stringify(dat));
+
+      // (b) the owning cell itself, pressed directly: the SAME field opens,
+      // and this time Enter commits into the RIGHT slot.
+      await clickCell(2, 2);
+      field = await fieldState();
+      assert.strictEqual(field && field.key, 'data-input-2-2',
+        'T11a: 直接按擁有槽的那一格，也要開出同一個欄位。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, 'D',
+        'T11a: 欄位預填值要跟按 cycle 3 開出來的一樣（同一個槽）');
+
+      await ctx.page.keyboard.type('NEWVAL');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const afterEnter = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(afterEnter.input, 0, 'T11a: Enter 落地之後欄位要收掉');
+      assert.strictEqual(afterEnter.gestures, '1',
+        'T11a: Enter 落地要剛好一次 commit。Got ' + JSON.stringify(afterEnter));
+
+      md = await saveAndRead(ctx);
+      doc = parseWaveBlock(md);
+      dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.3.x',
+        'T11a: 落地之後 wave 仍然必須一個字元都沒動——只有 data 該變，這一格從沒被畫過。Got ' +
+        JSON.stringify(dat));
+      assert.deepStrictEqual(dat.data, ['NEWVAL'],
+        'T11a: 新標籤要落在正確的槽（slot 0），不是被 append 或算到別的位置。Got ' + JSON.stringify(dat));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11a a press on a held continuation opens the owning cell\'s field ' +
+        'instead of painting it, and the field\'s own Enter/Escape both behave — OK');
+    }
   }
 
   await browser.close();

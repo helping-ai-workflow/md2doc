@@ -2683,7 +2683,14 @@ const RSRC = [
 
   const set = C.setDataAt(doc, 0, 1, 'NEW');
   assert.deepStrictEqual(set.signal[0].data, ['p', 'NEW', 'r']);
-  assert.strictEqual(C.setDataAt(doc, 0, 9, 'x').signal[0].data.length, 10,
+  // fix round 1: `.length === 10` is a proxy that cannot fail even if the
+  // padding loop were dropped entirely — `spare[pos] = text` alone already
+  // extends `.length` to 10 on a bare out-of-bounds array assignment, which
+  // is exactly the JS behaviour that would leave the six positions in
+  // between as holes (`undefined`, not `''`) rather than padded. Pinning
+  // the whole array is what actually proves "no holes".
+  assert.deepStrictEqual(C.setDataAt(doc, 0, 9, 'x').signal[0].data,
+    ['p', 'q', 'r', '', '', '', '', '', '', 'x'],
     '超出長度時補空字串，不得留洞');
   console.log('wave-codec: data 槽對應與寫入 — OK');
 }
