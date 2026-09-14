@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -152,6 +152,166 @@ assert.strictEqual(st2.op, null, 'identical text → no op pushed');
   assert.strictEqual(m4.lines.join('\n'), 'Para1\n\n| A | B |\n|---|---|\n|  |  |\n\nPara2');
   assert.strictEqual(m4.newStartLine, 3);
   assert.deepStrictEqual(tStack.undo(m4.lines).lines, tLines, 'undo restores exactly, multi-line insert included');
+}
+
+// -- v3.4.2: which pastes are list-shaped -----------------------------------
+// LIST_LINE_RE decides whether a line opens a list item. Two oracles, because
+// one of them is only valid for part of the input:
+//
+//   * UNINDENTED lines are pinned against the REAL lexer (buildBlockMap). A
+//     regex agreeing with list-md.js's sibling regex would prove only that the
+//     two were copied from each other; agreeing with marked proves the claim.
+//   * INDENTED lines cannot use that oracle. In isolation `    - x` lexes as a
+//     code block, and a tab-indented item likewise — but every use of this
+//     regex is INSIDE a list run, where exactly those lines are nested items.
+//     The first cut of this test asserted the lexer's isolated answer and
+//     "failed" on '\t- tabbed' for that reason; the oracle was wrong, not the
+//     regex. They are asserted directly instead, with the context named.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const lexerSaysLi = (line) => {
+    const b = buildBlockMap(line + '\n').blocks;
+    return b.length > 0 && b[0].type === 'li';
+  };
+  const unindented = [
+    '- a', '* a', '+ a', '1. a', '9. a', '1) a', '123456789. a',
+    '- [ ] task', '- [x] done',
+    'plain', '', '-a', '1.a', '1234567890. too many digits',
+    '#### heading', '> quote', '|a|b|',
+  ];
+  for (const line of unindented) {
+    assert.strictEqual(LIST_LINE_RE.test(line), lexerSaysLi(line),
+      'LIST_LINE_RE must agree with the lexer on ' + JSON.stringify(line) +
+      ' (regex says ' + LIST_LINE_RE.test(line) + ', lexer says ' + lexerSaysLi(line) + ')');
+  }
+  // Indented lines: the claim is about what they mean inside a run.
+  for (const line of ['  - indented', '\t- tabbed', '    - deeply nested', '   1. ordered']) {
+    assert.strictEqual(LIST_LINE_RE.test(line), true,
+      'inside a list run an indented marker is a NESTED item, not a code block: ' +
+      JSON.stringify(line));
+  }
+  for (const line of ['   ', '    plain indented text']) {
+    assert.strictEqual(LIST_LINE_RE.test(line), false,
+      'indentation alone is not a marker: ' + JSON.stringify(line));
+  }
+
+  // pasteIsAllListLines(): "every line belongs to a list", where belonging
+  // includes indented continuations and blank lines inside the paste.
+  const T = [
+    [['- a'], true, 'a single item'],
+    [['- a', '- b'], true, 'two items'],
+    [['1. a', '   wrapped continuation', '- b'], true, 'an indented continuation belongs'],
+    [['- a', '', '- b'], true, 'a blank line INSIDE the paste is fine — looseness is the author’s choice'],
+    [['', '- a', ''], true, 'leading and trailing blanks are ignored'],
+    [['- a', 'paragraph'], false, 'a list followed by a paragraph is not all-list'],
+    [['paragraph', '- a'], false, 'a paragraph first is not all-list either'],
+    [['paragraph'], false, 'no list line at all'],
+    [[''], false, 'nothing but blanks is not a list'],
+    [[], false, 'an empty paste is not a list'],
+    [['   indented but no list above'], false,
+      'indentation alone does not make a continuation — it has to continue something'],
+  ];
+  for (const [input, expected, why] of T) {
+    assert.strictEqual(pasteIsAllListLines(input), expected,
+      'pasteIsAllListLines(' + JSON.stringify(input) + ') — ' + why);
+  }
+  console.log('editor-client: list-shaped paste detection agrees with the lexer — OK');
+}
+
+// -- v3.4.2: commitBlockInsertion({ tight }) ---------------------------------
+// The always-on leading blank line is correct for a paragraph and wrong for a
+// list item: a blank line between items makes the list LOOSE, every item then
+// renders as <p>, serializeBlocks() answers 'P' per item, and the whole run
+// degrades read-only WITH NO BANNER. That is what a user sees as "I pasted an
+// item next to my list and now Tab does nothing".
+//
+// `tight` is opt-in and the caller decides. The default must keep the exact
+// byte contract measured above, so the first case here is a regression net,
+// not a new claim.
+{
+  const listLines = ['# Doc', '', '- alpha', '  - child', '', 'After.'];
+  const listBlocks = () => ([
+    { id: 0, type: 'heading', startLine: 1, endLine: 1 },
+    { id: 1, type: 'li', startLine: 3, endLine: 3 },
+    { id: 2, type: 'li', startLine: 4, endLine: 4 },
+    { id: 3, type: 'paragraph', startLine: 6, endLine: 6 },
+  ]);
+
+  // (a) default: unchanged, blank line and all.
+  const dStack = new UndoStack();
+  const d = commitBlockInsertion(
+    { lines: listLines.slice(), blocks: listBlocks(), stack: dStack }, 2, ['- pasted']);
+  assert.strictEqual(d.lines.join('\n'),
+    '# Doc\n\n- alpha\n  - child\n\n- pasted\n\nAfter.',
+    'default (no opts) must still write the leading blank — the contract every other caller relies on');
+
+  // (b) tight, next line already blank: no leading blank, and the existing
+  //     blank still separates the run from what follows.
+  const tStack2 = new UndoStack();
+  const t = commitBlockInsertion(
+    { lines: listLines.slice(), blocks: listBlocks(), stack: tStack2 }, 2, ['- pasted'],
+    { tight: true });
+  assert.strictEqual(t.lines.join('\n'),
+    '# Doc\n\n- alpha\n  - child\n- pasted\n\nAfter.',
+    'tight: the pasted item joins the run with no blank line before it');
+  assert.strictEqual(t.newStartLine, 5, 'tight: newStartLine points at the pasted line itself');
+  assert.deepStrictEqual(tStack2.undo(t.lines).lines, listLines,
+    'tight: undo restores the exact original bytes');
+
+  // (c) tight, next line is another list item: still no blank on either side,
+  //     otherwise the item that follows gets divorced from the run instead.
+  const midLines = ['- a', '- b'];
+  const mStack2 = new UndoStack();
+  const m = commitBlockInsertion(
+    { lines: midLines.slice(),
+      blocks: [{ id: 0, type: 'li', startLine: 1, endLine: 1 },
+               { id: 1, type: 'li', startLine: 2, endLine: 2 }],
+      stack: mStack2 },
+    0, ['- pasted'], { tight: true });
+  assert.strictEqual(m.lines.join('\n'), '- a\n- pasted\n- b',
+    'tight: a list line following the insert needs no separator either');
+  assert.deepStrictEqual(mStack2.undo(m.lines).lines, midLines, 'tight: undo restores exactly');
+
+  // (d) tight, next line is a PARAGRAPH: the trailing blank is still required,
+  //     or the paragraph is swallowed into the last list item when re-lexed.
+  const pLines = ['- a', 'Paragraph immediately after.'];
+  const pStack = new UndoStack();
+  const pr = commitBlockInsertion(
+    { lines: pLines.slice(),
+      blocks: [{ id: 0, type: 'li', startLine: 1, endLine: 1 },
+               { id: 1, type: 'paragraph', startLine: 2, endLine: 2 }],
+      stack: pStack },
+    0, ['- pasted'], { tight: true });
+  assert.strictEqual(pr.lines.join('\n'),
+    '- a\n- pasted\n\nParagraph immediately after.',
+    'tight: a non-list neighbour still gets its separating blank');
+  assert.deepStrictEqual(pStack.undo(pr.lines).lines, pLines, 'tight: undo restores exactly');
+
+  // (e) tight at EOF: nothing follows, nothing to separate from.
+  const eLines2 = ['- a'];
+  const eStack2 = new UndoStack();
+  const e2 = commitBlockInsertion(
+    { lines: eLines2.slice(),
+      blocks: [{ id: 0, type: 'li', startLine: 1, endLine: 1 }],
+      stack: eStack2 },
+    0, ['- pasted'], { tight: true });
+  assert.strictEqual(e2.lines.join('\n'), '- a\n- pasted', 'tight at EOF: no trailing blank');
+  assert.deepStrictEqual(eStack2.undo(e2.lines).lines, eLines2, 'tight at EOF: undo restores exactly');
+
+  // (f) multi-item paste, indentation preserved byte for byte. Re-serialising
+  //     the run instead would normalise these markers — and that is the trap
+  //     duplicateListItems() documents ('~5px' -> '\~5px').
+  const multiLines = ['- a', ''];
+  const muStack = new UndoStack();
+  const mu = commitBlockInsertion(
+    { lines: multiLines.slice(),
+      blocks: [{ id: 0, type: 'li', startLine: 1, endLine: 1 }],
+      stack: muStack },
+    0, ['- one', '  - nested ~5px', '- two'], { tight: true });
+  assert.strictEqual(mu.lines.join('\n'), '- a\n- one\n  - nested ~5px\n- two\n',
+    'tight: a multi-item paste lands verbatim, indentation and escapes untouched');
+
+  console.log('editor-client: commitBlockInsertion({ tight }) — OK');
 }
 
 // -- Finding 5: empty heading emits no trailing space ------------------------
