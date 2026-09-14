@@ -632,4 +632,98 @@ const FLAT = {
   console.log('wave-geometry: edge 幾何與把手命中互為反函數 — OK');
 }
 
+// ── v3.5.0 Task 5 fix round 2 (a)：壞掉的 edge 被跳過，兄弟 edge 照樣畫出來 ──
+//
+// 舊的 dangling fixture 整份文件沒有一個合法字母，只證明「全壞回 []」——把
+// `continue` 誤打成 `break` 那份測試照樣綠。這裡在同一個 `edge` 陣列裡混一條
+// 壞掉的、一條合法的，證明兩件事：壞的那條被跳過而不是讓整個陣列提早結束；
+// 存活下來那條的 `index` 是它在 `doc.edge` 裡的原始位置（1），不是過濾後輸出
+// 陣列裡的位置（0）——這正是要驗證的地方。
+// ---------------------------------------------------------------------------
+{
+  const C = require('../lib/editor/wave-codec.js');
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["q~>r x","b~>c setup"]}').doc;
+  const layout = G.layoutOf(doc);
+  const edges = G.edgeLayout(doc, layout);
+
+  assert.strictEqual(edges.length, 1, '壞掉那條不能讓存活的那條也一起消失');
+  assert.strictEqual(edges[0].index, 1,
+    'index 必須是 doc.edge 裡的原始位置（1），不是過濾後陣列裡的位置（0）');
+  assert.strictEqual(edges[0].edge.shape, '~>');
+
+  const r0 = G.cellRect(layout, 0, 1);
+  const r1 = G.cellRect(layout, 1, 3);
+  assert.strictEqual(edges[0].from.x, r0.x + r0.width / 2);
+  assert.strictEqual(edges[0].from.y, r0.y + r0.height / 2);
+  assert.strictEqual(edges[0].to.x, r1.x + r1.width / 2);
+  assert.strictEqual(edges[0].to.y, r1.y + r1.height / 2);
+
+  console.log('wave-geometry: 壞掉的 edge 被跳過，兄弟 edge 的原始 index 與端點都還在 — OK');
+}
+
+// ── v3.5.0 Task 5 fix round 2 (b)：elbow 家族真的在轉角座標轉彎 ─────────────
+//
+// `pathFor` 有三族：elbow（`-|` 系）、curve（`~` 系）、straight（`-` 系），先前
+// 只有 curve 家族被端到端量過，elbow 轉角座標的 off-by-one 不會被任何既有測試
+// 抓到。挑 `-|-` 當代表：它的 `midX` 是 `(from.x+to.x)/2`，跟 `from.x`/`to.x`
+// 都不同，能真正證明「有轉」；`-|`／`|-` 的 `midX` 會退化成 `to.x`/`from.x`，
+// 看不出跟直線的差別。
+// ---------------------------------------------------------------------------
+{
+  const C = require('../lib/editor/wave-codec.js');
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".d.."},{name:"z",wave:"0123",node:"...e"}],' +
+    'edge:["d-|-e"]}').doc;
+  const layout = G.layoutOf(doc);
+  const edges = G.edgeLayout(doc, layout);
+  assert.strictEqual(edges.length, 1);
+  assert.strictEqual(edges[0].edge.shape, '-|-');
+
+  const from = edges[0].from;
+  const to = edges[0].to;
+  const midX = (from.x + to.x) / 2;
+  assert.notStrictEqual(midX, from.x, 'midX 必須跟兩端都不同，才是真的轉彎而不是退化成直線');
+  assert.notStrictEqual(midX, to.x);
+
+  const d = edges[0].d;
+  assert.strictEqual(d.indexOf('M' + from.x + ',' + from.y), 0,
+    'path 必須從起點出發');
+  assert.ok(d.indexOf(' L' + midX + ',' + from.y + ' ') !== -1,
+    '第一段是水平線：走到轉角的 x，y 仍停在起點的 y');
+  assert.ok(d.indexOf(' L' + midX + ',' + to.y) !== -1,
+    '第二段是垂直線：x 停在轉角，y 換成終點的 y');
+  assert.ok(d.slice(-(' L' + to.x + ',' + to.y).length) === ' L' + to.x + ',' + to.y,
+    '最後一段走到終點座標收尾');
+
+  console.log('wave-geometry: elbow 家族真的在轉角座標轉彎 — OK');
+}
+
+// ── v3.5.0 Task 5 fix round 2 (c)：straight 家族是單一直線，沒有轉角也沒有曲線 ─
+//
+// straight 家族（`-` 系，這裡用箭頭變體 `->`）該只有一個 `M` 加一個 `L`：沒有
+// elbow 的中繼轉角點，也沒有 curve 家族的 `C` 指令。
+// ---------------------------------------------------------------------------
+{
+  const C = require('../lib/editor/wave-codec.js');
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".f.."},{name:"z",wave:"0123",node:"...g"}],' +
+    'edge:["f->g"]}').doc;
+  const layout = G.layoutOf(doc);
+  const edges = G.edgeLayout(doc, layout);
+  assert.strictEqual(edges.length, 1);
+  assert.strictEqual(edges[0].edge.shape, '->');
+
+  const from = edges[0].from;
+  const to = edges[0].to;
+  const d = edges[0].d;
+  assert.strictEqual(d.indexOf('C'), -1, 'straight 家族不准出現曲線指令');
+  assert.strictEqual((d.match(/L/g) || []).length, 1, 'straight 家族只准有一個 L，沒有轉角中繼點');
+  assert.strictEqual(d, 'M' + from.x + ',' + from.y + ' L' + to.x + ',' + to.y,
+    '只有起點與終點兩個座標，中間沒有別的東西');
+
+  console.log('wave-geometry: straight 家族是單一直線，沒有轉角也沒有曲線 — OK');
+}
+
 console.log('wave-geometry.test.js OK');
