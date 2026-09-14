@@ -24906,7 +24906,97 @@ async function gutterGeometry(page, sel) {
       } finally { t7bsrv.close(); }
     }
 
-    console.log('editor-client-runtime.test.js OK');
+    // ── v3.4.2: a list pasted beside a list joins it, instead of being
+  //    divorced from it by a blank line.
+  //
+  //    Reported as "I paste an item somewhere else and blank lines appear
+  //    around it, so I cannot indent it". The blank line is the visible half.
+  //    The half that makes it unfixable from the outside: a blank line makes
+  //    the list LOOSE, marked then wraps every item in <p>, serializeBlocks()
+  //    answers 'P' per item, and the whole run degrades READ-ONLY with no
+  //    banner. Tab does nothing and says nothing.
+  //
+  //    So the assertion that matters is not the absence of blank lines in the
+  //    file — it is that the run is still structurally editable and that Tab
+  //    actually indents. The bytes are asserted too, because a fix that kept
+  //    the run editable while still writing the blank would leave the user
+  //    deleting blank lines by hand forever.
+  {
+    const { srv, url, mdPath } = await setupListDoc([
+      '# List doc', '',
+      '1. Alpha item', '   - nested child', '2. Bravo item', '',
+    ]);
+    try {
+      const page = await newPage(browser);
+      await page.setViewport({ width: 1400, height: 900 });
+      await page.goto(url, { waitUntil: 'networkidle0' });
+
+      const list0 = await listBlockSel(page, 0);
+      await openWysiwyg(page, list0);
+      await placeCaretInListText(page, list0, 'nested child', false);
+
+      // A list copied from any rendered view arrives as text/html; that is the
+      // path that reaches insertBlockBelow() at all (a plain-text-only paste
+      // is inserted inline at the caret and never had this bug).
+      await page.evaluate(() => {
+        const el = document.activeElement;
+        const dt = new DataTransfer();
+        dt.setData('text/plain', 'sop and tlast are preserved');
+        dt.setData('text/html', '<ul><li>sop and tlast are preserved</li></ul>');
+        el.dispatchEvent(new ClipboardEvent('paste', {
+          clipboardData: dt, bubbles: true, cancelable: true,
+        }));
+      });
+
+      await page.waitForFunction(
+        () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 4,
+        { timeout: 10000 }).catch(() => {});
+      assert.strictEqual(
+        await page.evaluate(
+          () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
+        4, 'the pasted item must be on screen as a list item — everything below is vacuous otherwise');
+
+      // The direct refutation of "Tab does nothing": ask the serializer, not
+      // the DOM. A non-empty `unsupported` IS the read-only degrade.
+      assert.deepStrictEqual(
+        await page.evaluate(() => window.md2docListMd.serializeBlocks(
+          Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))).unsupported),
+        [],
+        'the run must still be structurally editable — a loose run answers P per item ' +
+        'and every structural op then refuses in silence');
+
+      // And the thing the user actually wanted: indent it.
+      await placeCaretInListText(page, list0, 'sop and tlast', true);
+      await page.keyboard.press('Tab');
+      await page.waitForFunction(
+        () => Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+          .some((el) => /sop and tlast/.test(el.textContent) &&
+            el.getAttribute('data-indent') === '1'),
+        { timeout: 10000 }).catch(() => {});
+      assert.strictEqual(
+        await page.evaluate(() => {
+          const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
+            .find((e) => /sop and tlast/.test(e.textContent));
+          return el ? el.getAttribute('data-indent') : null;
+        }),
+        '1', 'Tab must actually indent the pasted item — this is the reported symptom');
+
+      const out = await saveAndRead(page, mdPath);
+      assert.ok(!/\n\n\s*-\s+sop/.test(out),
+        'no blank line may separate the pasted item from the run it joined, got: ' +
+        JSON.stringify(out));
+      assert.ok(/nested child\n\s+-\s+sop and tlast are preserved\n2\. Bravo item/.test(out),
+        'the pasted item must sit tight between the child it followed and the item ' +
+        'that followed it, got: ' + JSON.stringify(out));
+
+      await page.close();
+      console.log('v3.4.2: a pasted list item joins the run tight, stays editable, and indents — OK');
+    } finally {
+      srv.close();
+    }
+  }
+
+  console.log('editor-client-runtime.test.js OK');
   } finally {
     await browser.close();
     srv.close();
