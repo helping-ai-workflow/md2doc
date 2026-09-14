@@ -601,7 +601,7 @@ const FLAT = {
     '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
     'edge:["b~>c setup"]}').doc;
   const layout = G.layoutOf(doc);
-  const edges = G.edgeLayout(doc, layout, C);
+  const edges = G.edgeLayout(doc, layout);
 
   assert.strictEqual(edges.length, 1);
   assert.strictEqual(edges[0].index, 0);
@@ -626,7 +626,7 @@ const FLAT = {
 
   // 引用到不存在字母的 edge 要被跳過，不得丟例外。
   const dangling = C.parseSource('{signal:[{name:"a",wave:"01"}],edge:["q~>r x"]}').doc;
-  assert.deepStrictEqual(G.edgeLayout(dangling, G.layoutOf(dangling), C), [],
+  assert.deepStrictEqual(G.edgeLayout(dangling, G.layoutOf(dangling)), [],
     '字母不存在的 edge 畫不出來，但不得讓整張圖倒掉');
 
   console.log('wave-geometry: edge 幾何與把手命中互為反函數 — OK');
