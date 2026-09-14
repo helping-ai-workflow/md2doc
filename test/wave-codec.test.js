@@ -2516,4 +2516,32 @@ const RSRC = [
   console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
 }
 
+// ── v3.5.0 Task 3: edge 陣列的三個 op ────────────────────────────────────
+{
+  const base = C.parseSource('{signal:[{name:"a",wave:"01",node:".b"}]}').doc;
+
+  const one = C.addEdge(base, { from: 'b', to: 'b', shape: '~>', label: 'self' });
+  assert.deepStrictEqual(one.edge, ['b~>b self'], '沒有 edge 陣列時要建一個');
+
+  const two = C.addEdge(one, { from: 'b', to: 'b', shape: '-', label: '' });
+  assert.deepStrictEqual(two.edge, ['b~>b self', 'b-b'], '附加在後面');
+
+  assert.strictEqual(C.addEdge(base, { from: 'b', to: 'b', shape: '??', label: '' }), base,
+    '不合法的形狀不得寫進去，且要回原 doc');
+
+  const upd = C.updateEdge(two, 0, { from: 'b', to: 'b', shape: '->', label: 'renamed' });
+  assert.deepStrictEqual(upd.edge, ['b->b renamed', 'b-b']);
+  assert.strictEqual(C.updateEdge(two, 9, { from: 'b', to: 'b', shape: '-', label: '' }), two,
+    '索引越界回原 doc');
+
+  const rm = C.removeEdge(two, 0);
+  assert.deepStrictEqual(rm.edge, ['b-b']);
+  assert.strictEqual(C.removeEdge(two, -1), two, '索引越界回原 doc');
+
+  const empty = C.removeEdge(one, 0);
+  assert.ok(!('edge' in empty), '刪到一條都不剩時要把 edge 鍵拿掉，不留空陣列');
+
+  console.log('wave-codec: add/update/removeEdge — OK');
+}
+
 console.log('wave-codec.test.js OK');
