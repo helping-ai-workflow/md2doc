@@ -3,6 +3,40 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.4.1 — 2026-09-14
+
+**批次 2 把 `.drawio` / `.xml` 教會了渲染，卻沒有把插入那條路一起納入範圍。** 這是
+疏漏，不是取捨：使用者按下工具列的 🖼，檔案對話框裡 `.drawio` 是灰的、選不到；就算
+用拖放繞過對話框，上傳一樣失敗。
+
+### Fixed
+
+- **插入圖片選不到 `.drawio` / `.xml`，拖放也上傳不了。** 一路上有**三道**閘門各擋
+  一次，而它們擋的理由都一樣：整條路只認 MIME，而**瀏覽器對 `.drawio` 回報的
+  `file.type` 是空字串**——`.drawio` 沒有註冊的 media type，所以 MIME 這個問題對它
+  根本沒有答案。三道分別是：`input.accept` 只列四種 raster MIME（對話框因此把檔案
+  變灰）、`uploadImageBlob()` 在送出請求前自己先用 `extFor(blob.type)` 否決、以及
+  `/api/asset` 的 `extFor(body.mime)` 回 `null` → `400 unsupported image type`。
+  修法不是放寬既有的白名單，而是**加第二道有自己規則的閘門**：
+  **副檔名決定候選、內容決定放不放行**。副檔名只認 `.drawio` 與 `.xml` 兩個字面值
+  （大小寫不敏感），而且寫進磁碟的那個副檔名取自程式裡的常數表、不是從檔名裡切出來的
+  字串——所以任何大小寫、Unicode 形近字或雙重副檔名都變不成磁碟上的副檔名。通過之後
+  再用 `lib/drawio.js` 既有的 `isDrawioXml()` parse 一次位元組本身，認不出
+  `<mxfile>` 或 `<mxGraphModel>` 就退回、**一個 byte 都不寫**。
+  `asset.js` 的 `EXT_FOR_MIME` **一個字都沒動**，`image/svg+xml` 仍然在門外——那條
+  註解記的威脅（SVG 可夾 `<script>`，而 MIME 字串是對方給的）在新這條路上不成立，
+  因為副檔名本身不足以放行，內容必須先 parse 成 drawio。實測釘住的是這幾條：把 HTML
+  改名成 `.xml` 被拒、隨便的 `.xml` 被拒、帶著合法 drawio 內容的 `.svg` 與 `.html`
+  一樣被拒、`image/svg+xml` 仍被拒，而三個被拒的上傳**在 `assets/` 裡不留任何東西**。
+- **被拒絕的上傳會對使用者說出與事實無關的話。** `uploadImageBlob()` 從不看伺服器
+  回傳的 `error` 欄位，只檢查 `j.path` 在不在，於是任何 4xx 都得到
+  「圖片上傳失敗 — 伺服器回應格式不正確」。這在新閘門出現之後從邊角變成日常——
+  「挑了一個不是 drawio 的 `.xml`」是很普通的手誤——所以改成非 2xx 時直接顯示伺服器
+  自己的理由（沒有理由才退回 `HTTP <status>`）。這是修插入時量出來的既存缺陷。
+
+markdown 的形狀沒有新發明：插入產生的就是 `![](assets/x.drawio)`，正是 v3.4.0 的
+`drawioPlaceholderFor()` 已經在吃的形狀。多頁 `.drawio` 仍落在第 0 頁，選頁不在這一版。
+
 ## v3.4.0 — 2026-09-13（批次 1＋2＋3／3）
 
 **下面列的是這一版的全部三批。** v3.4.0 的設計刻意把工作切成三批，
