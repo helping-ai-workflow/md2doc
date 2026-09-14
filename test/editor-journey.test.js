@@ -13634,6 +13634,158 @@ async function main() {
       console.log('journey: wave/T11b a press on a bus cell\'s BOX — away from its label — ' +
         'still paints, never opens the field — OK');
     }
+
+    // ── v3.5.0 Task 11 fix round 3: an UNLABELLED bus cell needs a mouse
+    // target too ─────────────────────────────────────────────────────────
+    //
+    // Round 2's rule ("open the field only on a press that hits the label
+    // TEXT") left the single most ordinary flow in this editor — paint a
+    // `=`, then name it — mouse-unreachable, because a fresh bus value has
+    // no text yet to press. Round 3 draws a small placeholder circle in a
+    // label's place when there is none, and this is its own fixture rather
+    // than a mutation of `WAVE_MD` above: every one of T6a through T11b
+    // counts lanes and rows against that fixture's own shape, and adding an
+    // unlabelled bus lane to it would be changing the ground every earlier
+    // row stands on for one new row's sake.
+    //
+    // MEASURED before writing any assertion: this doc flattens to `raw` =
+    // lane 0 (inside the group), `lvl` = lane 1. `raw` has no `data` field
+    // AT ALL, so its one bus cycle (cycle 1, `codec.dataSlotOf` = slot 0)
+    // has no label — exactly the case round 2 left stranded. `lvl` is a
+    // plain level lane (`010`), no bus cycle anywhere in it.
+    const WAVE11_EMPTY_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  ['g',",
+      "    { name: 'raw', wave: 'x=x' }",
+      "  ],",
+      "  { name: 'lvl', wave: '010' }",
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // The centre of a mark's own bounding box — the placeholder circle
+    // here, `labelPoint` above did the same for the text — never a cycle's.
+    const markPoint = async (page, selector) => {
+      const box = await page.evaluate((sel) => {
+        const t = document.querySelector(sel);
+        if (t === null) return null;
+        const r = t.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }, selector);
+      assert.ok(box !== null, 'markPoint 前提失敗：畫布上找不到 ' + selector);
+      return box;
+    };
+
+    // T11c — press the PLACEHOLDER of an unlabelled bus cell: must open the
+    // field for the right slot, exactly like pressing a labelled cell's
+    // text does in T11a.
+    {
+      const ctx = await newPage(WAVE11_EMPTY_MD);
+      await openWave(ctx.page);
+
+      const before = await ctx.page.evaluate(() => ({
+        empty: document.querySelectorAll('.ed-wave-buslabel-empty').length,
+        anyMark: document.querySelectorAll('.ed-wave-buslabel').length,
+      }));
+      assert.strictEqual(before.empty, 1,
+        'T11c 前提失敗：raw 這條沒有標籤的 bus cycle 必須畫出一個 placeholder。Got ' +
+        JSON.stringify(before));
+      // The placeholder carries BOTH classes (ed-wave-buslabel plus
+      // ed-wave-buslabel-empty — see drawLane's own comment), so a count of
+      // "any buslabel-class mark on screen" is also exactly 1, not 2.
+      assert.strictEqual(before.anyMark, 1,
+        'T11c 前提失敗：placeholder 要跟文字共用同一個 class，數量不該變成兩個。Got ' +
+        JSON.stringify(before));
+
+      const pt = await markPoint(ctx.page, '.ed-wave-buslabel-empty');
+      await ctx.page.mouse.move(pt.x, pt.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const field = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return el === null ? null : { key: el.getAttribute('data-focus-key'), value: el.value };
+      });
+      assert.ok(field !== null, 'T11c: 按 placeholder 必須開出標籤欄位');
+      assert.strictEqual(field.key, 'data-input-0-1',
+        'T11c: 開出來的欄位必須是那一個 bus cycle（lane 0, cycle 1）。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, '', 'T11c: 還沒有標籤，欄位要是空的。Got ' + JSON.stringify(field));
+
+      await ctx.page.keyboard.type('NEWNAME');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const raw = doc.signal[0][1];
+      assert.strictEqual(raw.wave, 'x=x', 'T11c: wave 不該被動到。Got ' + JSON.stringify(raw));
+      assert.deepStrictEqual(raw.data, ['NEWNAME'],
+        'T11c: 新標籤要建出 data 陣列，落在 slot 0。Got ' + JSON.stringify(raw));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11c a press on an UNLABELLED bus cell\'s placeholder opens the ' +
+        'field for the right slot — OK');
+    }
+
+    // T11d — a non-bus cell has no mark at all, and paints exactly as
+    // always. The regression this row guards: a placeholder rule that
+    // fired on ANY cell missing a label (rather than only a bus cell
+    // missing one) would put a mark — and this round's mouse hit target —
+    // on every plain level cell in every diagram.
+    {
+      const ctx = await newPage(WAVE11_EMPTY_MD);
+      await openWave(ctx.page);
+
+      const marks = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const laneHeight = svg.getBoundingClientRect().height /
+          Number(svg.getAttribute('data-lane-count'));
+        const r = svg.getBoundingClientRect();
+        const rows = new Set();
+        for (const el of svg.querySelectorAll('.ed-wave-buslabel')) {
+          const b = el.getBoundingClientRect();
+          rows.add(Math.floor((b.top + b.height / 2 - r.top) / laneHeight));
+        }
+        return Array.from(rows);
+      });
+      assert.deepStrictEqual(marks, [0],
+        'T11d 前提失敗：只有 lane 0（raw）該有標籤記號，lane 1（lvl）一個都不該有。Got ' +
+        JSON.stringify(marks));
+
+      await pressClick(ctx.page, '.ed-wave-brush[data-brush="1"]');
+      const at = await cellPoint(ctx.page, 1, 0);
+      await ctx.page.mouse.move(at.x, at.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const after = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        wave1: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-1'),
+      }));
+      assert.strictEqual(after.input, 0, 'T11d: 非 bus 格不該開出欄位');
+      assert.ok(after.wave1 !== null && after.wave1[0] === '1',
+        'T11d: 非 bus 格要照樣塗上去。Got ' + JSON.stringify(after));
+
+      // MEASURED: C.setCellRange({signal:[...,{wave:'010'}]}, 1, 0, 0, '1')
+      // gives 'lvl'.wave === '110' — only cycle 0 changes, no held cell
+      // downstream to anchor (every cycle in '010' is already explicit).
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const lvl = doc.signal[1];
+      assert.strictEqual(lvl.wave, '110',
+        'T11d: 存回去的 wave 也要反映那次塗格。Got ' + JSON.stringify(lvl));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11d a non-bus cell has no placeholder and paints exactly as ' +
+        'always — OK');
+    }
   }
 
   await browser.close();
