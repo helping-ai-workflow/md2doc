@@ -2412,4 +2412,48 @@ const RSRC = [
   assert.strictEqual(C.setCell(doc, 0, 0, 5), doc, '筆刷不是字串也一樣原樣回傳');
 }
 
+// ── v3.5.0 Task 1: edge 字串 ↔ 物件 ───────────────────────────────────────
+// 形狀清單與切字串的方式都是從 pin 住的 wavedrom 3.5.0 原始碼量到的
+// (node_modules/wavedrom/lib/arc-shape.js 的 case 清單、
+//  node_modules/wavedrom/lib/render-arcs.js 的 words[0] 切法)，不是憑記憶。
+{
+  assert.strictEqual(C.EDGE_SHAPES.length, 20, '形狀清單必須正好 20 種');
+  assert.ok(C.EDGE_SHAPES.indexOf('<-|->') !== -1, '最長的形狀必須在清單裡');
+
+  assert.deepStrictEqual(C.parseEdge('a~>b'),
+    { from: 'a', to: 'b', shape: '~>', label: '' });
+  assert.deepStrictEqual(C.parseEdge('a~>b setup'),
+    { from: 'a', to: 'b', shape: '~>', label: 'setup' });
+  assert.deepStrictEqual(C.parseEdge('x<-|->y t_hold 2ns'),
+    { from: 'x', to: 'y', shape: '<-|->', label: 't_hold 2ns' },
+    '標籤裡的空白必須原樣保留');
+  assert.deepStrictEqual(C.parseEdge('A+B'),
+    { from: 'A', to: 'B', shape: '+', label: '' }, '大寫字母也是合法 anchor');
+
+  assert.strictEqual(C.parseEdge('ab'), null, '沒有形狀');
+  assert.strictEqual(C.parseEdge('a?b'), null, '不是清單裡的形狀');
+  assert.strictEqual(C.parseEdge(''), null);
+  assert.strictEqual(C.parseEdge(null), null);
+
+  // 反函數：對每一個標準形式的輸入成立。
+  // 標準形式 = 已 trim、from/shape/to 之間無空白、標籤與頭部之間正好一個空白。
+  let round = 0;
+  for (const shape of C.EDGE_SHAPES) {
+    for (const label of ['', 'lbl', 'two words', 'has~tilde', 'has>gt']) {
+      const s = 'a' + shape + 'b' + (label === '' ? '' : ' ' + label);
+      const back = C.formatEdge(C.parseEdge(s));
+      assert.strictEqual(back, s, 'formatEdge(parseEdge(s)) 必須等於 s，s=' + JSON.stringify(s));
+      round += 1;
+    }
+  }
+  assert.strictEqual(round, 100, '窮舉必須真的跑過 20 形狀 × 5 標籤');
+
+  // 寫入端絕不可產生前導空白：引擎用未 trim 的字串配 trim 後的長度取 label，
+  // '  a~>b hello' 在引擎那邊會變成 label 'b hello'（實測）。
+  assert.strictEqual(C.formatEdge({ from: 'a', to: 'b', shape: '~>', label: ' pad' }),
+    'a~>b pad', 'formatEdge 必須把標籤前後的空白修掉，否則引擎會讀錯');
+
+  console.log('wave-codec: parseEdge/formatEdge 互為反函數 — OK');
+}
+
 console.log('wave-codec.test.js OK');
