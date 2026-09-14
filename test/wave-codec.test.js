@@ -2625,4 +2625,48 @@ const RSRC = [
   console.log('wave-codec: moveEdgeEnd fix round 1（撞格重用／cell 上界／self-loop）— OK');
 }
 
+// ── v3.5.0 Task 10 fix round 1: every BRUSHES entry is keyboard-reachable ──
+// `isBrushKey` (lib/editor/wave-ui.js) is the SAME predicate
+// `handleDrawingKey`'s keydown handler calls to decide whether a keystroke
+// both picks and paints a brush — this pins the rule the keyboard actually
+// obeys, not a belief about it (the same reason the `levelsOf`-vs-engine
+// test above renders through the real wavedrom instead of re-deriving its
+// answer). The task that widened `BRUSHES` to 22 left a `!ev.shiftKey`
+// guard in place for a moment that silently made `P`/`N` — added by that
+// same task, and only ever typed WITH Shift on an ordinary keyboard —
+// mouse-only; a test that only asserted `BRUSHES.length === 22` would have
+// stayed green through that, which is exactly why this checks reachability
+// per character, not the roster's size.
+{
+  const waveUi = require('../lib/editor/wave-ui.js');
+
+  for (const ch of waveUi.BRUSHES) {
+    assert.strictEqual(waveUi.isBrushKey(ch), true,
+      '每一顆筆刷都要能用鍵盤直接打出來（isBrushKey 是 handleDrawingKey 真的呼叫的' +
+      '那個判斷，不是它的複本）：' + JSON.stringify(ch));
+  }
+
+  // The six navigation key NAMES stay excluded — this is what the old
+  // `!ev.shiftKey` guard was actually protecting (Shift+ArrowLeft etc. must
+  // never fall into the paint path), and `isBrushKey`'s own comment records
+  // that the exclusion now lives in `key.length === 1`, not in `ev.shiftKey`.
+  for (const nav of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']) {
+    assert.strictEqual(waveUi.isBrushKey(nav), false,
+      '導覽鍵不能被當成筆刷字元（否則 Shift+方向鍵擴選會被畫面吃掉）：' + nav);
+  }
+
+  // The three characters this fix round exists for, named explicitly rather
+  // than trusting the roster loop above to have exercised the case that
+  // mattered: all three need Shift on a US keyboard layout to type at all.
+  for (const ch of ['P', 'N', '|']) {
+    assert.strictEqual(waveUi.isBrushKey(ch), true,
+      'Shift 才打得出來的字元也要能當筆刷用鍵盤直接畫：' + ch);
+  }
+
+  assert.strictEqual(waveUi.BRUSHES.length, 22,
+    'v3.5.0 Task 10：筆刷從 11 顆擴到 22 顆');
+
+  console.log('wave-codec: BRUSHES 每一顆都能用鍵盤直接打出來（isBrushKey，不只數量）— OK');
+}
+
 console.log('wave-codec.test.js OK');
