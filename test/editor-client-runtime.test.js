@@ -24966,7 +24966,15 @@ async function gutterGeometry(page, sel) {
         'and every structural op then refuses in silence');
 
       // And the thing the user actually wanted: indent it.
-      await placeCaretInListText(page, list0, 'sop and tlast', true);
+      //
+      // Addressed by its own text, not through `list0`: the pasted item is a
+      // bullet at indent 0 sitting between the ordered items, so CommonMark
+      // ends the ol and opens a ul — three runs, and runSpanOf(list0) spans
+      // only the first. That is a fact about the document the user pasted,
+      // not a defect: what the fix owes them is a run that is still editable
+      // and an item that still indents.
+      const pastedSel = await liBlockSelByText(page, 'sop and tlast are preserved');
+      await placeCaretInListText(page, pastedSel, 'sop and tlast', true);
       await page.keyboard.press('Tab');
       await page.waitForFunction(
         () => Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
