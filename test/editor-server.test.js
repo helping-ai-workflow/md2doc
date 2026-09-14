@@ -690,5 +690,93 @@ function clientIdOf(pageBody) {
     }
   }
 
+  // ==========================================================================
+  // /api/asset — the .drawio / .xml insert path (v3.4.1).
+  //
+  // v3.4.0 taught the renderer to embed `.drawio`/`.xml`, but the INSERT path
+  // was never widened: `extFor(mime)` is the only gate, and a browser reports
+  // `file.type === ''` for a .drawio, so every upload died at
+  // `400 unsupported image type`. Reopening it is not "widen the MIME
+  // whitelist" — `image/svg+xml` stays out for the reason asset.js documents.
+  // It is a SECOND gate with its own rule: the extension picks the candidate,
+  // the CONTENT decides whether anything is written. Renaming a payload to
+  // .xml must not be enough to put it on disk.
+  // ==========================================================================
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-asset-drawio-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# D\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    const assetsDir = path.join(dir, 'assets');
+    const b64 = (t) => Buffer.from(t, 'utf8').toString('base64');
+    const MXFILE = '<mxfile host="app.diagrams.net">' +
+      '<diagram name="Page-1"><mxGraphModel><root/></mxGraphModel></diagram></mxfile>';
+    const MXMODEL = '<mxGraphModel dx="1" dy="1"><root/></mxGraphModel>';
+    const post = (body) => req(srv.port, 'POST', '/api/asset', body);
+    try {
+      // 1. A real .drawio lands, keeping its extension — that extension is
+      //    what `drawioPlaceholderFor()` keys on downstream, so a silent
+      //    rewrite to .png would render as a broken image.
+      const a = await post({ fileId: 0, mime: '', name: 'flow.drawio', data: b64(MXFILE) });
+      assert.strictEqual(a.status, 200, 'a real .drawio must upload: ' + a.body);
+      const aPath = JSON.parse(a.body).path;
+      assert.ok(/\.drawio$/.test(aPath), 'uploaded .drawio must keep its extension, got ' + aPath);
+      assert.strictEqual(fs.readFileSync(path.join(assetsDir, path.basename(aPath)), 'utf8'),
+        MXFILE, 'the bytes on disk must be the bytes that were sent');
+
+      // 2. A bare <mxGraphModel> under .xml — the other root drawio writes.
+      const b = await post({ fileId: 0, mime: '', name: 'model.xml', data: b64(MXMODEL) });
+      assert.strictEqual(b.status, 200, 'an .xml holding <mxGraphModel> must upload: ' + b.body);
+      assert.ok(/\.xml$/.test(JSON.parse(b.body).path), '.xml must keep its extension');
+
+      // 3. Content decides. An .xml that is not drawio is refused — otherwise
+      //    it lands on disk and only fails later, at render time, as a broken
+      //    image beside an orphan file in the user's git tree.
+      const c = await post({ fileId: 0, mime: '', name: 'notes.xml',
+        data: b64('<notes><item>hello</item></notes>') });
+      assert.strictEqual(c.status, 400, 'a non-drawio .xml must be refused');
+
+      // 4. The rename attack: HTML wearing a .xml extension.
+      const dres = await post({ fileId: 0, mime: '', name: 'evil.xml',
+        data: b64('<html><script>alert(1)</script></html>') });
+      assert.strictEqual(dres.status, 400, 'renaming HTML to .xml must not put it on disk');
+
+      // 5. The extension is a whitelist of two literals, not "whatever the
+      //    name ends with". A name the content check would pass must still be
+      //    refused when its extension is one we do not serve.
+      const e = await post({ fileId: 0, mime: '', name: 'x.svg', data: b64(MXFILE) });
+      assert.strictEqual(e.status, 400, '.svg must stay refused even carrying drawio content');
+      const f = await post({ fileId: 0, mime: '', name: 'x.html', data: b64(MXFILE) });
+      assert.strictEqual(f.status, 400, '.html must stay refused even carrying drawio content');
+
+      // 6. image/svg+xml is still refused — this change adds a second gate,
+      //    it does not widen the first one.
+      const g = await post({ fileId: 0, mime: 'image/svg+xml', name: 'x.svg',
+        data: b64('<svg xmlns="http://www.w3.org/2000/svg"/>') });
+      assert.strictEqual(g.status, 400, 'image/svg+xml must stay refused');
+
+      // 7. Empty payload, on the new path too.
+      const h = await post({ fileId: 0, mime: '', name: 'empty.drawio', data: '' });
+      assert.strictEqual(h.status, 400, 'an empty .drawio payload must be refused');
+
+      // 8. The raster path is untouched.
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64');
+      const i = await post({ fileId: 0, mime: 'image/png', name: 'dot.png',
+        data: png.toString('base64') });
+      assert.strictEqual(i.status, 200, 'a png must still upload: ' + i.body);
+      assert.ok(/\.png$/.test(JSON.parse(i.body).path), 'png keeps its extension');
+
+      // 9. Nothing refused above may have left anything behind.
+      const landed = fs.readdirSync(assetsDir).sort();
+      assert.deepStrictEqual(landed, ['dot.png', 'flow.drawio', 'model.xml'],
+        'only the three accepted uploads may exist, got ' + JSON.stringify(landed));
+    } finally {
+      srv.close();
+    }
+    console.log('server: /api/asset accepts drawio .drawio/.xml by content, refuses the rest — OK');
+  }
+
   console.log('editor-server.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });

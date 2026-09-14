@@ -23762,6 +23762,107 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // ── v3.4.1: the .drawio insert path, both directions.
+    //
+    //    v3.4.0 taught the renderer to embed `.drawio`/`.xml` and left the
+    //    insert path alone, so every such upload died at
+    //    `400 unsupported image type` -- a browser reports `file.type === ''`
+    //    for a .drawio, and `extFor(mime)` was the only gate. The fix is a
+    //    SECOND gate rather than a wider first one: the extension picks the
+    //    candidate, the content decides whether bytes are written.
+    //
+    //    Both halves are asserted here because either alone would pass while
+    //    the feature is broken: a diagram that lands but renders as a broken
+    //    image, or a gate that refuses everything including real diagrams.
+    //    The drop is synthesised (Puppeteer cannot drive an OS file drag) but
+    //    everything downstream is the real path -- the widened pre-check, the
+    //    fetch, /api/asset's extension whitelist and isDrawioXml(), the
+    //    containment gates and the write.
+    //
+    //    ⚠ The rendered node is `<div class="drawio">`, NOT an <img>: a
+    //    .drawio reference leaves the image path entirely (see
+    //    drawioPlaceholderFor() in lib/md2doc.js). Asserting on <img> here
+    //    would pass for a file that landed and rendered as a broken image,
+    //    which is the exact half-fixed state this scenario exists to catch.
+    {
+      const { dir, srv, url, mdPath } = await setupTableDoc(
+        ['# Doc', '', 'Diagram anchor paragraph.', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle0' });
+
+        const sel = await paragraphSelByText(page, 'Diagram anchor');
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.content .drawio').length), 0,
+          'sanity: the fixture starts with no diagrams at all');
+
+        const MXFILE = '<mxfile host="app.diagrams.net">' +
+          '<diagram name="Page-1"><mxGraphModel dx="1" dy="1"><root>' +
+          '<mxCell id="0"/><mxCell id="1" parent="0"/>' +
+          '</root></mxGraphModel></diagram></mxfile>';
+
+        // (1) The refusal first, on a document that has nothing in assets/ yet:
+        // a non-diagram .xml must leave NOTHING behind. Running it before the
+        // success case is deliberate -- an empty assets/ makes "nothing was
+        // written" a statement about the whole directory rather than about one
+        // filename that could have collided.
+        await page.evaluate((s2, text) => {
+          const file = new File([text], 'notes.xml', { type: '' });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          document.querySelector(s2).dispatchEvent(new DragEvent('drop', {
+            dataTransfer: dt, bubbles: true, cancelable: true,
+          }));
+        }, sel, '<notes><item>not a diagram</item></notes>');
+
+        await page.waitForFunction(
+          () => !!document.querySelector('.ed-conflict'), { timeout: 10000 });
+        const refusal = await page.evaluate(
+          () => document.querySelector('.ed-conflict').textContent);
+        assert.ok(/draw\.io/i.test(refusal),
+          "the refusal must carry the server's own reason, got: " + JSON.stringify(refusal));
+        assert.ok(!fs.existsSync(path.join(dir, 'assets')) ||
+          fs.readdirSync(path.join(dir, 'assets')).length === 0,
+          'a refused upload must write nothing at all, found: ' +
+          JSON.stringify(fs.existsSync(path.join(dir, 'assets'))
+            ? fs.readdirSync(path.join(dir, 'assets')) : []));
+
+        // (2) The real diagram, through the same gesture.
+        await page.evaluate((s2, text) => {
+          const file = new File([text], 'flow.drawio', { type: '' });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          document.querySelector(s2).dispatchEvent(new DragEvent('drop', {
+            dataTransfer: dt, bubbles: true, cancelable: true,
+          }));
+        }, sel, MXFILE);
+
+        await page.waitForFunction(
+          () => document.querySelectorAll('.content .drawio').length === 1, { timeout: 20000 });
+
+        await settleEditor(page);
+        await pressSaveAndLand(page);
+        const fileText = fs.readFileSync(mdPath, 'utf8');
+        assert.ok(/\n!\[\]\(assets\/flow\.drawio\)\n/.test(fileText),
+          'the drop must reach the saved source as ![](assets/flow.drawio), got: ' +
+          JSON.stringify(fileText));
+
+        const onDisk = path.join(dir, 'assets', 'flow.drawio');
+        assert.ok(fs.existsSync(onDisk),
+          'the endpoint must have WRITTEN the diagram, not just answered a path: ' + onDisk);
+        assert.strictEqual(fs.readFileSync(onDisk, 'utf8'), MXFILE,
+          'the bytes on disk must be the dropped diagram, byte for byte');
+        assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'assets')).sort(), ['flow.drawio'],
+          'only the accepted diagram may exist in assets/');
+
+        await page.close();
+        console.log('v3.4.1: dropping a .drawio renders a diagram and writes the file; a non-diagram .xml is refused with a reason — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // v3.2.0 Task I: end-to-end cover for the incremental render (patch vs.
     // fallback). Every scenario below PRIMES lastParts with an unrelated

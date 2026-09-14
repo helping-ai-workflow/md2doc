@@ -2057,4 +2057,44 @@ function countInCode(source, needle) {
   console.log('editor-client: F6 drawio page identity (name only where it IS one) — OK');
 }
 
+// ============================================================================
+// v3.4.1 — the .drawio / .xml insert path, asserted on the source text.
+//
+// Counting is done with String.indexOf, never `grep -o`: client.js carries a
+// literal NUL (`DRAWIO_FP_SEP`), so GNU grep classifies it as binary and a
+// piped `grep -o ... | wc -l` answers 0 -- the same answer as "absent", which
+// is exactly the direction that lets a guard rot unnoticed. See CLAUDE.md.
+// ============================================================================
+{
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const count = (needle) => {
+    let n = 0, i = 0;
+    while ((i = src.indexOf(needle, i)) !== -1) { n += 1; i += 1; }
+    return n;
+  };
+
+  // The dialog's filter must name the two diagram extensions. A MIME-only
+  // accept list greys them out in the OS file picker -- the reported symptom.
+  assert.strictEqual(count("input.accept = 'image/png,image/jpeg,image/gif,image/webp,.drawio,.xml'"), 1,
+    'the file dialog must accept .drawio and .xml alongside the raster MIME types');
+
+  // The pre-flight refusal must not be MIME-only any more: a .drawio has no
+  // media type at all, so extFor() alone never lets the request leave.
+  assert.strictEqual(count("assetLib.extFor(blob.type) || DRAWIO_NAME_RE.test(blob.name || '')"), 1,
+    'the local pre-check must let a name-matched .drawio/.xml reach the server');
+  assert.strictEqual(count('const DRAWIO_NAME_RE = /\\.(drawio|xml)$/i;'), 1,
+    'the accepted diagram extensions must be written down exactly once on this side');
+
+  // A refusal from /api/asset must reach the user as its own reason. Picking
+  // an .xml that is not a diagram is an ordinary mistake, and the content gate
+  // makes it reachable; "伺服器回應格式不正確" would be a second wrong answer.
+  assert.strictEqual(
+    count("const why = (j && typeof j.error === 'string' && j.error) ? j.error : ('HTTP ' + res.status);"), 1,
+    'a non-2xx upload response must carry the server\'s reason, falling back to the status');
+  assert.strictEqual(count("showBanner('檔案上傳失敗 — ' + why, null, null)"), 1,
+    "the server's own refusal text must be what the user sees");
+
+  console.log('editor-client: the .drawio/.xml insert path is wired on the client — OK');
+}
+
 console.log('editor-client.test.js OK');
