@@ -12936,6 +12936,357 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8j the header says which key discards, and a block with no editable lanes says so — OK');
     }
+
+    // ── v3.5.0 Task 9: edges 的真機場景 ────────────────────────────────────
+    //
+    // Four scenarios, task-9-brief.md's own list. Every one of them asserts on
+    // the SAVED SOURCE, read back through `waveCodec.parseSource`/`parseEdge`
+    // — never on the DOM (`waveLaneNames` above already set that precedent for
+    // node names; `parseWaveBlock` below is the same move for the whole doc).
+    // `openWave`/`cellPoint`/`pressClick`/`saveAndRead` are Task 6-8's own
+    // harness, reused as-is — nothing about OPENING the editor or READING the
+    // file back is reinvented here.
+
+    // Two flat lanes, no group: keeps `doc.signal[i].node` a direct index, so
+    // the assertions below are not also a second test of `lanePaths()`.
+    const EDGE_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  { name: 'clk', wave: 'p....' },",
+      "  { name: 'req', wave: '0.1.0' }",
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // Two edges sharing anchor 'a', one lane each plus a `gap` lane with no
+    // node yet and a blank spacer — exactly what T9c (fork) and T9d (the
+    // three no-op drops) each need already sitting in the document, per the
+    // brief's own instruction ("事先放兩條共用字母的 edge").
+    const EDGE_FORK_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  { name: 'clk', wave: 'p....', node: '.a...' },",
+      "  { name: 'req', wave: '0.1.0', node: '..b..' },",
+      "  { name: 'ack', wave: '.0..1', node: '...c.' },",
+      "  { name: 'gap', wave: '01|10' },",
+      '  {}',
+      '],',
+      "edge: ['a~>b', 'a~>c']",
+      '}',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // A real press-move-release between two cells that may be on DIFFERENT
+    // lanes. `dragCells` above is lane-locked (it mirrors the paint drag it
+    // exists for); edge creation and endpoint dragging are not.
+    const dragBetween = async (page, a, b) => {
+      await page.mouse.move(a.x, a.y);
+      await page.mouse.down();
+      await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2);
+      await page.mouse.move(b.x, b.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // A plain click (press, release, no movement): selects an edge without
+    // arming or dragging anything — `onCanvasDown`'s `edgeHitAt` branch only
+    // ever selects on a press that lands with `selectedEdge === null`, so
+    // selecting and starting an endpoint drag are always two SEPARATE
+    // gestures at this same point, never one.
+    const clickAt = async (page, at) => {
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 150));
+    };
+
+    // A drag that presses, moves to a genuinely different nearby point, and
+    // only then moves back onto `at` before releasing — for the "dropped back
+    // on its own cell" no-op, where the start and end point are identical and
+    // a drag that never actually MOVED would leave `endpointDrag.at` at its
+    // initial `null` instead of exercising `moveEdgeEnd`'s own refusal.
+    const dragBackTo = async (page, at) => {
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.move(at.x + 6, at.y);
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // The wavedrom block's own text, parsed back through the codec — a
+    // DOCUMENT question, not a DOM one. Distinct from `waveLaneNames` above
+    // (which only wants the lane names): this one hands back the whole doc,
+    // for `edge`/`node` assertions.
+    const parseWaveBlock = (md) => {
+      const block = md.match(/```wavedrom\n([\s\S]*?)\n```/);
+      assert.ok(block !== null,
+        'parseWaveBlock 前提失敗：存回去的檔案裡要有一個 wavedrom 區塊。Got:\n' + md);
+      const parsed = waveCodec.parseSource(block[1]);
+      assert.strictEqual(parsed.ok, true,
+        'parseWaveBlock 前提失敗：寫回去的區塊必須還解析得回來。Got ' +
+        JSON.stringify(parsed) + '\n' + md);
+      return parsed.doc;
+    };
+
+    // Filled in by T9a, checked against by T9b.
+    let mouseCreatedDisk = null;
+
+    // T9a — armed, drag (lane0, cell1) -> (lane1, cell3): the saved source
+    // grows two `node` entries and one `edge`, `parseEdge` reads it back, and
+    // the arm disarms because this drag produced something.
+    {
+      const ctx = await newPage(EDGE_MD);
+      await openWave(ctx.page);
+
+      const before = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-edgemode'));
+      assert.strictEqual(before, 'idle',
+        'T9a 前提失敗：編輯器一開起來要是未武裝狀態。Got ' + before);
+
+      await pressClick(ctx.page, '.ed-wave-edge-arm');
+      await new Promise((r) => setTimeout(r, 150));
+      const armed = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-edgemode'));
+      assert.strictEqual(armed, 'armed',
+        'T9a 前提失敗：按過武裝鈕之後要是 armed。Got ' + armed);
+
+      const a = await cellPoint(ctx.page, 0, 1);
+      const b = await cellPoint(ctx.page, 1, 3);
+      await dragBetween(ctx.page, a, b);
+
+      const after = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        edgemode: el.getAttribute('data-wave-edgemode'),
+        gestures: el.getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(after.edgemode, 'idle',
+        'T9a: 拖出一條真的線之後必須自動解除武裝。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.gestures, '1',
+        'T9a: 一次拖曳只該推一次 commit。Got ' + JSON.stringify(after));
+
+      const disk = await saveAndRead(ctx);
+      mouseCreatedDisk = disk;
+      const doc = parseWaveBlock(disk);
+      assert.ok(doc !== null && Array.isArray(doc.signal) && doc.signal.length === 2,
+        'T9a 前提失敗：兩條 lane 都要還在。Got ' + JSON.stringify(doc));
+      const clkNode = (doc.signal[0] && typeof doc.signal[0].node === 'string')
+        ? doc.signal[0].node : '';
+      const reqNode = (doc.signal[1] && typeof doc.signal[1].node === 'string')
+        ? doc.signal[1].node : '';
+      assert.ok(/[A-Za-z]/.test(clkNode.charAt(1) || ''),
+        'T9a: clk 的 cell 1 要多出一個 node 字母。Got node=' + JSON.stringify(clkNode));
+      assert.ok(/[A-Za-z]/.test(reqNode.charAt(3) || ''),
+        'T9a: req 的 cell 3 要多出一個 node 字母。Got node=' + JSON.stringify(reqNode));
+      assert.ok(Array.isArray(doc.edge) && doc.edge.length === 1,
+        'T9a: 要多一條 edge。Got ' + JSON.stringify(doc.edge));
+      const parsedEdge = waveCodec.parseEdge(doc.edge[0]);
+      assert.ok(parsedEdge !== null,
+        'T9a: 那條 edge 必須讀得回來。Got ' + JSON.stringify(doc.edge));
+      assert.strictEqual(parsedEdge.from, clkNode.charAt(1),
+        'T9a: edge 的起點要接到 clk 那個字母。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.to, reqNode.charAt(3),
+        'T9a: edge 的終點要接到 req 那個字母。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.shape, '~>',
+        'T9a: 這個手勢固定畫 ~>。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.label, '',
+        'T9a: 這個手勢固定沒有 label。Got ' + JSON.stringify(parsedEdge));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9a arm, drag across lanes, and the saved source parses back — OK');
+    }
+
+    // T9b — the SAME edge, built with two Enter presses instead of a drag:
+    // the saved source must be byte-identical to T9a's, because both paths
+    // end in the exact same `finishEdgeDrag()` call.
+    {
+      const ctx = await newPage(EDGE_MD);
+      await openWave(ctx.page);
+
+      await pressClick(ctx.page, '.ed-wave-edge-arm');
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Get the keyboard onto the canvas without painting or dragging
+      // anything: real Tab presses, `document.activeElement` read back after
+      // EACH one — never a blind wait on a guessed value. The dialog is a
+      // focus trap (`modalRoots()`), so this always lands somewhere inside
+      // it; the cap is generous headroom over the toolbar's own control
+      // count (brushes + cycle ops + undo/redo + arm + meta fields + close).
+      let onCanvas = false;
+      let lastActive = null;
+      for (let i = 0; i < 80; i++) {
+        lastActive = await ctx.page.evaluate(() =>
+          (document.activeElement && document.activeElement.className) || '');
+        if (/(^|\s)ed-wave-canvas(\s|$)/.test(lastActive)) { onCanvas = true; break; }
+        await ctx.page.keyboard.press('Tab');
+      }
+      assert.strictEqual(onCanvas, true,
+        'T9b 前提失敗：Tab 了 80 次鍵盤還沒踏上畫布，最後停在「' + lastActive + '」');
+
+      // Tabbing onto the canvas fires its own `focus` listener, which calls
+      // `enterDrawing()` and plants the cursor at (0,0) — real product
+      // behaviour, not something this test sets up. From there: →1 lands on
+      // (lane0, cell1), the exact cell T9a's drag started from.
+      await ctx.page.keyboard.press('ArrowRight');
+      await ctx.page.keyboard.press('Enter');   // marks the start
+      const marked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      assert.ok(marked !== null && marked.indexOf('起點已標記') !== -1,
+        'T9b: 第一次 Enter 要標記起點。Got ' + JSON.stringify(marked));
+
+      await ctx.page.keyboard.press('ArrowDown');   // lane 0 -> lane 1
+      await ctx.page.keyboard.press('ArrowRight');  // cycle 1 -> 2
+      await ctx.page.keyboard.press('ArrowRight');  // cycle 2 -> 3
+      await ctx.page.keyboard.press('Enter');       // finishes at (lane1, cell3)
+      await new Promise((r) => setTimeout(r, 200));
+
+      const after = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        edgemode: el.getAttribute('data-wave-edgemode'),
+        gestures: el.getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(after.edgemode, 'idle',
+        'T9b: 完成之後必須自動解除武裝。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.gestures, '1',
+        'T9b: 兩下 Enter 只該是一次 commit。Got ' + JSON.stringify(after));
+
+      const disk = await saveAndRead(ctx);
+      assert.ok(mouseCreatedDisk !== null,
+        'T9b 前提失敗：T9a 要先跑過，留下滑鼠路徑的檔案內容可以比較');
+      assert.strictEqual(disk, mouseCreatedDisk,
+        'T9b: 鍵盤兩步做出來的檔案必須跟滑鼠拖曳做出來的逐位元組相同。\n滑鼠：\n' +
+        mouseCreatedDisk + '\n鍵盤：\n' + disk);
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9b keyboard Enter/Enter produces a byte-identical source to the mouse drag — OK');
+    }
+
+    // T9c — select the edge that shares anchor 'a', drag ITS `from` end onto
+    // an empty cell: `moveEdgeEnd` forks (`a` is still referenced by the
+    // OTHER edge), so the sibling edge's own entry must survive byte for
+    // byte. Clicking the shared point (clk cell 1) resolves to the LATER
+    // edge (`edgeHandleAt` walks `edges.length-1 downto 0`) — i.e. `a~>c`,
+    // index 1 — so that is the one under test; `a~>b` at index 0 is the
+    // control.
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const shared = await cellPoint(ctx.page, 0, 1);   // clk cell 1 = 'a'
+      await clickAt(ctx.page, shared);
+      const picked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '1',
+        'T9c 前提失敗：按共用的那個點必須選到後面那條 edge（index 1，a~>c）。Got ' + picked);
+
+      const target = await cellPoint(ctx.page, 3, 0);   // gap cell 0, unused
+      await dragBetween(ctx.page, shared, target);
+
+      const gestures = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-gestures'));
+      assert.strictEqual(gestures, '1',
+        'T9c: 分岔是一次真的改動，要推一次 commit。Got ' + gestures);
+
+      const disk = await saveAndRead(ctx);
+      // Byte check, not just a logical one: the ORIGINAL fixture's literal
+      // single-quoted entry must still be sitting in the saved file, untouched.
+      assert.ok(disk.indexOf("'a~>b'") !== -1,
+        "T9c: 另一條 edge（a~>b）的 entry 必須連引號一起逐位元組不變。Got:\n" + disk);
+
+      const doc = parseWaveBlock(disk);
+      assert.ok(Array.isArray(doc.edge) && doc.edge.length === 2,
+        'T9c 前提失敗：還是兩條 edge，分岔不會憑空多一條或少一條。Got ' + JSON.stringify(doc.edge));
+      assert.strictEqual(doc.edge[0], 'a~>b',
+        'T9c: 第一條 edge 的 entry 字串必須完全不變。Got ' + JSON.stringify(doc.edge));
+
+      const forked = waveCodec.parseEdge(doc.edge[1]);
+      assert.ok(forked !== null, 'T9c: 分岔後的 edge 必須讀得回來。Got ' + JSON.stringify(doc.edge));
+      assert.notStrictEqual(forked.from, 'a',
+        'T9c: 分岔出來的 edge 必須換成一個新字母，不能繼續用共用的 a。Got ' + JSON.stringify(forked));
+      assert.strictEqual(forked.to, 'c',
+        'T9c: 沒動的那一端（to）必須維持原樣。Got ' + JSON.stringify(forked));
+
+      const nodes = waveCodec.nodesOf(doc);
+      assert.ok(nodes.a !== undefined && nodes.a.at === 0 && nodes.a.cell === 1,
+        'T9c: 字母 a 必須還留在 clk cell 1 原地（它現在只給 a~>b 用）。Got ' + JSON.stringify(nodes.a));
+      const movedLetter = forked.from;
+      assert.ok(nodes[movedLetter] !== undefined &&
+        nodes[movedLetter].at === 3 && nodes[movedLetter].cell === 0,
+        'T9c: 新字母必須落在放開的那一格（gap cell 0）。Got ' +
+        JSON.stringify(nodes[movedLetter]));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9c re-pointing a shared end forks, and the sibling edge\'s entry is untouched — OK');
+    }
+
+    // T9d — select the edge that does NOT share its dragged end (`a~>b`'s
+    // `to`, letter `b`, unique — no tie-break ambiguity), then drop its
+    // handle on three targets `moveEdgeEnd` itself refuses: back on its own
+    // cell, on the cell holding the edge's OTHER end, and out of range (the
+    // blank spacer row — a real, hittable cell with zero cells of its own).
+    // Every one of the three must leave the undo depth exactly where it was.
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const own = await cellPoint(ctx.page, 1, 2);      // req cell 2 = 'b'
+      await clickAt(ctx.page, own);
+      const picked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '0',
+        'T9d 前提失敗：按 b 那個點必須選到 a~>b（index 0，b 沒有被別條共用）。Got ' + picked);
+
+      const baseline = await ctx.page.evaluate(() => ({
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+      }));
+      assert.strictEqual(baseline.gestures, '0',
+        'T9d 前提失敗：選取本身不該推任何 commit。Got ' + JSON.stringify(baseline));
+      assert.strictEqual(baseline.undoDisabled, true,
+        'T9d 前提失敗：一個乾淨的 session 一開始不該有東西可以復原。Got ' + JSON.stringify(baseline));
+
+      const assertNoop = async (where) => {
+        const now = await ctx.page.evaluate(() => ({
+          gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+          undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+          status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+          selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        }));
+        assert.strictEqual(now.gestures, baseline.gestures,
+          'T9d(' + where + '): undo 深度（gestures 計數）不得增加。Got ' + JSON.stringify(now));
+        assert.strictEqual(now.undoDisabled, true,
+          'T9d(' + where + '): 復原鈕不得變成可按。Got ' + JSON.stringify(now));
+        assert.ok(now.status !== null && now.status.indexOf('沒有改變任何東西') !== -1,
+          'T9d(' + where + '): 狀態列要說這個動作沒有改變任何東西。Got ' + JSON.stringify(now));
+        assert.strictEqual(now.selected, '0',
+          'T9d(' + where + '): no-op 不該動到目前的選取。Got ' + JSON.stringify(now));
+      };
+
+      // (a) back on its own cell.
+      await dragBackTo(ctx.page, own);
+      await assertNoop('own cell');
+
+      // (b) onto the cell holding the edge's OTHER end ('a', clk cell 1).
+      const other = await cellPoint(ctx.page, 0, 1);
+      await dragBetween(ctx.page, own, other);
+      await assertNoop('other end\'s cell');
+
+      // (c) out of range: the blank spacer row (lane 4) is a real, hittable
+      // point on the canvas — `cellAt` answers it like any other cell — but
+      // it has zero cells of its own, so `moveEdgeEnd` refuses it.
+      const outOfRange = await cellPoint(ctx.page, 4, 0);
+      await dragBetween(ctx.page, own, outOfRange);
+      await assertNoop('out of range (spacer row)');
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9d three refused endpoint drops each leave the undo depth untouched — OK');
+    }
   }
 
   await browser.close();
