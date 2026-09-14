@@ -9935,6 +9935,51 @@ async function main() {
       await new Promise((r) => setTimeout(r, 250));
     };
 
+    // v3.5.0 Task 10 fix round 3: the dialog's own focusable-element count,
+    // computed the SAME way `wave-ui.js`'s own `modalRoots()`/`focusables()`
+    // do — same `FOCUSABLE` selector, same disabled/hidden/getClientRects
+    // filter, same "the modal layer is the overlay AND any `.ed-conflict`
+    // banner" rule — not a re-guess of the product's own count. Every
+    // Tab-walk below used to cap its loop at a bare constant (60, 70, 80),
+    // and T8f's broke the moment `BRUSHES` grew from 11 to 22: eleven more
+    // toolbar buttons landed ahead of the canvas (the LAST focusable in the
+    // dialog), and a walk that used to fit inside 60 presses no longer did.
+    // Grepping for a count literal — this repo's usual guard before
+    // changing "a number of X" — could never have caught it, because 60 was
+    // never a count of anything; it was a TRAVERSAL BOUND whose sufficiency
+    // silently depended on the toolbar's size. Deriving the cap from the
+    // dialog's actual focusable count means the next button added to the
+    // toolbar never meets this failure at all — someone would have to
+    // "simplify" this back to a constant to reopen it, which is exactly why
+    // this comment says not to.
+    //
+    // The trap cycles through its focusable set, so the worst-case number of
+    // Tab presses to reach any ONE of them from an arbitrary starting point
+    // is `count - 1` (start right after the target, walk the rest of the way
+    // around). `MODAL_WALK_MARGIN` is headroom on top of that — small and
+    // named, not folded into a bigger guessed constant — for anything the
+    // selector below does not model exactly the way the real trap does.
+    const MODAL_WALK_MARGIN = 10;
+    const modalFocusableCap = async (page) => {
+      const count = await page.evaluate(() => {
+        const FOCUSABLE = 'button, input, select, textarea, a[href], ' +
+          '[tabindex]:not([tabindex="-1"])';
+        const roots = [document.querySelector('.ed-wave-overlay')];
+        for (const el of document.querySelectorAll('.ed-conflict')) roots.push(el);
+        let n = 0;
+        for (const root of roots) {
+          if (root === null) continue;
+          for (const el of root.querySelectorAll(FOCUSABLE)) {
+            if (el.disabled === true || el.hidden === true) continue;
+            if (el.getClientRects().length === 0) continue;
+            n++;
+          }
+        }
+        return n;
+      });
+      return count + MODAL_WALK_MARGIN;
+    };
+
     // The centre of one cell, in viewport coordinates, plus whether that point
     // is actually ON the drawing. The canvas is a scroll container inside a
     // fixed-width column: MEASURED in this session, a press 116px past its clip
@@ -11102,9 +11147,13 @@ async function main() {
         'T6k: 橫幅矩形中心的命中測試必須落在橫幅自己身上，否則滑鼠點不到它');
 
       // …and the keyboard. A trap scoped to the overlay alone would paint the
-      // banner on top and still make its buttons unreachable.
+      // banner on top and still make its buttons unreachable. The cap is
+      // DERIVED (see `modalFocusableCap`'s own comment) rather than a bare
+      // constant, because the banner sits behind however many toolbar
+      // buttons the overlay has ahead of it in Tab order.
+      const t6kCap = await modalFocusableCap(ctx.page);
       let reached = -1;
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < t6kCap; i++) {
         await ctx.page.keyboard.press('Tab');
         const inBanner = await ctx.page.evaluate(() =>
           document.querySelector('.ed-conflict').contains(document.activeElement));
@@ -11239,9 +11288,13 @@ async function main() {
       assert.ok(banner.z > banner.overlayZ,
         'T6l: banner 必須疊在 modal 上面。Got ' + banner.z + ' vs ' + banner.overlayZ);
       // …and it is reachable from inside the trap, which is what makes it an
-      // announcement rather than a decoration.
+      // announcement rather than a decoration. Cap DERIVED
+      // (`modalFocusableCap`) rather than the bare `120` this used to be —
+      // same construction T8f's fixed `60` broke on, just with more
+      // pre-existing headroom that happened not to run out yet.
+      const t6lCap = await modalFocusableCap(ctx.page);
       let reached = -1;
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < t6lCap; i++) {
         await ctx.page.keyboard.press('Tab');
         const inBanner = await ctx.page.evaluate(() =>
           document.querySelector('.ed-conflict').contains(document.activeElement));
@@ -12329,9 +12382,13 @@ async function main() {
         'T8d 前提失敗：這一列要先有一個真的會被丟掉的手勢。Got ' + JSON.stringify(painted));
 
       // Tab all the way to the rail tag — the group rename is reachable by
-      // keyboard, which is how this row presses it.
+      // keyboard, which is how this row presses it. Cap is DERIVED
+      // (`modalFocusableCap`) rather than a bare constant, since the rail
+      // tag sits behind however many toolbar buttons the overlay has ahead
+      // of it in Tab order.
+      const t8dCap = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8dCap; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12339,7 +12396,7 @@ async function main() {
         });
         if (k === 'group-1') break;
       }
-      assert.ok(walked < 60, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
+      assert.ok(walked < t8dCap, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       const opened = await ctx.page.evaluate(() => ({
@@ -12546,9 +12603,14 @@ async function main() {
       await openWave(ctx.page);
       // Tab all the way onto the drawing. It is the LAST focusable in the
       // dialog, which is why this walks rather than clicking: a click would be
-      // a choice, and the thing under test is what a traversal does.
+      // a choice, and the thing under test is what a traversal does. The cap
+      // is DERIVED (`modalFocusableCap`) rather than a bare constant — this
+      // is exactly the walk fix round 3 exists for: growing `BRUSHES` from
+      // 11 to 22 put eleven more buttons ahead of the canvas and broke a
+      // fixed 60-press cap outright.
+      const t8fCap = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8fCap; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12556,7 +12618,7 @@ async function main() {
         });
         if (k === 'canvas') break;
       }
-      assert.ok(walked < 60, 'T8f 前提失敗：Tab 走不到畫布');
+      assert.ok(walked < t8fCap, 'T8f 前提失敗：Tab 走不到畫布');
       const arrived = await ctx.page.evaluate(() => {
         const c = document.querySelector('[data-ed-wave-cursor]');
         return {
@@ -12706,8 +12768,11 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
+      // Cap DERIVED (`modalFocusableCap`) rather than a bare constant — same
+      // reasoning as T8d/T8f above.
+      const t8hCap1 = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8hCap1; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12715,7 +12780,7 @@ async function main() {
         });
         if (k === 'group-1') break;
       }
-      assert.ok(walked < 60, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
+      assert.ok(walked < t8hCap1, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       const open = await ctx.page.evaluate(() => ({
@@ -12751,8 +12816,12 @@ async function main() {
       // teardown. The ＋ above has just moved the group from `from=1` to
       // `from=2`; rename it, type, and undo THAT insert — the key the teardown
       // names goes back to `group-1` while the field's own key was `group-2`.
+      // Cap re-derived (not reused from above): the ＋ press just added a
+      // lane, so the dialog's real focusable count is already one row
+      // bigger than it was for `t8hCap1`.
+      const t8hCap2 = await modalFocusableCap(ctx.page);
       let toGroup = 0;
-      for (; toGroup < 70; toGroup++) {
+      for (; toGroup < t8hCap2; toGroup++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12760,7 +12829,7 @@ async function main() {
         });
         if (k === 'group-2') break;
       }
-      assert.ok(toGroup < 70, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
+      assert.ok(toGroup < t8hCap2, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       assert.strictEqual(await ctx.page.evaluate(() =>
@@ -13172,8 +13241,16 @@ async function main() {
       // anything: real Tab presses, `document.activeElement` read back after
       // EACH one — never a blind wait on a guessed value. The dialog is a
       // focus trap (`modalRoots()`), so this always lands somewhere inside
-      // it; the cap is generous headroom over the toolbar's own control
-      // count (brushes + cycle ops + undo/redo + arm + meta fields + close).
+      // it. v3.5.0 Task 10 fix round 3: the cap here USED to be the bare
+      // constant `80`, described as "generous headroom over the toolbar's
+      // own control count" — a description of a number nobody had written
+      // down, which is exactly how T8f's identical construction broke a cap
+      // of `60` the moment `BRUSHES` grew from 11 to 22 (eleven more
+      // buttons ahead of the canvas). This one happened to still fit under
+      // 80, but "happened to" is not a property to keep relying on, so it
+      // now uses `modalFocusableCap` (see that function's own comment) —
+      // derived from the dialog's actual focusable count, not a guess about
+      // it.
       //
       // Fix round 1: the canvas is an `<svg>` (`d.createElementNS(SVGNS,
       // 'svg')` in wave-ui.js), and on an SVG element `.className` is an
@@ -13193,9 +13270,10 @@ async function main() {
       // (`canvas.setAttribute('data-focus-key', 'canvas')`,
       // `lib/editor/wave-ui.js`), so that is what this reads now instead
       // of `.className`.
+      const t9bCap = await modalFocusableCap(ctx.page);
       let onCanvas = false;
       let lastActive = null;
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < t9bCap; i++) {
         lastActive = await ctx.page.evaluate(() => {
           const el = document.activeElement;
           if (!el) return null;
@@ -13205,7 +13283,7 @@ async function main() {
         await ctx.page.keyboard.press('Tab');
       }
       assert.strictEqual(onCanvas, true,
-        'T9b 前提失敗：Tab 了 80 次鍵盤還沒踏上畫布，最後停在「' +
+        'T9b 前提失敗：Tab 了 ' + t9bCap + ' 次鍵盤還沒踏上畫布，最後停在「' +
         JSON.stringify(lastActive) + '」');
 
       // Tabbing onto the canvas fires its own `focus` listener, which calls
