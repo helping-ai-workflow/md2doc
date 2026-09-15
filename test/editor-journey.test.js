@@ -13835,6 +13835,142 @@ async function main() {
       console.log('journey: wave/T11d a non-bus cell has no placeholder and paints exactly as ' +
         'always — OK');
     }
+
+    // ── final review finding 4：bus label 剛好也是 edge anchor 時，標籤按不到 ──
+    //
+    // `clk` cell 0 立一個 anchor `x`；`b` 這條 lane 的 `wave:'02.3'`
+    // MEASURED（`codec.dataSlotOf` 加 `brickOf`，見 wave-codec.js／
+    // wave-ui.js）：cell1 擁有 slot0（`data[0]='A'`，`brickOf('2')` 是
+    // `'vvv-2'`，跟 cell2 的 `.`——同樣展開成 `'2'`——合併成一個兩格的
+    // run）；cell3 是明確的 `'3'`，`brickOf('3')` 是 `'vvv-3'`，跟前一個
+    // run 的 brick 不同字串，`drawLane` 的 run 合併（`last.brick ===
+    // bricks[c]`）不會把它併進去，所以它是自己單獨一格的 run，擁有
+    // slot1（`data[1]='B'`）。這一步是實測踩過的坑：一開始寫成
+    // `'02.2'`（兩個 `2` 而非 `2`/`3`），`brickOf` 兩邊都是 `'vvv-2'`，
+    // 三格（1/2/3）被合併成一整條 run，畫面上只有一個「A」標籤，
+    // 「B」根本沒有自己的 `<text>`——這不是這個 finding 要測的東西，用
+    // 真頁面的 `document.querySelectorAll('.ed-wave-buslabel')` 量出來才
+    // 發現。單格 run 的標籤畫在那一格的正中央（`drawLane` 的
+    // `(x0+x1)/2`，`run.from===run.to` 時就是 cell 中心），跟
+    // `node:'...a'` 把 anchor `a` 放的座標（`centerOfCell`）完全重疊。
+    // `edge:['x~>a']` 讓這個重疊點同時是一條未被選取的 edge 的 `to` 端點。
+    //
+    // 修法分兩層，第一層單獨量測後發現不夠，第二層才真的補上：
+    //
+    //   1. `edgeHitAt` 只在 `handle.index === selectedEdge` 才採信
+    //      `geometry.edgeHandleAt` 的答案（見 wave-geometry.js/wave-ui.js
+    //      的 comment）——擋掉「未選取、沒畫出來的把手」用純座標數學搶
+    //      走這次按下。單獨量測：光有這一層，這個 finding 仍然重現
+    //      （`document.elementFromPoint` 在這個重疊點量出來還是
+    //      `path.ed-wave-edge-hit`，不是標籤——`renderEdges` 在每條
+    //      lane 畫完之後才畫 `.ed-wave-edge-hit`，這條 10px 寬、
+    //      `pointer-events:stroke` 的隱形線疊在標籤上面，`ev.target`
+    //      是瀏覽器自己依畫面疊層決定的，跟這個檔案的 `if` 先後順序
+    //      無關，把 bus label 檢查搬到 `edgeHitAt` 前面、繼續讀
+    //      `ev.target` 一樣量到吃掉）。
+    //   2. 真正需要的是 `busLabelHitAt`（wave-ui.js）：用
+    //      `document.elementsFromPoint`（複數，整疊元素，不是只問最上
+    //      面那個）找這次按下底下有沒有 `.ed-wave-buslabel`，不管它是
+    //      不是被別的隱形點擊目標蓋住；`onCanvasDown` 改成先問它、答
+    //      「有」就直接開欄位，`edgeHitAt` 排在它後面，兩者順序互不
+    //      衝突。
+    //
+    // 這一段用一支獨立、非測試檔案的 puppeteer 診斷腳本量過（見這個
+    // finding 的修復報告），不是憑推論寫的斷言。
+    {
+      const BUSLABEL_EDGE_MD = [
+        '# W', '',
+        '```wavedrom',
+        "{ signal: [",
+        "  { name: 'clk', wave: 'p...', node: 'x...' },",
+        "  { name: 'b', wave: '02.3', data: ['A', 'B'], node: '...a' }",
+        '],',
+        "edge: ['x~>a']",
+        '}',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+
+      const ctx = await newPage(BUSLABEL_EDGE_MD);
+      await openWave(ctx.page);
+
+      const counts = await ctx.page.evaluate(() => ({
+        edges: Number(document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count')),
+        labels: Array.from(document.querySelectorAll('.ed-wave-buslabel')).map((el) => el.textContent),
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+      }));
+      assert.strictEqual(counts.edges, 1,
+        '前提失敗：文件裡必須真的有一條 edge。Got ' + JSON.stringify(counts));
+      assert.deepStrictEqual(counts.labels.slice().sort(), ['A', 'B'],
+        '前提失敗：b 這條 lane 必須畫出兩個 bus 標籤（A 跟 B）。Got ' + JSON.stringify(counts));
+      assert.strictEqual(counts.selected, '',
+        '前提失敗：一開始不該有任何 edge 被選取。Got ' + JSON.stringify(counts));
+
+      // 「B」那個標籤（單格 run）的座標，就是 anchor a 的座標，也就是這條
+      // edge 未被畫出來的 `to` 把手的座標——這正是這個 finding 要驗證的
+      // 重疊點。用真正畫出來的 `<text>` 的 bounding rect，不用算出來的
+      // cell 中心，才是真的「按在標籤上」，跟 T11a 的 labelPoint 同一招。
+      const labelPoint = await ctx.page.evaluate(() => {
+        const labels = Array.from(document.querySelectorAll('.ed-wave-buslabel'));
+        const t = labels.find((el) => el.textContent === 'B');
+        if (t === undefined) return null;
+        const r = t.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      assert.ok(labelPoint !== null,
+        '前提失敗：畫布上找不到文字是「B」的 .ed-wave-buslabel');
+
+      await ctx.page.mouse.move(labelPoint.x, labelPoint.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const afterLabelPress = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return {
+          field: el === null ? null : { key: el.getAttribute('data-focus-key'), value: el.value },
+          selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        };
+      });
+      assert.ok(afterLabelPress.field !== null,
+        'finding4a: 按在 bus 標籤上必須開出資料欄位，即使這一點也是一條未選取 edge 的端點。Got ' +
+        JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.field.key, 'data-input-1-3',
+        'finding4a: 開出來的欄位必須是擁有這個標籤的那一格（lane 1, cycle 3）。Got ' +
+        JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.field.value, 'B',
+        'finding4a: 欄位要預填目前的標籤。Got ' + JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.selected, '',
+        'finding4a: 這次按下不准連帶選取那條 edge —— 標籤按得到跟 edge 被吃掉是互斥的。Got ' +
+        JSON.stringify(afterLabelPress));
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+
+      // 這條 edge 仍然選得到——按它另一端的 anchor（clk cell 0 = 'x'，不是
+      // bus 格，沒有標籤跟它搶這個像素），走的是同一個 `edgeHitAt`，這次
+      // 該落到 `.ed-wave-edge-hit` 那條 10px 寬的隱形路徑上。
+      const xPoint = await cellPoint(ctx.page, 0, 0);
+      await ctx.page.mouse.move(xPoint.x, xPoint.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const afterLinePress = await ctx.page.evaluate(() => ({
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        fieldGone: document.querySelector('.ed-wave-data-input') === null,
+      }));
+      assert.strictEqual(afterLinePress.selected, '0',
+        'finding4b: 按這條 edge 自己的線（另一端）必須還是選得到它。Got ' +
+        JSON.stringify(afterLinePress));
+      assert.strictEqual(afterLinePress.fieldGone, true,
+        'finding4b: Escape 之後資料欄位必須已經收掉，不是被這次按下蓋掉');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'finding4: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/finding4 一個 bus 格同時是 edge anchor 時，標籤按得到、edge 也選得到 — OK');
+    }
   }
 
   await browser.close();

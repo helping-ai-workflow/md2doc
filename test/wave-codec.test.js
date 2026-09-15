@@ -2919,21 +2919,41 @@ const RSRC = [
     assert.strictEqual(doc.signal[0].name, 'a');
   }
 
-  // Every key survives the copy — `data`/`node`, and whatever else a hand-
-  // edited lane carries — not just name/wave. The nested array is a REAL
-  // copy: mutating the duplicate's `data` must not reach the original's.
+  // Every key survives the copy EXCEPT `node` — final review finding 2.
+  // `node` names anchor letters that resolve to the ORIGINAL lane (§1's
+  // invariant: one letter → exactly one `{lane, cell}`); carrying it onto the
+  // duplicate gives two lanes the same letters, and `nodesOf` silently
+  // relocates every edge that pointed at the original onto the newer lane
+  // instead — with no way for `pruneNodes` to catch it, since the letter is
+  // still referenced, just by the wrong lane. `data`, and whatever else a
+  // hand-edited lane carries, still copies in full. The nested array is a
+  // REAL copy: mutating the duplicate's `data` must not reach the original's.
   {
     const doc = {
       signal: [{ name: 'd', wave: '2.2.', data: ['0x1', '0x2'], node: '.a..b' }],
     };
     const out = C.duplicateLane(doc, 0);
-    assert.deepStrictEqual(out.signal[1], doc.signal[0],
-      '每個欄位都要照抄，包括 data/node');
+    assert.deepStrictEqual(out.signal[1],
+      { name: 'd', wave: '2.2.', data: ['0x1', '0x2'] },
+      '除了 node，每個欄位都要照抄，包括 data；node 必須被拿掉');
+    assert.strictEqual(out.signal[1].node, undefined,
+      '複製品不准帶著原本那條 lane 的 node —— 那些字母的錨點指的是原本那條');
+    assert.strictEqual(doc.signal[0].node, '.a..b',
+      '原本那條 lane 的 node 不能被這次複製動到');
     assert.notStrictEqual(out.signal[1].data, doc.signal[0].data,
       '巢狀的 data 陣列要是新的，不是共用參照');
     out.signal[1].data.push('0x3');
     assert.deepStrictEqual(doc.signal[0].data, ['0x1', '0x2'],
       '改複製品的 data 不能動到原本那條 lane');
+  }
+
+  // A lane with no `node` at all copies unchanged — stripping only fires when
+  // there is something to strip, so a plain lane's shape is untouched.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01', data: ['x'] }] };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(out.signal[1], { name: 'a', wave: '01', data: ['x'] });
+    assert.strictEqual('node' in out.signal[1], false);
   }
 
   // Refused (same doc back, identity) rather than guessed: out of range,

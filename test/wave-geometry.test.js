@@ -726,4 +726,48 @@ const FLAT = {
   console.log('wave-geometry: straight 家族是單一直線，沒有轉角也沒有曲線 — OK');
 }
 
+// ── final review finding 1：`-|` 與 `|-` 轉角次序不同，不能是同一條 path ─────
+//
+// 量測對象是 pin 住的 node_modules/wavedrom/lib/arc-shape.js：
+//   case '-|' : d = 'm from.x,from.y  dx,0  0,dy'   → 先橫、後直
+//   case '|-' : d = 'm from.x,from.y  0,dy  dx,0'   → 先直、後橫
+// 兩者不是同一條線的兩種寫法，是兩種不同的轉角次序，這裡用結構斷言（第一段
+// 是水平還是垂直）釘住，而不是各自的黃金字串——字串斷言只證明「retype 出同
+// 一個 bug」的迴歸沒發生，證不出兩族本來就該不同。
+// ---------------------------------------------------------------------------
+{
+  const C = require('../lib/editor/wave-codec.js');
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".h.."},{name:"z",wave:"0123",node:"...i"}],' +
+    'edge:["h-|i","h|-i"]}').doc;
+  const layout = G.layoutOf(doc);
+  const edges = G.edgeLayout(doc, layout);
+  assert.strictEqual(edges.length, 2);
+  assert.strictEqual(edges[0].edge.shape, '-|');
+  assert.strictEqual(edges[1].edge.shape, '|-');
+
+  const from = edges[0].from;
+  const to = edges[0].to;
+  assert.notStrictEqual(from.x, to.x, '起訖點的 x 必須不同，否則轉彎次序測不出差異');
+  assert.notStrictEqual(from.y, to.y, '起訖點的 y 必須不同，否則轉彎次序測不出差異');
+
+  const dashPipe = edges[0].d;   // '-|'：先橫後直
+  const pipeDash = edges[1].d;   // '|-'：先直後橫
+
+  assert.strictEqual(dashPipe, 'M' + from.x + ',' + from.y +
+    ' L' + to.x + ',' + from.y + ' L' + to.x + ',' + to.y,
+    '-| 的第一段落在 (to.x, from.y) —— 水平先行');
+  assert.strictEqual(pipeDash, 'M' + from.x + ',' + from.y +
+    ' L' + from.x + ',' + to.y + ' L' + to.x + ',' + to.y,
+    '|- 的第一段落在 (from.x, to.y) —— 垂直先行');
+
+  assert.notStrictEqual(dashPipe, pipeDash, '-| 與 |- 不准畫出同一條 path');
+
+  // 兩條路徑都恰好一個轉角（兩段 L），沒有退化成的零長度收尾段。
+  assert.strictEqual((dashPipe.match(/L/g) || []).length, 2);
+  assert.strictEqual((pipeDash.match(/L/g) || []).length, 2);
+
+  console.log('wave-geometry: -| 與 |- 的轉角次序不同，各自釘住 — OK');
+}
+
 console.log('wave-geometry.test.js OK');
