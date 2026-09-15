@@ -13328,9 +13328,30 @@ async function main() {
     // an empty cell: `moveEdgeEnd` forks (`a` is still referenced by the
     // OTHER edge), so the sibling edge's own entry must survive byte for
     // byte. Clicking the shared point (clk cell 1) resolves to the LATER
-    // edge (`edgeHandleAt` walks `edges.length-1 downto 0`) — i.e. `a~>c`,
-    // index 1 — so that is the one under test; `a~>b` at index 0 is the
-    // control.
+    // edge — `a~>c`, index 1 — so that is the one under test; `a~>b` at
+    // index 0 is the control.
+    //
+    // final review re-review, item 2 (audit, no behaviour change): the
+    // mechanism this comment used to credit — `edgeHandleAt`'s
+    // `edges.length-1 downto 0` scan order — is no longer what resolves this
+    // press. Final review finding 4 gated that phantom-handle shortcut to
+    // the SELECTED edge only (or a self-loop; neither applies here, nothing
+    // is selected yet and this isn't one), so an unselected click now
+    // resolves through `edgeHitAt`'s `.ed-wave-edge-hit` fallback instead.
+    // The outcome (index 1 wins) happens to be UNCHANGED, but for a
+    // different reason: `a~>b` and `a~>c` both LITERALLY start at `a` — not
+    // merely pass near it, the exact same `centerOfCell` coordinate both
+    // curves' `M` command opens on — so both hit paths cover that exact
+    // pixel with total certainty, not a geometric coincidence the way T9d's
+    // crossing-curves case was. `renderEdges` always appends edges in
+    // `doc.edge` order, so the later index is always painted on top, and
+    // `elementFromPoint` at a point of exact, guaranteed overlap reliably
+    // resolves to the topmost paint — this is DETERMINISTIC under the new
+    // rule (not merely lucky the way a coincidental crossing would be): it
+    // follows from `a~>b`/`a~>c` sharing an anchor LETTER, which is a
+    // property of this fixture that never changes, not from where their
+    // curves happen to cross in some rendering. This row needed no code
+    // change, only this corrected explanation.
     {
       const ctx = await newPage(EDGE_FORK_MD);
       await openWave(ctx.page);
@@ -13384,21 +13405,56 @@ async function main() {
     }
 
     // T9d — select the edge that does NOT share its dragged end (`a~>b`'s
-    // `to`, letter `b`, unique — no tie-break ambiguity), then drop its
-    // handle on three targets `moveEdgeEnd` itself refuses: back on its own
-    // cell, on the cell holding the edge's OTHER end, and out of range (the
-    // blank spacer row — a real, hittable cell with zero cells of its own).
-    // Every one of the three must leave the undo depth exactly where it was.
+    // `to`, letter `b`, unique — no tie-break ambiguity in the LETTER), then
+    // drop its handle on three targets `moveEdgeEnd` itself refuses: back on
+    // its own cell, on the cell holding the edge's OTHER end, and out of
+    // range (the blank spacer row — a real, hittable cell with zero cells of
+    // its own). Every one of the three must leave the undo depth exactly
+    // where it was.
+    //
+    // final review re-review, item 2: the FIRST click — the one that has to
+    // select `a~>b` (index 0) with nothing selected yet — no longer lands at
+    // `b`'s own cell centre. Final review finding 4 gated the phantom-handle
+    // shortcut in `edgeHitAt` to only fire for the SELECTED edge (or a
+    // self-loop), so an unselected first click now resolves through the
+    // visible `.ed-wave-edge-hit` paths, and MEASURED against a real page,
+    // `a~>b`'s curve and `a~>c`'s curve — both start at the SAME shared
+    // point `a` — cross close enough to `b`'s cell centre that BOTH hit
+    // paths cover it there, and the topmost (last-drawn, highest index —
+    // `a~>c`, index 1) wins, not the edge that actually ENDS at `b`. That is
+    // T9c's own mechanism (see its comment), just showing up somewhere this
+    // row did not expect it.
+    //
+    // The fix keeps the row's PURPOSE (three refused drops must each leave
+    // the undo depth untouched on a KNOWN edge) intact by making the
+    // SELECTION click land somewhere only `a~>b`'s own hit path covers.
+    // MEASURED with a grid probe of `document.elementsFromPoint` around `b`'s
+    // cell centre: 15px to its LEFT (`own.x - 15`, well inside the same
+    // cell — a cell is 40px wide, so this is 5px clear of the cell's own
+    // left edge) is covered ONLY by edge index 0 at every sampled y; `a~>c`'s
+    // hit path does not reach that far left at `b`'s row. This is a
+    // SELECTION-only adjustment — every drag below still starts and ends at
+    // `own` itself (`b`'s exact cell centre), because those presses run
+    // through the SELECTED edge's own drawn-handle path (`onCanvasDown`'s
+    // endpoint-drag branch), which is scoped to `handle.index ===
+    // selectedEdge` and is unambiguous here regardless of any overlap: `a~>c`
+    // has no ENDPOINT at `b` at all (its own endpoints are `a` and `c`), so
+    // it has no handle rectangle anywhere near this cell to compete with —
+    // only the FULL-PATH hit-test the first click uses is affected by the
+    // curves crossing near here.
     {
       const ctx = await newPage(EDGE_FORK_MD);
       await openWave(ctx.page);
 
       const own = await cellPoint(ctx.page, 1, 2);      // req cell 2 = 'b'
-      await clickAt(ctx.page, own);
+      // MEASURED clear of `a~>c`'s hit path — see the comment above.
+      const selectPt = { x: own.x - 15, y: own.y };
+      await clickAt(ctx.page, selectPt);
       const picked = await ctx.page.$eval('.ed-wave-overlay',
         (el) => el.getAttribute('data-wave-selected-edge'));
       assert.strictEqual(picked, '0',
-        'T9d 前提失敗：按 b 那個點必須選到 a~>b（index 0，b 沒有被別條共用）。Got ' + picked);
+        'T9d 前提失敗：按 b 那個點附近必須選到 a~>b（index 0，b 沒有被別條共用；' +
+        '這一點刻意跟 b 的正中央錯開，避開 a~>c 的線在這附近也蓋到的範圍）。Got ' + picked);
 
       const baseline = await ctx.page.evaluate(() => ({
         gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
@@ -13970,6 +14026,87 @@ async function main() {
         'finding4: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/finding4 一個 bus 格同時是 edge anchor 時，標籤按得到、edge 也選得到 — OK');
+    }
+
+    // ── final review re-review item 1：從沒被選過的 self-loop 也要選得到、刪得掉 ──
+    //
+    // MEASURED regression from finding 4 的 Layer 1（`edgeHitAt` 只在
+    // `handle.index === selectedEdge` 才採信 `geometry.edgeHandleAt` 的答
+    // 案）：`pathFor` 在 `from === to` 時，三個形狀家族的 path 都會退化成
+    // 零長度（每個 `L`/`C` 指令的終點都跟起點一樣），Chrome 對零長度、
+    // butt-cap 的 path 完全不給 hit area（`elementsFromPoint` 在那個點上
+    // 一個 path 元素都查不到——下面會量出來）。`selectedEdge` 只有一個賦值
+    // 來源，就是 `edgeHitAt` 的回傳值；一條「從來沒被選過」的 self-loop在
+    // Layer 1 把 phantom handle 擋掉之後，`.ed-wave-edge-hit` 這條退路又
+    // 完全摸不到它——滑鼠選不到、也就刪不掉。使用者手寫的 markdown 造得出
+    // self-loop（UI 自己的拖曳建立會被 `finishEdgeDrag` 擋掉同字母），這個
+    // codec 也把它當一等公民對待（`moveEdgeEnd` 自己的不變量註解、
+    // `onCanvasDown` 專門為它寫的 `say()`），所以這不是邊角案例。
+    //
+    // 修法：`edgeHitAt` 的 Layer 1 現在除了「這個 handle 屬於已選取的
+    // edge」，多一條「這個 handle 屬於一條 self-loop」也算數（見
+    // wave-ui.js 的 comment）——self-loop 不管選沒選過，它的 handle 都是
+    // 它唯一摸得到的東西。
+    {
+      const SELFLOOP_MD = [
+        '# W', '',
+        '```wavedrom',
+        "{ signal: [",
+        "  { name: 'a', wave: '0123', node: '.d..' }",
+        '],',
+        "edge: ['d~>d']",
+        '}',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+
+      const ctx = await newPage(SELFLOOP_MD);
+      await openWave(ctx.page);
+
+      const pre = await ctx.page.evaluate(() => ({
+        edgeCount: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count'),
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        pathCount: document.querySelectorAll('.ed-wave-edge-path').length,
+      }));
+      assert.strictEqual(pre.edgeCount, '1',
+        '前提失敗：文件裡必須真的有一條 self-loop edge。Got ' + JSON.stringify(pre));
+      assert.strictEqual(pre.selected, '',
+        '前提失敗：一開始不該有任何 edge 被選取——這個 finding 就是要驗證「從沒選過」' +
+        '的那一次按下。Got ' + JSON.stringify(pre));
+
+      // `elementsFromPoint` 在這個點上量出來的整疊元素——self-loop 的
+      // path 完全不在裡面，證明退路真的摸不到它，選到它只能靠 handle。
+      const pt = await cellPoint(ctx.page, 0, 1);   // lane 0, cycle 1 = anchor 'd'（self-loop 兩端都在這）
+      const stack = await ctx.page.evaluate((x, y) =>
+        document.elementsFromPoint(x, y).map((el) => el.tagName + '.' + (el.getAttribute('class') || '')),
+        pt.x, pt.y);
+      assert.strictEqual(
+        stack.some((s) => s.indexOf('ed-wave-edge-hit') !== -1 || s.indexOf('ed-wave-edge-path') !== -1),
+        false,
+        '前提驗證：self-loop 退化成零長度 path，這個點的 elementsFromPoint 裡不該有任何 ' +
+        'edge 的 path/hit 元素——如果有，這個 finding 的前提就不成立了。Got ' + JSON.stringify(stack));
+
+      await clickAt(ctx.page, pt);
+      const picked = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '0',
+        '從沒被選過的 self-loop，第一次按下就必須選到它（index 0）。Got ' + picked);
+
+      await pressClick(ctx.page, '.ed-wave-edge-delete');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        edgeCount: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count'),
+        pathCount: document.querySelectorAll('.ed-wave-edge-path').length,
+      }));
+      assert.strictEqual(after.edgeCount, '0',
+        '選到之後必須真的刪得掉。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.pathCount, 0,
+        '刪掉之後畫布上不該再留著任何 edge path。Got ' + JSON.stringify(after));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'self-loop: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/re-review-item1 從沒被選過的 self-loop 第一次按下就選得到、也刪得掉 — OK');
     }
   }
 
