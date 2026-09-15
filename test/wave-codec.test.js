@@ -2412,4 +2412,707 @@ const RSRC = [
   assert.strictEqual(C.setCell(doc, 0, 0, 5), doc, '筆刷不是字串也一樣原樣回傳');
 }
 
+// ── v3.5.0 Task 1: edge 字串 ↔ 物件 ───────────────────────────────────────
+// 形狀清單與切字串的方式都是從 pin 住的 wavedrom 3.5.0 原始碼量到的
+// (node_modules/wavedrom/lib/arc-shape.js 的 case 清單、
+//  node_modules/wavedrom/lib/render-arcs.js 的 words[0] 切法)，不是憑記憶。
+{
+  assert.strictEqual(C.EDGE_SHAPES.length, 20, '形狀清單必須正好 20 種');
+  assert.ok(C.EDGE_SHAPES.indexOf('<-|->') !== -1, '最長的形狀必須在清單裡');
+
+  assert.deepStrictEqual(C.parseEdge('a~>b'),
+    { from: 'a', to: 'b', shape: '~>', label: '' });
+  assert.deepStrictEqual(C.parseEdge('a~>b setup'),
+    { from: 'a', to: 'b', shape: '~>', label: 'setup' });
+  assert.deepStrictEqual(C.parseEdge('x<-|->y t_hold 2ns'),
+    { from: 'x', to: 'y', shape: '<-|->', label: 't_hold 2ns' },
+    '標籤裡的空白必須原樣保留');
+  assert.deepStrictEqual(C.parseEdge('A+B'),
+    { from: 'A', to: 'B', shape: '+', label: '' }, '大寫字母也是合法 anchor');
+
+  assert.strictEqual(C.parseEdge('ab'), null, '沒有形狀');
+  assert.strictEqual(C.parseEdge('a?b'), null, '不是清單裡的形狀');
+  assert.strictEqual(C.parseEdge(''), null);
+  assert.strictEqual(C.parseEdge(null), null);
+
+  // 反函數：對每一個標準形式的輸入成立。
+  // 標準形式 = 已 trim、from/shape/to 之間無空白、標籤與頭部之間正好一個空白。
+  let round = 0;
+  for (const shape of C.EDGE_SHAPES) {
+    for (const label of ['', 'lbl', 'two words', 'has~tilde', 'has>gt']) {
+      const s = 'a' + shape + 'b' + (label === '' ? '' : ' ' + label);
+      const back = C.formatEdge(C.parseEdge(s));
+      assert.strictEqual(back, s, 'formatEdge(parseEdge(s)) 必須等於 s，s=' + JSON.stringify(s));
+      round += 1;
+    }
+  }
+  assert.strictEqual(round, 100, '窮舉必須真的跑過 20 形狀 × 5 標籤');
+
+  // 寫入端絕不可產生前導空白：引擎用未 trim 的字串配 trim 後的長度取 label，
+  // '  a~>b hello' 在引擎那邊會變成 label 'b hello'（實測）。
+  assert.strictEqual(C.formatEdge({ from: 'a', to: 'b', shape: '~>', label: ' pad' }),
+    'a~>b pad', 'formatEdge 必須把標籤前後的空白修掉，否則引擎會讀錯');
+
+  console.log('wave-codec: parseEdge/formatEdge 互為反函數 — OK');
+}
+
+// ── v3.5.0 Task 2: node 字母 ─────────────────────────────────────────────
+// 釘死的不變量：node 字串的索引是 CELL、不是 cycle。'.' 與 '|' 都佔一個
+// cell，而 '.' 在 wave 裡不是「重複前一個字元」（v3.4.0 對 3.5.0 實測）。
+{
+  const doc = C.parseSource(
+    '{signal:[{name:"a",wave:"01.x",node:".b.c"},{name:"d",wave:"0|1",node:"..e"}],' +
+    'edge:["b~>c setup"]}').doc;
+
+  assert.deepStrictEqual(C.nodesOf(doc), {
+    b: { at: 0, cell: 1 },
+    c: { at: 0, cell: 3 },
+    e: { at: 1, cell: 2 },
+  }, 'node 的索引是 cell，含 . 與 | 都各佔一格');
+
+  // 已經有字母的格子回既有字母，不配新的。
+  const same = C.ensureNode(doc, 0, 1);
+  assert.strictEqual(same.letter, 'b');
+  assert.strictEqual(same.doc, doc, '沒有改變就要回原本那個 doc（=== 判斷）');
+
+  // 沒有字母的格子配一個沒用過的。
+  const fresh = C.ensureNode(doc, 1, 0);
+  assert.notStrictEqual(fresh.doc, doc);
+  assert.ok(/^[A-Za-z]$/.test(fresh.letter));
+  assert.ok(['b', 'c', 'e'].indexOf(fresh.letter) === -1, '不得重用已存在的字母');
+  assert.strictEqual(C.nodesOf(fresh.doc)[fresh.letter].cell, 0);
+  assert.strictEqual(C.nodesOf(fresh.doc).b.cell, 1, '別條 lane 的字母不得被動到');
+
+  // node 字串比 cell 短的時候要補 '.'。
+  const padded = C.ensureNode(C.parseSource('{signal:[{name:"a",wave:"0123"}]}').doc, 0, 2);
+  assert.strictEqual(padded.doc.signal[0].node, '..' + padded.letter);
+
+  // pruneNodes 只清沒有 edge 引用的。
+  const pruned = C.pruneNodes(fresh.doc);
+  assert.deepStrictEqual(Object.keys(C.nodesOf(pruned)).sort(), ['b', 'c'],
+    'e 與新配的字母都沒有 edge 引用，要被清掉；b/c 被引用，要留');
+  assert.strictEqual(C.pruneNodes(pruned), pruned, '沒有可清的就回原 doc');
+
+  // 上界：cell 不可超過這條 lane 實際的 wave 長度（跟 setCell/insertCycles
+  // 用同一套 isIndex(_, readLane(lane).cells.length)，不是第二個答案）。
+  const doc2 = C.parseSource('{signal:[{name:"a",wave:"01.x"}]}').doc; // 4 cells: 0..3
+  const oob = C.ensureNode(doc2, 0, 4); // 剛好比最後一格多 1
+  assert.strictEqual(oob.doc, doc2, 'cell 超過 lane 長度要回原 doc（=== 判斷）');
+  assert.strictEqual(oob.letter, null, '超界不配字母');
+
+  const atEdge = C.ensureNode(doc2, 0, 3); // 最後一格仍合法
+  assert.notStrictEqual(atEdge.doc, doc2);
+  assert.strictEqual(atEdge.letter, 'a');
+  assert.deepStrictEqual(C.nodesOf(atEdge.doc).a, { at: 0, cell: 3 },
+    '最後一格仍要能正常配字母');
+
+  // pool 前段字母已被占用時必須跳過去，拿第一個還沒被用過的，不能撞名。
+  const taken = C.parseSource(
+    '{signal:[{name:"x",wave:"0123",node:"a.b."}]}').doc; // a@0, b@2；cell3 空
+  const picked = C.ensureNode(taken, 0, 3);
+  assert.strictEqual(picked.letter, 'c',
+    'a/b 已被占用時要跳過去拿第一個空字母，不可撞名');
+
+  console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
+}
+
+// ── v3.5.0 Task 3: edge 陣列的三個 op ────────────────────────────────────
+{
+  const base = C.parseSource('{signal:[{name:"a",wave:"01",node:".b"}]}').doc;
+
+  const one = C.addEdge(base, { from: 'b', to: 'b', shape: '~>', label: 'self' });
+  assert.deepStrictEqual(one.edge, ['b~>b self'], '沒有 edge 陣列時要建一個');
+
+  const two = C.addEdge(one, { from: 'b', to: 'b', shape: '-', label: '' });
+  assert.deepStrictEqual(two.edge, ['b~>b self', 'b-b'], '附加在後面');
+
+  assert.strictEqual(C.addEdge(base, { from: 'b', to: 'b', shape: '??', label: '' }), base,
+    '不合法的形狀不得寫進去，且要回原 doc');
+
+  const upd = C.updateEdge(two, 0, { from: 'b', to: 'b', shape: '->', label: 'renamed' });
+  assert.deepStrictEqual(upd.edge, ['b->b renamed', 'b-b']);
+  assert.strictEqual(C.updateEdge(two, 9, { from: 'b', to: 'b', shape: '-', label: '' }), two,
+    '索引越界回原 doc');
+
+  const rm = C.removeEdge(two, 0);
+  assert.deepStrictEqual(rm.edge, ['b-b']);
+  assert.strictEqual(C.removeEdge(two, -1), two, '索引越界回原 doc');
+
+  const empty = C.removeEdge(one, 0);
+  assert.ok(!('edge' in empty), '刪到一條都不剩時要把 edge 鍵拿掉，不留空陣列');
+
+  console.log('wave-codec: add/update/removeEdge — OK');
+}
+
+// ── v3.5.0 Task 4: moveEdgeEnd ───────────────────────────────────────────
+{
+  // 兩條 edge 共用字母 b。
+  const shared = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c one","b-c two"]}').doc;
+
+  // 分岔：搬第 0 條的 from，b 被第 1 條也引用 → 目標放新字母，只有第 0 條改綁。
+  const forked = C.moveEdgeEnd(shared, 0, 'from', 0, 3);
+  const forkedEntries = forked.edge;
+  assert.strictEqual(forkedEntries[1], 'b-c two',
+    '沒有被拖的那一條，位元組必須一模一樣');
+  const e0 = C.parseEdge(forkedEntries[0]);
+  assert.notStrictEqual(e0.from, 'b', '被拖的那一條必須改綁到新字母');
+  assert.strictEqual(C.nodesOf(forked)[e0.from].cell, 3, '新字母落在目標格');
+  assert.strictEqual(C.nodesOf(forked).b.cell, 1, '原字母留在原位給另一條用');
+
+  // 獨佔：只有一條 edge 用 c，搬它 → 原地搬移，名字不變。
+  const solo = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c only"]}').doc;
+  const moved = C.moveEdgeEnd(solo, 0, 'to', 1, 0);
+  assert.strictEqual(moved.edge[0], 'b~>c only',
+    '獨佔的字母原地搬移，entry 本身一個位元組都不該變');
+  assert.strictEqual(C.nodesOf(moved).c.cell, 0, '字母真的搬到新格子了');
+
+  // 三種 no-op：回原 doc（=== 相同），呼叫端據此不推 undo。
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 1, 3), solo, '拖回原來那一格');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 0, 1), solo, '拖到自己另一端 = a~>a');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'to', 99, 0), solo, '目標 lane 不存在');
+  assert.strictEqual(C.moveEdgeEnd(solo, 9, 'to', 1, 0), solo, 'edge 索引越界');
+  assert.strictEqual(C.moveEdgeEnd(solo, 0, 'sideways', 1, 0), solo, 'end 只能是 from/to');
+
+  console.log('wave-codec: moveEdgeEnd 分岔／原地兩條路 — OK');
+}
+
+// ── v3.5.0 Task 4 fix round 1: Critical 1 / Critical 2 / self-loop pin ──
+{
+  // CRITICAL 1 repro: 原地搬移撞到目標格已經有別的字母（'e'）時，不能直接蓋掉它
+  // ——那是把 'f~>e note' 那條線的錨點無聲拔掉。正確答案是併進分岔路：重用已經
+  // 佔著那格的字母，把被拖的這條改綁過去，原字母 c 因為不再被任何 edge 引用，
+  // 由 pruneNodes 清掉。
+  const occupied = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"},' +
+    '{name:"w",wave:"0123",node:"f.e."}],edge:["b~>c only","f~>e note"]}').doc;
+
+  const landed = C.moveEdgeEnd(occupied, 0, 'to', 2, 2); // 拖 edge0 的 to 到 w 的 cell2，那格已經住著 'e'
+  assert.strictEqual(landed.edge[1], 'f~>e note',
+    '沒被拖的那一條，位元組必須一模一樣');
+  assert.strictEqual(C.nodesOf(landed).e.cell, 2,
+    '被佔的字母 e 不能被蓋掉，必須還在原地');
+  const moved0 = C.parseEdge(landed.edge[0]);
+  assert.strictEqual(moved0.to, 'e',
+    '撞到已佔格子時要重用那個字母（併進分岔路），不是發明第三種行為');
+  assert.strictEqual(C.nodesOf(landed).c, undefined,
+    '舊字母 c 不再被任何 edge 引用，pruneNodes 該把它清掉');
+
+  // CRITICAL 2 repro：原地搬移那條路沒有 cell 上界，跟 ensureNode 用不同答案。
+  // z 這條 lane 只有 4 格（0..3），拖到 cell 50 必須被當成不存在的目標，回原 doc。
+  const bounded = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."},{name:"z",wave:"0123",node:"...c"}],' +
+    'edge:["b~>c only"]}').doc;
+  assert.strictEqual(C.moveEdgeEnd(bounded, 0, 'to', 1, 50), bounded,
+    '原地搬移必須跟 ensureNode 用同一顆 isIndex(_, cells.length) 上界，不能真的搬到格子外面');
+
+  // IMPORTANT 3 pin：self-loop（b~>b）的兩個端點都算「被共用」——即使只有這一條
+  // edge，from 跟 to 同一個字母也貢獻了 2 個 sharers，所以搬其中一端一定要分岔，
+  // 不可以原地搬移（那會把兩端一起拖走）。
+  const loop = C.parseSource(
+    '{signal:[{name:"a",wave:"0123",node:".b.."}],edge:["b~>b loop"]}').doc;
+  const forkedLoop = C.moveEdgeEnd(loop, 0, 'from', 0, 3);
+  const lf = C.parseEdge(forkedLoop.edge[0]);
+  assert.notStrictEqual(lf.from, 'b',
+    'self-loop 搬其中一端必須分岔，不能原地搬移把兩端一起拖走');
+  assert.strictEqual(lf.to, 'b', '沒被拖的那一端字母不變');
+  assert.strictEqual(C.nodesOf(forkedLoop)[lf.from].cell, 3, '新字母落在目標格');
+  assert.strictEqual(C.nodesOf(forkedLoop).b.cell, 1, '原字母 b 留在原位給沒被拖的那一端用');
+
+  console.log('wave-codec: moveEdgeEnd fix round 1（撞格重用／cell 上界／self-loop）— OK');
+}
+
+// ── v3.5.0 Task 10 fix round 1: every BRUSHES entry is keyboard-reachable ──
+// `isBrushKey` (lib/editor/wave-ui.js) is the SAME predicate
+// `handleDrawingKey`'s keydown handler calls to decide whether a keystroke
+// both picks and paints a brush — this pins the rule the keyboard actually
+// obeys, not a belief about it (the same reason the `levelsOf`-vs-engine
+// test above renders through the real wavedrom instead of re-deriving its
+// answer). The task that widened `BRUSHES` to 22 left a `!ev.shiftKey`
+// guard in place for a moment that silently made `P`/`N` — added by that
+// same task, and only ever typed WITH Shift on an ordinary keyboard —
+// mouse-only; a test that only asserted `BRUSHES.length === 22` would have
+// stayed green through that, which is exactly why this checks reachability
+// per character, not the roster's size.
+{
+  const waveUi = require('../lib/editor/wave-ui.js');
+
+  for (const ch of waveUi.BRUSHES) {
+    assert.strictEqual(waveUi.isBrushKey(ch), true,
+      '每一顆筆刷都要能用鍵盤直接打出來（isBrushKey 是 handleDrawingKey 真的呼叫的' +
+      '那個判斷，不是它的複本）：' + JSON.stringify(ch));
+  }
+
+  // The six navigation key NAMES stay excluded — this is what the old
+  // `!ev.shiftKey` guard was actually protecting (Shift+ArrowLeft etc. must
+  // never fall into the paint path), and `isBrushKey`'s own comment records
+  // that the exclusion now lives in `key.length === 1`, not in `ev.shiftKey`.
+  for (const nav of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End']) {
+    assert.strictEqual(waveUi.isBrushKey(nav), false,
+      '導覽鍵不能被當成筆刷字元（否則 Shift+方向鍵擴選會被畫面吃掉）：' + nav);
+  }
+
+  // The three characters this fix round exists for, named explicitly rather
+  // than trusting the roster loop above to have exercised the case that
+  // mattered: all three need Shift on a US keyboard layout to type at all.
+  for (const ch of ['P', 'N', '|']) {
+    assert.strictEqual(waveUi.isBrushKey(ch), true,
+      'Shift 才打得出來的字元也要能當筆刷用鍵盤直接畫：' + ch);
+  }
+
+  assert.strictEqual(waveUi.BRUSHES.length, 22,
+    'v3.5.0 Task 10：筆刷從 11 顆擴到 22 顆');
+
+  console.log('wave-codec: BRUSHES 每一顆都能用鍵盤直接打出來（isBrushKey，不只數量）— OK');
+}
+
+// ── v3.5.0 Task 11: data 槽 ──────────────────────────────────────────────
+// 只有 '=' 與 '2'-'9' 消耗資料槽；'.' 與 '|' 不消耗（v3.4.0 對 3.5.0 實測）。
+{
+  const doc = C.parseSource('{signal:[{name:"b",wave:"x=.=|=",data:["p","q","r"]}]}').doc;
+  const lane = doc.signal[0];
+  assert.strictEqual(C.dataSlotOf(lane, 0), null, 'x 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 1), 0, '第一個 = 是第 0 槽');
+  assert.strictEqual(C.dataSlotOf(lane, 2), null, '. 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 3), 1, '第二個 = 是第 1 槽');
+  assert.strictEqual(C.dataSlotOf(lane, 4), null, '| 不消耗');
+  assert.strictEqual(C.dataSlotOf(lane, 5), 2);
+
+  const set = C.setDataAt(doc, 0, 1, 'NEW');
+  assert.deepStrictEqual(set.signal[0].data, ['p', 'NEW', 'r']);
+  // fix round 1: `.length === 10` is a proxy that cannot fail even if the
+  // padding loop were dropped entirely — `spare[pos] = text` alone already
+  // extends `.length` to 10 on a bare out-of-bounds array assignment, which
+  // is exactly the JS behaviour that would leave the six positions in
+  // between as holes (`undefined`, not `''`) rather than padded. Pinning
+  // the whole array is what actually proves "no holes".
+  assert.deepStrictEqual(C.setDataAt(doc, 0, 9, 'x').signal[0].data,
+    ['p', 'q', 'r', '', '', '', '', '', '', 'x'],
+    '超出長度時補空字串，不得留洞');
+  console.log('wave-codec: data 槽對應與寫入 — OK');
+}
+
+// ── v3.5.0 Task 12: groupLanes / ungroupLanes ─────────────────────────────
+{
+  const FLAT = function () {
+    return {
+      signal: [
+        { name: 'a', wave: '01' },
+        { name: 'b', wave: '01' },
+        { name: 'c', wave: '01' },
+        { name: 'd', wave: '01' },
+      ],
+    };
+  };
+
+  // 連續多選：量過的結果，不是猜的 —— 見上面 groupLanes/ungroupLanes 之前跑過
+  // 的手動量測，這裡把同一組斷言釘住。
+  {
+    const doc = FLAT();
+    const [a, b, c, d] = doc.signal;
+    const out = C.groupLanes(doc, [1, 2], 'mygrp');
+    assert.deepStrictEqual(laneShape(out), ['a', ['mygrp', 'b', 'c'], 'd'],
+      '連續選 1,2 要變成一個新群組，位置在原本 b 站的地方');
+    assert.strictEqual(out.signal[0], a, '沒被選到的 lane 原物件要原封不動地留著');
+    assert.strictEqual(out.signal[1][1], b, '群組裡的 lane 必須是同一個物件（remapOrigins 靠 identity 認人）');
+    assert.strictEqual(out.signal[1][2], c);
+    assert.strictEqual(out.signal[2], d);
+    assert.strictEqual(doc.signal.length, 4, '原本的 doc 不得被改到');
+  }
+
+  // 順序打亂也要照顯示順序組（sorted，不是呼叫端給的順序）
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [2, 1], 'g');
+    assert.deepStrictEqual(laneShape(out), ['a', ['g', 'b', 'c'], 'd']);
+  }
+
+  // 不連續多選：拒絕，回原 doc（identity），不是「群組中間那一段」
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [0, 2], 'x');
+    assert.strictEqual(out, doc,
+      '不連續的選取（0 與 2，跳過 1）必須原封不動地拒絕，不能悄悄把 0,1,2 都包進去');
+  }
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.groupLanes(doc, [0, 3], 'x'), doc, '頭尾不連續一樣要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [1, 1], 'x') === doc, true,
+      '重複的編號當成不連續處理，一起拒絕');
+  }
+
+  // 無效輸入：型別、越界、空集合都回原 doc
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.groupLanes(doc, [0, 1], 5), doc, 'label 不是字串要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [0, 1], null), doc);
+    assert.strictEqual(C.groupLanes(doc, [], 'x'), doc, '空集合沒東西可群組');
+    assert.strictEqual(C.groupLanes(doc, [4], 'x'), doc, '越界的編號要拒絕');
+    assert.strictEqual(C.groupLanes(doc, [-1, 0], 'x'), doc);
+    assert.strictEqual(C.groupLanes(doc, 'nope', 'x'), doc, 'ats 不是陣列要拒絕');
+    assert.strictEqual(C.groupLanes(null, [0], 'x'), null, '不是文件也不丟例外');
+  }
+
+  // 單條也可以群組成一個只有一條 lane 的群組——codec 本身不禁止，UI 另有自己的門檻
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [2], 'solo');
+    assert.deepStrictEqual(laneShape(out), ['a', 'b', ['solo', 'c'], 'd']);
+  }
+
+  // 空字串 label 合法：跟新增 lane 一樣先建立、之後再讓使用者改名
+  {
+    const doc = FLAT();
+    const out = C.groupLanes(doc, [0, 1], '');
+    assert.strictEqual(out.signal[0][0], '');
+  }
+
+  // 選取整個既有群組的全部 lane，加上後面緊接著的一條 —— 原群組被吃光收掉，
+  // 新群組落在原群組原本站的位置，銜接後面那條也一起進來
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c], d] };
+    // 攤平：a=0, b=1, c=2, d=3
+    const out = C.groupLanes(doc, [1, 2, 3], 'outer');
+    assert.deepStrictEqual(laneShape(out), ['a', ['outer', 'b', 'c', 'd']],
+      'G 的兩條 lane 全被選走，G 本身要跟著消失，新群組頂替它原本的位置');
+    assert.strictEqual(out.signal[1][1], b);
+    assert.strictEqual(out.signal[1][2], c);
+    assert.strictEqual(out.signal[1][3], d);
+  }
+
+  // 巢狀群組全部被吃光：往上一路收，跟 removeLane 對空 group 的規則一致
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', ['Inner', b, c]]] };
+    const out = C.groupLanes(doc, [0, 1], 'newlabel');
+    assert.deepStrictEqual(laneShape(out), [['newlabel', 'b', 'c']],
+      'Inner 與 Outer 都被選光了，兩層都要收掉，只留新群組');
+  }
+
+  // 橫跨群組邊界的部分選取：群組沒被選光（b 還留著），選取跨進跨出視為「不能表達
+  // 成一段陣列切片」——拒絕，不得悄悄把 c 從 G 挖出來、把 d 從 signal 挖出來
+  // 兜成一個新陣列（那個新陣列在 WaveJSON 裡沒有對應的容器）。
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const e = { name: 'e', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c, e], d] };
+    // 攤平：a=0, b=1, c=2, e=3, d=4 —— 選 c,e,d（2,3,4），G 沒被選光（b 還在）
+    const out = C.groupLanes(doc, [2, 3, 4], 'x');
+    assert.strictEqual(out, doc, '跨越沒被選光的群組邊界要拒絕，不是猜著兜');
+  }
+
+  // ── ungroupLanes ──────────────────────────────────────────────────────
+
+  // 解散剛剛建立的群組，往返要回到原本的攤平形狀（且是同一批 lane 物件）
+  {
+    const doc = FLAT();
+    const [a, b, c, d] = doc.signal;
+    const grouped = C.groupLanes(doc, [1, 2], 'mygrp');
+    const back = C.ungroupLanes(grouped, 1); // 1 = 群組裡第一條（b）的攤平編號
+    assert.deepStrictEqual(laneShape(back), ['a', 'b', 'c', 'd']);
+    assert.strictEqual(back.signal[0], a);
+    assert.strictEqual(back.signal[1], b);
+    assert.strictEqual(back.signal[2], c);
+    assert.strictEqual(back.signal[3], d);
+  }
+
+  // at 是群組裡的任何一條，不只是第一條，答案要一樣
+  {
+    const doc = FLAT();
+    const grouped = C.groupLanes(doc, [1, 2], 'mygrp'); // b,c 在群組裡，攤平編號都是 1,2
+    assert.deepStrictEqual(laneShape(C.ungroupLanes(grouped, 1)), ['a', 'b', 'c', 'd']);
+    assert.deepStrictEqual(laneShape(C.ungroupLanes(grouped, 2)), ['a', 'b', 'c', 'd'],
+      '指群組裡的第二條一樣要能解散整個群組');
+  }
+
+  // 不在任何群組裡的 lane：ungroupLanes 沒東西可拆，原封不動回來
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.ungroupLanes(doc, 0), doc, '頂層的 lane 不在任何群組裡');
+  }
+
+  // 越界 / 非文件：原封不動，不丟例外
+  {
+    const doc = FLAT();
+    assert.strictEqual(C.ungroupLanes(doc, 99), doc);
+    assert.strictEqual(C.ungroupLanes(doc, -1), doc);
+    assert.strictEqual(C.ungroupLanes(null, 0), null);
+  }
+
+  // 只解散最直接包住那條 lane 的那一層，不動更外層——巢狀群組的骨架要留著
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', ['Inner', b, c]]] };
+    const out = C.ungroupLanes(doc, 0); // b,c 在 Outer 底下的 Inner 裡
+    assert.deepStrictEqual(laneShape(out), [['Outer', 'b', 'c']],
+      'Inner 被拆掉，b/c 直接掛回 Outer 底下；Outer 自己還在');
+  }
+
+  // 拆掉群組不會動到群組裡本身還有的巢狀子群組——只剝掉最外面那一層陣列與標題
+  {
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const doc = { signal: [['Outer', b, ['Inner', c]]] };
+    const out = C.ungroupLanes(doc, 0); // b 是 Outer 的直接 lane
+    assert.deepStrictEqual(laneShape(out), ['b', ['Inner', 'c']],
+      'Outer 被拆掉；b 落到頂層，Inner 這個子群組原封不動地跟著留下');
+  }
+
+  // 沒有標題（作者手寫的裸陣列）：不強求第一格是字串，仍然可以拆
+  {
+    const b = { name: 'b', wave: '01' };
+    const doc = { signal: [[b]] };
+    const out = C.ungroupLanes(doc, 0);
+    assert.deepStrictEqual(laneShape(out), ['b']);
+  }
+
+  // 跟 moveLane 的互動：新群組建立後，既有的跨群組搬移規則要照常運作
+  // （Task 12 brief 步驟 6：確認在群組的新結構下，moveLane 仍然正確）
+  {
+    const doc = FLAT();
+    const grouped = C.groupLanes(doc, [1, 2], 'G'); // a, [G,b,c], d
+    assert.deepStrictEqual(laneShape(grouped), ['a', ['G', 'b', 'c'], 'd']);
+    assert.deepStrictEqual(laneShape(C.moveLane(grouped, 3, 2)),
+      ['a', ['G', 'b', 'd', 'c']], '把 d 搬進群組尾巴前面');
+    assert.deepStrictEqual(laneShape(C.moveLane(grouped, 1, 3)),
+      ['a', ['G', 'c'], 'd', 'b'],
+      '把群組裡的 b 搬到群組外面（to=3 是「拿掉 b 之後」的第 3 個位置，也就是尾端，b 落在 d 後面）');
+    assert.strictEqual(C.moveLane(grouped, 1, 1), grouped, '搬到自己原地是 no-op');
+    // 把群組僅剩的兩條都搬出去之後，群組應該跟著消失（既有 moveLane 規則，
+    // 不是這次新加的，但群組是 groupLanes 剛造出來的，值得再釘一次）
+    const movedOut1 = C.moveLane(grouped, 1, 0);
+    assert.deepStrictEqual(laneShape(movedOut1), ['b', 'a', ['G', 'c'], 'd']);
+    const movedOut2 = C.moveLane(movedOut1, 2, 0);
+    assert.deepStrictEqual(laneShape(movedOut2), ['c', 'b', 'a', 'd'],
+      'G 只剩的最後一條也搬走之後，空掉的 G 要跟著消失');
+  }
+
+  console.log('wave-codec: groupLanes / ungroupLanes — OK');
+}
+
+// ── v3.5.0 Task 13: duplicateLane, and addLane({}) as the spacer button uses
+// it ─────────────────────────────────────────────────────────────────────
+{
+  // The copy lands right after the original, at at+1; everything after that
+  // shifts down one; the original doc/array are untouched (addLane's own
+  // no-alias contract, inherited rather than re-proven).
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(laneShape(out), ['a', 'a', 'b']);
+    assert.deepStrictEqual(out.signal[1], { name: 'a', wave: '01' });
+    assert.notStrictEqual(out.signal[1], out.signal[0], '複製品是新物件，不是同一個參照');
+    assert.strictEqual(out.signal[2], doc.signal[1], '沒被搬動的 lane 要原封不動地共用');
+    assert.strictEqual(doc.signal.length, 2, '原本的 doc 不得被改到');
+    assert.strictEqual(doc.signal[0].name, 'a');
+  }
+
+  // Every key survives the copy EXCEPT `node` — final review finding 2.
+  // `node` names anchor letters that resolve to the ORIGINAL lane (§1's
+  // invariant: one letter → exactly one `{lane, cell}`); carrying it onto the
+  // duplicate gives two lanes the same letters, and `nodesOf` silently
+  // relocates every edge that pointed at the original onto the newer lane
+  // instead — with no way for `pruneNodes` to catch it, since the letter is
+  // still referenced, just by the wrong lane. `data`, and whatever else a
+  // hand-edited lane carries, still copies in full. The nested array is a
+  // REAL copy: mutating the duplicate's `data` must not reach the original's.
+  {
+    const doc = {
+      signal: [{ name: 'd', wave: '2.2.', data: ['0x1', '0x2'], node: '.a..b' }],
+    };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(out.signal[1],
+      { name: 'd', wave: '2.2.', data: ['0x1', '0x2'] },
+      '除了 node，每個欄位都要照抄，包括 data；node 必須被拿掉');
+    assert.strictEqual(out.signal[1].node, undefined,
+      '複製品不准帶著原本那條 lane 的 node —— 那些字母的錨點指的是原本那條');
+    assert.strictEqual(doc.signal[0].node, '.a..b',
+      '原本那條 lane 的 node 不能被這次複製動到');
+    assert.notStrictEqual(out.signal[1].data, doc.signal[0].data,
+      '巢狀的 data 陣列要是新的，不是共用參照');
+    out.signal[1].data.push('0x3');
+    assert.deepStrictEqual(doc.signal[0].data, ['0x1', '0x2'],
+      '改複製品的 data 不能動到原本那條 lane');
+  }
+
+  // A lane with no `node` at all copies unchanged — stripping only fires when
+  // there is something to strip, so a plain lane's shape is untouched.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01', data: ['x'] }] };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(out.signal[1], { name: 'a', wave: '01', data: ['x'] });
+    assert.strictEqual('node' in out.signal[1], false);
+  }
+
+  // Refused (same doc back, identity) rather than guessed: out of range,
+  // negative, non-integer, or not a document at all — the same refusal
+  // shape every other lane op in this file gives.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }] };
+    assert.strictEqual(C.duplicateLane(doc, 1), doc, '越界（只有一條，1 已經超界）');
+    assert.strictEqual(C.duplicateLane(doc, 99), doc);
+    assert.strictEqual(C.duplicateLane(doc, -1), doc);
+    assert.strictEqual(C.duplicateLane(doc, 0.5), doc, '不是整數也拒絕');
+    assert.strictEqual(C.duplicateLane(null, 0), null, '不是文件也不丟例外');
+  }
+
+  // Grouped fixture — MEASURED against the real codec (node -e), not
+  // guessed: `duplicateLane` is built on `addLane`/`laneInsertPath`, so it
+  // inherits that function's own documented asymmetry rather than adding a
+  // second one. Duplicating a group's first lane stays inside the group;
+  // duplicating its LAST lane lands just outside it, appended to `signal`
+  // right after the group — the exact same edge `insertButton`'s own
+  // `landingOf` already surfaces to the user for an ordinary insert.
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c], d] }; // flat: a=0, b=1, c=2, d=3
+    assert.deepStrictEqual(laneShape(C.duplicateLane(doc, 1)),
+      ['a', ['G', 'b', 'b', 'c'], 'd'],
+      '複製群組的第一條，複製品留在群組裡，緊接在原本那條後面');
+    assert.deepStrictEqual(laneShape(C.duplicateLane(doc, 2)),
+      ['a', ['G', 'b', 'c'], 'c', 'd'],
+      '複製群組最後一條，複製品落在群組外面（跟 insertButton 的 landingOf 同一條門檻）');
+  }
+
+  // The spacer button inserts a bare `{}` through the already-existing
+  // `addLane` — no new codec function, because `isLane({})` already accepts
+  // a lane with no keys at all. Pinned here because the UI button's
+  // correctness depends on this exact call staying accepted.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+    const out = C.addLane(doc, 1, {});
+    assert.deepStrictEqual(out.signal[1], {}, '空白列就是裸的 {}，不補任何欄位');
+    assert.deepStrictEqual(laneShape(out), ['a', undefined, 'b']);
+    assert.strictEqual(doc.signal.length, 2, '原本的 doc 不得被改到');
+  }
+
+  console.log('wave-codec: duplicateLane / spacer — OK');
+}
+
+// ── v3.5.0 Task 13, fix round 2: setBannerField ───────────────────────────
+// Extracted so `commitBanner` (a wave-ui.js closure with no unit-test seam
+// of its own) has a pure function to delegate to. The defect this closes:
+// clearing an already-set `tick`/`tock`/`every` field used to write `''`
+// instead of deleting the key — invisible for `.text` (the engine's
+// `captext` treats `''` the same as absent) but not for the other three
+// (`ticktock` in node_modules/wavedrom/lib/render-marks.js only skips a
+// field that is `=== undefined`; `''` reaches its array branch and draws a
+// full default 0-based ruler). MEASURED against the pinned engine below —
+// same `node -e` shape the rest of this file's edge/lane fixtures use.
+{
+  // set: creates `doc[which]` from nothing.
+  {
+    const doc = { signal: [] };
+    const out = C.setBannerField(doc, 'head', 'tick', '5');
+    assert.deepStrictEqual(out, { signal: [], head: { tick: '5' } });
+    assert.deepStrictEqual(doc, { signal: [] }, '原本的 doc 不得被改到');
+  }
+
+  // overwrite: an existing value under the same key is replaced; writing
+  // the SAME value back is a no-op (identity).
+  {
+    const doc = { signal: [], head: { tick: '5' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '7');
+    assert.deepStrictEqual(out, { signal: [], head: { tick: '7' } });
+    assert.strictEqual(C.setBannerField(out, 'head', 'tick', '7'), out,
+      '寫回同一個值是 no-op，要回同一個物件');
+  }
+
+  // clear a SET key: the key itself is gone, not written as ''. This is
+  // the exact defect — assert the key is ABSENT, not merely falsy/empty.
+  {
+    const doc = { signal: [], head: { tick: '5', every: '2' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '');
+    assert.deepStrictEqual(out, { signal: [], head: { every: '2' } });
+    assert.strictEqual('tick' in out.head, false, '清掉的欄位必須整個 key 消失，不是空字串');
+    assert.deepStrictEqual(doc, { signal: [], head: { tick: '5', every: '2' } },
+      '原本的 doc 不得被改到');
+  }
+
+  // clear an UNSET key: identity — same refusal shape every other op in
+  // this file gives, whether the parent object exists or not.
+  {
+    const doc1 = { signal: [] };
+    assert.strictEqual(C.setBannerField(doc1, 'head', 'tick', ''), doc1);
+    const doc2 = { signal: [], head: { every: '2' } };
+    assert.strictEqual(C.setBannerField(doc2, 'head', 'tick', ''), doc2,
+      'head 存在，但 tick 這個 key 本來就沒有，一樣是 no-op');
+  }
+
+  // clear the LAST key under `head`: `head` itself is deleted too, so a
+  // fully-cleared document is byte-identical to one that never had it.
+  {
+    const doc = { signal: [], head: { tick: '5' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '');
+    assert.deepStrictEqual(out, { signal: [] });
+    assert.strictEqual('head' in out, false, '清光的容器不能留下一個空的 {}');
+  }
+
+  // `foot` is independent of `head`, and `text`/`tick`/`tock`/`every` don't
+  // trample each other under the same parent.
+  {
+    const doc = { signal: [], head: { text: 'TOP' }, foot: { tock: '1' } };
+    const out = C.setBannerField(doc, 'foot', 'tick', '0');
+    assert.deepStrictEqual(out,
+      { signal: [], head: { text: 'TOP' }, foot: { tock: '1', tick: '0' } });
+    assert.strictEqual(out.head, doc.head, '沒被動到的 head 要原封不動地共用');
+  }
+
+  // Refused (identity), not guessed: not a document, `which` outside
+  // {head, foot}, or a non-string/empty `key`.
+  {
+    const doc = { signal: [] };
+    assert.strictEqual(C.setBannerField(null, 'head', 'tick', '5'), null);
+    assert.strictEqual(C.setBannerField(doc, 'nope', 'tick', '5'), doc);
+    assert.strictEqual(C.setBannerField(doc, 'head', '', '5'), doc);
+    assert.strictEqual(C.setBannerField(doc, 'head', 5, '5'), doc, 'key 不是字串要拒絕');
+  }
+
+  // MEASURED against the pinned engine: an empty-string `tick` (the
+  // pre-fix shape) draws a ruler the field looks empty of; the key this
+  // function produces after a clear does not exist at all, so the SAME
+  // measurement made on the properly-cleared doc draws nothing.
+  {
+    const wavedrom = require('wavedrom');
+    function tickMarks(doc) {
+      const svg = wavedrom.renderAny(0, doc, wavedrom.waveSkin);
+      const out = [];
+      (function walk(node) {
+        if (!Array.isArray(node)) return;
+        if (node[0] === 'g' && node[1] && node[1].class === 'muted') {
+          for (const child of node.slice(2)) {
+            if (Array.isArray(child) && child[0] === 'text') out.push(child[child.length - 1]);
+          }
+        }
+        for (const c of node) walk(c);
+      })(svg);
+      return out;
+    }
+    const preFixShape = { signal: [{ name: 'a', wave: '0101' }], head: { tick: '' } };
+    assert.ok(tickMarks(preFixShape).length > 0,
+      '量測釘住這個 defect 曾經多糟：一個看起來空的欄位，引擎照樣畫出整排刻度');
+    const cleared = C.setBannerField(
+      { signal: [{ name: 'a', wave: '0101' }], head: { tick: '5' } }, 'head', 'tick', '');
+    assert.deepStrictEqual(tickMarks(cleared), [],
+      '修好之後：真的清掉的欄位，引擎什麼刻度都不畫');
+  }
+
+  console.log('wave-codec: setBannerField — OK');
+}
+
 console.log('wave-codec.test.js OK');

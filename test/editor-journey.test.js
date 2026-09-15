@@ -9935,6 +9935,51 @@ async function main() {
       await new Promise((r) => setTimeout(r, 250));
     };
 
+    // v3.5.0 Task 10 fix round 3: the dialog's own focusable-element count,
+    // computed the SAME way `wave-ui.js`'s own `modalRoots()`/`focusables()`
+    // do — same `FOCUSABLE` selector, same disabled/hidden/getClientRects
+    // filter, same "the modal layer is the overlay AND any `.ed-conflict`
+    // banner" rule — not a re-guess of the product's own count. Every
+    // Tab-walk below used to cap its loop at a bare constant (60, 70, 80),
+    // and T8f's broke the moment `BRUSHES` grew from 11 to 22: eleven more
+    // toolbar buttons landed ahead of the canvas (the LAST focusable in the
+    // dialog), and a walk that used to fit inside 60 presses no longer did.
+    // Grepping for a count literal — this repo's usual guard before
+    // changing "a number of X" — could never have caught it, because 60 was
+    // never a count of anything; it was a TRAVERSAL BOUND whose sufficiency
+    // silently depended on the toolbar's size. Deriving the cap from the
+    // dialog's actual focusable count means the next button added to the
+    // toolbar never meets this failure at all — someone would have to
+    // "simplify" this back to a constant to reopen it, which is exactly why
+    // this comment says not to.
+    //
+    // The trap cycles through its focusable set, so the worst-case number of
+    // Tab presses to reach any ONE of them from an arbitrary starting point
+    // is `count - 1` (start right after the target, walk the rest of the way
+    // around). `MODAL_WALK_MARGIN` is headroom on top of that — small and
+    // named, not folded into a bigger guessed constant — for anything the
+    // selector below does not model exactly the way the real trap does.
+    const MODAL_WALK_MARGIN = 10;
+    const modalFocusableCap = async (page) => {
+      const count = await page.evaluate(() => {
+        const FOCUSABLE = 'button, input, select, textarea, a[href], ' +
+          '[tabindex]:not([tabindex="-1"])';
+        const roots = [document.querySelector('.ed-wave-overlay')];
+        for (const el of document.querySelectorAll('.ed-conflict')) roots.push(el);
+        let n = 0;
+        for (const root of roots) {
+          if (root === null) continue;
+          for (const el of root.querySelectorAll(FOCUSABLE)) {
+            if (el.disabled === true || el.hidden === true) continue;
+            if (el.getClientRects().length === 0) continue;
+            n++;
+          }
+        }
+        return n;
+      });
+      return count + MODAL_WALK_MARGIN;
+    };
+
     // The centre of one cell, in viewport coordinates, plus whether that point
     // is actually ON the drawing. The canvas is a scroll container inside a
     // fixed-width column: MEASURED in this session, a press 116px past its clip
@@ -10342,6 +10387,64 @@ async function main() {
       assert.deepStrictEqual(after.drawn, after.engine,
         'T6b: 編輯之後也必須逐格一致\ndrawn : ' + JSON.stringify(after.drawn) +
         '\nengine: ' + JSON.stringify(after.engine));
+
+      // v3.5.0 Task 10 fix round 2: `P`/`N` are supposed to look different
+      // from `p`/`n` — that is the whole point of the task that widened
+      // `BRUSHES` to 22 — but until this row nothing asserted it. Neither
+      // long suite reads `data-clock-edge-<i>` or `.ed-wave-clock-arrow` at
+      // all (fix round 2's own review finding), so the arrow-drawing code
+      // in `drawLane` could be deleted outright and every suite would still
+      // stay green. `clk` (lane 0) is still five plain `p` cycles here —
+      // the emptying step below has not run yet — so it is the ABSENCE
+      // half of the pin, for free, off the untouched fixture. Painting `P`
+      // onto `req` (lane 1) and `N` onto `dat` (lane 2) is the PRESENCE
+      // half. Both halves are needed: presence alone would also pass an
+      // implementation that draws the arrow on every clock cycle, which
+      // would make `P` and `p` identical again, just in the other
+      // direction — exactly the regression `P`/`N` were added to fix.
+      //
+      // `req`/`dat` cycle 2 (currently a plain explicit level, `1` and `3`),
+      // not `ack`/`gap` — checked directly against `wave-codec.js` first,
+      // not assumed. `ack` starts with a bare repeater (`.0..1`), and
+      // `wave-codec.js`'s own `ABSOLUTE_CHARS` comment records that a
+      // repeater at cycle 0 makes the PAIR it forms with the next character
+      // draw as `x` unless that character is one of `pnhl` — `P`/`N` are
+      // not on that list, so painting `P` at `ack` cycle 1 measured back as
+      // `levelsOf` == `x`, erasing the very thing under test. `gap`
+      // (`01|10`) has its own trap: cycle 2 is a `|`, and `levelsOf` carries
+      // a `|`'s cycle forward from whatever precedes it, so painting `N` at
+      // cycle 1 measured back as TWO edge entries (`1:N 2:N`) — correct per
+      // `levelsOf`'s own contract, but not the clean single-entry presence
+      // pin this row wants. `req`/`dat` avoid both traps: neither starts
+      // with a repeater and neither has a `|`.
+      await paintCell(ctx.page, 1, 2, 'P');
+      await paintCell(ctx.page, 2, 2, 'N');
+      const edgeMarks = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        return {
+          clk: svg.getAttribute('data-clock-edge-0'),
+          req: svg.getAttribute('data-clock-edge-1'),
+          dat: svg.getAttribute('data-clock-edge-2'),
+          arrows: svg.querySelectorAll('.ed-wave-clock-arrow').length,
+        };
+      });
+      assert.strictEqual(edgeMarks.clk, '',
+        'T6b: clk lane 全部都是小寫 p，不該留下任何箭頭記號（absence half）。Got ' +
+        JSON.stringify(edgeMarks.clk));
+      assert.strictEqual(edgeMarks.req, '2:P',
+        'T6b: 塗上去的 P 必須在 data-clock-edge-1 的 cycle 2 留下記號（presence half）。' +
+        'Got ' + JSON.stringify(edgeMarks.req));
+      assert.strictEqual(edgeMarks.dat, '2:N',
+        'T6b: 塗上去的 N 必須在 data-clock-edge-2 的 cycle 2 留下記號（presence half，' +
+        'N 是鏡射幾何，跟 P 分開釘住才抓得到只有一邊算錯正負號）。Got ' +
+        JSON.stringify(edgeMarks.dat));
+      // …and the actual painted SHAPE count agrees: exactly one triangle per
+      // P/N cycle, not zero (the attribute could be right while nothing is
+      // drawn) and not more than two (an implementation that also arrowed
+      // clk's plain p cycles would still pass the three assertions above).
+      assert.strictEqual(edgeMarks.arrows, 2,
+        'T6b: 畫面上真正畫出來的 .ed-wave-clock-arrow 必須剛好 2 個（一個 P 一個 N，clk 的 p 沒有）。' +
+        'Got ' + edgeMarks.arrows);
 
       // The gap axis is only covered if the fixture actually HAS one drawn, on
       // a lane this comparison names.
@@ -11044,9 +11147,13 @@ async function main() {
         'T6k: 橫幅矩形中心的命中測試必須落在橫幅自己身上，否則滑鼠點不到它');
 
       // …and the keyboard. A trap scoped to the overlay alone would paint the
-      // banner on top and still make its buttons unreachable.
+      // banner on top and still make its buttons unreachable. The cap is
+      // DERIVED (see `modalFocusableCap`'s own comment) rather than a bare
+      // constant, because the banner sits behind however many toolbar
+      // buttons the overlay has ahead of it in Tab order.
+      const t6kCap = await modalFocusableCap(ctx.page);
       let reached = -1;
-      for (let i = 0; i < 80; i++) {
+      for (let i = 0; i < t6kCap; i++) {
         await ctx.page.keyboard.press('Tab');
         const inBanner = await ctx.page.evaluate(() =>
           document.querySelector('.ed-conflict').contains(document.activeElement));
@@ -11181,9 +11288,13 @@ async function main() {
       assert.ok(banner.z > banner.overlayZ,
         'T6l: banner 必須疊在 modal 上面。Got ' + banner.z + ' vs ' + banner.overlayZ);
       // …and it is reachable from inside the trap, which is what makes it an
-      // announcement rather than a decoration.
+      // announcement rather than a decoration. Cap DERIVED
+      // (`modalFocusableCap`) rather than the bare `120` this used to be —
+      // same construction T8f's fixed `60` broke on, just with more
+      // pre-existing headroom that happened not to run out yet.
+      const t6lCap = await modalFocusableCap(ctx.page);
       let reached = -1;
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < t6lCap; i++) {
         await ctx.page.keyboard.press('Tab');
         const inBanner = await ctx.page.evaluate(() =>
           document.querySelector('.ed-conflict').contains(document.activeElement));
@@ -12271,9 +12382,13 @@ async function main() {
         'T8d 前提失敗：這一列要先有一個真的會被丟掉的手勢。Got ' + JSON.stringify(painted));
 
       // Tab all the way to the rail tag — the group rename is reachable by
-      // keyboard, which is how this row presses it.
+      // keyboard, which is how this row presses it. Cap is DERIVED
+      // (`modalFocusableCap`) rather than a bare constant, since the rail
+      // tag sits behind however many toolbar buttons the overlay has ahead
+      // of it in Tab order.
+      const t8dCap = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8dCap; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12281,7 +12396,7 @@ async function main() {
         });
         if (k === 'group-1') break;
       }
-      assert.ok(walked < 60, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
+      assert.ok(walked < t8dCap, 'T8d 前提失敗：Tab 走不到群組名稱那顆鈕');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       const opened = await ctx.page.evaluate(() => ({
@@ -12488,9 +12603,14 @@ async function main() {
       await openWave(ctx.page);
       // Tab all the way onto the drawing. It is the LAST focusable in the
       // dialog, which is why this walks rather than clicking: a click would be
-      // a choice, and the thing under test is what a traversal does.
+      // a choice, and the thing under test is what a traversal does. The cap
+      // is DERIVED (`modalFocusableCap`) rather than a bare constant — this
+      // is exactly the walk fix round 3 exists for: growing `BRUSHES` from
+      // 11 to 22 put eleven more buttons ahead of the canvas and broke a
+      // fixed 60-press cap outright.
+      const t8fCap = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8fCap; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12498,7 +12618,7 @@ async function main() {
         });
         if (k === 'canvas') break;
       }
-      assert.ok(walked < 60, 'T8f 前提失敗：Tab 走不到畫布');
+      assert.ok(walked < t8fCap, 'T8f 前提失敗：Tab 走不到畫布');
       const arrived = await ctx.page.evaluate(() => {
         const c = document.querySelector('[data-ed-wave-cursor]');
         return {
@@ -12648,8 +12768,11 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
+      // Cap DERIVED (`modalFocusableCap`) rather than a bare constant — same
+      // reasoning as T8d/T8f above.
+      const t8hCap1 = await modalFocusableCap(ctx.page);
       let walked = 0;
-      for (; walked < 60; walked++) {
+      for (; walked < t8hCap1; walked++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12657,7 +12780,7 @@ async function main() {
         });
         if (k === 'group-1') break;
       }
-      assert.ok(walked < 60, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
+      assert.ok(walked < t8hCap1, 'T8h 前提失敗：Tab 走不到群組名稱那顆鈕');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       const open = await ctx.page.evaluate(() => ({
@@ -12693,8 +12816,12 @@ async function main() {
       // teardown. The ＋ above has just moved the group from `from=1` to
       // `from=2`; rename it, type, and undo THAT insert — the key the teardown
       // names goes back to `group-1` while the field's own key was `group-2`.
+      // Cap re-derived (not reused from above): the ＋ press just added a
+      // lane, so the dialog's real focusable count is already one row
+      // bigger than it was for `t8hCap1`.
+      const t8hCap2 = await modalFocusableCap(ctx.page);
       let toGroup = 0;
-      for (; toGroup < 70; toGroup++) {
+      for (; toGroup < t8hCap2; toGroup++) {
         await ctx.page.keyboard.press('Tab');
         const k = await ctx.page.evaluate(() => {
           const ae = document.activeElement;
@@ -12702,7 +12829,7 @@ async function main() {
         });
         if (k === 'group-2') break;
       }
-      assert.ok(toGroup < 70, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
+      assert.ok(toGroup < t8hCap2, 'T8h 前提失敗：群組移位之後 Tab 走不到它');
       await ctx.page.keyboard.press('Enter');
       await new Promise((r) => setTimeout(r, 250));
       assert.strictEqual(await ctx.page.evaluate(() =>
@@ -12935,6 +13062,1051 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T8j: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8j the header says which key discards, and a block with no editable lanes says so — OK');
+    }
+
+    // ── v3.5.0 Task 9: edges 的真機場景 ────────────────────────────────────
+    //
+    // Four scenarios, task-9-brief.md's own list. Every one of them asserts on
+    // the SAVED SOURCE, read back through `waveCodec.parseSource`/`parseEdge`
+    // — never on the DOM (`waveLaneNames` above already set that precedent for
+    // node names; `parseWaveBlock` below is the same move for the whole doc).
+    // `openWave`/`cellPoint`/`pressClick`/`saveAndRead` are Task 6-8's own
+    // harness, reused as-is — nothing about OPENING the editor or READING the
+    // file back is reinvented here.
+
+    // Two flat lanes, no group: keeps `doc.signal[i].node` a direct index, so
+    // the assertions below are not also a second test of `lanePaths()`.
+    const EDGE_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  { name: 'clk', wave: 'p....' },",
+      "  { name: 'req', wave: '0.1.0' }",
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // Two edges sharing anchor 'a', one lane each plus a `gap` lane with no
+    // node yet and a blank spacer — exactly what T9c (fork) and T9d (the
+    // three no-op drops) each need already sitting in the document, per the
+    // brief's own instruction ("事先放兩條共用字母的 edge").
+    const EDGE_FORK_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  { name: 'clk', wave: 'p....', node: '.a...' },",
+      "  { name: 'req', wave: '0.1.0', node: '..b..' },",
+      "  { name: 'ack', wave: '.0..1', node: '...c.' },",
+      "  { name: 'gap', wave: '01|10' },",
+      '  {}',
+      '],',
+      "edge: ['a~>b', 'a~>c']",
+      '}',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // A real press-move-release between two cells that may be on DIFFERENT
+    // lanes. `dragCells` above is lane-locked (it mirrors the paint drag it
+    // exists for); edge creation and endpoint dragging are not.
+    const dragBetween = async (page, a, b) => {
+      await page.mouse.move(a.x, a.y);
+      await page.mouse.down();
+      await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2);
+      await page.mouse.move(b.x, b.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // A plain click (press, release, no movement): selects an edge without
+    // arming or dragging anything — `onCanvasDown`'s `edgeHitAt` branch only
+    // ever selects on a press that lands with `selectedEdge === null`, so
+    // selecting and starting an endpoint drag are always two SEPARATE
+    // gestures at this same point, never one.
+    const clickAt = async (page, at) => {
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 150));
+    };
+
+    // A drag that presses, moves to a genuinely different nearby point, and
+    // only then moves back onto `at` before releasing — for the "dropped back
+    // on its own cell" no-op, where the start and end point are identical and
+    // a drag that never actually MOVED would leave `endpointDrag.at` at its
+    // initial `null` instead of exercising `moveEdgeEnd`'s own refusal.
+    const dragBackTo = async (page, at) => {
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await page.mouse.move(at.x + 6, at.y);
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    // The wavedrom block's own text, parsed back through the codec — a
+    // DOCUMENT question, not a DOM one. Distinct from `waveLaneNames` above
+    // (which only wants the lane names): this one hands back the whole doc,
+    // for `edge`/`node` assertions.
+    const parseWaveBlock = (md) => {
+      const block = md.match(/```wavedrom\n([\s\S]*?)\n```/);
+      assert.ok(block !== null,
+        'parseWaveBlock 前提失敗：存回去的檔案裡要有一個 wavedrom 區塊。Got:\n' + md);
+      const parsed = waveCodec.parseSource(block[1]);
+      assert.strictEqual(parsed.ok, true,
+        'parseWaveBlock 前提失敗：寫回去的區塊必須還解析得回來。Got ' +
+        JSON.stringify(parsed) + '\n' + md);
+      return parsed.doc;
+    };
+
+    // Filled in by T9a, checked against by T9b.
+    let mouseCreatedDisk = null;
+
+    // T9a — armed, drag (lane0, cell1) -> (lane1, cell3): the saved source
+    // grows two `node` entries and one `edge`, `parseEdge` reads it back, and
+    // the arm disarms because this drag produced something.
+    {
+      const ctx = await newPage(EDGE_MD);
+      await openWave(ctx.page);
+
+      const before = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-edgemode'));
+      assert.strictEqual(before, 'idle',
+        'T9a 前提失敗：編輯器一開起來要是未武裝狀態。Got ' + before);
+
+      await pressClick(ctx.page, '.ed-wave-edge-arm');
+      await new Promise((r) => setTimeout(r, 150));
+      const armed = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-edgemode'));
+      assert.strictEqual(armed, 'armed',
+        'T9a 前提失敗：按過武裝鈕之後要是 armed。Got ' + armed);
+
+      const a = await cellPoint(ctx.page, 0, 1);
+      const b = await cellPoint(ctx.page, 1, 3);
+      await dragBetween(ctx.page, a, b);
+
+      const after = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        edgemode: el.getAttribute('data-wave-edgemode'),
+        gestures: el.getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(after.edgemode, 'idle',
+        'T9a: 拖出一條真的線之後必須自動解除武裝。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.gestures, '1',
+        'T9a: 一次拖曳只該推一次 commit。Got ' + JSON.stringify(after));
+
+      const disk = await saveAndRead(ctx);
+      mouseCreatedDisk = disk;
+      const doc = parseWaveBlock(disk);
+      assert.ok(doc !== null && Array.isArray(doc.signal) && doc.signal.length === 2,
+        'T9a 前提失敗：兩條 lane 都要還在。Got ' + JSON.stringify(doc));
+      const clkNode = (doc.signal[0] && typeof doc.signal[0].node === 'string')
+        ? doc.signal[0].node : '';
+      const reqNode = (doc.signal[1] && typeof doc.signal[1].node === 'string')
+        ? doc.signal[1].node : '';
+      assert.ok(/[A-Za-z]/.test(clkNode.charAt(1) || ''),
+        'T9a: clk 的 cell 1 要多出一個 node 字母。Got node=' + JSON.stringify(clkNode));
+      assert.ok(/[A-Za-z]/.test(reqNode.charAt(3) || ''),
+        'T9a: req 的 cell 3 要多出一個 node 字母。Got node=' + JSON.stringify(reqNode));
+      assert.ok(Array.isArray(doc.edge) && doc.edge.length === 1,
+        'T9a: 要多一條 edge。Got ' + JSON.stringify(doc.edge));
+      const parsedEdge = waveCodec.parseEdge(doc.edge[0]);
+      assert.ok(parsedEdge !== null,
+        'T9a: 那條 edge 必須讀得回來。Got ' + JSON.stringify(doc.edge));
+      assert.strictEqual(parsedEdge.from, clkNode.charAt(1),
+        'T9a: edge 的起點要接到 clk 那個字母。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.to, reqNode.charAt(3),
+        'T9a: edge 的終點要接到 req 那個字母。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.shape, '~>',
+        'T9a: 這個手勢固定畫 ~>。Got ' + JSON.stringify(parsedEdge));
+      assert.strictEqual(parsedEdge.label, '',
+        'T9a: 這個手勢固定沒有 label。Got ' + JSON.stringify(parsedEdge));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9a arm, drag across lanes, and the saved source parses back — OK');
+    }
+
+    // T9b — the SAME edge, built with two Enter presses instead of a drag:
+    // the saved source must be byte-identical to T9a's, because both paths
+    // end in the exact same `finishEdgeDrag()` call.
+    {
+      const ctx = await newPage(EDGE_MD);
+      await openWave(ctx.page);
+
+      await pressClick(ctx.page, '.ed-wave-edge-arm');
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Get the keyboard onto the canvas without painting or dragging
+      // anything: real Tab presses, `document.activeElement` read back after
+      // EACH one — never a blind wait on a guessed value. The dialog is a
+      // focus trap (`modalRoots()`), so this always lands somewhere inside
+      // it. v3.5.0 Task 10 fix round 3: the cap here USED to be the bare
+      // constant `80`, described as "generous headroom over the toolbar's
+      // own control count" — a description of a number nobody had written
+      // down, which is exactly how T8f's identical construction broke a cap
+      // of `60` the moment `BRUSHES` grew from 11 to 22 (eleven more
+      // buttons ahead of the canvas). This one happened to still fit under
+      // 80, but "happened to" is not a property to keep relying on, so it
+      // now uses `modalFocusableCap` (see that function's own comment) —
+      // derived from the dialog's actual focusable count, not a guess about
+      // it.
+      //
+      // Fix round 1: the canvas is an `<svg>` (`d.createElementNS(SVGNS,
+      // 'svg')` in wave-ui.js), and on an SVG element `.className` is an
+      // `SVGAnimatedString` OBJECT, not a string — read as a string it stringifies
+      // to `"[object SVGAnimatedString]"`, which this loop's old
+      // `ed-wave-canvas` regex could never match. That silently broke the
+      // probe, not the product: focus was landing on the canvas the whole
+      // time, the loop just could not recognise it, so it kept pressing
+      // Tab and finally reported whichever ordinary HTML button it
+      // happened to stop on 80 presses later. Confirmed empirically before
+      // this fix (see task-9-report.md's fix-round section) — on a real
+      // SVG element `typeof el.className === 'object'` while
+      // `el.getAttribute('class')` and `el.dataset.focusKey` both answer
+      // correctly, and `getAttribute()` itself works identically on HTML
+      // and SVG elements either way. `data-focus-key` is what the product
+      // already tags the canvas with for exactly this purpose
+      // (`canvas.setAttribute('data-focus-key', 'canvas')`,
+      // `lib/editor/wave-ui.js`), so that is what this reads now instead
+      // of `.className`.
+      const t9bCap = await modalFocusableCap(ctx.page);
+      let onCanvas = false;
+      let lastActive = null;
+      for (let i = 0; i < t9bCap; i++) {
+        lastActive = await ctx.page.evaluate(() => {
+          const el = document.activeElement;
+          if (!el) return null;
+          return { focusKey: el.getAttribute('data-focus-key'), tag: el.tagName };
+        });
+        if (lastActive !== null && lastActive.focusKey === 'canvas') { onCanvas = true; break; }
+        await ctx.page.keyboard.press('Tab');
+      }
+      assert.strictEqual(onCanvas, true,
+        'T9b 前提失敗：Tab 了 ' + t9bCap + ' 次鍵盤還沒踏上畫布，最後停在「' +
+        JSON.stringify(lastActive) + '」');
+
+      // Tabbing onto the canvas fires its own `focus` listener, which calls
+      // `enterDrawing()` and plants the cursor at (0,0) — real product
+      // behaviour, not something this test sets up. From there: →1 lands on
+      // (lane0, cell1), the exact cell T9a's drag started from.
+      await ctx.page.keyboard.press('ArrowRight');
+      await ctx.page.keyboard.press('Enter');   // marks the start
+      const marked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      assert.ok(marked !== null && marked.indexOf('起點已標記') !== -1,
+        'T9b: 第一次 Enter 要標記起點。Got ' + JSON.stringify(marked));
+
+      await ctx.page.keyboard.press('ArrowDown');   // lane 0 -> lane 1
+      await ctx.page.keyboard.press('ArrowRight');  // cycle 1 -> 2
+      await ctx.page.keyboard.press('ArrowRight');  // cycle 2 -> 3
+      await ctx.page.keyboard.press('Enter');       // finishes at (lane1, cell3)
+      await new Promise((r) => setTimeout(r, 200));
+
+      const after = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
+        edgemode: el.getAttribute('data-wave-edgemode'),
+        gestures: el.getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(after.edgemode, 'idle',
+        'T9b: 完成之後必須自動解除武裝。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.gestures, '1',
+        'T9b: 兩下 Enter 只該是一次 commit。Got ' + JSON.stringify(after));
+
+      const disk = await saveAndRead(ctx);
+      assert.ok(mouseCreatedDisk !== null,
+        'T9b 前提失敗：T9a 要先跑過，留下滑鼠路徑的檔案內容可以比較');
+      assert.strictEqual(disk, mouseCreatedDisk,
+        'T9b: 鍵盤兩步做出來的檔案必須跟滑鼠拖曳做出來的逐位元組相同。\n滑鼠：\n' +
+        mouseCreatedDisk + '\n鍵盤：\n' + disk);
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9b keyboard Enter/Enter produces a byte-identical source to the mouse drag — OK');
+    }
+
+    // T9c — select the edge that shares anchor 'a', drag ITS `from` end onto
+    // an empty cell: `moveEdgeEnd` forks (`a` is still referenced by the
+    // OTHER edge), so the sibling edge's own entry must survive byte for
+    // byte. Clicking the shared point (clk cell 1) resolves to the LATER
+    // edge — `a~>c`, index 1 — so that is the one under test; `a~>b` at
+    // index 0 is the control.
+    //
+    // final review re-review, item 2 (audit, no behaviour change): the
+    // mechanism this comment used to credit — `edgeHandleAt`'s
+    // `edges.length-1 downto 0` scan order — is no longer what resolves this
+    // press. Final review finding 4 gated that phantom-handle shortcut to
+    // the SELECTED edge only (or a self-loop; neither applies here, nothing
+    // is selected yet and this isn't one), so an unselected click now
+    // resolves through `edgeHitAt`'s `.ed-wave-edge-hit` fallback instead.
+    // The outcome (index 1 wins) happens to be UNCHANGED, but for a
+    // different reason: `a~>b` and `a~>c` both LITERALLY start at `a` — not
+    // merely pass near it, the exact same `centerOfCell` coordinate both
+    // curves' `M` command opens on — so both hit paths cover that exact
+    // pixel with total certainty, not a geometric coincidence the way T9d's
+    // crossing-curves case was. `renderEdges` always appends edges in
+    // `doc.edge` order, so the later index is always painted on top, and
+    // `elementFromPoint` at a point of exact, guaranteed overlap reliably
+    // resolves to the topmost paint — this is DETERMINISTIC under the new
+    // rule (not merely lucky the way a coincidental crossing would be): it
+    // follows from `a~>b`/`a~>c` sharing an anchor LETTER, which is a
+    // property of this fixture that never changes, not from where their
+    // curves happen to cross in some rendering. This row needed no code
+    // change, only this corrected explanation.
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const shared = await cellPoint(ctx.page, 0, 1);   // clk cell 1 = 'a'
+      await clickAt(ctx.page, shared);
+      const picked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '1',
+        'T9c 前提失敗：按共用的那個點必須選到後面那條 edge（index 1，a~>c）。Got ' + picked);
+
+      const target = await cellPoint(ctx.page, 3, 0);   // gap cell 0, unused
+      await dragBetween(ctx.page, shared, target);
+
+      const gestures = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-gestures'));
+      assert.strictEqual(gestures, '1',
+        'T9c: 分岔是一次真的改動，要推一次 commit。Got ' + gestures);
+
+      const disk = await saveAndRead(ctx);
+      // Byte check, not just a logical one: the ORIGINAL fixture's literal
+      // single-quoted entry must still be sitting in the saved file, untouched.
+      assert.ok(disk.indexOf("'a~>b'") !== -1,
+        "T9c: 另一條 edge（a~>b）的 entry 必須連引號一起逐位元組不變。Got:\n" + disk);
+
+      const doc = parseWaveBlock(disk);
+      assert.ok(Array.isArray(doc.edge) && doc.edge.length === 2,
+        'T9c 前提失敗：還是兩條 edge，分岔不會憑空多一條或少一條。Got ' + JSON.stringify(doc.edge));
+      assert.strictEqual(doc.edge[0], 'a~>b',
+        'T9c: 第一條 edge 的 entry 字串必須完全不變。Got ' + JSON.stringify(doc.edge));
+
+      const forked = waveCodec.parseEdge(doc.edge[1]);
+      assert.ok(forked !== null, 'T9c: 分岔後的 edge 必須讀得回來。Got ' + JSON.stringify(doc.edge));
+      assert.notStrictEqual(forked.from, 'a',
+        'T9c: 分岔出來的 edge 必須換成一個新字母，不能繼續用共用的 a。Got ' + JSON.stringify(forked));
+      assert.strictEqual(forked.to, 'c',
+        'T9c: 沒動的那一端（to）必須維持原樣。Got ' + JSON.stringify(forked));
+
+      const nodes = waveCodec.nodesOf(doc);
+      assert.ok(nodes.a !== undefined && nodes.a.at === 0 && nodes.a.cell === 1,
+        'T9c: 字母 a 必須還留在 clk cell 1 原地（它現在只給 a~>b 用）。Got ' + JSON.stringify(nodes.a));
+      const movedLetter = forked.from;
+      assert.ok(nodes[movedLetter] !== undefined &&
+        nodes[movedLetter].at === 3 && nodes[movedLetter].cell === 0,
+        'T9c: 新字母必須落在放開的那一格（gap cell 0）。Got ' +
+        JSON.stringify(nodes[movedLetter]));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9c re-pointing a shared end forks, and the sibling edge\'s entry is untouched — OK');
+    }
+
+    // T9d — select the edge that does NOT share its dragged end (`a~>b`'s
+    // `to`, letter `b`, unique — no tie-break ambiguity in the LETTER), then
+    // drop its handle on three targets `moveEdgeEnd` itself refuses: back on
+    // its own cell, on the cell holding the edge's OTHER end, and out of
+    // range (the blank spacer row — a real, hittable cell with zero cells of
+    // its own). Every one of the three must leave the undo depth exactly
+    // where it was.
+    //
+    // final review re-review, item 2: the FIRST click — the one that has to
+    // select `a~>b` (index 0) with nothing selected yet — no longer lands at
+    // `b`'s own cell centre. Final review finding 4 gated the phantom-handle
+    // shortcut in `edgeHitAt` to only fire for the SELECTED edge (or a
+    // self-loop), so an unselected first click now resolves through the
+    // visible `.ed-wave-edge-hit` paths, and MEASURED against a real page,
+    // `a~>b`'s curve and `a~>c`'s curve — both start at the SAME shared
+    // point `a` — cross close enough to `b`'s cell centre that BOTH hit
+    // paths cover it there, and the topmost (last-drawn, highest index —
+    // `a~>c`, index 1) wins, not the edge that actually ENDS at `b`. That is
+    // T9c's own mechanism (see its comment), just showing up somewhere this
+    // row did not expect it.
+    //
+    // The fix keeps the row's PURPOSE (three refused drops must each leave
+    // the undo depth untouched on a KNOWN edge) intact by making the
+    // SELECTION click land somewhere only `a~>b`'s own hit path covers.
+    // MEASURED with a grid probe of `document.elementsFromPoint` around `b`'s
+    // cell centre: 15px to its LEFT (`own.x - 15`, well inside the same
+    // cell — a cell is 40px wide, so this is 5px clear of the cell's own
+    // left edge) is covered ONLY by edge index 0 at every sampled y; `a~>c`'s
+    // hit path does not reach that far left at `b`'s row. This is a
+    // SELECTION-only adjustment — every drag below still starts and ends at
+    // `own` itself (`b`'s exact cell centre), because those presses run
+    // through the SELECTED edge's own drawn-handle path (`onCanvasDown`'s
+    // endpoint-drag branch), which is scoped to `handle.index ===
+    // selectedEdge` and is unambiguous here regardless of any overlap: `a~>c`
+    // has no ENDPOINT at `b` at all (its own endpoints are `a` and `c`), so
+    // it has no handle rectangle anywhere near this cell to compete with —
+    // only the FULL-PATH hit-test the first click uses is affected by the
+    // curves crossing near here.
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const own = await cellPoint(ctx.page, 1, 2);      // req cell 2 = 'b'
+      // MEASURED clear of `a~>c`'s hit path — see the comment above.
+      const selectPt = { x: own.x - 15, y: own.y };
+      await clickAt(ctx.page, selectPt);
+      const picked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '0',
+        'T9d 前提失敗：按 b 那個點附近必須選到 a~>b（index 0，b 沒有被別條共用；' +
+        '這一點刻意跟 b 的正中央錯開，避開 a~>c 的線在這附近也蓋到的範圍）。Got ' + picked);
+
+      const baseline = await ctx.page.evaluate(() => ({
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+      }));
+      assert.strictEqual(baseline.gestures, '0',
+        'T9d 前提失敗：選取本身不該推任何 commit。Got ' + JSON.stringify(baseline));
+      assert.strictEqual(baseline.undoDisabled, true,
+        'T9d 前提失敗：一個乾淨的 session 一開始不該有東西可以復原。Got ' + JSON.stringify(baseline));
+
+      const assertNoop = async (where) => {
+        const now = await ctx.page.evaluate(() => ({
+          gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+          undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+          status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+          selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        }));
+        assert.strictEqual(now.gestures, baseline.gestures,
+          'T9d(' + where + '): undo 深度（gestures 計數）不得增加。Got ' + JSON.stringify(now));
+        assert.strictEqual(now.undoDisabled, true,
+          'T9d(' + where + '): 復原鈕不得變成可按。Got ' + JSON.stringify(now));
+        assert.ok(now.status !== null && now.status.indexOf('沒有改變任何東西') !== -1,
+          'T9d(' + where + '): 狀態列要說這個動作沒有改變任何東西。Got ' + JSON.stringify(now));
+        assert.strictEqual(now.selected, '0',
+          'T9d(' + where + '): no-op 不該動到目前的選取。Got ' + JSON.stringify(now));
+      };
+
+      // (a) back on its own cell.
+      await dragBackTo(ctx.page, own);
+      await assertNoop('own cell');
+
+      // (b) onto the cell holding the edge's OTHER end ('a', clk cell 1).
+      const other = await cellPoint(ctx.page, 0, 1);
+      await dragBetween(ctx.page, own, other);
+      await assertNoop('other end\'s cell');
+
+      // (c) out of range: the blank spacer row (lane 4) is a real, hittable
+      // point on the canvas — `cellAt` answers it like any other cell — but
+      // it has zero cells of its own, so `moveEdgeEnd` refuses it.
+      const outOfRange = await cellPoint(ctx.page, 4, 0);
+      await dragBetween(ctx.page, own, outOfRange);
+      await assertNoop('out of range (spacer row)');
+
+      assert.strictEqual(ctx.errs.length, 0, 'T9d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T9d three refused endpoint drops each leave the undo depth untouched — OK');
+    }
+
+    // ── v3.5.0 Task 11 fix round 2: bus data label 就地編，真機場景 ─────────
+    //
+    // MEASURED against the pinned codec BEFORE writing any assertion here
+    // (see this task's own fix-round-2 report for the full trace): in
+    // `WAVE_MD`'s own `dat` lane (`wave: 'x.3.x'`, `data: ['D']`), flattened
+    // lane index 2 (`clk`=0, the group's `req`=1, `dat`=2 — `waveLaneNames`
+    // above already pins this same order), cycle 2 is the run's own
+    // EXPLICIT owner (`codec.dataSlotOf` = slot 0) and cycle 3 is a HELD
+    // CONTINUATION of that same run (`dataSlotOf` = null, `levelsOf` = '3',
+    // a bus level — not `x`). `drawLane` merges the two into ONE polygon and
+    // draws ONE `<text class="ed-wave-buslabel">` centred on the pair, so
+    // there is exactly one label on screen for this run regardless of which
+    // of its two cycles a press's x-coordinate happens to resolve to.
+    //
+    // Round 1 opened the field on a press anywhere in that box and was
+    // reviewer-found to be its own regression: T6b paints an `N` onto a bus
+    // cell with the mouse, and a gesture that swallows every press in the
+    // box left no pointer route to repaint one at all. Round 2's rule is
+    // "the label TEXT is the target, the box paints" — `labelPoint` below
+    // finds `.ed-wave-buslabel`'s own on-screen centre (which is NOT the
+    // same point as either cycle's own centre — `cellPoint(2,2)` sits at the
+    // canvas-local x of cycle 2's own midpoint, `cellPoint(2,3)` at cycle
+    // 3's, and the shared label sits AT THE BOUNDARY between them, centred
+    // on the whole two-cycle run), and `cellPoint` below is reused exactly
+    // as it always has been for "press the box, away from the text".
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      const fieldState = () => ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return el === null ? null : {
+          key: el.getAttribute('data-focus-key'),
+          value: el.value,
+          focused: document.activeElement === el,
+        };
+      });
+      // The label text's own on-screen centre — never a cycle's. Asserts
+      // the element actually exists first: an absent label (drawLane skips
+      // the `<text>` entirely for an empty string — see its own comment)
+      // would otherwise read as "click missed everything" rather than as
+      // the test's own precondition failing.
+      const labelPoint = async () => {
+        const box = await ctx.page.evaluate(() => {
+          const t = document.querySelector('.ed-wave-buslabel');
+          if (t === null) return null;
+          const r = t.getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+        assert.ok(box !== null,
+          'labelPoint 前提失敗：畫布上找不到 .ed-wave-buslabel（dat 這條 lane 應該有一個「D」）');
+        return box;
+      };
+      const clickAt = async (pt) => {
+        await ctx.page.mouse.move(pt.x, pt.y);
+        await ctx.page.mouse.down();
+        await ctx.page.mouse.up();
+        await new Promise((r) => setTimeout(r, 250));
+      };
+
+      // (a) press the label TEXT: must open the OWNING cell's field (cycle
+      // 2's slot 0) — resolveBusTarget's answer for this run, regardless of
+      // whether the text's own x happens to resolve to cycle 2 or cycle 3.
+      await clickAt(await labelPoint());
+      let field = await fieldState();
+      assert.ok(field !== null,
+        'T11a: 按標籤文字必須開出欄位，不能什麼都沒發生');
+      assert.strictEqual(field.key, 'data-input-2-2',
+        'T11a: 開出來的欄位必須是「擁有這個槽」的 cycle 2。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, 'D',
+        'T11a: 欄位要預填目前的標籤。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.focused, true, 'T11a: 鍵盤要落在欄位裡');
+
+      // Escape cancels: no write, no undo step, the field is gone.
+      await ctx.page.keyboard.type('SHOULD-NOT-LAND');
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+      const afterEscape = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+        undoDisabled: document.querySelector('.ed-wave-undo').disabled,
+      }));
+      assert.strictEqual(afterEscape.input, 0, 'T11a: Escape 之後欄位要收掉');
+      assert.strictEqual(afterEscape.gestures, '0',
+        'T11a: Escape 取消不該推任何 commit。Got ' + JSON.stringify(afterEscape));
+      assert.strictEqual(afterEscape.undoDisabled, true,
+        'T11a: 取消不該讓復原鈕變成可按。Got ' + JSON.stringify(afterEscape));
+
+      // Proved against the SAVED bytes, not just the live DOM.
+      let md = await saveAndRead(ctx);
+      let doc = parseWaveBlock(md);
+      let dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.3.x',
+        'T11a: 取消之後 wave 必須一個字元都沒動。Got ' + JSON.stringify(dat));
+      assert.deepStrictEqual(dat.data, ['D'],
+        'T11a: 取消之後 data 也不該動。Got ' + JSON.stringify(dat));
+
+      // (b) press the label text again: the SAME field opens, and this time
+      // Enter commits into the RIGHT slot.
+      //
+      // v3.5.0 Task 11 fix round 4 (guard rewritten in round 5's
+      // adjudication): this second press is ALSO the regression proof for
+      // round 4's own fix — the first press above left `selection` standing
+      // on cycle 2 (Escape's `cancel()` never touches it), so `.ed-wave-
+      // selection` is still drawn over this exact cell when this press
+      // lands.
+      //
+      // MEASURED (a real getBoundingClientRect() dump, not the earlier
+      // round's estimate): the selection rect's own bounding box ends at
+      // EXACTLY the cycle boundary (its `width`/`x` attributes give no
+      // stroke overflow in `getBoundingClientRect()`'s answer here), while
+      // this label's rendered glyph — a single character, not perfectly
+      // symmetric — centres a few hundredths of a pixel PAST that
+      // boundary. A bounding-box comparison between the two therefore reads
+      // as "no overlap" and is not a reliable proxy for the real hazard:
+      // confirmed by toggling `pointer-events` on the selection rect back
+      // to its pre-round-4 default and asking `elementFromPoint` at the
+      // EXACT coordinates `labelPoint()` computes (the same coordinates the
+      // press below lands at) — it resolves to `.ed-wave-selection`, not
+      // the label, meaning the stroke's actual PAINTED hit area does extend
+      // to this pixel even though the reported bounding box does not. This
+      // check asks that same question directly instead of approximating it
+      // through bounding-box arithmetic: with the selection rect's
+      // pointer-events forced back on for the duration of the probe (and
+      // restored immediately after, before the real press), does
+      // `elementFromPoint` at the exact press coordinates resolve to the
+      // selection rect? A `true` answer is proof this exact gesture WOULD
+      // have been swallowed by the selection absent round 4's fix — the
+      // guard's original meaning, kept intact, measured through the same
+      // mechanism the actual defect used rather than through a geometric
+      // proxy for it.
+      const pressPoint = await labelPoint();
+      const wouldIntercept = await ctx.page.evaluate((x, y) => {
+        const sel = document.querySelector('.ed-wave-selection');
+        if (sel === null) return null;
+        const prevPointerEvents = sel.style.pointerEvents;
+        sel.style.pointerEvents = 'visiblePainted';
+        const el = document.elementFromPoint(x, y);
+        sel.style.pointerEvents = prevPointerEvents;
+        return el !== null && el.classList !== undefined &&
+          el.classList.contains('ed-wave-selection');
+      }, pressPoint.x, pressPoint.y);
+      assert.strictEqual(wouldIntercept, true,
+        'T11a 前提失敗：把選取框的 pointer-events 暫時撥回去之後，這次按壓的座標必須真的會被 ' +
+        '選取框接住——不然下面這次按壓沒有驗到 round 4 要防的那個迴歸（round 4 自己的 bounding-' +
+        'box 判斷在這裡量出 false，但那個判斷本身量錯了東西，見這個任務的報告）。Got ' +
+        JSON.stringify(wouldIntercept));
+
+      await clickAt(pressPoint);
+      field = await fieldState();
+      assert.strictEqual(field && field.key, 'data-input-2-2',
+        'T11a: 再按一次標籤文字，也要開出同一個欄位。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, 'D', 'T11a: 欄位預填值要跟第一次按開的一樣（同一個槽）');
+
+      await ctx.page.keyboard.type('NEWVAL');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+      const afterEnter = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
+      }));
+      assert.strictEqual(afterEnter.input, 0, 'T11a: Enter 落地之後欄位要收掉');
+      assert.strictEqual(afterEnter.gestures, '1',
+        'T11a: Enter 落地要剛好一次 commit。Got ' + JSON.stringify(afterEnter));
+
+      md = await saveAndRead(ctx);
+      doc = parseWaveBlock(md);
+      dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.3.x',
+        'T11a: 落地之後 wave 仍然必須一個字元都沒動——只有 data 該變，這一格從沒被畫過。Got ' +
+        JSON.stringify(dat));
+      assert.deepStrictEqual(dat.data, ['NEWVAL'],
+        'T11a: 新標籤要落在正確的槽（slot 0），不是被 append 或算到別的位置。Got ' + JSON.stringify(dat));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11a: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11a a press on the label TEXT opens the owning cell\'s field, ' +
+        'and the field\'s own Enter/Escape both behave — OK');
+    }
+
+    // T11b — fix round 2's own regression guard: a press on the BOX of a
+    // bus cell — away from the label text, exactly where `paintCell`
+    // presses every other cell in this file — still PAINTS. Without this
+    // row, the next change to touch `onCanvasDown`'s bus branch could widen
+    // the click target back to the whole cell (round 1's own shape) and
+    // nothing here would catch it; T6b above already covers "painting a bus
+    // cell with the mouse still works" for a SINGLE clean cell, this row
+    // covers it again on the SAME merged run T11a just edited, so the two
+    // gestures (label click vs. box click) are proven disjoint on one
+    // concrete diagram rather than on two different ones that never had to
+    // agree.
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      // cellPoint(2,2) is cycle 2's own centre — measured above (this
+      // fixture's own comment block) to sit well clear of the run's shared
+      // label, which is centred on the run's boundary, not on either cycle.
+      await pressClick(ctx.page, '.ed-wave-brush[data-brush="0"]');
+      const at = await cellPoint(ctx.page, 2, 2);
+      await ctx.page.mouse.move(at.x, at.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const after = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        wave2: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-2'),
+      }));
+      assert.strictEqual(after.input, 0,
+        'T11b: 按盒子本體（不是文字）不該開出標籤欄位。Got ' + JSON.stringify(after));
+      assert.ok(after.wave2 !== null && after.wave2[2] === '0',
+        'T11b: 按盒子本體要真的塗上去——cycle 2 要變成畫筆的 0，不是被欄位手勢吃掉。Got ' +
+        JSON.stringify(after));
+
+      // MEASURED against the real codec before writing this assertion —
+      // `C.setCellRange({signal:[{wave:'x.3.x',data:['D']}]}, 0, 2, 2, '0')`
+      // gives `'x.03x'`, NOT the naively-expected `'x.0.x'`: painting cycle
+      // 2 alone anchors cycle 3 (`anchorAfter` in wave-codec.js) into an
+      // explicit `3` so its OWN displayed level survives cycle 2 changing
+      // out from under it — the continuation the codec is protecting is
+      // exactly the one this scenario is pressing past. `data` stays `['D']`
+      // too (the label moves with the run's surviving explicit cell, cycle
+      // 3), but this row only asserts `wave` — proving a paint reached disk
+      // is the whole of what T11b exists for.
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const dat = doc.signal[1][2];
+      assert.strictEqual(dat.wave, 'x.03x',
+        'T11b: 存回去的 wave 也要反映那次塗格，不是只有畫面上看起來塗到。Got ' + JSON.stringify(dat));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11b: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11b a press on a bus cell\'s BOX — away from its label — ' +
+        'still paints, never opens the field — OK');
+    }
+
+    // ── v3.5.0 Task 11 fix round 3: an UNLABELLED bus cell needs a mouse
+    // target too ─────────────────────────────────────────────────────────
+    //
+    // Round 2's rule ("open the field only on a press that hits the label
+    // TEXT") left the single most ordinary flow in this editor — paint a
+    // `=`, then name it — mouse-unreachable, because a fresh bus value has
+    // no text yet to press. Round 3 draws a small placeholder circle in a
+    // label's place when there is none, and this is its own fixture rather
+    // than a mutation of `WAVE_MD` above: every one of T6a through T11b
+    // counts lanes and rows against that fixture's own shape, and adding an
+    // unlabelled bus lane to it would be changing the ground every earlier
+    // row stands on for one new row's sake.
+    //
+    // MEASURED before writing any assertion: this doc flattens to `raw` =
+    // lane 0 (inside the group), `lvl` = lane 1. `raw` has no `data` field
+    // AT ALL, so its one bus cycle (cycle 1, `codec.dataSlotOf` = slot 0)
+    // has no label — exactly the case round 2 left stranded. `lvl` is a
+    // plain level lane (`010`), no bus cycle anywhere in it.
+    const WAVE11_EMPTY_MD = [
+      '# W', '',
+      '```wavedrom',
+      "{ signal: [",
+      "  ['g',",
+      "    { name: 'raw', wave: 'x=x' }",
+      "  ],",
+      "  { name: 'lvl', wave: '010' }",
+      '] }',
+      '```', '',
+      'Tail para two.', '',
+    ].join('\n');
+
+    // The centre of a mark's own bounding box — the placeholder circle
+    // here, `labelPoint` above did the same for the text — never a cycle's.
+    const markPoint = async (page, selector) => {
+      const box = await page.evaluate((sel) => {
+        const t = document.querySelector(sel);
+        if (t === null) return null;
+        const r = t.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      }, selector);
+      assert.ok(box !== null, 'markPoint 前提失敗：畫布上找不到 ' + selector);
+      return box;
+    };
+
+    // T11c — press the PLACEHOLDER of an unlabelled bus cell: must open the
+    // field for the right slot, exactly like pressing a labelled cell's
+    // text does in T11a.
+    {
+      const ctx = await newPage(WAVE11_EMPTY_MD);
+      await openWave(ctx.page);
+
+      const before = await ctx.page.evaluate(() => ({
+        empty: document.querySelectorAll('.ed-wave-buslabel-empty').length,
+        anyMark: document.querySelectorAll('.ed-wave-buslabel').length,
+      }));
+      assert.strictEqual(before.empty, 1,
+        'T11c 前提失敗：raw 這條沒有標籤的 bus cycle 必須畫出一個 placeholder。Got ' +
+        JSON.stringify(before));
+      // The placeholder carries BOTH classes (ed-wave-buslabel plus
+      // ed-wave-buslabel-empty — see drawLane's own comment), so a count of
+      // "any buslabel-class mark on screen" is also exactly 1, not 2.
+      assert.strictEqual(before.anyMark, 1,
+        'T11c 前提失敗：placeholder 要跟文字共用同一個 class，數量不該變成兩個。Got ' +
+        JSON.stringify(before));
+
+      const pt = await markPoint(ctx.page, '.ed-wave-buslabel-empty');
+      await ctx.page.mouse.move(pt.x, pt.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const field = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return el === null ? null : { key: el.getAttribute('data-focus-key'), value: el.value };
+      });
+      assert.ok(field !== null, 'T11c: 按 placeholder 必須開出標籤欄位');
+      assert.strictEqual(field.key, 'data-input-0-1',
+        'T11c: 開出來的欄位必須是那一個 bus cycle（lane 0, cycle 1）。Got ' + JSON.stringify(field));
+      assert.strictEqual(field.value, '', 'T11c: 還沒有標籤，欄位要是空的。Got ' + JSON.stringify(field));
+
+      await ctx.page.keyboard.type('NEWNAME');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 250));
+
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const raw = doc.signal[0][1];
+      assert.strictEqual(raw.wave, 'x=x', 'T11c: wave 不該被動到。Got ' + JSON.stringify(raw));
+      assert.deepStrictEqual(raw.data, ['NEWNAME'],
+        'T11c: 新標籤要建出 data 陣列，落在 slot 0。Got ' + JSON.stringify(raw));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11c: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11c a press on an UNLABELLED bus cell\'s placeholder opens the ' +
+        'field for the right slot — OK');
+    }
+
+    // T11d — a non-bus cell has no mark at all, and paints exactly as
+    // always. The regression this row guards: a placeholder rule that
+    // fired on ANY cell missing a label (rather than only a bus cell
+    // missing one) would put a mark — and this round's mouse hit target —
+    // on every plain level cell in every diagram.
+    {
+      const ctx = await newPage(WAVE11_EMPTY_MD);
+      await openWave(ctx.page);
+
+      const marks = await ctx.page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const laneHeight = svg.getBoundingClientRect().height /
+          Number(svg.getAttribute('data-lane-count'));
+        const r = svg.getBoundingClientRect();
+        const rows = new Set();
+        for (const el of svg.querySelectorAll('.ed-wave-buslabel')) {
+          const b = el.getBoundingClientRect();
+          rows.add(Math.floor((b.top + b.height / 2 - r.top) / laneHeight));
+        }
+        return Array.from(rows);
+      });
+      assert.deepStrictEqual(marks, [0],
+        'T11d 前提失敗：只有 lane 0（raw）該有標籤記號，lane 1（lvl）一個都不該有。Got ' +
+        JSON.stringify(marks));
+
+      await pressClick(ctx.page, '.ed-wave-brush[data-brush="1"]');
+      const at = await cellPoint(ctx.page, 1, 0);
+      await ctx.page.mouse.move(at.x, at.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const after = await ctx.page.evaluate(() => ({
+        input: document.querySelectorAll('.ed-wave-data-input').length,
+        wave1: document.querySelector('.ed-wave-canvas').getAttribute('data-wave-1'),
+      }));
+      assert.strictEqual(after.input, 0, 'T11d: 非 bus 格不該開出欄位');
+      assert.ok(after.wave1 !== null && after.wave1[0] === '1',
+        'T11d: 非 bus 格要照樣塗上去。Got ' + JSON.stringify(after));
+
+      // MEASURED: C.setCellRange({signal:[...,{wave:'010'}]}, 1, 0, 0, '1')
+      // gives 'lvl'.wave === '110' — only cycle 0 changes, no held cell
+      // downstream to anchor (every cycle in '010' is already explicit).
+      const md = await saveAndRead(ctx);
+      const doc = parseWaveBlock(md);
+      const lvl = doc.signal[1];
+      assert.strictEqual(lvl.wave, '110',
+        'T11d: 存回去的 wave 也要反映那次塗格。Got ' + JSON.stringify(lvl));
+
+      assert.strictEqual(ctx.errs.length, 0, 'T11d: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T11d a non-bus cell has no placeholder and paints exactly as ' +
+        'always — OK');
+    }
+
+    // ── final review finding 4：bus label 剛好也是 edge anchor 時，標籤按不到 ──
+    //
+    // `clk` cell 0 立一個 anchor `x`；`b` 這條 lane 的 `wave:'02.3'`
+    // MEASURED（`codec.dataSlotOf` 加 `brickOf`，見 wave-codec.js／
+    // wave-ui.js）：cell1 擁有 slot0（`data[0]='A'`，`brickOf('2')` 是
+    // `'vvv-2'`，跟 cell2 的 `.`——同樣展開成 `'2'`——合併成一個兩格的
+    // run）；cell3 是明確的 `'3'`，`brickOf('3')` 是 `'vvv-3'`，跟前一個
+    // run 的 brick 不同字串，`drawLane` 的 run 合併（`last.brick ===
+    // bricks[c]`）不會把它併進去，所以它是自己單獨一格的 run，擁有
+    // slot1（`data[1]='B'`）。這一步是實測踩過的坑：一開始寫成
+    // `'02.2'`（兩個 `2` 而非 `2`/`3`），`brickOf` 兩邊都是 `'vvv-2'`，
+    // 三格（1/2/3）被合併成一整條 run，畫面上只有一個「A」標籤，
+    // 「B」根本沒有自己的 `<text>`——這不是這個 finding 要測的東西，用
+    // 真頁面的 `document.querySelectorAll('.ed-wave-buslabel')` 量出來才
+    // 發現。單格 run 的標籤畫在那一格的正中央（`drawLane` 的
+    // `(x0+x1)/2`，`run.from===run.to` 時就是 cell 中心），跟
+    // `node:'...a'` 把 anchor `a` 放的座標（`centerOfCell`）完全重疊。
+    // `edge:['x~>a']` 讓這個重疊點同時是一條未被選取的 edge 的 `to` 端點。
+    //
+    // 修法分兩層，第一層單獨量測後發現不夠，第二層才真的補上：
+    //
+    //   1. `edgeHitAt` 只在 `handle.index === selectedEdge` 才採信
+    //      `geometry.edgeHandleAt` 的答案（見 wave-geometry.js/wave-ui.js
+    //      的 comment）——擋掉「未選取、沒畫出來的把手」用純座標數學搶
+    //      走這次按下。單獨量測：光有這一層，這個 finding 仍然重現
+    //      （`document.elementFromPoint` 在這個重疊點量出來還是
+    //      `path.ed-wave-edge-hit`，不是標籤——`renderEdges` 在每條
+    //      lane 畫完之後才畫 `.ed-wave-edge-hit`，這條 10px 寬、
+    //      `pointer-events:stroke` 的隱形線疊在標籤上面，`ev.target`
+    //      是瀏覽器自己依畫面疊層決定的，跟這個檔案的 `if` 先後順序
+    //      無關，把 bus label 檢查搬到 `edgeHitAt` 前面、繼續讀
+    //      `ev.target` 一樣量到吃掉）。
+    //   2. 真正需要的是 `busLabelHitAt`（wave-ui.js）：用
+    //      `document.elementsFromPoint`（複數，整疊元素，不是只問最上
+    //      面那個）找這次按下底下有沒有 `.ed-wave-buslabel`，不管它是
+    //      不是被別的隱形點擊目標蓋住；`onCanvasDown` 改成先問它、答
+    //      「有」就直接開欄位，`edgeHitAt` 排在它後面，兩者順序互不
+    //      衝突。
+    //
+    // 這一段用一支獨立、非測試檔案的 puppeteer 診斷腳本量過（見這個
+    // finding 的修復報告），不是憑推論寫的斷言。
+    {
+      const BUSLABEL_EDGE_MD = [
+        '# W', '',
+        '```wavedrom',
+        "{ signal: [",
+        "  { name: 'clk', wave: 'p...', node: 'x...' },",
+        "  { name: 'b', wave: '02.3', data: ['A', 'B'], node: '...a' }",
+        '],',
+        "edge: ['x~>a']",
+        '}',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+
+      const ctx = await newPage(BUSLABEL_EDGE_MD);
+      await openWave(ctx.page);
+
+      const counts = await ctx.page.evaluate(() => ({
+        edges: Number(document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count')),
+        labels: Array.from(document.querySelectorAll('.ed-wave-buslabel')).map((el) => el.textContent),
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+      }));
+      assert.strictEqual(counts.edges, 1,
+        '前提失敗：文件裡必須真的有一條 edge。Got ' + JSON.stringify(counts));
+      assert.deepStrictEqual(counts.labels.slice().sort(), ['A', 'B'],
+        '前提失敗：b 這條 lane 必須畫出兩個 bus 標籤（A 跟 B）。Got ' + JSON.stringify(counts));
+      assert.strictEqual(counts.selected, '',
+        '前提失敗：一開始不該有任何 edge 被選取。Got ' + JSON.stringify(counts));
+
+      // 「B」那個標籤（單格 run）的座標，就是 anchor a 的座標，也就是這條
+      // edge 未被畫出來的 `to` 把手的座標——這正是這個 finding 要驗證的
+      // 重疊點。用真正畫出來的 `<text>` 的 bounding rect，不用算出來的
+      // cell 中心，才是真的「按在標籤上」，跟 T11a 的 labelPoint 同一招。
+      const labelPoint = await ctx.page.evaluate(() => {
+        const labels = Array.from(document.querySelectorAll('.ed-wave-buslabel'));
+        const t = labels.find((el) => el.textContent === 'B');
+        if (t === undefined) return null;
+        const r = t.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      assert.ok(labelPoint !== null,
+        '前提失敗：畫布上找不到文字是「B」的 .ed-wave-buslabel');
+
+      await ctx.page.mouse.move(labelPoint.x, labelPoint.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const afterLabelPress = await ctx.page.evaluate(() => {
+        const el = document.querySelector('.ed-wave-data-input');
+        return {
+          field: el === null ? null : { key: el.getAttribute('data-focus-key'), value: el.value },
+          selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        };
+      });
+      assert.ok(afterLabelPress.field !== null,
+        'finding4a: 按在 bus 標籤上必須開出資料欄位，即使這一點也是一條未選取 edge 的端點。Got ' +
+        JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.field.key, 'data-input-1-3',
+        'finding4a: 開出來的欄位必須是擁有這個標籤的那一格（lane 1, cycle 3）。Got ' +
+        JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.field.value, 'B',
+        'finding4a: 欄位要預填目前的標籤。Got ' + JSON.stringify(afterLabelPress));
+      assert.strictEqual(afterLabelPress.selected, '',
+        'finding4a: 這次按下不准連帶選取那條 edge —— 標籤按得到跟 edge 被吃掉是互斥的。Got ' +
+        JSON.stringify(afterLabelPress));
+
+      await ctx.page.keyboard.press('Escape');
+      await new Promise((r) => setTimeout(r, 200));
+
+      // 這條 edge 仍然選得到——按它另一端的 anchor（clk cell 0 = 'x'，不是
+      // bus 格，沒有標籤跟它搶這個像素），走的是同一個 `edgeHitAt`，這次
+      // 該落到 `.ed-wave-edge-hit` 那條 10px 寬的隱形路徑上。
+      const xPoint = await cellPoint(ctx.page, 0, 0);
+      await ctx.page.mouse.move(xPoint.x, xPoint.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+
+      const afterLinePress = await ctx.page.evaluate(() => ({
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        fieldGone: document.querySelector('.ed-wave-data-input') === null,
+      }));
+      assert.strictEqual(afterLinePress.selected, '0',
+        'finding4b: 按這條 edge 自己的線（另一端）必須還是選得到它。Got ' +
+        JSON.stringify(afterLinePress));
+      assert.strictEqual(afterLinePress.fieldGone, true,
+        'finding4b: Escape 之後資料欄位必須已經收掉，不是被這次按下蓋掉');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'finding4: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/finding4 一個 bus 格同時是 edge anchor 時，標籤按得到、edge 也選得到 — OK');
+    }
+
+    // ── final review re-review item 1：從沒被選過的 self-loop 也要選得到、刪得掉 ──
+    //
+    // MEASURED regression from finding 4 的 Layer 1（`edgeHitAt` 只在
+    // `handle.index === selectedEdge` 才採信 `geometry.edgeHandleAt` 的答
+    // 案）：`pathFor` 在 `from === to` 時，三個形狀家族的 path 都會退化成
+    // 零長度（每個 `L`/`C` 指令的終點都跟起點一樣），Chrome 對零長度、
+    // butt-cap 的 path 完全不給 hit area（`elementsFromPoint` 在那個點上
+    // 一個 path 元素都查不到——下面會量出來）。`selectedEdge` 只有一個賦值
+    // 來源，就是 `edgeHitAt` 的回傳值；一條「從來沒被選過」的 self-loop在
+    // Layer 1 把 phantom handle 擋掉之後，`.ed-wave-edge-hit` 這條退路又
+    // 完全摸不到它——滑鼠選不到、也就刪不掉。使用者手寫的 markdown 造得出
+    // self-loop（UI 自己的拖曳建立會被 `finishEdgeDrag` 擋掉同字母），這個
+    // codec 也把它當一等公民對待（`moveEdgeEnd` 自己的不變量註解、
+    // `onCanvasDown` 專門為它寫的 `say()`），所以這不是邊角案例。
+    //
+    // 修法：`edgeHitAt` 的 Layer 1 現在除了「這個 handle 屬於已選取的
+    // edge」，多一條「這個 handle 屬於一條 self-loop」也算數（見
+    // wave-ui.js 的 comment）——self-loop 不管選沒選過，它的 handle 都是
+    // 它唯一摸得到的東西。
+    {
+      const SELFLOOP_MD = [
+        '# W', '',
+        '```wavedrom',
+        "{ signal: [",
+        "  { name: 'a', wave: '0123', node: '.d..' }",
+        '],',
+        "edge: ['d~>d']",
+        '}',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+
+      const ctx = await newPage(SELFLOOP_MD);
+      await openWave(ctx.page);
+
+      const pre = await ctx.page.evaluate(() => ({
+        edgeCount: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count'),
+        selected: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'),
+        pathCount: document.querySelectorAll('.ed-wave-edge-path').length,
+      }));
+      assert.strictEqual(pre.edgeCount, '1',
+        '前提失敗：文件裡必須真的有一條 self-loop edge。Got ' + JSON.stringify(pre));
+      assert.strictEqual(pre.selected, '',
+        '前提失敗：一開始不該有任何 edge 被選取——這個 finding 就是要驗證「從沒選過」' +
+        '的那一次按下。Got ' + JSON.stringify(pre));
+
+      // `elementsFromPoint` 在這個點上量出來的整疊元素——self-loop 的
+      // path 完全不在裡面，證明退路真的摸不到它，選到它只能靠 handle。
+      const pt = await cellPoint(ctx.page, 0, 1);   // lane 0, cycle 1 = anchor 'd'（self-loop 兩端都在這）
+      const stack = await ctx.page.evaluate((x, y) =>
+        document.elementsFromPoint(x, y).map((el) => el.tagName + '.' + (el.getAttribute('class') || '')),
+        pt.x, pt.y);
+      assert.strictEqual(
+        stack.some((s) => s.indexOf('ed-wave-edge-hit') !== -1 || s.indexOf('ed-wave-edge-path') !== -1),
+        false,
+        '前提驗證：self-loop 退化成零長度 path，這個點的 elementsFromPoint 裡不該有任何 ' +
+        'edge 的 path/hit 元素——如果有，這個 finding 的前提就不成立了。Got ' + JSON.stringify(stack));
+
+      await clickAt(ctx.page, pt);
+      const picked = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-overlay').getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '0',
+        '從沒被選過的 self-loop，第一次按下就必須選到它（index 0）。Got ' + picked);
+
+      await pressClick(ctx.page, '.ed-wave-edge-delete');
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await ctx.page.evaluate(() => ({
+        edgeCount: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edge-count'),
+        pathCount: document.querySelectorAll('.ed-wave-edge-path').length,
+      }));
+      assert.strictEqual(after.edgeCount, '0',
+        '選到之後必須真的刪得掉。Got ' + JSON.stringify(after));
+      assert.strictEqual(after.pathCount, 0,
+        '刪掉之後畫布上不該再留著任何 edge path。Got ' + JSON.stringify(after));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'self-loop: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/re-review-item1 從沒被選過的 self-loop 第一次按下就選得到、也刪得掉 — OK');
     }
   }
 

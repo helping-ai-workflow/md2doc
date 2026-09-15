@@ -929,6 +929,114 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 }
 
 // ---------------------------------------------------------------------------
+// T29：history 上限 200。`history.length === 200` 只是代理指標；真正要釘住的是
+// 「退場的是最舊的那些、游標 at 跟著退場筆數一起往下移、canUndo 剛好在保留窗口的
+// 底部變 false、redo 沒有被上限的裁剪誤傷」。用 apply 回傳的 store.doc 物件本身
+// （frozen，之後絕不重建）當身分證——undo/redo 回到同一格會拿回同一個物件參考，
+// 比對 opName 字串更硬。
+//
+// 邊界本身（第 199／200／201 步的轉折）跟穩態（再往後很多步）都要各自釘一次，
+// 不能只測其中一邊——199 步時上限還沒碰到、200 步時第一筆（base）剛好被擠掉、
+// 201 步時連 apply #1 的結果也被擠掉，這三格答案不一樣。
+// ---------------------------------------------------------------------------
+{
+  const s = S.createStore(SRC);
+  const docs = [s.doc]; // docs[0] = base（apply 之前的原始文件）
+
+  // 走到 i 步之後，保留窗口最舊那一格的「概念編號」——base 之後推 i 步、上限
+  // 200，退場規則是超過就從最前面丟一格，所以底部 = max(0, i - 199)。
+  const floorOf = (i) => Math.max(0, i - 199);
+
+  // 從目前位置一路 undo 到底，確認拿到的正是 docs[expectedFloor] 那個物件，
+  // canUndo 剛好在那裡變 false，然後原路 redo 回頂端，確認拿回 docs[expectedTop]、
+  // canRedo 剛好在那裡變 false。往返之後游標位置不變，不影響外層繼續 apply。
+  const checkWindow = (expectedTop, expectedFloor, label) => {
+    assert.strictEqual(s.doc, docs[expectedTop], label + '：目前應該站在第 ' +
+      expectedTop + ' 步的文件上');
+    let undone = 0;
+    while (s.canUndo()) { s.undo(); undone++; }
+    assert.strictEqual(s.doc, docs[expectedFloor], label + '：退到底應該是第 ' +
+      expectedFloor + ' 步的文件（不是更舊的），Got 第幾步 = ' +
+      docs.indexOf(s.doc));
+    assert.strictEqual(s.canUndo(), false, label + '：保留窗口底部 canUndo 必須是 false');
+    let redone = 0;
+    while (s.canRedo()) { s.redo(); redone++; }
+    assert.strictEqual(redone, undone, label + '：redo 步數必須跟 undo 步數對稱');
+    assert.strictEqual(s.doc, docs[expectedTop], label + '：redo 回頂端必須拿回同一個物件');
+    assert.strictEqual(s.canRedo(), false, label + '：頂端 canRedo 必須是 false');
+  };
+
+  for (let i = 1; i <= 199; i++) {
+    const ch = i % 2 === 0 ? '1' : '0';
+    assert.strictEqual(s.apply('step' + i, (d) => C.setCell(d, 0, 1, ch)), true);
+    docs.push(s.doc);
+  }
+  // 199 步：base + 199 筆 = 200 筆，剛好頂到上限，還沒有任何一筆被擠掉。
+  checkWindow(199, 0, '199 步（頂到上限，還沒退場）');
+
+  {
+    const ch = 200 % 2 === 0 ? '1' : '0';
+    assert.strictEqual(s.apply('step200', (d) => C.setCell(d, 0, 1, ch)), true);
+    docs.push(s.doc);
+  }
+  // 200 步：base 被擠掉，最舊的變成 apply #1 的結果。這是轉折本身。
+  checkWindow(200, 1, '200 步（base 剛被擠掉）');
+
+  {
+    const ch = 201 % 2 === 0 ? '1' : '0';
+    assert.strictEqual(s.apply('step201', (d) => C.setCell(d, 0, 1, ch)), true);
+    docs.push(s.doc);
+  }
+  // 201 步：連 apply #1 的結果都被擠掉了，底部往前挪到 #2。
+  checkWindow(201, 2, '201 步（apply #1 也被擠掉）');
+
+  for (let i = 202; i <= 250; i++) {
+    const ch = i % 2 === 0 ? '1' : '0';
+    assert.strictEqual(s.apply('step' + i, (d) => C.setCell(d, 0, 1, ch)), true);
+    docs.push(s.doc);
+  }
+  // 穩態：不只測轉折那一下，再往後推很多步，上限要一直守住、底部要一直跟著挪。
+  checkWindow(250, 51, '250 步（穩態，遠超過上限）');
+
+  // ---- redo 不能被上限的裁剪誤傷 -----------------------------------------
+  //
+  // 上限裁剪（從前面 shift 掉最舊一筆）跟既有的 redo-tail 裁剪（apply 時
+  // `history.length = at + 1` 從後面砍掉還沒被蓋掉的重做分支）動的是陣列的
+  // 兩端，理論上不會互相干擾——這裡直接量出來：站在頂端往回 undo 5 步、留一段
+  // 合法的 redo 分支，開一個新分支（這會砍掉那 5 筆），確認新分支正常成立，而且
+  // 保留窗口的底部（#51，同上）完全沒被這次「未觸發上限」的 push 動到。
+  for (let k = 0; k < 5; k++) s.undo();
+  assert.strictEqual(s.redoName(), 'step246', '分岔前，redo 名字必須是被留在原地的那一步');
+  const beforeBranch = s.doc;
+  assert.strictEqual(s.apply('branch', (d) => C.setCell(d, 0, 1, '|')), true);
+  const branchTop = s.doc;
+  assert.notStrictEqual(branchTop, beforeBranch, '新分支必須是一份新文件');
+  assert.strictEqual(s.canRedo(), false, '開新分支之後，舊的 redo 尾巴必須不見');
+  assert.strictEqual(s.redoName(), null);
+  // 這次 push 沒有頂到上限（砍尾巴讓陣列長度遠低於 200），所以底部應該完全沒動。
+  let undoneAfterBranch = 0;
+  while (s.canUndo()) { s.undo(); undoneAfterBranch++; }
+  assert.strictEqual(s.doc, docs[51], '未觸發上限的分支不該動到保留窗口的底部');
+
+  // 再把游標放回分支頂端，確認拿回的正是分支自己那份文件，不是被裁掉的舊尾巴。
+  for (let k = 0; k < undoneAfterBranch; k++) s.redo();
+  assert.strictEqual(s.doc, branchTop, 'redo 回頂端必須是分支自己那份文件');
+
+  // 從分支再繼續推過 200 筆，確認上限的裁剪不會因為中途分岔過就認錯「最新」。
+  for (let i = 1; i <= 250; i++) {
+    const ch = i % 2 === 0 ? '1' : '0';
+    assert.strictEqual(s.apply('after-branch-' + i, (d) => C.setCell(d, 0, 2, ch)), true);
+  }
+  const afterBranchTop = s.doc;
+  let count = 0;
+  while (s.canUndo()) { s.undo(); count++; }
+  assert.strictEqual(count, 199, '分岔過的 history 一樣要守住 200 筆的上限（199 次 undo 到底）');
+  assert.strictEqual(s.canUndo(), false);
+  while (s.canRedo()) s.redo();
+  assert.strictEqual(s.doc, afterBranchTop, '分岔過的 history 一樣要能完整 redo 回頂端');
+}
+
+// ---------------------------------------------------------------------------
 // T15：守衛要有牙齒 —— 不碰 DOM、不執行字串。
 // 清單跟 wave-codec.test.js 同一份，只少掉 `require(`（本檔正當地 require codec）。
 // 樣式與咬痕 copy 自 test/wave-geometry.test.js：散文讓路給守衛，不是反過來。
