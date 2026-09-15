@@ -124,6 +124,43 @@ message against the revision the run started from. Zero hits means the run is
 void — rerun on a clean tree (`git status` empty) and do not attribute it. A
 separate worktree is the way to run and edit at once.
 
+## Never Infer a Hit From `getBoundingClientRect()`
+
+The browser dispatches a press through `elementFromPoint` / `elementsFromPoint`, which
+account for stroke width, `pointer-events`, paint order and transparency. A rectangle
+comparison knows none of that, and it **lies in both directions**:
+
+- **False red.** v3.5.0 had a guard asserting a selection rect covered a label before
+  pressing it. The boxes said no; `elementFromPoint` at that exact pixel said the rect
+  really was on top. The guard was measuring the wrong thing, not reporting a real
+  change.
+- **False green.** Two boxes overlapping proves nothing when the top one carries
+  `pointer-events: none` — it never intercepts at all.
+
+Related, and measured here: **SVG paint order is document order.** `renderCanvas` draws
+every lane before it draws the edges, so an invisible 10px `.ed-wave-edge-hit` stroke
+sits on top of every bus label underneath it — no matter which `if` the hit-testing code
+happens to run first. A fix that only reorders the checks does nothing.
+
+And: **a zero-length path has no hit area at all** (butt cap, no `stroke-linecap`).
+A self-loop edge degenerates to exactly that, which is why it needs its handle to stay
+hittable rather than relying on its line.
+
+## One Concept, Two Definitions, and a Layer That Assumes They Agree
+
+Three separate defects in v3.5.0 had the same shape — the same idea defined differently
+at two ends of the system, with the code in between assuming one answer:
+
+- `node` string indices are **cells**, while the drawing thinks in **cycles**; `.` and
+  `|` occupy a cell but are not their own cycle.
+- `getBoundingClientRect` boxes versus `elementFromPoint` hits (above).
+- An empty string means "unset" to the engine's `captext` (a truthy test) and
+  "set, draw the default ruler" to its `ticktock` (an `=== undefined` test) — so
+  clearing a field had to DELETE the key, not write `''`.
+
+When you touch a value that crosses a boundary, check what the far side does with it
+rather than what your side means by it. Measure both ends.
+
 ## Changing a Count, a Roster, or a Pinned Measurement
 
 Before you change any "number of X" — button counts, enabled-button tallies,
@@ -143,6 +180,37 @@ Two rules that fall out of it:
   pinned number from 555 to 522; re-measuring showed the *other* number in the
   same sentence was already wrong (75, actually 42). This repo makes real
   decisions from `MEASURED` comments, so a stale one is expensive.
+
+## A Traversal Bound Is Not a Count — Deriving Beats Grepping
+
+The rule above says grep for a literal before changing a count. v3.5.0 followed it and
+still went red: growing the wave editor's brush roster from 11 to 22 broke a scenario
+whose Tab walk was capped at `60`. That `60` is not a count of anything — it is a
+**traversal bound that merely has to be big enough for a count kept somewhere else**,
+so grepping for `11`, `22` or `brush` finds nothing.
+
+The general form: **changing a roster can break a constant that only has to be large
+enough for that roster.** Those constants are invisible to the grep the rule above
+prescribes.
+
+So: a bound over a collection should be DERIVED from that collection at the point of
+use, not written as a number. `test/editor-journey.test.js` now computes its Tab caps
+from the dialog's actual focusable count (`modalFocusableCap`), using the same selector
+and the same filters as `wave-ui.js`'s own `focusables()` — a copy of the product's
+rule, not a second opinion about it. Each site says in a comment why it is derived, or
+someone will simplify it back to a number.
+
+## `lib/md2doc.js`'s CSS Lives Inside a JS Template Literal
+
+The `<style>` block is built inside a template literal, so **a backtick anywhere in a
+comment you add there breaks the whole file** — and the break is a syntax error far from
+where you typed it. This bit v3.5.0 twice, in two different tasks.
+
+Run `node --check lib/md2doc.js` before every commit that touches that file. It is also
+where every `.ed-wave-*` rule lives: visual properties (stroke, fill, opacity, dashes)
+belong there as CSS classes, not as inline SVG attributes — a renderer with two styling
+mechanisms means the next person changing colours edits one and silently misses the
+other.
 
 ## Do NOT Stage
 
