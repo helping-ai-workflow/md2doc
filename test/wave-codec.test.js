@@ -2902,4 +2902,86 @@ const RSRC = [
   console.log('wave-codec: groupLanes / ungroupLanes — OK');
 }
 
+// ── v3.5.0 Task 13: duplicateLane, and addLane({}) as the spacer button uses
+// it ─────────────────────────────────────────────────────────────────────
+{
+  // The copy lands right after the original, at at+1; everything after that
+  // shifts down one; the original doc/array are untouched (addLane's own
+  // no-alias contract, inherited rather than re-proven).
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(laneShape(out), ['a', 'a', 'b']);
+    assert.deepStrictEqual(out.signal[1], { name: 'a', wave: '01' });
+    assert.notStrictEqual(out.signal[1], out.signal[0], '複製品是新物件，不是同一個參照');
+    assert.strictEqual(out.signal[2], doc.signal[1], '沒被搬動的 lane 要原封不動地共用');
+    assert.strictEqual(doc.signal.length, 2, '原本的 doc 不得被改到');
+    assert.strictEqual(doc.signal[0].name, 'a');
+  }
+
+  // Every key survives the copy — `data`/`node`, and whatever else a hand-
+  // edited lane carries — not just name/wave. The nested array is a REAL
+  // copy: mutating the duplicate's `data` must not reach the original's.
+  {
+    const doc = {
+      signal: [{ name: 'd', wave: '2.2.', data: ['0x1', '0x2'], node: '.a..b' }],
+    };
+    const out = C.duplicateLane(doc, 0);
+    assert.deepStrictEqual(out.signal[1], doc.signal[0],
+      '每個欄位都要照抄，包括 data/node');
+    assert.notStrictEqual(out.signal[1].data, doc.signal[0].data,
+      '巢狀的 data 陣列要是新的，不是共用參照');
+    out.signal[1].data.push('0x3');
+    assert.deepStrictEqual(doc.signal[0].data, ['0x1', '0x2'],
+      '改複製品的 data 不能動到原本那條 lane');
+  }
+
+  // Refused (same doc back, identity) rather than guessed: out of range,
+  // negative, non-integer, or not a document at all — the same refusal
+  // shape every other lane op in this file gives.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }] };
+    assert.strictEqual(C.duplicateLane(doc, 1), doc, '越界（只有一條，1 已經超界）');
+    assert.strictEqual(C.duplicateLane(doc, 99), doc);
+    assert.strictEqual(C.duplicateLane(doc, -1), doc);
+    assert.strictEqual(C.duplicateLane(doc, 0.5), doc, '不是整數也拒絕');
+    assert.strictEqual(C.duplicateLane(null, 0), null, '不是文件也不丟例外');
+  }
+
+  // Grouped fixture — MEASURED against the real codec (node -e), not
+  // guessed: `duplicateLane` is built on `addLane`/`laneInsertPath`, so it
+  // inherits that function's own documented asymmetry rather than adding a
+  // second one. Duplicating a group's first lane stays inside the group;
+  // duplicating its LAST lane lands just outside it, appended to `signal`
+  // right after the group — the exact same edge `insertButton`'s own
+  // `landingOf` already surfaces to the user for an ordinary insert.
+  {
+    const a = { name: 'a', wave: '01' };
+    const b = { name: 'b', wave: '01' };
+    const c = { name: 'c', wave: '01' };
+    const d = { name: 'd', wave: '01' };
+    const doc = { signal: [a, ['G', b, c], d] }; // flat: a=0, b=1, c=2, d=3
+    assert.deepStrictEqual(laneShape(C.duplicateLane(doc, 1)),
+      ['a', ['G', 'b', 'b', 'c'], 'd'],
+      '複製群組的第一條，複製品留在群組裡，緊接在原本那條後面');
+    assert.deepStrictEqual(laneShape(C.duplicateLane(doc, 2)),
+      ['a', ['G', 'b', 'c'], 'c', 'd'],
+      '複製群組最後一條，複製品落在群組外面（跟 insertButton 的 landingOf 同一條門檻）');
+  }
+
+  // The spacer button inserts a bare `{}` through the already-existing
+  // `addLane` — no new codec function, because `isLane({})` already accepts
+  // a lane with no keys at all. Pinned here because the UI button's
+  // correctness depends on this exact call staying accepted.
+  {
+    const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '10' }] };
+    const out = C.addLane(doc, 1, {});
+    assert.deepStrictEqual(out.signal[1], {}, '空白列就是裸的 {}，不補任何欄位');
+    assert.deepStrictEqual(laneShape(out), ['a', undefined, 'b']);
+    assert.strictEqual(doc.signal.length, 2, '原本的 doc 不得被改到');
+  }
+
+  console.log('wave-codec: duplicateLane / spacer — OK');
+}
+
 console.log('wave-codec.test.js OK');
