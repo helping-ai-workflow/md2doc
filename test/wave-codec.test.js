@@ -2984,4 +2984,115 @@ const RSRC = [
   console.log('wave-codec: duplicateLane / spacer — OK');
 }
 
+// ── v3.5.0 Task 13, fix round 2: setBannerField ───────────────────────────
+// Extracted so `commitBanner` (a wave-ui.js closure with no unit-test seam
+// of its own) has a pure function to delegate to. The defect this closes:
+// clearing an already-set `tick`/`tock`/`every` field used to write `''`
+// instead of deleting the key — invisible for `.text` (the engine's
+// `captext` treats `''` the same as absent) but not for the other three
+// (`ticktock` in node_modules/wavedrom/lib/render-marks.js only skips a
+// field that is `=== undefined`; `''` reaches its array branch and draws a
+// full default 0-based ruler). MEASURED against the pinned engine below —
+// same `node -e` shape the rest of this file's edge/lane fixtures use.
+{
+  // set: creates `doc[which]` from nothing.
+  {
+    const doc = { signal: [] };
+    const out = C.setBannerField(doc, 'head', 'tick', '5');
+    assert.deepStrictEqual(out, { signal: [], head: { tick: '5' } });
+    assert.deepStrictEqual(doc, { signal: [] }, '原本的 doc 不得被改到');
+  }
+
+  // overwrite: an existing value under the same key is replaced; writing
+  // the SAME value back is a no-op (identity).
+  {
+    const doc = { signal: [], head: { tick: '5' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '7');
+    assert.deepStrictEqual(out, { signal: [], head: { tick: '7' } });
+    assert.strictEqual(C.setBannerField(out, 'head', 'tick', '7'), out,
+      '寫回同一個值是 no-op，要回同一個物件');
+  }
+
+  // clear a SET key: the key itself is gone, not written as ''. This is
+  // the exact defect — assert the key is ABSENT, not merely falsy/empty.
+  {
+    const doc = { signal: [], head: { tick: '5', every: '2' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '');
+    assert.deepStrictEqual(out, { signal: [], head: { every: '2' } });
+    assert.strictEqual('tick' in out.head, false, '清掉的欄位必須整個 key 消失，不是空字串');
+    assert.deepStrictEqual(doc, { signal: [], head: { tick: '5', every: '2' } },
+      '原本的 doc 不得被改到');
+  }
+
+  // clear an UNSET key: identity — same refusal shape every other op in
+  // this file gives, whether the parent object exists or not.
+  {
+    const doc1 = { signal: [] };
+    assert.strictEqual(C.setBannerField(doc1, 'head', 'tick', ''), doc1);
+    const doc2 = { signal: [], head: { every: '2' } };
+    assert.strictEqual(C.setBannerField(doc2, 'head', 'tick', ''), doc2,
+      'head 存在，但 tick 這個 key 本來就沒有，一樣是 no-op');
+  }
+
+  // clear the LAST key under `head`: `head` itself is deleted too, so a
+  // fully-cleared document is byte-identical to one that never had it.
+  {
+    const doc = { signal: [], head: { tick: '5' } };
+    const out = C.setBannerField(doc, 'head', 'tick', '');
+    assert.deepStrictEqual(out, { signal: [] });
+    assert.strictEqual('head' in out, false, '清光的容器不能留下一個空的 {}');
+  }
+
+  // `foot` is independent of `head`, and `text`/`tick`/`tock`/`every` don't
+  // trample each other under the same parent.
+  {
+    const doc = { signal: [], head: { text: 'TOP' }, foot: { tock: '1' } };
+    const out = C.setBannerField(doc, 'foot', 'tick', '0');
+    assert.deepStrictEqual(out,
+      { signal: [], head: { text: 'TOP' }, foot: { tock: '1', tick: '0' } });
+    assert.strictEqual(out.head, doc.head, '沒被動到的 head 要原封不動地共用');
+  }
+
+  // Refused (identity), not guessed: not a document, `which` outside
+  // {head, foot}, or a non-string/empty `key`.
+  {
+    const doc = { signal: [] };
+    assert.strictEqual(C.setBannerField(null, 'head', 'tick', '5'), null);
+    assert.strictEqual(C.setBannerField(doc, 'nope', 'tick', '5'), doc);
+    assert.strictEqual(C.setBannerField(doc, 'head', '', '5'), doc);
+    assert.strictEqual(C.setBannerField(doc, 'head', 5, '5'), doc, 'key 不是字串要拒絕');
+  }
+
+  // MEASURED against the pinned engine: an empty-string `tick` (the
+  // pre-fix shape) draws a ruler the field looks empty of; the key this
+  // function produces after a clear does not exist at all, so the SAME
+  // measurement made on the properly-cleared doc draws nothing.
+  {
+    const wavedrom = require('wavedrom');
+    function tickMarks(doc) {
+      const svg = wavedrom.renderAny(0, doc, wavedrom.waveSkin);
+      const out = [];
+      (function walk(node) {
+        if (!Array.isArray(node)) return;
+        if (node[0] === 'g' && node[1] && node[1].class === 'muted') {
+          for (const child of node.slice(2)) {
+            if (Array.isArray(child) && child[0] === 'text') out.push(child[child.length - 1]);
+          }
+        }
+        for (const c of node) walk(c);
+      })(svg);
+      return out;
+    }
+    const preFixShape = { signal: [{ name: 'a', wave: '0101' }], head: { tick: '' } };
+    assert.ok(tickMarks(preFixShape).length > 0,
+      '量測釘住這個 defect 曾經多糟：一個看起來空的欄位，引擎照樣畫出整排刻度');
+    const cleared = C.setBannerField(
+      { signal: [{ name: 'a', wave: '0101' }], head: { tick: '5' } }, 'head', 'tick', '');
+    assert.deepStrictEqual(tickMarks(cleared), [],
+      '修好之後：真的清掉的欄位，引擎什麼刻度都不畫');
+  }
+
+  console.log('wave-codec: setBannerField — OK');
+}
+
 console.log('wave-codec.test.js OK');
