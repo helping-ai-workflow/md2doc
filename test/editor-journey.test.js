@@ -10007,6 +10007,70 @@ async function main() {
       return at;
     };
 
+    // v3.6.0 Task 5 fix round 2（R16）：一個 edge 端點「把手」在畫面上的位置。
+    //
+    // `cellPoint` 給的是格子的正中央，v3.6.0 之前那剛好也是把手畫的地方，兩者
+    // 撞在一起讓 T9c/T9d 一直借用 `cellPoint` 當作「按下去抓這個端點」的座標。
+    // Task 5 把畫布的端點移到 anchor（`SKIN_METRICS.anchorRatio`，離格子左緣
+    // 0.15 個 cycle，不是正中央）——`lib/editor/wave-draw.js:689` 用
+    // `geometry.edgeHandleRect(e[end])` 畫 `.ed-wave-edge-handle`，
+    // `onCanvasDown` 也是拿同一顆 `geometry.edgeHandleAt` 對答案，畫跟命中沒有
+    // 分家；分家的是這個測試檔，它一直靠 `cellPoint` 自己另外相信端點在哪，
+    // 現在那個信念過期了（R16：這是測試 fixture 舊掉，不是產品缺陷）。
+    //
+    // 修法照 R16 的裁決：量真正畫出來的元素，不在這裡重算一次
+    // `c * cw + anchorRatio * cw`——那會是第四份關於同一個點的信念，下次
+    // anchor 再動一次，這裡又會跟著漂移。兩種情況：
+    //   - edge 已經被選取：`renderEdges` 畫了 `.ed-wave-edge-handle`
+    //     （`data-edge-index`／`data-edge-handle` 兩個屬性標好是哪一條、哪一
+    //     端），直接量它的 `getBoundingClientRect()`。
+    //   - self-loop（`from === to`）還沒被選過：`renderEdges` 只在
+    //     `isSelected` 時才畫 handle，這時畫面上沒有 `.ed-wave-edge-handle`
+    //     可以量。但 self-loop 的 `.ed-wave-edge-path` 是零長度 path（`from`/
+    //     `to` 是同一個 anchor），它的 `getBoundingClientRect()` 會收斂成一個
+    //     寬高都是 0 的點，正好落在 `edgeHitAt` 那條 self-loop 例外信任的同一
+    //     個 phantom handle 座標上——量它，不用假裝 handle 存在。若那個 path
+    //     不是退化成一個點（呼叫端把這個函式用在非 self-loop 的未選取 edge
+    //     上，本來就沒有這個函式能給的答案），直接吵出來，不要悄悄回傳一個
+    //     其實是整條線 bounding box 中心的錯誤點。
+    const edgeHandlePoint = async (page, edgeIndex, end) => {
+      const at = await page.evaluate((idx, e) => {
+        const wrap = document.querySelector('.ed-wave-canvas-wrap');
+        if (!wrap) return { error: 'no-wrap' };
+        const w = wrap.getBoundingClientRect();
+        const sel = '.ed-wave-edge-handle[data-edge-index="' + idx +
+          '"][data-edge-handle="' + e + '"]';
+        const h = document.querySelector(sel);
+        let r;
+        let via;
+        if (h !== null) {
+          r = h.getBoundingClientRect();
+          via = 'handle';
+        } else {
+          const p = document.querySelector(
+            '.ed-wave-edge-path[data-edge-index="' + idx + '"]');
+          if (p === null) return { error: 'no-handle-and-no-path' };
+          r = p.getBoundingClientRect();
+          if (r.width > 0.5 || r.height > 0.5) {
+            return { error: 'no-handle-and-path-not-degenerate',
+              width: r.width, height: r.height };
+          }
+          via = 'self-loop-path';
+        }
+        const x = r.left + r.width / 2;
+        const y = r.top + r.height / 2;
+        return { x: x, y: y, via: via,
+          visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
+      }, edgeIndex, end);
+      assert.ok(at && at.error === undefined,
+        'edgeHandlePoint: edge ' + edgeIndex + ' 端 ' + end + ' 量不到把手，也量不到一個退化成' +
+        '單點的 self-loop path。Got ' + JSON.stringify(at));
+      assert.strictEqual(at.visible, true,
+        'edgeHandlePoint: edge ' + edgeIndex + ' 端 ' + end +
+        ' 的把手落在畫布的可視範圍外，按下去會按到別的東西。Got ' + JSON.stringify(at));
+      return at;
+    };
+
     // The saved block, parsed back: the lane names in the codec's display order.
     //
     // For rows that ask a question about the DOCUMENT — how many lanes are in
@@ -13338,20 +13402,37 @@ async function main() {
     // the SELECTED edge only (or a self-loop; neither applies here, nothing
     // is selected yet and this isn't one), so an unselected click now
     // resolves through `edgeHitAt`'s `.ed-wave-edge-hit` fallback instead.
-    // The outcome (index 1 wins) happens to be UNCHANGED, but for a
-    // different reason: `a~>b` and `a~>c` both LITERALLY start at `a` — not
-    // merely pass near it, the exact same `centerOfCell` coordinate both
-    // curves' `M` command opens on — so both hit paths cover that exact
-    // pixel with total certainty, not a geometric coincidence the way T9d's
-    // crossing-curves case was. `renderEdges` always appends edges in
-    // `doc.edge` order, so the later index is always painted on top, and
-    // `elementFromPoint` at a point of exact, guaranteed overlap reliably
-    // resolves to the topmost paint — this is DETERMINISTIC under the new
-    // rule (not merely lucky the way a coincidental crossing would be): it
-    // follows from `a~>b`/`a~>c` sharing an anchor LETTER, which is a
-    // property of this fixture that never changes, not from where their
-    // curves happen to cross in some rendering. This row needed no code
-    // change, only this corrected explanation.
+    // The outcome (index 1 wins) happens to be UNCHANGED: `a~>b` and `a~>c`
+    // both LITERALLY start at the same anchor `a`, so both hit paths cover
+    // the region around it, and `elementFromPoint` reliably resolves to the
+    // topmost paint — this is DETERMINISTIC (not merely lucky the way a
+    // coincidental crossing would be): it follows from `a~>b`/`a~>c` sharing
+    // an anchor LETTER, which is a property of this fixture that never
+    // changes, not from where their curves happen to cross in some
+    // rendering. This row needed no code change for the SELECTION click,
+    // only this corrected explanation.
+    //
+    // v3.6.0 Task 5 fix round 2 (R16, Critical): the sentence this comment
+    // used to end on — "the exact same `centerOfCell` coordinate both
+    // curves' `M` command opens on" — is no longer true, and it was never
+    // just a stale rename. Task 5 moved that opening coordinate to the
+    // ANCHOR (`SKIN_METRICS.anchorRatio`, 0.15 of a cycle off the cell's own
+    // centre — 16.8px at this editor's 48px pitch), so `shared` (still
+    // `cellPoint`'s cell centre, on purpose — see below) no longer sits on
+    // the exact pixel either curve's path opens on. The SELECTION click above
+    // still lands on `a~>c`'s 10px-wide `.ed-wave-edge-hit` stroke because
+    // that stroke passes near the cell centre as the curve continues away
+    // from its anchor, not because `shared` sits exactly on the anchor
+    // itself — a geometric coincidence of the stroke's width, not of the
+    // path's start point, and MEASURED (not assumed) via a real page before
+    // this fix. What DID break, and IS a real defect this fix corrects: the
+    // drag below used to reuse this same `shared` point as its START, and a
+    // drag-start must land inside the drawn 12px `.ed-wave-edge-handle` box
+    // at the anchor — 16.8px away from `shared` — for `onCanvasDown` to ever
+    // recognise it as grabbing this edge's endpoint at all. `sharedHandle`
+    // below measures that real handle element instead of a second guess at
+    // where the anchor is (see `edgeHandlePoint`'s own comment for why this
+    // is a test-fixture ruling, not a production fix).
     {
       const ctx = await newPage(EDGE_FORK_MD);
       await openWave(ctx.page);
@@ -13363,8 +13444,13 @@ async function main() {
       assert.strictEqual(picked, '1',
         'T9c 前提失敗：按共用的那個點必須選到後面那條 edge（index 1，a~>c）。Got ' + picked);
 
+      // The drag must START on the now-selected edge's own drawn handle —
+      // `shared` (the cell centre) is 16.8px off it — so grab the real
+      // rendered `.ed-wave-edge-handle` instead of reusing the selection
+      // click's point.
+      const sharedHandle = await edgeHandlePoint(ctx.page, 1, 'from');
       const target = await cellPoint(ctx.page, 3, 0);   // gap cell 0, unused
-      await dragBetween(ctx.page, shared, target);
+      await dragBetween(ctx.page, sharedHandle, target);
 
       const gestures = await ctx.page.$eval('.ed-wave-overlay',
         (el) => el.getAttribute('data-wave-gestures'));
@@ -13428,33 +13514,60 @@ async function main() {
     // The fix keeps the row's PURPOSE (three refused drops must each leave
     // the undo depth untouched on a KNOWN edge) intact by making the
     // SELECTION click land somewhere only `a~>b`'s own hit path covers.
-    // MEASURED with a grid probe of `document.elementsFromPoint` around `b`'s
-    // cell centre: 15px to its LEFT (`own.x - 15`, well inside the same
-    // cell — a cell is 40px wide, so this is 5px clear of the cell's own
-    // left edge) is covered ONLY by edge index 0 at every sampled y; `a~>c`'s
-    // hit path does not reach that far left at `b`'s row. This is a
-    // SELECTION-only adjustment — every drag below still starts and ends at
-    // `own` itself (`b`'s exact cell centre), because those presses run
-    // through the SELECTED edge's own drawn-handle path (`onCanvasDown`'s
-    // endpoint-drag branch), which is scoped to `handle.index ===
-    // selectedEdge` and is unambiguous here regardless of any overlap: `a~>c`
-    // has no ENDPOINT at `b` at all (its own endpoints are `a` and `c`), so
-    // it has no handle rectangle anywhere near this cell to compete with —
-    // only the FULL-PATH hit-test the first click uses is affected by the
-    // curves crossing near here.
+    // `own` itself (`b`'s exact cell centre) still names the right CELL for
+    // `selectPt`'s offset — the offset ITSELF is re-measured below.
+    //
+    // v3.6.0 Task 5 fix round 2 (R16, Critical): TWO separate beliefs in this
+    // row went stale from the same Task 5 change, not one.
+    //
+    //   1. The paragraph that used to stand here said every drag below
+    //      "starts and ends at `own` itself... because those presses run
+    //      through the SELECTED edge's own drawn-handle path" — true before
+    //      Task 5, when the drawn handle sat on the cell centre `own`
+    //      already was. Task 5 moved it to the anchor (16.8px off `own` at
+    //      this editor's 48px pitch), so a press AT `own` no longer lands in
+    //      the drawn 12px `.ed-wave-edge-handle` box and `onCanvasDown`'s
+    //      endpoint-drag branch never fires. `ownHandle` below measures the
+    //      real handle instead.
+    //
+    //   2. `own.x - 15` (the SELECTION click's disambiguating offset,
+    //      immediately below) went stale for a DIFFERENT reason: it is not
+    //      a handle at all, it is a point hand-picked to land only on
+    //      `a~>b`'s own curve and clear of `a~>c`'s — and Task 5 moved BOTH
+    //      curves' `from` AND `to` endpoints (every edge's anchor, not just
+    //      the selected one's drawn handle), so the whole crossing pattern
+    //      the `-15` offset was measured against shifted with them.
+    //      RE-MEASURED (not recomputed — the repo's own standing rule for a
+    //      stale MEASURED number, see `~/CLAUDE.md`'s note on this file)
+    //      with the same grid-probe technique the original comment used, at
+    //      `own.y` exactly: `a~>b`'s hit path now covers ONLY `own.x - 32`
+    //      through `own.x - 23` (10px wide) before `a~>c`'s topmost paint
+    //      takes over at `own.x - 22`. `own.x - 27` sits at the middle of
+    //      that zone, ~4–5px clear on each side. Unlike the old `-15`, this
+    //      zone is no longer "well inside the same cell" — cell 2's own left
+    //      edge is at `own.x - 24`, so most of the safe zone is technically
+    //      over cycle 1's pixels now. That does not matter for what this
+    //      click tests (which EDGE wins the topmost paint at this pixel,
+    //      not which CELL the pixel nominally belongs to), so the offset is
+    //      kept there rather than shrunk to fit inside cell 2 — there is no
+    //      edge-0-only pixel left inside cell 2 at this row to shrink it to.
     {
       const ctx = await newPage(EDGE_FORK_MD);
       await openWave(ctx.page);
 
       const own = await cellPoint(ctx.page, 1, 2);      // req cell 2 = 'b'
-      // MEASURED clear of `a~>c`'s hit path — see the comment above.
-      const selectPt = { x: own.x - 15, y: own.y };
+      // RE-MEASURED clear of `a~>c`'s hit path — see the comment above.
+      const selectPt = { x: own.x - 27, y: own.y };
       await clickAt(ctx.page, selectPt);
       const picked = await ctx.page.$eval('.ed-wave-overlay',
         (el) => el.getAttribute('data-wave-selected-edge'));
       assert.strictEqual(picked, '0',
         'T9d 前提失敗：按 b 那個點附近必須選到 a~>b（index 0，b 沒有被別條共用；' +
         '這一點刻意跟 b 的正中央錯開，避開 a~>c 的線在這附近也蓋到的範圍）。Got ' + picked);
+
+      // Now selected — the drawn handle exists; every drag below must
+      // actually START inside it (`own`, the cell centre, is 16.8px off).
+      const ownHandle = await edgeHandlePoint(ctx.page, 0, 'to');
 
       const baseline = await ctx.page.evaluate(() => ({
         gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
@@ -13483,19 +13596,19 @@ async function main() {
       };
 
       // (a) back on its own cell.
-      await dragBackTo(ctx.page, own);
+      await dragBackTo(ctx.page, ownHandle);
       await assertNoop('own cell');
 
       // (b) onto the cell holding the edge's OTHER end ('a', clk cell 1).
       const other = await cellPoint(ctx.page, 0, 1);
-      await dragBetween(ctx.page, own, other);
+      await dragBetween(ctx.page, ownHandle, other);
       await assertNoop('other end\'s cell');
 
       // (c) out of range: the blank spacer row (lane 4) is a real, hittable
       // point on the canvas — `cellAt` answers it like any other cell — but
       // it has zero cells of its own, so `moveEdgeEnd` refuses it.
       const outOfRange = await cellPoint(ctx.page, 4, 0);
-      await dragBetween(ctx.page, own, outOfRange);
+      await dragBetween(ctx.page, ownHandle, outOfRange);
       await assertNoop('out of range (spacer row)');
 
       assert.strictEqual(ctx.errs.length, 0, 'T9d: 不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -14074,9 +14187,24 @@ async function main() {
         '前提失敗：一開始不該有任何 edge 被選取——這個 finding 就是要驗證「從沒選過」' +
         '的那一次按下。Got ' + JSON.stringify(pre));
 
+      // v3.6.0 Task 5 fix round 2 (R16): this used to be `cellPoint(0, 1)`
+      // (the cell's centre). Task 5 moved the self-loop's own degenerate
+      // point to the ANCHOR — 16.8px off that centre at this editor's 48px
+      // pitch — so a click at the old point would now land 16.8px outside
+      // the phantom handle `edgeHitAt`'s self-loop exception trusts, and
+      // this finding's own prerequisite check below (no path/hit element at
+      // this exact pixel) would no longer be probing the pixel the click
+      // actually needs. `edgeHandlePoint` has no drawn `.ed-wave-edge-handle`
+      // to measure yet (nothing is selected — `renderEdges` only draws one
+      // for the selected edge), so it falls back to measuring
+      // `.ed-wave-edge-path[data-edge-index="0"]`'s own bounding rect, which
+      // — for a self-loop specifically — collapses to a single point at the
+      // exact same anchor (see that helper's own comment). MEASURED: that
+      // point's `width`/`height` are both 0.
+      //
       // `elementsFromPoint` 在這個點上量出來的整疊元素——self-loop 的
       // path 完全不在裡面，證明退路真的摸不到它，選到它只能靠 handle。
-      const pt = await cellPoint(ctx.page, 0, 1);   // lane 0, cycle 1 = anchor 'd'（self-loop 兩端都在這）
+      const pt = await edgeHandlePoint(ctx.page, 0, 'to');   // lane 0, cycle 1 = anchor 'd'（self-loop 兩端都在這）
       const stack = await ctx.page.evaluate((x, y) =>
         document.elementsFromPoint(x, y).map((el) => el.tagName + '.' + (el.getAttribute('class') || '')),
         pt.x, pt.y);
