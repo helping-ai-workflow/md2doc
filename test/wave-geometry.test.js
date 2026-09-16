@@ -770,4 +770,55 @@ const FLAT = {
   console.log('wave-geometry: -| 與 |- 的轉角次序不同，各自釘住 — OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 3：SKIN_METRICS 是 pin 住的常數（R12：不得在 wave-geometry.js
+// 內 require('wavedrom') 推導 —— 瀏覽器的 window.WaveDrom 不帶 waveSkin，見
+// production 碼上方註解）。推導與跟引擎對答案的工作移到這裡，測試檔可以自由
+// require 任何東西。
+// ---------------------------------------------------------------------------
+{
+  const M = G.SKIN_METRICS;
+  assert.ok(M !== undefined, 'SKIN_METRICS 必須匯出');
+  assert.ok(Object.isFrozen(M), 'SKIN_METRICS 必須是 frozen 常數');
+
+  const wd = require('wavedrom');
+  const skinText = JSON.stringify(wd.waveSkin);
+
+  // MEASURED（node_modules/wavedrom 3.5.0）：skin 的 socket 是
+  // ["rect",{"y":"15","x":"6","height":"20","width":"20"}]，半磚寬 20 →
+  // 一個 cycle 40，錨點 x=6 → 6/40 = 0.15。
+  const sock = skinText.match(/"id":"socket"\},\["rect",\{"y":"\d+","x":"(\d+)","height":"\d+","width":"(\d+)"\}/);
+  assert.ok(sock !== null, 'skin 必須有 socket 這個 rect（引擎版本變了才會沒有）');
+  const halfBrick = Number(sock[2]);
+  const cycleUnit = halfBrick * 2;
+  const derivedAnchorRatio = Number(sock[1]) / cycleUnit;
+  assert.strictEqual(derivedAnchorRatio, M.anchorRatio,
+    'pinned anchorRatio 必須跟 waveSkin 現場推導的一致 —— 不一致代表 wavedrom 換了 skin，要重新 pin');
+  assert.strictEqual(M.slewEndRatio, M.anchorRatio, '斜坡終點即錨點');
+
+  // MEASURED：轉態磚 `0m0` 的 path 是 'm0,20 3,0 3,-…'，第一段長 3 → 3/40。
+  const ramp = skinText.match(/"id":"0m0"\},\["path",\{"d":"m0,\d+ (\d+),0 /);
+  assert.ok(ramp !== null, 'skin 必須有 0m0 這個 path（引擎版本變了才會沒有）');
+  const derivedSlewStartRatio = Number(ramp[1]) / cycleUnit;
+  assert.strictEqual(derivedSlewStartRatio, M.slewStartRatio,
+    'pinned slewStartRatio 必須跟 waveSkin 現場推導的一致');
+
+  assert.ok(M.slewStartRatio < M.slewEndRatio, '斜坡必須有寬度');
+
+  // 直接跟引擎對答案：同一份 doc 的 gmark 端點必須落在 anchorRatio 上。
+  const src = { signal: [{ name: 'w', wave: '0.1.0...', node: 'a.b.c...' }], edge: ['a-b'] };
+  const out = JSON.stringify(wd.renderAny(0, JSON.parse(JSON.stringify(src)), wd.waveSkin));
+  const m = out.match(/gmark_a_b","d":"M (\d+(?:\.\d+)?),\d+ (\d+(?:\.\d+)?),/);
+  assert.ok(m !== null, '引擎必須畫出 gmark_a_b');
+  const engineFrom = Number(m[1]);
+  const engineTo = Number(m[2]);
+  const ENGINE_CYCLE = 40;
+  assert.strictEqual(engineFrom, 0 * ENGINE_CYCLE + M.anchorRatio * ENGINE_CYCLE,
+    'a 在 cycle 0 的錨點上');
+  assert.strictEqual(engineTo, 2 * ENGINE_CYCLE + M.anchorRatio * ENGINE_CYCLE,
+    'b 在 cycle 2 的錨點上');
+
+  console.log('wave-geometry: SKIN_METRICS 是 pin 住的常數，且跟引擎逐值相符 — OK');
+}
+
 console.log('wave-geometry.test.js OK');
