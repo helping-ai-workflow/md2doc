@@ -629,10 +629,11 @@ const FLAT = {
   assert.strictEqual(edges[0].index, 0);
   assert.strictEqual(edges[0].edge.shape, '~>');
 
-  // 端點落在該格的正中央——與 cellRect 同一個運算式算出來的，不另算一份。
-  const r0 = G.cellRect(layout, 0, 1);
-  assert.strictEqual(edges[0].from.x, r0.x + r0.width / 2);
-  assert.strictEqual(edges[0].from.y, r0.y + r0.height / 2);
+  // 端點落在該格的錨點（v3.6.0 Task 5：不是格子正中央，是引擎畫轉態斜坡
+  // 結束的那一點）——與 anchorOfCell 同一個運算式算出來的，不另算一份。
+  const a0 = G.anchorOfCell(layout, 0, 1);
+  assert.strictEqual(edges[0].from.x, a0.x);
+  assert.strictEqual(edges[0].from.y, a0.y);
 
   assert.ok(typeof edges[0].d === 'string' && edges[0].d.charAt(0) === 'M',
     'path 必須是 SVG d 字串');
@@ -675,12 +676,12 @@ const FLAT = {
     'index 必須是 doc.edge 裡的原始位置（1），不是過濾後陣列裡的位置（0）');
   assert.strictEqual(edges[0].edge.shape, '~>');
 
-  const r0 = G.cellRect(layout, 0, 1);
-  const r1 = G.cellRect(layout, 1, 3);
-  assert.strictEqual(edges[0].from.x, r0.x + r0.width / 2);
-  assert.strictEqual(edges[0].from.y, r0.y + r0.height / 2);
-  assert.strictEqual(edges[0].to.x, r1.x + r1.width / 2);
-  assert.strictEqual(edges[0].to.y, r1.y + r1.height / 2);
+  const a0 = G.anchorOfCell(layout, 0, 1);
+  const a1 = G.anchorOfCell(layout, 1, 3);
+  assert.strictEqual(edges[0].from.x, a0.x);
+  assert.strictEqual(edges[0].from.y, a0.y);
+  assert.strictEqual(edges[0].to.x, a1.x);
+  assert.strictEqual(edges[0].to.y, a1.y);
 
   console.log('wave-geometry: 壞掉的 edge 被跳過，兄弟 edge 的原始 index 與端點都還在 — OK');
 }
@@ -1072,6 +1073,126 @@ const FLAT = {
   assert.strictEqual(G.layoutOf(mk(0), opts).hscale, 1);
 
   console.log('wave-geometry: config.hscale 的四捨五入／clamp 跟引擎逐值一致（R15）— OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 5：錨點落在斜坡終點；命中取最近邊界；轉態點可列舉
+//
+// 使用者回報「連線應該要頭尾相接」——量到的病因：畫布把 edge 端點畫在格子
+// 正中央，引擎卻是畫在轉態磚斜坡結束的那一點，在預設 40px 的 cycle 寬下差了
+// 17px，一條標注上升緣的線因此肉眼可見地沒有接上那個緣。`anchorOfCell` 是
+// 修法：跟 `cellRect` 一樣問「哪一格」，但回傳的是 `SKIN_METRICS.anchorRatio`
+// 那個偏移點，不是格子中心。
+// ---------------------------------------------------------------------------
+{
+  const doc = { signal: [{ name: 'w', wave: '0.1.0...', node: 'a.b.c...' }], edge: ['a-b'] };
+  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 40, nameColWidth: 0 });
+  const R = G.SKIN_METRICS.anchorRatio;
+
+  assert.deepStrictEqual(G.anchorOfCell(L, 0, 0), { x: 0 * 40 + R * 40, y: 20 });
+  assert.deepStrictEqual(G.anchorOfCell(L, 0, 2), { x: 2 * 40 + R * 40, y: 20 });
+  assert.strictEqual(G.anchorOfCell(L, 0, 99), null, '超出範圍沒有錨點');
+
+  // edge 端點必須跟著走
+  const edges = G.edgeLayout(doc, L);
+  assert.strictEqual(edges.length, 1);
+  assert.strictEqual(edges[0].from.x, 0 * 40 + R * 40);
+  assert.strictEqual(edges[0].to.x, 2 * 40 + R * 40);
+
+  // 命中：最近邊界，不是 floor。cycle 2 的錨點在 x = 86；
+  // 從那裡往左 19px（67）與往右 19px（105）都該回到 cell 2。
+  const ax = 2 * 40 + R * 40;
+  assert.deepStrictEqual(G.boundaryAt(L, ax, 20), { laneIndex: 0, cell: 2 });
+  assert.deepStrictEqual(G.boundaryAt(L, ax - 19, 20), { laneIndex: 0, cell: 2 },
+    '往左 19px 仍是同一個邊界');
+  assert.deepStrictEqual(G.boundaryAt(L, ax + 19, 20), { laneIndex: 0, cell: 2 },
+    '往右 19px 仍是同一個邊界');
+  assert.deepStrictEqual(G.boundaryAt(L, ax - 21, 20), { laneIndex: 0, cell: 1 },
+    '往左 21px 跨到前一個邊界');
+
+  // 轉態：'0.1.0...' → cell 0（起點）、2（上升）、4（下降）
+  assert.deepStrictEqual(G.transitionsOf(doc, 0), [0, 2, 4]);
+
+  // `|` 是斷點不是轉態
+  const gapDoc = { signal: [{ name: 'g', wave: '0|1' }] };
+  assert.deepStrictEqual(G.transitionsOf(gapDoc, 0), [0, 2],
+    'gap 本身不算轉態，它後面那格算');
+
+  // 中間斷一次（不是開頭）：斷點後面那格照樣算轉態
+  const midGap = { signal: [{ name: 'm', wave: '01|10' }] };
+  assert.deepStrictEqual(G.transitionsOf(midGap, 0), [0, 1, 3, 4],
+    '斷點在中間：它前後的格子各自照自己的規則算');
+
+  // 斷點正後方立刻接一個 held cell：held 沿用斷點前的電位，一樣不是轉態
+  const gapThenHeld = { signal: [{ name: 'h', wave: '0.1|.0' }] };
+  assert.deepStrictEqual(G.transitionsOf(gapThenHeld, 0), [0, 2, 5],
+    '斷點正後方接著的 held cell 不算轉態，斷點本身也不算');
+
+  console.log('wave-geometry: 錨點/最近邊界/轉態列舉 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 5：`boundaryAt` 的界不准比 `cellRect` 寬——用 R14 那組矩陣本身
+// 而不是第三份 fixture。矩陣裡每一個 lane 都有自己的 period/phase/hscale，
+// 正是「boundaryAt 用 layout.cycles 當界會超出這條 lane 自己的 reach」那個
+// 缺陷類別會露餡的地方：混合 period 那組本來就有一條比別人窄很多的 lane。
+// ---------------------------------------------------------------------------
+{
+  const doc = {
+    signal: [
+      { name: 'a', wave: '01010101' },
+      { name: 'wide', wave: '01', period: 6 },
+      { name: 'narrow', wave: '0101010101010101', period: 0.5 },
+    ],
+  };
+  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
+
+  for (let lane = 0; lane < L.lanes.length; lane++) {
+    const row = L.lanes[lane];
+    // 遠遠超出這條 lane 自己的 reach（但還在畫面高度以內）也不准回一個
+    // `cellRect` 會判成 null 的 cell。
+    const far = G.boundaryAt(L, row.originX + 999 * row.cycleWidth, row.y + row.height / 2);
+    assert.ok(far !== null, 'lane ' + lane + '：遠遠超出範圍時 boundaryAt 仍要夾回界內');
+    assert.notStrictEqual(G.cellRect(L, far.laneIndex, far.cell), null,
+      'lane ' + lane + '：boundaryAt 回傳的 cell 必須是 cellRect 認得的格子（' +
+      JSON.stringify(far) + '）');
+
+    // 反過來：boundaryAt 找得到的每一個 cell，cellRect 對它都不准是 null。
+    for (let probe = 0; probe < row.cycles + 4; probe++) {
+      const x = row.originX + probe * row.cycleWidth + G.SKIN_METRICS.anchorRatio * row.cycleWidth;
+      const hit = G.boundaryAt(L, x, row.y + row.height / 2);
+      if (hit === null) continue;
+      assert.notStrictEqual(G.cellRect(L, hit.laneIndex, hit.cell), null,
+        'lane ' + lane + ' probe ' + probe + '：boundaryAt 給出的 cell 必須有 cellRect');
+    }
+  }
+
+  console.log('wave-geometry: boundaryAt 的界不准比 cellRect 寬 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 5：`boundaryAt` 取最近，`cellAt` 用 floor——兩者故意不同，
+// 釘住那個差異本身，免得以後有人「簡化」成同一個函式。
+//
+// cycleWidth=40、anchorRatio=0.15：cell 1 的錨點在 x=46，cell 2 的錨點在
+// x=86，cell 2 的左緣（格線）在 x=80。挑 x=70：
+//   - cellAt 用 floor((70-0)/40)=1，還沒到 cell 2 的左緣（80），答案是 cell 1；
+//   - boundaryAt 比距離：|70-46|=24 對 |70-86|=16，離 cell 2 的錨點更近，
+//     答案是 cell 2。
+// 同一個 x，兩個函式故意給出不同答案——這正是它們各自存在的理由：畫面上使用者
+// 瞄準的是 86 那條線，不是 80 那條格線。
+// ---------------------------------------------------------------------------
+{
+  const doc = { signal: [{ name: 'w', wave: '0.1.0...', node: 'a.b.c...' }], edge: ['a-b'] };
+  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 40, nameColWidth: 0 });
+  const x = 70;
+
+  assert.deepStrictEqual(G.cellAt(L, x, 20), { laneIndex: 0, cycle: 1 },
+    'cellAt 用 floor：70 還沒到 cell 2 的左緣（80），所以是 cell 1');
+  assert.deepStrictEqual(G.boundaryAt(L, x, 20), { laneIndex: 0, cell: 2 },
+    'boundaryAt 用最近錨點：70 離 cell 2 的錨點（86）比離 cell 1 的錨點（46）近，所以是 cell 2');
+
+  console.log('wave-geometry: boundaryAt 取最近、cellAt 用 floor，兩者故意不同 — OK');
 }
 
 console.log('wave-geometry.test.js OK');
