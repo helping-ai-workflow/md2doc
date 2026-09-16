@@ -10274,8 +10274,9 @@ async function main() {
           // comparison come from the same source.
           //
           // So this reads the SHAPES. The cycle grid comes from the painted
-          // `.ed-wave-grid` lines rather than from any attribute, the row height
-          // comes from that grid's own extent divided by the ENGINE's lane
+          // `.ed-wave-grid` lines rather than from any attribute, the row band
+          // comes from that grid's own measured extent — TOP as well as
+          // BOTTOM, not just bottom-over-0 — divided by the ENGINE's lane
           // count, and each cycle is classified by what is painted over its
           // midpoint — a rect is x, a polygon is a bus, a clock path is a clock,
           // and a plain line is read as high/mid/low by which third of its row
@@ -10283,14 +10284,29 @@ async function main() {
           // a cycle's midpoint never falls inside one; gap markers and bus
           // labels are excluded by class (gaps have their own per-cycle
           // comparison above).
+          //
+          // v3.6.0 Task 6 fix round 1 (R19): `rowH = gridBottom / laneCount`
+          // and `top = i * rowH` used to be exact because lane 0's band
+          // started at y=0. Task 6 gave the canvas a `layout.originY` (a
+          // ruler band, unconditionally ≥22px) above lane 0, so the grid's
+          // own top moved off 0 too — `top`/`rowH` still have to come from
+          // what was PAINTED (this block's whole reason to exist: reading
+          // `data-origin-y` here would put the product's own belief on both
+          // sides of the comparison and a canvas that silently drew nothing
+          // would still pass), just anchored on the grid's measured TOP
+          // (`gridTop`) instead of on an assumed 0.
           const gridXs = Array.prototype.map.call(
             svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('x1')))
             .sort((a, b) => a - b);
-          const gridBottom = Math.max.apply(null, Array.prototype.map.call(
-            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('y2'))));
+          const gridYs1 = Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('y1')));
+          const gridYs2 = Array.prototype.map.call(
+            svg.querySelectorAll('.ed-wave-grid'), (g) => Number(g.getAttribute('y2')));
+          const gridTop = Math.min.apply(null, gridYs1);
+          const gridBottom = Math.max.apply(null, gridYs2);
           const engineLaneCount = document.querySelectorAll(
             '[id^="wavelane_draw_"][id$="_9000"]').length;
-          const rowH = engineLaneCount > 0 ? gridBottom / engineLaneCount : 0;
+          const rowH = engineLaneCount > 0 ? (gridBottom - gridTop) / engineLaneCount : 0;
           const shapes = Array.prototype.filter.call(svg.children, (el) => {
             const cls = el.getAttribute('class') || '';
             return cls.indexOf('ed-wave-grid') === -1 &&
@@ -10314,7 +10330,7 @@ async function main() {
           const painted = [];
           const paintedCounts = [];
           for (let i = 0; i < engineLaneCount; i++) {
-            const top = i * rowH;
+            const top = gridTop + i * rowH;
             paintedCounts.push(shapes.filter(
               (sh) => sh.cy >= top && sh.cy < top + rowH).length);
             const row = [];
