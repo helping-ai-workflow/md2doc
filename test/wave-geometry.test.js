@@ -14,7 +14,9 @@ const C = require('../lib/editor/wave-codec.js');
 
   assert.strictEqual(L.lanes.length, 2);
   assert.strictEqual(L.width, 60 + 4 * 20, '寬 = 名稱欄 + cycle 數 × cycle 寬');
-  assert.strictEqual(L.height, 2 * 40);
+  // v3.6.0 Task 6 re-pin: 舊值 80（2*40，無尺規帶）→ 新值 102
+  // （L.originY(22) + 2*40）— 尺規帶把 lane 0 往下推，高度多出 originY。
+  assert.strictEqual(L.height, L.originY + 2 * 40);
 
   // 往返：每一格的中心點必須 hit 回同一格
   for (let lane = 0; lane < 2; lane++) {
@@ -124,7 +126,8 @@ const FLAT = {
     assert.deepStrictEqual(Ln.lanes.map(function (l) { return l.lane.name; }),
       ['a', 'b', 'c', 'd']);
     assert.deepStrictEqual(Ln.lanes.map(function (l) { return l.depth; }), [0, 1, 2, 0]);
-    assert.strictEqual(Ln.height, 4 * opts.laneHeight, '巢狀 group 一樣不佔列');
+    // v3.6.0 Task 6 re-pin: 舊值 160（4*40）→ 新值 182（Ln.originY(22) + 4*40）
+    assert.strictEqual(Ln.height, Ln.originY + 4 * opts.laneHeight, '巢狀 group 一樣不佔列');
     for (let i = 0; i < Ln.lanes.length; i++) {
       assert.deepStrictEqual(Ln.lanes[i].path, C.lanePath(nested, i),
         '巢狀：lane ' + i + ' 的 path 必須等於 codec 的 lanePath');
@@ -137,28 +140,33 @@ const FLAT = {
 // ---------------------------------------------------------------------------
 {
   const L = G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
+  // v3.6.0 Task 6 re-pin: 整個區塊的 y 都要加上 L.originY（22，無 head）——
+  // lane 0 的列不再從 y=0 開始，凡是「落在 lane 0 列中」的 y 一律改成
+  // `L.originY + <舊值>`；凡是「列與列之間的分界」（`lane * 40`）一律改成
+  // `L.originY + lane * 40`。x 軸（名稱欄／格線）完全不受影響。
+  const y0 = L.originY + 20;   // lane 0 列中央（舊值 20）
 
   // 名稱欄那一刀：59.999 還在名稱欄，60 已經是第 0 格
-  assert.strictEqual(G.cellAt(L, 59.999, 20), null, '名稱欄的最後一畫素不是格子');
-  assert.deepStrictEqual(G.cellAt(L, 60, 20), { laneIndex: 0, cycle: 0 },
+  assert.strictEqual(G.cellAt(L, 59.999, y0), null, '名稱欄的最後一畫素不是格子');
+  assert.deepStrictEqual(G.cellAt(L, 60, y0), { laneIndex: 0, cycle: 0 },
     '名稱欄右緣屬於第 0 格');
 
   // 每一條格線：左邊屬於前一格，格線本身屬於後一格
   for (let cyc = 1; cyc < 4; cyc++) {
     const edge = 60 + cyc * 20;
-    assert.deepStrictEqual(G.cellAt(L, edge - 0.001, 20), { laneIndex: 0, cycle: cyc - 1 },
+    assert.deepStrictEqual(G.cellAt(L, edge - 0.001, y0), { laneIndex: 0, cycle: cyc - 1 },
       '格線左邊一點點屬於 cycle ' + (cyc - 1));
-    assert.deepStrictEqual(G.cellAt(L, edge, 20), { laneIndex: 0, cycle: cyc },
+    assert.deepStrictEqual(G.cellAt(L, edge, y0), { laneIndex: 0, cycle: cyc },
       '格線本身屬於 cycle ' + cyc);
   }
 
   // 最後一格的右緣沒有下一格可以給，就是外面
-  assert.deepStrictEqual(G.cellAt(L, L.width - 0.001, 20), { laneIndex: 0, cycle: 3 });
-  assert.strictEqual(G.cellAt(L, L.width, 20), null, '最右緣已經在圖外');
+  assert.deepStrictEqual(G.cellAt(L, L.width - 0.001, y0), { laneIndex: 0, cycle: 3 });
+  assert.strictEqual(G.cellAt(L, L.width, y0), null, '最右緣已經在圖外');
 
   // 同一條規則套在列上：上緣屬於自己，下緣屬於下一列
   for (let lane = 1; lane < 4; lane++) {
-    const edge = lane * 40;
+    const edge = L.originY + lane * 40;
     assert.deepStrictEqual(G.cellAt(L, 70, edge - 0.001), { laneIndex: lane - 1, cycle: 0 },
       '列線上面一點點屬於 lane ' + (lane - 1));
     assert.deepStrictEqual(G.cellAt(L, 70, edge), { laneIndex: lane, cycle: 0 },
@@ -166,7 +174,11 @@ const FLAT = {
   }
   assert.strictEqual(G.cellAt(L, 70, L.height), null, '最下緣已經在圖外');
   assert.strictEqual(G.cellAt(L, 70, -0.001), null, '負的 y 不是格子');
-  assert.strictEqual(G.cellAt(L, -1, 20), null, '負的 x 不是格子');
+  assert.strictEqual(G.cellAt(L, -1, y0), null, '負的 x 不是格子');
+  // 尺規帶本身：originY 之前的 y 不是格子（v3.6.0 Task 6 新增）
+  assert.strictEqual(G.cellAt(L, 70, L.originY - 0.001), null, '尺規帶的最後一畫素仍不是格子');
+  assert.deepStrictEqual(G.cellAt(L, 70, L.originY), { laneIndex: 0, cycle: 0 },
+    'originY 本身屬於 lane 0');
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +203,8 @@ const FLAT = {
     '每條 lane 的拍數要跟 levelsOf 一致（跳過 repeater 的天真算法會給 1/2/2/0）');
   assert.strictEqual(L.cycles, 4, '整張圖的拍數 = 最長的那條');
   assert.strictEqual(L.width, 30 + 4 * 8);
-  assert.strictEqual(L.height, 4 * 10, '沒有 wave 的 lane 一樣佔一列');
+  // v3.6.0 Task 6 re-pin: 舊值 40（4*10）→ 新值 62（L.originY(22) + 4*10）
+  assert.strictEqual(L.height, L.originY + 4 * 10, '沒有 wave 的 lane 一樣佔一列');
 
   for (let i = 0; i < L.lanes.length; i++) {
     assert.strictEqual(L.lanes[i].cycles,
@@ -201,7 +214,9 @@ const FLAT = {
 
   // 短 lane 的尾巴後面仍然是格子（往那裡畫 = 把 wave 拉長），呼叫端靠 lanes[i].cycles
   // 判斷有沒有超過；這裡不回 null，否則 Task 6 沒辦法往後畫。
-  assert.deepStrictEqual(G.cellAt(L, 30 + 3 * 8 + 4, 2 * 10 + 5),
+  // v3.6.0 Task 6 re-pin: y 舊值 2*10+5=25 → 新值 L.originY + 2*10+5（lane 2 的列
+  // 因為尺規帶往下推了 L.originY）。
+  assert.deepStrictEqual(G.cellAt(L, 30 + 3 * 8 + 4, L.originY + 2 * 10 + 5),
     { laneIndex: 2, cycle: 3 }, '短 lane 的尾巴後面仍然回得出格子');
   assert.ok(L.lanes[2].cycles <= 3, '而且呼叫端看得出那一拍超過了這條 lane 的長度');
 }
@@ -213,9 +228,13 @@ const FLAT = {
   const doc = { signal: [{ name: 'a', wave: '01' }, {}, { name: 'b', wave: '01' }] };
   const L = G.layoutOf(doc, { laneHeight: 30, cycleWidth: 40, nameColWidth: 40 });
   assert.strictEqual(L.lanes.length, 3, 'spacer 也是一條 lane');
-  assert.strictEqual(L.height, 90);
-  assert.deepStrictEqual(L.lanes.map(function (l) { return l.y; }), [0, 30, 60]);
-  assert.deepStrictEqual(G.cellAt(L, 50, 65), { laneIndex: 2, cycle: 0 },
+  // v3.6.0 Task 6 re-pin: 舊值 90 → 新值 112（L.originY(22) + 90）
+  assert.strictEqual(L.height, L.originY + 90);
+  // v3.6.0 Task 6 re-pin: 舊值 [0,30,60] → 新值各加 L.originY
+  assert.deepStrictEqual(L.lanes.map(function (l) { return l.y; }),
+    [L.originY, L.originY + 30, L.originY + 60]);
+  // v3.6.0 Task 6 re-pin: y 舊值 65 → 新值 L.originY + 65
+  assert.deepStrictEqual(G.cellAt(L, 50, L.originY + 65), { laneIndex: 2, cycle: 0 },
     'spacer 下面那條是 b，序號 2');
   assert.strictEqual(L.lanes[2].lane.name, 'b');
 }
@@ -228,7 +247,10 @@ const FLAT = {
   assert.strictEqual(L.laneHeight, 30);
   assert.strictEqual(L.cycleWidth, 40);
   assert.strictEqual(L.nameColWidth, 40);
-  assert.strictEqual(L.height, 4 * 30, '四條 lane 的高度 = 引擎量到的 120');
+  // v3.6.0 Task 6 re-pin: 引擎量到的 120（4*30）是「沒有尺規帶」的舊世界；
+  // 這個畫布多了 L.originY(22) 的尺規帶，新值 142。
+  assert.strictEqual(L.height, L.originY + 4 * 30,
+    '四條 lane 的高度 = 引擎量到的 120 + 尺規帶 originY');
   assert.strictEqual(L.width, 40 + 4 * 40);
 }
 
@@ -254,7 +276,8 @@ const FLAT = {
   // 空文件：沒有 lane 就沒有格子
   const E = G.layoutOf({ signal: [] }, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
   assert.deepStrictEqual(E.lanes, []);
-  assert.strictEqual(E.height, 0);
+  // v3.6.0 Task 6 re-pin: 舊值 0 → 新值 22（尺規帶不論有沒有 lane 都保留）
+  assert.strictEqual(E.height, 22, '沒有 lane 仍保留尺規帶的高度');
   assert.strictEqual(E.width, 60, '沒有 lane 就只剩名稱欄');
   assert.strictEqual(G.cellAt(E, 70, 0), null);
   assert.strictEqual(G.cellRect(E, 0, 0), null);
@@ -496,7 +519,8 @@ const FLAT = {
   const over = G.layoutOf(big);
   assert.strictEqual(over.lanes.length, 1024, '超過上限就截斷，不丟');
   assert.strictEqual(over.truncated, true, '而且說得出來，讓呼叫端可以顯示警告');
-  assert.strictEqual(over.height, 1024 * over.laneHeight);
+  // v3.6.0 Task 6 re-pin: 舊值 1024*laneHeight（30720）→ 新值再加 over.originY
+  assert.strictEqual(over.height, over.originY + 1024 * over.laneHeight);
   assert.deepStrictEqual(over.lanes[1023].path, C.lanePath(big, 1023),
     '截斷後最後一條仍然是 codec 的第 1023 條，不是別的');
   assert.strictEqual(over.lanes[1023].lane.name, 'l1023');
@@ -541,9 +565,11 @@ const FLAT = {
     assert.strictEqual(L.cycles, 1, '有 lane 的文件至少要有一拍可以畫：' + JSON.stringify(doc));
     assert.strictEqual(L.lanes[0].cycles, 0, '但那條 lane 自己仍然是 0 拍');
     assert.strictEqual(L.width, 60 + 20);
-    assert.deepStrictEqual(G.cellAt(L, 60, 0), { laneIndex: 0, cycle: 0 },
+    // v3.6.0 Task 6 re-pin: y 舊值 0 → 新值 L.originY（lane 0 的上緣，尺規帶之下）
+    assert.deepStrictEqual(G.cellAt(L, 60, L.originY), { laneIndex: 0, cycle: 0 },
       '空文件也要有一個座標可以放第一拍');
-    assert.deepStrictEqual(G.cellRect(L, 0, 0), { x: 60, y: 0, width: 20, height: 40 });
+    assert.deepStrictEqual(G.cellRect(L, 0, 0),
+      { x: 60, y: L.originY, width: 20, height: 40 });
     assert.strictEqual(G.cellRect(L, 0, 1), null, '但只有一拍');
   }
   // 沒有 lane 就沒有拍：引擎也一樣（寬 40 vs 100）
@@ -587,14 +613,21 @@ const FLAT = {
 // 數值與索引都沒差，但 `deepStrictEqual(hit, {laneIndex: 0})` 會失敗，下一棒會為了
 // 一個算得正確的答案debug 一小時。
 // ---------------------------------------------------------------------------
+// v3.6.0 Task 6 re-pin: `y = -0` 曾經是 lane 0 的上緣（originY 是 0），拿它探
+// laneIndex 的 -0 折疊。`originY` 現在恆為 >=22（尺規帶永遠保留），`pos - origin`
+// 不可能再算出 -0（IEEE754：兩個相等的非零有限數相減一律是 +0，不是 -0），所以
+// laneIndex 這條路徑的 -0 折疊，經由 `cellAt` 已經量不到了——不是缺陷，是
+// Task 6 把「origin 是 0」這個前提本身拿掉了。cycle（x 軸，origin 仍可以是
+// nameColWidth=0）完全不受影響，照舊測。y 改用 `L.originY`，繼續驗證輸出契約
+// 本身（不准是 -0），即使內部已經不需要那個 `+0` 折疊也要成立。
 {
   const L = G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 0 });
-  const hit = G.cellAt(L, -0, -0);
+  const hit = G.cellAt(L, -0, L.originY);
   assert.deepStrictEqual(hit, { laneIndex: 0, cycle: 0 });
   assert.strictEqual(Object.is(hit.laneIndex, -0), false, 'laneIndex 不准是 -0');
   assert.strictEqual(Object.is(hit.cycle, -0), false, 'cycle 不准是 -0');
-  const hit2 = G.cellAt(G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 }),
-    60, -0);
+  const L2 = G.layoutOf(FLAT, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
+  const hit2 = G.cellAt(L2, 60, L2.originY);
   assert.strictEqual(Object.is(hit2.laneIndex, -0), false);
 }
 
@@ -641,8 +674,10 @@ const FLAT = {
   // nameColWidth 40）跟 SKIN_METRICS.anchorRatio 這個常數——把數字釘死。
   assert.strictEqual(edges[0].from.x, 40 + 1 * 40 + G.SKIN_METRICS.anchorRatio * 40,
     '手算：nameColWidth(40) + cycle 1 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 86');
-  assert.strictEqual(edges[0].from.y, 0 * 30 + 30 / 2,
-    '手算：lane 0 的列中心 y = 0*laneHeight(30) + laneHeight/2 = 15');
+  // v3.6.0 Task 6 re-pin: 舊值 15（0*30+30/2）→ 新值加上 layout.originY
+  // （尺規帶把 lane 0 往下推）。
+  assert.strictEqual(edges[0].from.y, layout.originY + 0 * 30 + 30 / 2,
+    '手算：originY + lane 0 的列中心 y = originY + 0*laneHeight(30) + laneHeight/2');
 
   assert.ok(typeof edges[0].d === 'string' && edges[0].d.charAt(0) === 'M',
     'path 必須是 SVG d 字串');
@@ -695,10 +730,14 @@ const FLAT = {
   // fix round 1：同樣手算一次，不透過 anchorOfCell／cellRect。
   assert.strictEqual(edges[0].from.x, 40 + 1 * 40 + G.SKIN_METRICS.anchorRatio * 40,
     '手算：nameColWidth(40) + cycle 1 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 86');
-  assert.strictEqual(edges[0].from.y, 0 * 30 + 30 / 2, '手算：lane 0 的列中心 y = 15');
+  // v3.6.0 Task 6 re-pin: from.y 舊值 15、to.y 舊值 45，兩者都加上 layout.originY
+  // （尺規帶把每一列都往下推同樣的距離，兩者的差不變）。
+  assert.strictEqual(edges[0].from.y, layout.originY + 0 * 30 + 30 / 2,
+    '手算：originY + lane 0 的列中心 y');
   assert.strictEqual(edges[0].to.x, 40 + 3 * 40 + G.SKIN_METRICS.anchorRatio * 40,
     '手算：nameColWidth(40) + cycle 3 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 166');
-  assert.strictEqual(edges[0].to.y, 1 * 30 + 30 / 2, '手算：lane 1 的列中心 y = 45');
+  assert.strictEqual(edges[0].to.y, layout.originY + 1 * 30 + 30 / 2,
+    '手算：originY + lane 1 的列中心 y');
 
   console.log('wave-geometry: 壞掉的 edge 被跳過，兄弟 edge 的原始 index 與端點都還在 — OK');
 }
@@ -1071,6 +1110,31 @@ const FLAT = {
       const L = G.layoutOf(doc, size.opts);
       verifyInvariant(L, size.label + '／hscale 2.5');
     }
+
+    // v3.6.0 Task 6 fix round 1: 延伸這個矩陣蓋 originY 不是 22（尺規帶單獨一條）
+    // 的情形——head.text 疊出 42（尺規帶+標題帶），foot 疊出非零 footHeight。
+    // `verifyInvariant` 本身讀的是 `row.y`／`layout.height`，不需要改；把它跑在
+    // 一份 originY 更大、且同時帶 mixed period／phase 的文件上，才真的驗到
+    // 「originY 改變不會悄悄弄壞既有的 x 軸不變量」，而不是只驗尺規帶單獨存在
+    // 那一種（22）。
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'wide', wave: '01', period: 6 },
+          { name: 'narrow', wave: '0101010101010101', period: 0.5, phase: 1.5 },
+        ],
+        head: { text: 'T' },
+        foot: { tick: 0 },
+      };
+      const L = G.layoutOf(doc, size.opts);
+      assert.strictEqual(L.originY, 42,
+        size.label + '／head+foot：originY 必須是 headTextHeight(20) + rulerHeight(22)');
+      assert.strictEqual(L.footHeight, 22, size.label + '／head+foot：foot 也要算進去');
+      assert.strictEqual(L.height, 42 + L.lanes.length * L.laneHeight + 22,
+        size.label + '／head+foot：height 必須含 originY 與 footHeight 兩端');
+      verifyInvariant(L, size.label + '／head+foot（originY=42）');
+    }
   }
 
   console.log('wave-geometry: R14 三條不變量在 period/phase/hscale 矩陣下成立 — OK');
@@ -1129,8 +1193,11 @@ const FLAT = {
   const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 40, nameColWidth: 0 });
   const R = G.SKIN_METRICS.anchorRatio;
 
-  assert.deepStrictEqual(G.anchorOfCell(L, 0, 0), { x: 0 * 40 + R * 40, y: 20 });
-  assert.deepStrictEqual(G.anchorOfCell(L, 0, 2), { x: 2 * 40 + R * 40, y: 20 });
+  // v3.6.0 Task 6 re-pin: y 舊值 20（lane 0 列中心，laneHeight/2）→ 新值
+  // L.originY + 20（尺規帶把 lane 0 往下推）。
+  const y0 = L.originY + 20;
+  assert.deepStrictEqual(G.anchorOfCell(L, 0, 0), { x: 0 * 40 + R * 40, y: y0 });
+  assert.deepStrictEqual(G.anchorOfCell(L, 0, 2), { x: 2 * 40 + R * 40, y: y0 });
   assert.strictEqual(G.anchorOfCell(L, 0, 99), null, '超出範圍沒有錨點');
 
   // edge 端點必須跟著走
@@ -1142,12 +1209,12 @@ const FLAT = {
   // 命中：最近邊界，不是 floor。cycle 2 的錨點在 x = 86；
   // 從那裡往左 19px（67）與往右 19px（105）都該回到 cell 2。
   const ax = 2 * 40 + R * 40;
-  assert.deepStrictEqual(G.boundaryAt(L, ax, 20), { laneIndex: 0, cell: 2 });
-  assert.deepStrictEqual(G.boundaryAt(L, ax - 19, 20), { laneIndex: 0, cell: 2 },
+  assert.deepStrictEqual(G.boundaryAt(L, ax, y0), { laneIndex: 0, cell: 2 });
+  assert.deepStrictEqual(G.boundaryAt(L, ax - 19, y0), { laneIndex: 0, cell: 2 },
     '往左 19px 仍是同一個邊界');
-  assert.deepStrictEqual(G.boundaryAt(L, ax + 19, 20), { laneIndex: 0, cell: 2 },
+  assert.deepStrictEqual(G.boundaryAt(L, ax + 19, y0), { laneIndex: 0, cell: 2 },
     '往右 19px 仍是同一個邊界');
-  assert.deepStrictEqual(G.boundaryAt(L, ax - 21, 20), { laneIndex: 0, cell: 1 },
+  assert.deepStrictEqual(G.boundaryAt(L, ax - 21, y0), { laneIndex: 0, cell: 1 },
     '往左 21px 跨到前一個邊界');
 
   // 轉態：'0.1.0...' → cell 0（起點）、2（上升）、4（下降）
@@ -1194,13 +1261,72 @@ const FLAT = {
   const doc = { signal: [{ name: 'w', wave: '0.1.0...', node: 'a.b.c...' }], edge: ['a-b'] };
   const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 40, nameColWidth: 0 });
   const x = 70;
+  // v3.6.0 Task 6 re-pin: y 舊值 20（lane 0 列中心）→ 新值 L.originY + 20。
+  const y0 = L.originY + 20;
 
-  assert.deepStrictEqual(G.cellAt(L, x, 20), { laneIndex: 0, cycle: 1 },
+  assert.deepStrictEqual(G.cellAt(L, x, y0), { laneIndex: 0, cycle: 1 },
     'cellAt 用 floor：70 還沒到 cell 2 的左緣（80），所以是 cell 1');
-  assert.deepStrictEqual(G.boundaryAt(L, x, 20), { laneIndex: 0, cell: 2 },
+  assert.deepStrictEqual(G.boundaryAt(L, x, y0), { laneIndex: 0, cell: 2 },
     'boundaryAt 用最近錨點：70 離 cell 2 的錨點（86）比離 cell 1 的錨點（46）近，所以是 cell 2');
 
   console.log('wave-geometry: boundaryAt 取最近、cellAt 用 floor，兩者故意不同 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 6：尺規帶把 lane 0 往下推
+// ---------------------------------------------------------------------------
+{
+  const plain = { signal: [{ name: 'a', wave: '01' }] };
+  const L1 = G.layoutOf(plain, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
+  assert.strictEqual(L1.rulerHeight, 22, '尺規帶固定 22px');
+  assert.strictEqual(L1.headTextHeight, 0, '沒有 head.text 就沒有標題帶');
+  assert.strictEqual(L1.originY, 22, 'lane 0 的上緣 = 尺規帶下緣');
+  assert.strictEqual(L1.lanes[0].y, 22, 'lane 0 從 originY 開始');
+  assert.strictEqual(L1.height, 22 + 40, '高度含尺規帶');
+
+  const titled = { signal: [{ name: 'a', wave: '01' }], head: { text: 'T' } };
+  const L2 = G.layoutOf(titled, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
+  assert.strictEqual(L2.headTextHeight, 20, 'head.text 佔一條 20px 的帶');
+  assert.strictEqual(L2.originY, 42, '標題帶在尺規帶之上');
+
+  const footed = { signal: [{ name: 'a', wave: '01' }], foot: { tick: 0 } };
+  const L3 = G.layoutOf(footed, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
+  assert.strictEqual(L3.footHeight, 22, 'foot 刻度佔一條帶');
+  assert.strictEqual(L3.height, 22 + 40 + 22);
+
+  // 名稱欄仍然不是格子
+  assert.strictEqual(G.cellAt(L1, 10, 30), null, '名稱欄不得回傳格子');
+  // 尺規帶也不是格子
+  assert.strictEqual(G.cellAt(L1, 130, 5), null, '尺規帶不得回傳格子');
+
+  console.log('wave-geometry: 尺規/標題/foot 帶進入版面 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 6 fix round 1：cellAt／boundaryAt 的垂直界線改用 originY，
+// 不再是 0 —— 尺規帶／標題帶裡的一按必須是 null，不能落回 lane 0。
+// ---------------------------------------------------------------------------
+{
+  const doc = { signal: [{ name: 'a', wave: '01' }, { name: 'b', wave: '01' }] };
+  const opts = { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 };
+  const L = G.layoutOf(doc, opts);   // originY 22（無 head），lane0 y=[22,62)
+
+  // 尺規帶正中央：x 落在合法的 cycle 欄位上，但 y 在 originY 之前
+  assert.strictEqual(G.cellAt(L, 70, 10), null, '尺規帶（y<originY）不得回傳格子');
+  assert.strictEqual(G.boundaryAt(L, 70, 10), null, 'boundaryAt 同理：尺規帶不是任何 cell 的邊界');
+
+  // originY 本身的那一刀：originY-0.001 還在尺規帶，originY 已經是 lane 0
+  assert.strictEqual(G.cellAt(L, 70, L.originY - 0.001), null, 'originY 的最後一畫素仍是尺規帶');
+  assert.deepStrictEqual(G.cellAt(L, 70, L.originY), { laneIndex: 0, cycle: 0 },
+    'originY 本身屬於 lane 0（跟格子左緣屬於自己同一條規則）');
+
+  // 帶標題帶的文件：originY 42，lane 0 的上緣也跟著往下推
+  const titledDoc = { signal: [{ name: 'a', wave: '01' }], head: { text: 'T' } };
+  const LT = G.layoutOf(titledDoc, opts);
+  assert.strictEqual(G.cellAt(LT, 70, 30), null, '標題帶（22~42 之間）也不是格子');
+  assert.deepStrictEqual(G.cellAt(LT, 70, LT.originY), { laneIndex: 0, cycle: 0 });
+
+  console.log('wave-geometry: cellAt／boundaryAt 的垂直界線改用 originY — OK');
 }
 
 console.log('wave-geometry.test.js OK');

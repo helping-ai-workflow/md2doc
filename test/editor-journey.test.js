@@ -9986,21 +9986,70 @@ async function main() {
     // landed on the preview column instead, the mousedown listener never fired,
     // and the result was indistinguishable from "the paint refused". Without
     // this flag that is a silently green scenario.
+    //
+    // v3.6.0 Task 6 (ruling R18): this USED to derive lane pitch / cycle pitch
+    // by dividing the SVG's own `getBoundingClientRect()` by a lane/cycle
+    // count — `lh = r.height / laneCount`, `cw = r.width / cycleCount`. That
+    // division is only correct when the SVG's total height/width is made up
+    // ENTIRELY of lane rows / cycle columns and nothing else. Task 6 gave the
+    // canvas a 120px name column (`r.width` now also spans that) and a 22px+
+    // ruler/head band (`r.height` now also spans that), so both divisions
+    // silently produced the wrong pitch the moment this task landed — every
+    // call site pressed in the wrong place, and the failures looked like
+    // unrelated product bugs.
+    //
+    // Fixed the same way Task 5 fixed the same class of bug one fixture
+    // over: stop deriving, start measuring. `wave-draw.js` now publishes the
+    // geometry it actually used as `data-origin-x` / `data-origin-y` /
+    // `data-lane-height` / `data-cycle-width` on the canvas element itself
+    // (written straight from `layout`, never recomputed) — read those
+    // instead of dividing.
+    //
+    // `data-cycle-width` is lane 0's own width, not a diagram-wide constant
+    // (Task 4 made `cycleWidth` per lane via `period`/`hscale`), so this
+    // REFUSES to answer for a document where any other lane's own
+    // `data-cycle-width-<i>` disagrees with it, rather than silently
+    // returning a point that is wrong for that lane. No fixture in this file
+    // sets `period`, so this should never fire; if it does, the fixture is
+    // telling you something true and `cellPoint` is the wrong tool for it.
     const cellPoint = async (page, lane, cycle) => {
       const at = await page.evaluate((l, c) => {
         const svg = document.querySelector('.ed-wave-canvas');
         const wrap = document.querySelector('.ed-wave-canvas-wrap');
         if (!svg || !wrap) return null;
+        const laneCount = Number(svg.getAttribute('data-lane-count'));
+        const cycleWidth0 = Number(svg.getAttribute('data-cycle-width'));
+        for (let i = 0; i < laneCount; i++) {
+          const own = Number(svg.getAttribute('data-cycle-width-' + i));
+          if (own !== cycleWidth0) {
+            return { error: 'mixed cycleWidth across lanes (lane ' + i + ': ' + own +
+              ' vs lane 0: ' + cycleWidth0 + ') — cellPoint only answers for a ' +
+              'document where every lane shares one cycle width' };
+          }
+        }
         const r = svg.getBoundingClientRect();
         const w = wrap.getBoundingClientRect();
-        const lh = r.height / Number(svg.getAttribute('data-lane-count'));
-        const cw = r.width / Number(svg.getAttribute('data-cycle-count'));
-        const x = r.left + c * cw + cw / 2;
-        const y = r.top + l * lh + lh / 2;
+        const originX = Number(svg.getAttribute('data-origin-x'));
+        const originY = Number(svg.getAttribute('data-origin-y'));
+        const laneHeight = Number(svg.getAttribute('data-lane-height'));
+        const cycleWidth = cycleWidth0;
+        // The SVG's viewBox is in the SAME units as the geometry attributes
+        // above (both come straight from `layout`); `getBoundingClientRect()`
+        // is in rendered CSS px. The two only differ under CSS/zoom scaling
+        // of the element itself, which this canvas does not do (`width`/
+        // `height` attributes equal the `viewBox`) — but computing the scale
+        // explicitly, rather than assuming 1, is one line and survives that
+        // changing later.
+        const vb = svg.viewBox.baseVal;
+        const scaleX = vb.width > 0 ? r.width / vb.width : 1;
+        const scaleY = vb.height > 0 ? r.height / vb.height : 1;
+        const x = r.left + (originX + c * cycleWidth + cycleWidth / 2) * scaleX;
+        const y = r.top + (originY + l * laneHeight + laneHeight / 2) * scaleY;
         return { x: x, y: y,
           visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
       }, lane, cycle);
       assert.ok(at, 'cellPoint: 畫布不在畫面上');
+      assert.strictEqual(at.error, undefined, 'cellPoint: ' + at.error);
       assert.strictEqual(at.visible, true,
         'cellPoint: lane ' + lane + ' cycle ' + cycle +
         ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
@@ -12231,15 +12280,22 @@ async function main() {
         await new Promise((r) => setTimeout(r, 150));
         assert.strictEqual(await cell(), '3,4',
           'T8b: Shift+→ 也要把游標帶過去，選取不是獨立於游標的第二個東西');
+        // v3.6.0 Task 6 (same R18 class as `cellPoint`): `width`/count used to
+        // give the right pitch because the canvas had no name column/ruler
+        // band eating into it. Read the measured `data-cycle-width` /
+        // `data-lane-height` / `data-origin-y` instead, and subtract
+        // `originY` before dividing into a lane index — `.ed-wave-selection`
+        // is drawn at `selRow.y` (`wave-draw.js`), which already carries that
+        // offset.
         const span = await ctx.page.evaluate(() => {
           const svg = document.querySelector('.ed-wave-canvas');
           const box = document.querySelector('.ed-wave-selection');
-          const cw = Number(svg.getAttribute('width')) /
-            Number(svg.getAttribute('data-cycle-count'));
+          const cw = Number(svg.getAttribute('data-cycle-width'));
+          const laneHeight = Number(svg.getAttribute('data-lane-height'));
+          const originY = Number(svg.getAttribute('data-origin-y'));
           return box === null ? null : {
             cycles: Number(box.getAttribute('width')) / cw,
-            lane: Number(box.getAttribute('y')) /
-              (Number(svg.getAttribute('height')) / Number(svg.getAttribute('data-lane-count'))),
+            lane: (Number(box.getAttribute('y')) - originY) / laneHeight,
           };
         });
         assert.deepStrictEqual(span, { cycles: 4, lane: 3 },
@@ -12720,17 +12776,21 @@ async function main() {
       }
       await ctx.page.keyboard.up('Shift');
       await new Promise((r) => setTimeout(r, 200));
+      // v3.6.0 Task 6 (R18): same fix as T8b above — measured `data-cycle-
+      // width` / `data-origin-x`, not `width`/count, and `selFrom` has to
+      // subtract `originX` before dividing (`.ed-wave-selection` is drawn at
+      // `selRow.originX + from * selRow.cycleWidth`).
       const state = () => ctx.page.evaluate(() => {
         const svg = document.querySelector('.ed-wave-canvas');
         const box = document.querySelector('.ed-wave-selection');
         const c = document.querySelector('[data-ed-wave-cursor]');
-        const cw = Number(svg.getAttribute('width')) /
-          Number(svg.getAttribute('data-cycle-count'));
+        const cw = Number(svg.getAttribute('data-cycle-width'));
+        const originX = Number(svg.getAttribute('data-origin-x'));
         return {
           cycles: svg.getAttribute('data-cycle-count'),
           cell: c === null ? null : c.getAttribute('data-cell'),
           selCycles: box === null ? 0 : Number(box.getAttribute('width')) / cw,
-          selFrom: box === null ? null : Number(box.getAttribute('x')) / cw,
+          selFrom: box === null ? null : (Number(box.getAttribute('x')) - originX) / cw,
           status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
         };
       });
@@ -13959,15 +14019,22 @@ async function main() {
       const ctx = await newPage(WAVE11_EMPTY_MD);
       await openWave(ctx.page);
 
+      // v3.6.0 Task 6 (R18): `height`/laneCount used to give the right row
+      // pitch AND line up row 0 with `r.top`, because there was no ruler/
+      // head band pushing lane 0 down. Read the measured `data-lane-height`
+      // and subtract the (scaled) `data-origin-y` before dividing, the same
+      // way `cellPoint` above does.
       const marks = await ctx.page.evaluate(() => {
         const svg = document.querySelector('.ed-wave-canvas');
-        const laneHeight = svg.getBoundingClientRect().height /
-          Number(svg.getAttribute('data-lane-count'));
         const r = svg.getBoundingClientRect();
+        const vb = svg.viewBox.baseVal;
+        const scaleY = vb.height > 0 ? r.height / vb.height : 1;
+        const laneHeight = Number(svg.getAttribute('data-lane-height')) * scaleY;
+        const originY = Number(svg.getAttribute('data-origin-y')) * scaleY;
         const rows = new Set();
         for (const el of svg.querySelectorAll('.ed-wave-buslabel')) {
           const b = el.getBoundingClientRect();
-          rows.add(Math.floor((b.top + b.height / 2 - r.top) / laneHeight));
+          rows.add(Math.floor((b.top + b.height / 2 - r.top - originY) / laneHeight));
         }
         return Array.from(rows);
       });
