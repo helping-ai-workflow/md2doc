@@ -635,6 +635,15 @@ const FLAT = {
   assert.strictEqual(edges[0].from.x, a0.x);
   assert.strictEqual(edges[0].from.y, a0.y);
 
+  // fix round 1：上面那兩條只證明 edgeLayoutDetail 把參數傳對了（兩邊都呼叫
+  // 同一顆 anchorOfCell，證不出算式本身對不對）。這裡另外手算一次——不透過
+  // anchorOfCell／cellRect，只用 DEFAULTS（laneHeight 30、cycleWidth 40、
+  // nameColWidth 40）跟 SKIN_METRICS.anchorRatio 這個常數——把數字釘死。
+  assert.strictEqual(edges[0].from.x, 40 + 1 * 40 + G.SKIN_METRICS.anchorRatio * 40,
+    '手算：nameColWidth(40) + cycle 1 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 86');
+  assert.strictEqual(edges[0].from.y, 0 * 30 + 30 / 2,
+    '手算：lane 0 的列中心 y = 0*laneHeight(30) + laneHeight/2 = 15');
+
   assert.ok(typeof edges[0].d === 'string' && edges[0].d.charAt(0) === 'M',
     'path 必須是 SVG d 字串');
 
@@ -682,6 +691,14 @@ const FLAT = {
   assert.strictEqual(edges[0].from.y, a0.y);
   assert.strictEqual(edges[0].to.x, a1.x);
   assert.strictEqual(edges[0].to.y, a1.y);
+
+  // fix round 1：同樣手算一次，不透過 anchorOfCell／cellRect。
+  assert.strictEqual(edges[0].from.x, 40 + 1 * 40 + G.SKIN_METRICS.anchorRatio * 40,
+    '手算：nameColWidth(40) + cycle 1 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 86');
+  assert.strictEqual(edges[0].from.y, 0 * 30 + 30 / 2, '手算：lane 0 的列中心 y = 15');
+  assert.strictEqual(edges[0].to.x, 40 + 3 * 40 + G.SKIN_METRICS.anchorRatio * 40,
+    '手算：nameColWidth(40) + cycle 3 * cycleWidth(40) + anchorRatio(0.15) * cycleWidth(40) = 166');
+  assert.strictEqual(edges[0].to.y, 1 * 30 + 30 / 2, '手算：lane 1 的列中心 y = 45');
 
   console.log('wave-geometry: 壞掉的 edge 被跳過，兄弟 edge 的原始 index 與端點都還在 — OK');
 }
@@ -919,12 +936,23 @@ const FLAT = {
 //   (a) 每一個非 null 的 cellRect(L,i,c) 都整個落在 [0, layout.width] 之內；
 //   (b) cellRect(L,i,c) !== null 若且唯若 cellAt(該格中心) 精確回 {i,c}；
 //   (c) 均勻文件（每條 lane period 1 / phase 0 / hscale 1）可觸及的 cycle
-//       範圍跟今天一樣，一格不少一格不多。
+//       範圍跟今天一樣，一格不少一格不多；
+//   (d)（v3.6.0 Task 5 fix round 1）對任何 `(x, y)`，若 `boundaryAt` 回傳
+//       `{laneIndex, cell}`，`cellRect(layout, laneIndex, cell)` 必須不是
+//       null——`boundaryAt` 給出的答案不准比 `cellRect` 認得的範圍寬。
 //
 // 用矩陣而不是單一 fixture 驗證：上一輪正是「只有一組 fixture」才讓 Critical
 // 那個缺陷混進來。矩陣涵蓋：均勻／混合 period（含一條每格明顯比別人寬的）／
 // 正負 phase（含一個大到把 originX 推成負值的）／hscale≠1（含需要 R15 四捨
 // 五入的小數），而且每一種都在整數與小數尺寸下各跑一次。
+//
+// (d) 本身也是同一個教訓的重複：Task 5 fix round 1 的 Critical 正是
+// `boundaryAt` 只顧到 `reachOf` 那一邊（右界），漏掉 `cellRect` 另外還判的
+// 左緣（`phase` 把 `originX` 推成負值時）——而第一版的 `boundaryAt` 測試只
+// 挑了矩陣裡「混合 period」那組不帶 `phase` 的 fixture，天生碰不到左緣那條
+// 路徑。這裡把 (d) 併進 `verifyInvariant` 本身，讓它跟著 (a)(b)(c) 掃過同一份
+// 矩陣（含帶 `phase` 的那組、含 `huge` 那條 `originX` 是負的 lane），而不是
+// 另外挑一個 fixture——挑 fixture 正是上一輪漏掉這個缺陷的原因。
 // ---------------------------------------------------------------------------
 {
   function verifyInvariant(L, label, uniformExpectedCycles) {
@@ -963,6 +991,18 @@ const FLAT = {
         // 一格不多：均勻文件下每條 lane 的可觸及範圍跟 layout.cycles 對齊
         assert.strictEqual(G.cellRect(L, lane, uniformExpectedCycles), null,
           label + '：均勻文件超出 layout.cycles 的那一格必須是 null');
+      }
+
+      // (d) boundaryAt 的答案不准比 cellRect 寬：掃過畫面外到畫面外，每一個
+      // x 都要驗。範圍取 layout.width 左右各加 200px，確保掃得到 phase 造成
+      // 的負 originX 那一段，也掃得到 reach 之外的右邊。
+      const cy2 = row.y + row.height / 2;
+      for (let x = -200; x <= L.width + 200; x += 1) {
+        const b = G.boundaryAt(L, x, cy2);
+        if (b === null) continue;
+        assert.notStrictEqual(G.cellRect(L, b.laneIndex, b.cell), null,
+          label + '：lane ' + lane + ' x=' + x + ' boundaryAt 回傳的 cell 必須有 cellRect（' +
+          JSON.stringify(b) + '）');
       }
     }
   }
@@ -1131,44 +1171,12 @@ const FLAT = {
   console.log('wave-geometry: 錨點/最近邊界/轉態列舉 — OK');
 }
 
-// ---------------------------------------------------------------------------
-// v3.6.0 Task 5：`boundaryAt` 的界不准比 `cellRect` 寬——用 R14 那組矩陣本身
-// 而不是第三份 fixture。矩陣裡每一個 lane 都有自己的 period/phase/hscale，
-// 正是「boundaryAt 用 layout.cycles 當界會超出這條 lane 自己的 reach」那個
-// 缺陷類別會露餡的地方：混合 period 那組本來就有一條比別人窄很多的 lane。
-// ---------------------------------------------------------------------------
-{
-  const doc = {
-    signal: [
-      { name: 'a', wave: '01010101' },
-      { name: 'wide', wave: '01', period: 6 },
-      { name: 'narrow', wave: '0101010101010101', period: 0.5 },
-    ],
-  };
-  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
-
-  for (let lane = 0; lane < L.lanes.length; lane++) {
-    const row = L.lanes[lane];
-    // 遠遠超出這條 lane 自己的 reach（但還在畫面高度以內）也不准回一個
-    // `cellRect` 會判成 null 的 cell。
-    const far = G.boundaryAt(L, row.originX + 999 * row.cycleWidth, row.y + row.height / 2);
-    assert.ok(far !== null, 'lane ' + lane + '：遠遠超出範圍時 boundaryAt 仍要夾回界內');
-    assert.notStrictEqual(G.cellRect(L, far.laneIndex, far.cell), null,
-      'lane ' + lane + '：boundaryAt 回傳的 cell 必須是 cellRect 認得的格子（' +
-      JSON.stringify(far) + '）');
-
-    // 反過來：boundaryAt 找得到的每一個 cell，cellRect 對它都不准是 null。
-    for (let probe = 0; probe < row.cycles + 4; probe++) {
-      const x = row.originX + probe * row.cycleWidth + G.SKIN_METRICS.anchorRatio * row.cycleWidth;
-      const hit = G.boundaryAt(L, x, row.y + row.height / 2);
-      if (hit === null) continue;
-      assert.notStrictEqual(G.cellRect(L, hit.laneIndex, hit.cell), null,
-        'lane ' + lane + ' probe ' + probe + '：boundaryAt 給出的 cell 必須有 cellRect');
-    }
-  }
-
-  console.log('wave-geometry: boundaryAt 的界不准比 cellRect 寬 — OK');
-}
+// v3.6.0 Task 5 fix round 1：`boundaryAt` 的界不准比 `cellRect` 寬（R14 (d)）
+// 這件事，原本只挑了 R14 矩陣裡「混合 period」那組不帶 `phase` 的 fixture，
+// 碰不到 `originX` 被 `phase` 推成負值的左緣缺陷（見 Critical 修復紀錄）。
+// 現在併進上面 R14 的 `verifyInvariant`（(d) 那一段），對整個矩陣（均勻／
+// 混合 period／phase，含 `huge` 那條負 `originX` 的／hscale≠1）逐 x 掃描，
+// 不再另外挑一組 fixture——不變量測試禁不起「只測一種輸入形狀」。
 
 // ---------------------------------------------------------------------------
 // v3.6.0 Task 5：`boundaryAt` 取最近，`cellAt` 用 floor——兩者故意不同，
