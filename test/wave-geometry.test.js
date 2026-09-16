@@ -821,4 +821,47 @@ const FLAT = {
   console.log('wave-geometry: SKIN_METRICS 是 pin 住的常數，且跟引擎逐值相符 — OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 4：period / phase / config.hscale 進入 layout
+// ---------------------------------------------------------------------------
+{
+  const doc = {
+    signal: [
+      { name: 'a', wave: '0101' },
+      { name: 'b', wave: '0101', period: 2 },
+      { name: 'c', wave: '0101', phase: 0.5 },
+    ],
+    config: { hscale: 2 },
+  };
+  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
+
+  assert.strictEqual(L.hscale, 2, 'config.hscale 進 layout');
+
+  // base 20 × hscale 2 = 40
+  assert.strictEqual(L.lanes[0].cycleWidth, 40, '沒有 period 的 lane 只吃 hscale');
+  // base 20 × period 2 × hscale 2 = 80
+  assert.strictEqual(L.lanes[1].cycleWidth, 80, 'period 再乘上去');
+  assert.strictEqual(L.lanes[2].cycleWidth, 40, 'phase 不改變格寬');
+
+  // phase 不乘 hscale（引擎如此：xs*(2*i*period*hscale - phase)）
+  assert.strictEqual(L.lanes[0].originX, 60, '沒有 phase 就是名稱欄右緣');
+  assert.strictEqual(L.lanes[2].originX, 60 - 20 * 0.5, 'phase 位移用的是 base，不乘 hscale');
+
+  // cellRect 用該 lane 自己的格寬
+  assert.strictEqual(G.cellRect(L, 1, 1).x, 60 + 1 * 80, 'period 2 的 lane 第 1 格在 80 之後');
+  assert.strictEqual(G.cellRect(L, 1, 1).width, 80);
+
+  // 往返性質仍成立（既有測試釘住的性質，不得因 per-lane 而破）
+  for (let lane = 0; lane < 3; lane++) {
+    for (let cyc = 0; cyc < L.lanes[lane].cycles; cyc++) {
+      const r = G.cellRect(L, lane, cyc);
+      const hit = G.cellAt(L, r.x + r.width / 2, r.y + r.height / 2);
+      assert.deepStrictEqual(hit, { laneIndex: lane, cycle: cyc },
+        'per-lane 之後往返仍成立：lane=' + lane + ' cycle=' + cyc);
+    }
+  }
+
+  console.log('wave-geometry: period/phase/hscale 進入 per-lane 幾何 — OK');
+}
+
 console.log('wave-geometry.test.js OK');
