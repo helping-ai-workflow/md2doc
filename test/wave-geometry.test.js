@@ -390,6 +390,17 @@ const FLAT = {
 {
   // 決定性的小數 fuzz：6 lane × 8 cycle × 200 組尺寸 = 9600 格，
   // 每一格都檢查中心、左上角、以及右緣屬於下一格。
+  //
+  // v3.6.0 Task 4 fix round 1（Important）：每條 lane 現在都額外帶非 1 的
+  // fractional period、非 0 的正負 phase，每組尺寸也各自帶一個 config.hscale
+  // ——`originX = nameColWidth - cycleWidth*phase` 是全新的減法，减法與除法
+  // 在小數尺寸下捨入的方向不同，這個 fuzz 存在的理由正是要抓這個，不能讓它
+  // 繼續只測 period=1/phase=0/hscale=1 的舊路徑。phase 的範圍刻意按這條 lane
+  // 自己的 cycleWidth 與 nameColWidth 換算，保證 originX 不會被推成負值 ——
+  // 「originX 是負的」是刻意的另一種情境，R14 矩陣那組測試已經專門測過，這裡
+  // 的職責只是替既有的邊界精度檢查換上非 1/0/1 的算式，兩者不混在一起。
+  // lane 數、trial 數、每個 lane 的 cycle 數（wave 字串長度，不受 period 影響）
+  // 都維持原樣，所以下面 `cells === 9600` 這個釘住的數字不必重新量。
   let seed = 20260912;
   const rnd = function () {
     seed ^= seed << 13; seed |= 0;
@@ -397,8 +408,6 @@ const FLAT = {
     seed ^= seed << 5; seed |= 0;
     return ((seed >>> 0) % 1000000) / 1000000;
   };
-  const doc = { signal: [] };
-  for (let i = 0; i < 6; i++) doc.signal.push({ name: 'l' + i, wave: '01010101' });
 
   let cells = 0, centreMiss = 0, leftEdgeMiss = 0, topEdgeMiss = 0, nextMiss = 0, farMiss = 0;
   let firstBad = null;
@@ -408,6 +417,19 @@ const FLAT = {
       cycleWidth: 1 + rnd() * 40,
       nameColWidth: 1 + rnd() * 40,
     };
+    const rawHscale = 0.5 + rnd() * 4;
+    // 保守估計引擎正規化後的 hscale 上界（R15 是 round 再 clamp，這裡故意抓
+    // 得比真正的結果更大），只用來把 phase 的安全範圍算得夠窄，不是在複製
+    // production 的正規化邏輯。
+    const hscaleBound = Math.ceil(rawHscale) + 1;
+    const doc = { signal: [], config: { hscale: rawHscale } };
+    for (let i = 0; i < 6; i++) {
+      const period = 0.4 + rnd() * 3.6;
+      const laneCycleWidthBound = opts.cycleWidth * period * hscaleBound;
+      const maxPhase = opts.nameColWidth / laneCycleWidthBound;
+      const phase = (rnd() * 2 - 1) * maxPhase;
+      doc.signal.push({ name: 'l' + i, wave: '01010101', period: period, phase: phase });
+    }
     const L = G.layoutOf(doc, opts);
     for (let lane = 0; lane < L.lanes.length; lane++) {
       for (let cyc = 0; cyc < L.cycles; cyc++) {
@@ -862,6 +884,194 @@ const FLAT = {
   }
 
   console.log('wave-geometry: period/phase/hscale 進入 per-lane 幾何 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 4 fix round 1 — Critical repro：短 lane 的「往後畫一格」affordance
+// 曾經拿「整張圖的 cycle 數」（layout.cycles）乘上「這條 lane 自己的
+// cycleWidth」當作右邊界，兩者只有在所有 lane 共用同一個 cycleWidth 時才會
+// 恰好一致；period 一旦不同，這條線就會超出 layout.width。逐字照抄 controller
+// 的重現。
+// ---------------------------------------------------------------------------
+{
+  const doc = {
+    signal: [
+      { name: 'a', wave: '01010' },
+      { name: 'b', wave: '01', period: 3 },
+    ],
+  };
+  const L = G.layoutOf(doc, { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 });
+  assert.strictEqual(L.width, 180);
+  assert.strictEqual(L.cycles, 5);
+
+  assert.strictEqual(G.cellRect(L, 1, 4), null,
+    'lane 1（period 3）自己的格寬乘上整張圖的 cycle 數會超出 layout.width（180），必須是 null');
+  assert.strictEqual(G.cellAt(L, 330, 60), null,
+    '330 已經在 layout.width(180) 外面，不准命中任何格子');
+
+  console.log('wave-geometry: fix round 1 Critical 重現已修（period 不再讓格子跑出 layout.width）— OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 4 fix round 1 — R14：控制器給的是不變量，不是算式。
+//
+//   (a) 每一個非 null 的 cellRect(L,i,c) 都整個落在 [0, layout.width] 之內；
+//   (b) cellRect(L,i,c) !== null 若且唯若 cellAt(該格中心) 精確回 {i,c}；
+//   (c) 均勻文件（每條 lane period 1 / phase 0 / hscale 1）可觸及的 cycle
+//       範圍跟今天一樣，一格不少一格不多。
+//
+// 用矩陣而不是單一 fixture 驗證：上一輪正是「只有一組 fixture」才讓 Critical
+// 那個缺陷混進來。矩陣涵蓋：均勻／混合 period（含一條每格明顯比別人寬的）／
+// 正負 phase（含一個大到把 originX 推成負值的）／hscale≠1（含需要 R15 四捨
+// 五入的小數），而且每一種都在整數與小數尺寸下各跑一次。
+// ---------------------------------------------------------------------------
+{
+  function verifyInvariant(L, label, uniformExpectedCycles) {
+    for (let lane = 0; lane < L.lanes.length; lane++) {
+      const row = L.lanes[lane];
+      const probe = (uniformExpectedCycles === undefined ? 0 : uniformExpectedCycles) + 24;
+      for (let cyc = 0; cyc < probe; cyc++) {
+        const r = G.cellRect(L, lane, cyc);
+        if (r !== null) {
+          // (a) 整個矩形都要落在 [0, layout.width] 之內
+          assert.ok(r.x >= 0, label + '：lane ' + lane + ' cyc ' + cyc +
+            ' 的左緣不准是負的 —— ' + JSON.stringify(r));
+          assert.ok(r.x + r.width <= L.width, label + '：lane ' + lane + ' cyc ' + cyc +
+            ' 的右緣不准超出 layout.width（' + L.width + '）—— ' + JSON.stringify(r));
+          // (b) 正向：非 null 的格子，中心點必須 hit 回自己
+          const hit = G.cellAt(L, r.x + r.width / 2, r.y + r.height / 2);
+          assert.deepStrictEqual(hit, { laneIndex: lane, cycle: cyc },
+            label + '：lane ' + lane + ' cyc ' + cyc + ' 中心必須 hit 回自己');
+        } else {
+          // (b) 反向：cellRect 說沒有這一格，用跟 cellRect 同一條公開算式手算出
+          // 它「本來會在哪裡」，那個位置的中心點不准被判成這一格。
+          const x = row.originX + cyc * row.cycleWidth;
+          const cx = x + row.cycleWidth / 2;
+          const cy = row.y + row.height / 2;
+          const hit = G.cellAt(L, cx, cy);
+          assert.notDeepStrictEqual(hit, { laneIndex: lane, cycle: cyc },
+            label + '：lane ' + lane + ' cyc ' + cyc + ' 沒有格子，不准被 hit 到');
+        }
+      }
+      if (uniformExpectedCycles !== undefined) {
+        // (c) 均勻文件：0..cycles-1 一格不少
+        for (let cyc = 0; cyc < uniformExpectedCycles; cyc++) {
+          assert.notStrictEqual(G.cellRect(L, lane, cyc), null,
+            label + '：均勻文件的 lane ' + lane + ' cyc ' + cyc + ' 必須可以觸及（今天就可以）');
+        }
+        // 一格不多：均勻文件下每條 lane 的可觸及範圍跟 layout.cycles 對齊
+        assert.strictEqual(G.cellRect(L, lane, uniformExpectedCycles), null,
+          label + '：均勻文件超出 layout.cycles 的那一格必須是 null');
+      }
+    }
+  }
+
+  const SIZE_SETS = [
+    { label: '整數尺寸', opts: { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 } },
+    { label: '小數尺寸', opts: { laneHeight: 13.7, cycleWidth: 7.3, nameColWidth: 41.9 } },
+  ];
+
+  for (const size of SIZE_SETS) {
+    // 均勻：period 1 / phase 0 / hscale 1（三個欄位都沒設定）
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'b', wave: '01010101' },
+          { name: 'c', wave: '01010101' },
+        ],
+      };
+      const L = G.layoutOf(doc, size.opts);
+      verifyInvariant(L, size.label + '／均勻', 8);
+    }
+
+    // 混合 period：一條每格明顯比別人寬（period 6），一條比別人窄（period 0.5）
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'wide', wave: '01', period: 6 },
+          { name: 'narrow', wave: '0101010101010101', period: 0.5 },
+        ],
+      };
+      const L = G.layoutOf(doc, size.opts);
+      verifyInvariant(L, size.label + '／mixed period');
+    }
+
+    // phase：正、負，以及一個大到會把 originX 推成負值的
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'pos', wave: '01010101', phase: 1.5 },
+          { name: 'neg', wave: '01010101', phase: -1.5 },
+          { name: 'huge', wave: '01010101', phase: 10 },
+        ],
+      };
+      const L = G.layoutOf(doc, size.opts);
+      verifyInvariant(L, size.label + '／phase');
+      // huge 那條：這裡的 nameColWidth 遠小於 cycleWidth*10，originX 必須是
+      // 負的 —— 直接斷言，證明左緣的 null 化真的有在跑，不是矩陣裡的死碼。
+      const hugeRow = L.lanes[3];
+      assert.ok(hugeRow.originX < 0,
+        size.label + '／phase：huge 的 originX 必須是負的，矩陣才真的測到左緣');
+    }
+
+    // config.hscale ≠ 1，含需要 R15 四捨五入的小數
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'b', wave: '01010101', period: 2 },
+          { name: 'c', wave: '01010101', phase: 0.5 },
+        ],
+        config: { hscale: 2.5 },
+      };
+      const L = G.layoutOf(doc, size.opts);
+      verifyInvariant(L, size.label + '／hscale 2.5');
+    }
+  }
+
+  console.log('wave-geometry: R14 三條不變量在 period/phase/hscale 矩陣下成立 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 4 fix round 1 — R15：config.hscale 比照引擎的正規化
+// （node_modules/wavedrom/lib/parse-config.js 的 `tonumber` + 再次 round +
+// clamp ≤100），否則畫布跟預覽對不上，正是這個版本要清掉的那類缺陷。
+// ---------------------------------------------------------------------------
+{
+  const mk = function (hscale) {
+    return {
+      signal: [
+        { name: 'a', wave: '0101' },
+        { name: 'b', wave: '0101', period: 2, phase: 0.5 },
+      ],
+      config: { hscale: hscale },
+    };
+  };
+  const opts = { laneHeight: 40, cycleWidth: 20, nameColWidth: 60 };
+
+  const L25 = G.layoutOf(mk(2.5), opts);
+  const L3 = G.layoutOf(mk(3), opts);
+  assert.strictEqual(L25.hscale, 3, 'hscale:2.5 必須跟引擎一樣四捨五入成 3');
+  assert.deepStrictEqual(L25.lanes.map(function (l) { return l.cycleWidth; }),
+    L3.lanes.map(function (l) { return l.cycleWidth; }),
+    'hscale:2.5 產生的幾何必須跟 hscale:3 逐值相同');
+  assert.deepStrictEqual(L25.lanes.map(function (l) { return l.originX; }),
+    L3.lanes.map(function (l) { return l.originX; }));
+  assert.strictEqual(L25.width, L3.width);
+
+  const L250 = G.layoutOf(mk(250), opts);
+  assert.strictEqual(L250.hscale, 100, 'hscale:250 必須 clamp 到 100');
+
+  // 邊界：四捨五入後 <=0 的，引擎當成沒設定，用預設 1
+  assert.strictEqual(G.layoutOf(mk(0.4), opts).hscale, 1,
+    '四捨五入後是 0 的，引擎當作沒設定，用預設 1');
+  assert.strictEqual(G.layoutOf(mk(-5), opts).hscale, 1, '負的 hscale 引擎當成 1');
+  assert.strictEqual(G.layoutOf(mk(0), opts).hscale, 1);
+
+  console.log('wave-geometry: config.hscale 的四捨五入／clamp 跟引擎逐值一致（R15）— OK');
 }
 
 console.log('wave-geometry.test.js OK');
