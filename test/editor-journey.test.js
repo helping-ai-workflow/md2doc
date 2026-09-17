@@ -14711,6 +14711,55 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 工具列八個分區與按鈕數 — OK');
     }
+
+    // ── v3.6.0 Task 13: 右欄五面板 ─────────────────────────────────────────
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const sections = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-side .ed-wave-section')].map((s) => ({
+          key: s.getAttribute('data-section'),
+          open: s.hasAttribute('data-open'),
+          title: s.querySelector('.ed-wave-section-title').textContent,
+        })));
+
+      assert.deepStrictEqual(sections.map((s) => s.key),
+        ['edge', 'document', 'lane', 'preview', 'source'],
+        '五個面板，順序固定');
+      assert.deepStrictEqual(sections.map((s) => s.open),
+        [true, true, true, false, false],
+        'preview 與 source 預設摺疊');
+
+      // document 面板要有全部八個 banner 欄位 + hscale
+      const docFields = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('[data-section="document"] input')]
+          .map((i) => i.getAttribute('data-field')));
+      assert.deepStrictEqual(docFields,
+        ['head.text', 'head.tick', 'head.tock', 'head.every',
+          'foot.text', 'foot.tick', 'foot.tock', 'foot.every', 'config.hscale'],
+        '九個欄位：八個 banner + hscale');
+
+      // lane 面板兩個欄位（period/phase），未選取任何 cycle 時 disabled
+      const laneFields = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('[data-section="lane"] input')].map((i) => ({
+          field: i.getAttribute('data-field'), disabled: i.disabled,
+        })));
+      assert.deepStrictEqual(laneFields,
+        [{ field: 'period', disabled: true }, { field: 'phase', disabled: true }],
+        'Lane 面板兩個欄位，未選取 cycle 時 disabled');
+
+      // source 面板的文字必須跟寫回去的 bytes 相同
+      const same = await ctx.page.evaluate(() => {
+        const el = document.querySelector('[data-section="source"] .ed-wave-source');
+        return el.textContent === window.__edWaveSourceProbe();
+      });
+      assert.strictEqual(same, true, 'source 面板必須是 writeBack 的輸出');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 13: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 右欄五面板、九個欄位、source 與寫回一致 — OK');
+    }
   }
 
   await browser.close();
