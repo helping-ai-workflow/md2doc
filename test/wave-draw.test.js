@@ -268,4 +268,85 @@ function makeDrawer() {
   console.log('wave-draw: 畫布自己畫出 lane 與群組名稱 — OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 9：8 個 banner 欄位都畫得出來
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = {
+    signal: [{ name: 'a', wave: '0101' }],
+    head: { text: 'title', tick: 0 },
+    foot: { tock: 5, every: 2 },
+  };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  // The brief's own snippet passes `{}` for state, which `renderCanvas` (see
+  // Task 8's own fixture above) crashes on before any assertion is reached —
+  // same fix, `fakeCanvasState()` instead of `{}`.
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const byClass = {};
+  (function walk(n) {
+    const c = n.attrs && n.attrs.class;
+    if (c) { byClass[c] = byClass[c] || []; byClass[c].push(n); }
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  assert.strictEqual((byClass['ed-wave-head-text'] || []).length, 1, 'head.text 一個');
+  // tick 落在邊界，cycleCount + 1 個
+  assert.strictEqual((byClass['ed-wave-ruler-tick'] || []).length, 5,
+    'head.tick 是 cycles + 1 個邊界刻度');
+  // foot.tock 落在格中心，every 2 → 每兩格一個
+  assert.strictEqual((byClass['ed-wave-ruler-tock'] || []).length, 2,
+    'foot.tock 配 every=2 → 4 格畫 2 個');
+
+  // 邊界刻度的 x 必須在 cell 左緣，不是中心
+  const t0 = byClass['ed-wave-ruler-tick'][0];
+  assert.strictEqual(Number(t0.attrs.x), G.cellRect(L, 0, 0).x, 'tick 對齊邊界');
+
+  console.log('wave-draw: 尺規的 tick/tock/every 與 head/foot 文字 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 9 fix round 1: `every` 錨在 (index + base)，不是裸 index
+//
+// MEASURED against `node_modules/wavedrom` 3.5.0's `render-marks.js`
+// `ticktock()`: the filter is `(i + offset) % cxt[ref1].every`, where
+// `offset` is the SAME base the label values themselves are built from
+// (`Number(val)` off `head.tick`/`head.tock`) — not a bare `i % every`. Live
+// render, `{signal:[{name:'a',wave:'0101'}],head:{tick:3,every:2}}`, dumped
+// `gmarks_0`: only two `<text>` nodes survive, `"4"` at x=40 and `"6"` at
+// x=120 (i.e. i=1 and i=3 — `(1+3)%2===0`, `(3+3)%2===0`; i=0,2,4 all drop,
+// `(0+3)%2===1` etc). A `c % every` implementation keeps i=0,2,4 instead —
+// three ticks, values 3/5/7, not two ticks, values 4/6 — same COUNT as this
+// fixture's `tock` case above happens to hide (every=2 splits either
+// parity into exactly half when `len` is a multiple of `every`), but a
+// different actual answer, which is why this needs its own case pinned on
+// VALUES, not just a count.
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = {
+    signal: [{ name: 'a', wave: '0101' }],
+    head: { tick: 3, every: 2 },
+  };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const ticks = [];
+  (function walk(n) {
+    if (n.attrs && n.attrs.class === 'ed-wave-ruler-tick') ticks.push(n);
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  const values = ticks.map(function (t) {
+    return (t.children[0] && t.children[0].text) || '';
+  });
+  assert.deepStrictEqual(values, ['4', '6'],
+    'every 要錨在 (index+base)，跟引擎的 gmarks_0 量到的一致：' + JSON.stringify(values));
+
+  console.log('wave-draw: every 錨在 (index+base)，不是裸 index — OK');
+}
+
 console.log('wave-draw.test.js OK');
