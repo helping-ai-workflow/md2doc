@@ -206,7 +206,16 @@ The `<style>` block is built inside a template literal, so **a backtick anywhere
 comment you add there breaks the whole file** — and the break is a syntax error far from
 where you typed it. This bit v3.5.0 twice, in two different tasks.
 
-Run `node --check lib/md2doc.js` before every commit that touches that file. It is also
+**`node --check` does NOT catch it.** A stray backtick usually closes the literal early
+and leaves something that still PARSES — the file is valid JavaScript that means a
+different thing, and the damage only appears when the renderer runs. v3.6.0's Task 10 shipped
+exactly that: `node --check` clean, then `renderMarkdown` died at runtime with
+`wave is not defined`.
+
+So the check is not a syntax check. Either render a real document
+(`node bin/md2doc.js some.md` and confirm it exits 0 and writes the HTML), or count the
+backticks in the file and confirm the total is unchanged from the previous commit — a
+correct edit to a CSS comment never changes that count. It is also
 where every `.ed-wave-*` rule lives: visual properties (stroke, fill, opacity, dashes)
 belong there as CSS classes, not as inline SVG attributes — a renderer with two styling
 mechanisms means the next person changing colours edits one and silently misses the
