@@ -10414,9 +10414,30 @@ async function main() {
           // bound on `x0` would wrongly drop exactly that brick. A bound on
           // the shape's own centre only drops something the grid's first
           // line runs through or past the MIDDLE of, which a real brick
-          // straddling the name-column edge under phase is not (see the
-          // probe in task-8-report.md — no fixture in this suite currently
-          // reaches that case, checked directly).
+          // straddling the name-column edge under phase is not.
+          //
+          // v3.6.0 Task 8 fix round 2 (review): the exact residual, worked
+          // through `originX = nameColWidth - cycleWidth * phase` and a
+          // first run of `k` cycles spanning `[originX, originX +
+          // k*cycleWidth]`:
+          //
+          //     x0     >= gridXs[0]  iff  phase <= 0
+          //     centre >= gridXs[0]  iff  phase <= k/2
+          //
+          // So `x0` would drop a legitimate first brick for ANY positive
+          // phase — which is why centre is the right bound, not x0 — but
+          // centre is not exempt either: once `phase` exceeds `k/2` (worst
+          // case `phase > 0.5` for a single-cycle first run), the centre
+          // itself crosses left of `gridXs[0]` and this bound drops a real
+          // brick too. No fixture in this suite reaches that today, and not
+          // by accident: `bricks()` (this whole comparison) is only ever
+          // called against `WAVE_MD` and its edited/emptied forms, none of
+          // which set `period`/`phase`/`hscale` on any lane, and this
+          // block's own pre-assertion (`got.unmodelled === ''`, a few lines
+          // below) would fail first and stop the run before this bound was
+          // ever exercised on such a document. A future T6b fixture that
+          // adds `phase` needs `got.unmodelled` widened before it gets
+          // here — and needs this residual re-examined once it does.
           //
           // v3.6.0 Task 6 fix round 1 (R19): `rowH = gridBottom / laneCount`
           // and `top = i * rowH` used to be exact because lane 0's band
