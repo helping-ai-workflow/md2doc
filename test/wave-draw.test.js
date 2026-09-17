@@ -493,4 +493,120 @@ function makeDrawer() {
   console.log('wave-draw: hscale 讓 grid 跟尺規共用同一個乘了 hscale 的 pitch（R30）— OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 10：電位圖示重用 brick 繪製，不是第二套實作
+//
+// `BRUSHES` 是 22 個（brief 的 roster，跟 wave-ui.js 自己的常數與
+// wave-codec.test.js 的 isBrushKey 斷言同一份字面值）。每個都要有圖示，
+// 而且圖示的線條必須來自跟畫布同一批函式 —— 不是為了工具列另外手畫一套。
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const BRUSHES = ['0', '1', 'x', 'z', 'p', 'n', 'P', 'N', 'h', 'l', 'u', 'd',
+    '=', '2', '3', '4', '5', '6', '7', '8', '9', '|'];
+  assert.strictEqual(BRUSHES.length, 22, '筆刷 roster 是 22 個');
+
+  function collectTag(node, tag) {
+    const out = [];
+    (function walk(n) {
+      if (n.tag === tag) out.push(n);
+      (n.children || []).forEach(walk);
+    })(node);
+    return out;
+  }
+
+  for (const ch of BRUSHES) {
+    const icon = drawer.levelIcon(ch);
+    assert.ok(icon !== null && icon.tag === 'svg', ch + ' 必須有圖示');
+    assert.strictEqual(icon.attrs.width, '24', ch + ' 寬度必須是 24');
+    assert.strictEqual(icon.attrs.height, '16', ch + ' 高度必須是 16');
+    const paths = collectTag(icon, 'path');
+    assert.ok(paths.length > 0, ch + ' 的圖示必須含至少一個 path');
+  }
+
+  // 圖示的 path 必須跟 brickPath 同一個來源：'1' 的平坦圖示應等於
+  // brickPath('1','1',24,16) 的形狀 —— brief Step 1 原文釘住的那一條。
+  {
+    const icon = drawer.levelIcon('1');
+    const paths = collectTag(icon, 'path');
+    assert.strictEqual(paths[0].attrs.d, drawer.brickPath('1', '1', 24, 16),
+      '\'1\' 的圖示必須重用 brickPath，不得另寫一套');
+  }
+
+  // `u`/`d` 是這個 task 真正的地雷（brief item 4/5）：brickPath 自己的
+  // yFor 只認得 000/111 的兩個端點字元，'u'/'d' 原封不動丟進去會落在
+  // yFor 的預設分支（mid），跟畫布上 bandOf 把 uuu 畫在 hi、ddd 畫在 lo
+  // 不一致 —— 圖示必須是「跟畫布同一個高度」，不是 brickPath 對生字元的
+  // 巧合結果。所以這裡直接釘住：'u' 的圖示必須等於 brickPath('1','1',…)
+  // （跟 bandOf('uuu') === [hi,hi] 同一個高度），'d' 必須等於
+  // brickPath('0','0',…)（跟 bandOf('ddd') === [lo,lo] 同一個高度）。
+  {
+    const uIcon = drawer.levelIcon('u');
+    const uPaths = collectTag(uIcon, 'path');
+    assert.strictEqual(uPaths[0].attrs.d, drawer.brickPath('1', '1', 24, 16),
+      'u 的圖示高度必須跟畫布的 bandOf(uuu)=hi 一致，不是 yFor 的預設 mid：' +
+      JSON.stringify(uPaths[0].attrs.d));
+    assert.strictEqual(uPaths[0].attrs.class.indexOf('ed-wave-weak') !== -1, true,
+      'u 在畫布上是虛線（ed-wave-weak），圖示要跟畫布一致');
+
+    const dIcon = drawer.levelIcon('d');
+    const dPaths = collectTag(dIcon, 'path');
+    assert.strictEqual(dPaths[0].attrs.d, drawer.brickPath('0', '0', 24, 16),
+      'd 的圖示高度必須跟畫布的 bandOf(ddd)=lo 一致，不是 yFor 的預設 mid：' +
+      JSON.stringify(dPaths[0].attrs.d));
+  }
+
+  // bus（'='、'2'-'9'）不是平線 —— 圖示必須帶跟畫布相同的 bus class（六邊形
+  // 的來源跟畫布共用），才不會淪為「看起來像平線」的地雷（brief item 6）。
+  {
+    for (const ch of ['=', '2', '3', '4', '5', '6', '7', '8', '9']) {
+      const icon = drawer.levelIcon(ch);
+      const busShapes = collectTag(icon, 'path').filter(function (p) {
+        return typeof p.attrs.class === 'string' && p.attrs.class.indexOf('ed-wave-bus') !== -1;
+      });
+      assert.ok(busShapes.length > 0, ch + ' 的圖示必須有 ed-wave-bus 形狀，不是平線');
+    }
+  }
+
+  // xxx 也不是平線 —— 圖示必須帶 ed-wave-x。
+  {
+    const icon = drawer.levelIcon('x');
+    const xShapes = collectTag(icon, 'path').filter(function (p) {
+      return typeof p.attrs.class === 'string' && p.attrs.class.indexOf('ed-wave-x') !== -1;
+    });
+    assert.ok(xShapes.length > 0, 'x 的圖示必須有 ed-wave-x 形狀，不是平線');
+  }
+
+  // clock（p/P/n/N）是方波，不是平線；P/N 額外帶箭頭，p/n 不帶。
+  {
+    for (const ch of ['p', 'n', 'P', 'N']) {
+      const icon = drawer.levelIcon(ch);
+      const clockShapes = collectTag(icon, 'path').filter(function (p) {
+        return typeof p.attrs.class === 'string' && p.attrs.class.indexOf('ed-wave-clock') !== -1 &&
+          p.attrs.class.indexOf('ed-wave-clock-arrow') === -1;
+      });
+      assert.ok(clockShapes.length > 0, ch + ' 的圖示必須有方波（ed-wave-clock）');
+      const arrowShapes = collectTag(icon, 'path').filter(function (p) {
+        return typeof p.attrs.class === 'string' && p.attrs.class.indexOf('ed-wave-clock-arrow') !== -1;
+      });
+      if (ch === 'P' || ch === 'N') {
+        assert.ok(arrowShapes.length > 0, ch + ' 是明示邊沿，圖示必須帶箭頭');
+      } else {
+        assert.strictEqual(arrowShapes.length, 0, ch + ' 不是明示邊沿，圖示不得帶箭頭');
+      }
+    }
+  }
+
+  // `|`（gap）也帶自己的雙箭頭記號，不是平線。
+  {
+    const icon = drawer.levelIcon('|');
+    const gapShapes = collectTag(icon, 'path').filter(function (p) {
+      return typeof p.attrs.class === 'string' && p.attrs.class.indexOf('ed-wave-gap') !== -1;
+    });
+    assert.ok(gapShapes.length > 0, '| 的圖示必須有 ed-wave-gap 形狀');
+  }
+
+  console.log('wave-draw: 22 個電位圖示全部由畫布的同一批繪製函式產生 — OK');
+}
+
 console.log('wave-draw.test.js OK');
