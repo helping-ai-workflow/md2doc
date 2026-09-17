@@ -14936,6 +14936,93 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 展開的側欄有路收回去，不是單向門 — OK');
     }
+
+    // ── v3.6.0 Task 13 fix round 3：選取 edge 必須自動展開側欄 ──────────────
+    //
+    // 在這批建議的 800×600 視窗下，側欄一開始是收合的 28px 直立標籤；關聯線
+    // 面板即使 data-open（預設就是），它的控制項在這個狀態下矩形是 0×0——
+    // 選一條 edge 之後，使用者唯一能編輯／刪除它的地方是這個看不到也按不到
+    // 的面板。這裡直接重現這個症狀（選取前刪除鈕矩形是 0×0），再確認選取
+    // 之後側欄自動展開、刪除鈕有非零矩形、而且自己座標上的 hit-test 真的是
+    // 它自己（矩形檢查不夠——這批已經被「矩形重疊但 hit-test 落到別的元素
+    // 上」咬過，pressClick 本身就是為了同一個理由存在）。最後確認「只在
+    // null -> 有選取的那一拍展開」：手動收合、edge 還選著的時候讓一個跟
+    // selectedEdge 完全無關的 repaint 發生（畫布上按方向鍵），側欄不准被
+    // 重新彈開。
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const before = await ctx.page.evaluate(() => {
+        const side = document.querySelector('.ed-wave-side');
+        const del = document.querySelector('.ed-wave-edge-delete');
+        const r = del.getBoundingClientRect();
+        return {
+          sideExpanded: side.hasAttribute('data-expanded'),
+          deleteRect: { w: Math.round(r.width), h: Math.round(r.height) },
+        };
+      });
+      assert.strictEqual(before.sideExpanded, false,
+        '前提失敗：一開始（沒選任何 edge）側欄不該是展開的。Got ' + JSON.stringify(before));
+      assert.deepStrictEqual(before.deleteRect, { w: 0, h: 0 },
+        '前提失敗：這正是要重現的症狀——側欄收合時，關聯線面板的刪除鈕矩形是 0×0。Got ' +
+        JSON.stringify(before));
+
+      // 按共用錨點 'a' 的那一格（clk cycle 1）選到 a~>c（同 T9c 的手法）。
+      const shared = await cellPoint(ctx.page, 0, 1);
+      await clickAt(ctx.page, shared);
+      const selected = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.notStrictEqual(selected, '',
+        '前提失敗：按共用錨點必須真的選到一條 edge。Got ' + selected);
+
+      const after = await ctx.page.evaluate(() => {
+        const side = document.querySelector('.ed-wave-side');
+        const del = document.querySelector('.ed-wave-edge-delete');
+        const r = del.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {
+          sideExpanded: side.hasAttribute('data-expanded'),
+          deleteRect: { w: Math.round(r.width), h: Math.round(r.height) },
+          hitIsDelete: hit === del,
+        };
+      });
+      assert.strictEqual(after.sideExpanded, true,
+        'Critical：選取 edge 之後側欄必須自動展開。Got ' + JSON.stringify(after));
+      assert.ok(after.deleteRect.w > 0 && after.deleteRect.h > 0,
+        '刪除鈕必須有非零矩形。Got ' + JSON.stringify(after.deleteRect));
+      // 矩形檢查之外，真的做一次 hit-test——跟 pressClick 用的是同一種驗證。
+      assert.strictEqual(after.hitIsDelete, true,
+        '刪除鈕自己座標上的 hit-test 必須是它自己，不是別的元素。Got ' + JSON.stringify(after));
+
+      // 手動收合，然後讓一個跟 selectedEdge 無關的 repaint 發生：側欄不准
+      // 自己彈開——只有 null -> 有選取的那個「轉場」才展開，不是「有選取
+      // 就每次都展開」。
+      await pressClick(ctx.page, '.ed-wave-side-collapse');
+      await new Promise((r) => setTimeout(r, 100));
+      const collapsedAgain = await ctx.page.$eval('.ed-wave-side',
+        (el) => el.hasAttribute('data-expanded'));
+      assert.strictEqual(collapsedAgain, false, '收合按鈕必須真的收合');
+
+      await pressClick(ctx.page, '.ed-wave-canvas');
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      const stillOnSameEdge = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(stillOnSameEdge, selected,
+        '前提失敗：方向鍵不該碰到 selectedEdge，這條才是「無關的 repaint」。Got ' +
+        stillOnSameEdge);
+      const notReExpanded = await ctx.page.$eval('.ed-wave-side',
+        (el) => el.hasAttribute('data-expanded'));
+      assert.strictEqual(notReExpanded, false,
+        '同一條 edge 還選著的時候，其他原因造成的 repaint 不該把側欄重新展開——' +
+        '否則使用者按下收合按鈕之後的下一個按鍵就把它彈回來，收合形同虛設。');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 13 fix round 3: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 選取 edge 在窄視窗下會自動展開側欄，且只在那一拍展開 — OK');
+    }
   }
 
   await browser.close();
