@@ -212,6 +212,95 @@ belong there as CSS classes, not as inline SVG attributes — a renderer with tw
 mechanisms means the next person changing colours edits one and silently misses the
 other.
 
+## A False Sentence Next to Correct Code Costs a Fix Round
+
+v3.6.0 found four of these, none of which reddened a single test:
+
+- `test/wave-geometry.test.js` asserted `'斜坡終點即錨點'`. The number was right and the
+  reason was wrong — the engine's anchor is the ramp's **midpoint**, the 50% crossing. The
+  claim had been derived from `0m0`, which is a same-level blip, not a transition.
+- `isLineBrick` was a **deny-list**, so its comment described what it excluded while the
+  code silently included `zzz`/`uuu`/`ddd`, whose geometry nobody had measured.
+- `edgeHitAt`'s comment said "`SIZES.nameColWidth` is 0 in this file" three lines from the
+  commit that changed it to 120.
+- `renderUnmodelled`'s neighbour claimed "zero occurrences of `hscale`, `period` or
+  `phase`" a task after all three were modelled.
+
+Each one would have sent the next reader to a wrong conclusion, and one of them (the first)
+had already misled this project's own design notes for three tasks. When you change a
+value, grep the file for prose that names it. A comment is an assertion with no test.
+
+## Prefer an Allow-List Wherever a Rule Selects Cases
+
+`isLineBrick` excluded bus, `xxx` and clock, and therefore silently admitted every brick
+nobody had thought about. Rewritten as `isRampPair` — both sides must be `000` or `111` —
+the next brush someone adds defaults to the OLD behaviour instead of to unverified new
+behaviour.
+
+The same shape appeared in `editor-journey.test.js`: T6b excluded decorations by class
+name, so every new decoration had to be added to the list. Bounding the collection to the
+grid's own measured extent excludes the whole name column at once, permanently. Keep a
+deny-list only for things that genuinely fall INSIDE the allowed region.
+
+Watch the escape hatch: the allow-list must test the same thing the exclusion does.
+`uuu` maps to the level `'1'`, so a check written against level characters would have let
+it straight back through a list built on brick names.
+
+## Counting Is the Weakest Assertion
+
+Two defects in one task survived a count and died to a position:
+
+- `every` filters on `(index + base)`, not the bare index, so `head:{tick:3, every:2}`
+  keeps labels **4 and 6**. The brief's assertion counted labels, and both behaviours give
+  the same count for its fixture.
+- Under `config.hscale: 2` the ruler's tick COUNT was already right and only its PITCH was
+  wrong, so a count-only check passed on a ruler drawn at half the correct spacing.
+
+Pin label text and x positions. Counting proves a loop ran, not that it ran over the right
+things.
+
+## A Test That Measures the Product Still Needs the Product to Draw in the Right Place
+
+T6b buckets shapes into lane rows by measuring the painted grid rather than reading the
+canvas's published attributes, deliberately: *"An editor that draws nothing is
+indistinguishable from a correct one when both halves of the comparison come from the same
+source."* That property is worth keeping — but when Task 6 moved the canvas origin and the
+grid lines were still drawn from `y1='0'`, the measurement anchored on the wrong place and
+the failure stopped naming its cause. A measurement-based test does not stop being useful
+when the drawing is wrong; it stops being diagnostic.
+
+## Three Ways a Puppeteer Press Lands Somewhere Else
+
+v3.6.0's name column and ruler band broke every press helper in `editor-journey.test.js`,
+three times, three different ways:
+
+1. **Derived coordinates.** `cellPoint` computed a cell from `svg.height / laneCount` and
+   `svg.width / cycleCount`. Both divisions are wrong the moment the SVG contains anything
+   that is not lanes and cycles.
+2. **Coordinates captured before a scroll.** `dragBetween(a, b)` resolved `b` before
+   pressing `a`, and pressing `a` can scroll. The stale drop point produced "nothing
+   happened" — which is exactly what a no-op-refusal assertion wants to see.
+3. **Coordinates measured but clipped.** `getBoundingClientRect()` returns viewport
+   coordinates even for content a scroll container has clipped, so a press on an element
+   6px past the edge silently hit whatever was painted there instead.
+
+All three now go through one `pointInCanvas(page, locate, msg)`: scroll, re-read, assert
+visibility as a POST-condition. Resolve a point at the last possible moment, never before
+a call that can scroll, and never reimplement the scroll arithmetic beside it.
+
+## A Probe Fixture Shaped Like the Real One Is Not the Real One
+
+A Task 8 self-check reported five dropped shapes where the suite's actual fixture drops
+six, because its probe document omitted a lane and a `{}` spacer. The count never shipped,
+but the evidence audited a document nobody runs. Use the literal fixture.
+
+## Copying a Linked Worktree Does Not Detach It
+
+A linked worktree's `.git` is a pointer file holding an absolute gitdir path. `cp -r` it to
+`/tmp` and the copy's git commands operate on the ORIGINAL worktree's index — during
+v3.6.0 that briefly staged a stale blob into the tree being reviewed. Probe in place, or
+create a real worktree with `git worktree add`.
+
 ## Do NOT Stage
 
 - `docs/superpowers/specs/`, `docs/superpowers/plans/` — local working state from brainstorming / writing-plans skills. Not for the repo (already in `.gitignore`? — if not, the rule still stands).
