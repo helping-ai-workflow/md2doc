@@ -14947,8 +14947,9 @@ async function main() {
     // 它自己（矩形檢查不夠——這批已經被「矩形重疊但 hit-test 落到別的元素
     // 上」咬過，pressClick 本身就是為了同一個理由存在）。最後確認「只在
     // null -> 有選取的那一拍展開」：手動收合、edge 還選著的時候讓一個跟
-    // selectedEdge 完全無關的 repaint 發生（畫布上按方向鍵），側欄不准被
-    // 重新彈開。
+    // selectedEdge 完全無關的 repaint 發生（在別的 lane 上色），側欄不准被
+    // 重新彈開。那一段自己帶見證，說明為什麼不能圖省事用方向鍵——見它自己的
+    // 註解。
     {
       const ctx = await newPage(EDGE_FORK_MD);
       await openWave(ctx.page);
@@ -15004,13 +15005,89 @@ async function main() {
         (el) => el.hasAttribute('data-expanded'));
       assert.strictEqual(collapsedAgain, false, '收合按鈕必須真的收合');
 
-      await pressClick(ctx.page, '.ed-wave-canvas');
-      await ctx.page.keyboard.press('ArrowRight');
-      await new Promise((r) => setTimeout(r, 150));
+      // 兩件事這一段刻意不做，兩件都是量出來的，不是風格選擇：
+      //
+      // 一、**不准用滑鼠按畫布來取得焦點。** `onCanvasDown` 的
+      //     `// A press that hit neither an edge's handle nor its path deselects`
+      //     那一段會把 `selectedEdge` 清成 null；按在畫布中心打不到這條
+      //     edge，所以按下去的同一拍前提就沒了（實測：`data-wave-selected-edge`
+      //     從 '1' 變成 ''，而且那一下按壓還順手把 ack lane 塗成 '.10.1'）。
+      //     焦點改用 `.focus()`——canvas 是 `tabindex="0"`，keydown 的閘門是
+      //     `const onCanvas = canvas !== null && ev.target === canvas;`，
+      //     所以把焦點放上去就夠了，不需要任何指標手勢。
+      //
+      // 二、**方向鍵不能當那個「無關的 repaint」。** `moveCursor` 收尾呼叫的是
+      //     `repaintDrawing`（`/** The lane list and the drawing, repainted
+      //     together and without touching` 那一支），它只重畫 lane list 與
+      //     canvas，**不經過 `render()`**；而被測的 `expandSide()` 閘門
+      //     （`if (selectedEdge !== null && lastSelectedEdge === null) {`）只活在
+      //     `render()` 裡。拿方向鍵當 repaint 的話，側欄本來就沒有任何機會彈開，
+      //     這個斷言會永遠綠、零偵測力——正是這個 repo 反覆付過學費的空綠形狀。
+      //     （實測：方向鍵按完，`.ed-wave-source` 那顆 `<pre>` 還是同一個節點，
+      //     `renderSource()` 沒跑過；上色之後它被換成新節點。）
+      //
+      // 所以這裡走真的會到 `render()` 的路：方向鍵先把游標帶到目標格，再按一個
+      // brush 字元鍵 → `paintAtCursor` → `commit` → `afterStoreMoved` → `render()`。
+      await ctx.page.$eval('.ed-wave-canvas', (el) => el.focus());
+      const laneCount = await ctx.page.$eval('.ed-wave-canvas',
+        (el) => Number(el.getAttribute('data-lane-count')));
+      const waveStatus = () => ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      // 游標現在在哪不重要也不該假設（開啟 overlay 本身就可能已經建過一顆），
+      // 所以先把它趕到已知的角落：ArrowUp 按滿「lane 數」次必定夾到 lane 0
+      // ——這個次數是從畫布自己的 `data-lane-count` 推導出來的，不是寫死的
+      // 常數。寫死的數字在 roster 變大的那天會安靜地不夠用（T8f 的 Tab 上限
+      // 60 就是這樣破的），而這裡的上限只需要「不小於 lane 數」。
+      await ctx.page.keyboard.press('ArrowDown');
+      await new Promise((r) => setTimeout(r, 60));
+      for (let i = 0; i < laneCount; i++) {
+        await ctx.page.keyboard.press('ArrowUp');
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      await ctx.page.keyboard.press('Home');
+      await new Promise((r) => setTimeout(r, 60));
+      // 往下三格到 `gap` lane。挑 `gap` 不是隨便挑的：它是 EDGE_FORK_MD 裡
+      // 唯一沒有 `node` 的具名 lane，所以上色不可能動到 a／b／c 任何一個
+      // anchor——`render()` 開頭那段 `edgeIsDrawable` 夾擠會把「畫不出來的
+      // edge」的選取清成 null，塗在帶 anchor 的 lane 上會讓下面那條「選取沒
+      // 變」為了錯誤的理由變紅。落點直接用狀態列對答案，fixture 一改就吵。
+      for (let i = 0; i < 3; i++) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 60));
+      }
+      const atGap = await waveStatus();
+      assert.strictEqual(atGap, '游標：gap cycle 1',
+        '前提失敗：游標必須停在 gap lane 的第一格（那是唯一沒有 anchor、塗了' +
+        '也動不到任何 edge 的 lane）。Got ' + atGap);
+
+      const srcBeforePaint = await ctx.page.$eval('.ed-wave-source',
+        (el) => el.textContent);
+      await ctx.page.keyboard.press('1');
+      await new Promise((r) => setTimeout(r, 300));
+      // 見證一：`commit` 真的認為文件變了。`commit` 在 `store.apply` 回報沒變
+      // 時會直接 `say('這個動作沒有改變任何東西')` 並 return false，連
+      // `afterStoreMoved`（唯一呼叫 `render()` 的地方）都不會走到——沒有這條
+      // 斷言的話，fixture 哪天讓 gap cycle 1 本來就是 '1'，整段就退回永真。
+      const paintStatus = await waveStatus();
+      assert.strictEqual(paintStatus, '已寫回：paint',
+        '前提失敗：那一下 brush 鍵必須真的改到文件，否則 `commit` 會提早 return、' +
+        '`render()` 根本不會跑，這個場景就沒有在測任何東西。Got ' + paintStatus);
+      // 見證二：`render()` 真的跑過。`renderSource()` 只有一個呼叫點，就在
+      // `render()` 裡（`panels.renderSource();`），而它每次都重建 `.ed-wave-source`
+      // 那顆 `<pre>` 並重填 `actions.sourceText()`——所以這串文字變了，等於
+      // `render()` 走過了一遍。
+      const srcAfterPaint = await ctx.page.$eval('.ed-wave-source',
+        (el) => el.textContent);
+      assert.notStrictEqual(srcAfterPaint, srcBeforePaint,
+        '前提失敗：這次 repaint 必須真的經過 `render()`（`.ed-wave-source` 由' +
+        '`render()` 裡唯一的 `renderSource()` 產生），否則 expandSide 的閘門根本' +
+        '沒被執行到，下面那條斷言就是永真的。before=' + JSON.stringify(srcBeforePaint) +
+        ' after=' + JSON.stringify(srcAfterPaint));
+
       const stillOnSameEdge = await ctx.page.$eval('.ed-wave-overlay',
         (el) => el.getAttribute('data-wave-selected-edge'));
       assert.strictEqual(stillOnSameEdge, selected,
-        '前提失敗：方向鍵不該碰到 selectedEdge，這條才是「無關的 repaint」。Got ' +
+        '前提失敗：上色不該碰到 selectedEdge，這條才是「無關的 repaint」。Got ' +
         stillOnSameEdge);
       const notReExpanded = await ctx.page.$eval('.ed-wave-side',
         (el) => el.hasAttribute('data-expanded'));
