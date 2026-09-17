@@ -10012,6 +10012,16 @@ async function main() {
     // returning a point that is wrong for that lane. No fixture in this file
     // sets `period`, so this should never fire; if it does, the fixture is
     // telling you something true and `cellPoint` is the wrong tool for it.
+    // v3.6.0 Task 6 fix round 2 (R20): the 120px name column means fewer
+    // cycles fit in the same clip than before — MEASURED at this journey's
+    // default 800×600 viewport, ~3.4 cycles visible where 5 used to be — so a
+    // target cell being off the wrap's current scroll position is now the
+    // ORDINARY case, not a fixture bug. A real user scrolls to it; this now
+    // does too, the same way the keyboard path already does
+    // (`wave-ui.js`'s `scrollCursorIntoView`: read its own box against the
+    // wrap's PADDING BOX — `clientLeft`/`clientWidth`, not
+    // `getBoundingClientRect()`, which would count the border and leave the
+    // cell short) — one mechanism, not a second one invented for the test.
     const cellPoint = async (page, lane, cycle) => {
       const at = await page.evaluate((l, c) => {
         const svg = document.querySelector('.ed-wave-canvas');
@@ -10027,29 +10037,65 @@ async function main() {
               'document where every lane shares one cycle width' };
           }
         }
-        const r = svg.getBoundingClientRect();
-        const w = wrap.getBoundingClientRect();
         const originX = Number(svg.getAttribute('data-origin-x'));
         const originY = Number(svg.getAttribute('data-origin-y'));
         const laneHeight = Number(svg.getAttribute('data-lane-height'));
         const cycleWidth = cycleWidth0;
-        // The SVG's viewBox is in the SAME units as the geometry attributes
-        // above (both come straight from `layout`); `getBoundingClientRect()`
-        // is in rendered CSS px. The two only differ under CSS/zoom scaling
-        // of the element itself, which this canvas does not do (`width`/
-        // `height` attributes equal the `viewBox`) — but computing the scale
-        // explicitly, rather than assuming 1, is one line and survives that
-        // changing later.
-        const vb = svg.viewBox.baseVal;
-        const scaleX = vb.width > 0 ? r.width / vb.width : 1;
-        const scaleY = vb.height > 0 ? r.height / vb.height : 1;
-        const x = r.left + (originX + c * cycleWidth + cycleWidth / 2) * scaleX;
-        const y = r.top + (originY + l * laneHeight + laneHeight / 2) * scaleY;
+        // The cell's box in the SVG's OWN coordinate space (same units
+        // `wave-geometry.cellRect` returns) — fixed regardless of scroll,
+        // which is exactly why it is computed once, before any scrolling,
+        // and everything that depends on the CURRENT scroll position is
+        // computed fresh from it below instead of being derived once and
+        // reused.
+        const box = { x: originX + c * cycleWidth, y: originY + l * laneHeight,
+          width: cycleWidth, height: laneHeight };
+
+        // Scroll the target into view — same arithmetic as
+        // `scrollCursorIntoView` in wave-ui.js: against the wrap's padding
+        // box (`clientLeft`/`clientWidth`/`clientTop`/`clientHeight`), scaled
+        // from SVG units into rendered CSS px the same way the point below
+        // is (see the scale-factor comment there for why: the canvas does
+        // not currently apply CSS/zoom scaling, but computing the scale
+        // rather than assuming 1 costs one line and survives that changing).
+        const scaleOf = () => {
+          const r = svg.getBoundingClientRect();
+          const vb = svg.viewBox.baseVal;
+          return { x: vb.width > 0 ? r.width / vb.width : 1,
+            y: vb.height > 0 ? r.height / vb.height : 1 };
+        };
+        let scale = scaleOf();
+        let cbox = svg.getBoundingClientRect();
+        let wbox = wrap.getBoundingClientRect();
+        const left = (cbox.left + box.x * scale.x) - (wbox.left + wrap.clientLeft);
+        const top = (cbox.top + box.y * scale.y) - (wbox.top + wrap.clientTop);
+        const w = wrap.clientWidth;
+        const h = wrap.clientHeight;
+        if (left < 0) wrap.scrollLeft += left;
+        else if (left + box.width * scale.x > w) wrap.scrollLeft += left + box.width * scale.x - w;
+        if (top < 0) wrap.scrollTop += top;
+        else if (top + box.height * scale.y > h) wrap.scrollTop += top + box.height * scale.y - h;
+
+        // Re-read: scrolling just moved both rects, and a point computed
+        // from the PRE-scroll rects would be wrong in a new way — this is
+        // the whole reason the point is not computed until after the scroll
+        // above has already happened.
+        scale = scaleOf();
+        cbox = svg.getBoundingClientRect();
+        wbox = wrap.getBoundingClientRect();
+        const x = cbox.left + (box.x + box.width / 2) * scale.x;
+        const y = cbox.top + (box.y + box.height / 2) * scale.y;
         return { x: x, y: y,
-          visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
+          visible: x >= wbox.left && x <= wbox.right && y >= wbox.top && y <= wbox.bottom };
       }, lane, cycle);
       assert.ok(at, 'cellPoint: 畫布不在畫面上');
       assert.strictEqual(at.error, undefined, 'cellPoint: ' + at.error);
+      // Unchanged in strictness, but now a POST-scroll check (R20): a cell
+      // still not visible once we have scrolled all the way to it — the
+      // canvas is narrower/shorter than the wrap's clip even at its own
+      // scroll limit, or the cell simply does not exist — is still a hard
+      // failure with the same message. This guard is what stops a blind
+      // press from looking like "painting didn't work"; scrolling makes the
+      // ordinary case reachable, it does not make this advisory.
       assert.strictEqual(at.visible, true,
         'cellPoint: lane ' + lane + ' cycle ' + cycle +
         ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
@@ -10147,12 +10193,27 @@ async function main() {
     };
 
     // A real press-drag-release across a range of cycles.
+    //
+    // v3.6.0 Task 6 fix round 2 (R20): `from` and `to` are on the same lane
+    // but can be further apart than the wrap's visible width now shows (the
+    // 120px name column narrowed it) — `dragCells(page, 0, 0, 4)` below spans
+    // all 5 cycles of a fixture where ~3.4 fit at once, so there is no single
+    // scroll position that shows BOTH endpoints simultaneously. `a` used to
+    // be computed, THEN `b` computed (which can scroll the wrap and leave
+    // `a`'s already-captured viewport point stale), and only then were both
+    // used — the exact "captures coordinates once, reuses them across
+    // several presses" precondition R20 fixed in `cellPoint` itself. Fixed
+    // by using `a` for the mousedown BEFORE `b` is even asked for, so the
+    // only scroll that can happen while `a` is still needed is `a`'s own.
     const dragCells = async (page, lane, from, to) => {
       const a = await cellPoint(page, lane, from);
-      const b = await cellPoint(page, lane, to);
       await page.mouse.move(a.x, a.y);
       await page.mouse.down();
-      await page.mouse.move((a.x + b.x) / 2, a.y);
+      // A real intermediate move, still on `a`'s coordinates — valid because
+      // nothing has scrolled the wrap since `a` was computed. Exercises the
+      // drag-extends repaint path before the final move below commits it.
+      await page.mouse.move(a.x + (to >= from ? 8 : -8), a.y);
+      const b = await cellPoint(page, lane, to);
       await page.mouse.move(b.x, b.y);
       await page.mouse.up();
       await new Promise((r) => setTimeout(r, 250));
@@ -10867,12 +10928,17 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
+      // v3.6.0 Task 6 fix round 2 (R20): `a` is used for the mousedown
+      // BEFORE `b` is computed — same reorder as `dragCells`, so `b`'s own
+      // `cellPoint` scroll (cycle 3 of 5 is not necessarily visible from
+      // wherever cycle 1's scroll left the wrap) cannot leave `a` stale
+      // before it gets pressed.
       const a = await cellPoint(ctx.page, 0, 1);
-      const b = await cellPoint(ctx.page, 0, 3);
       const wave0 = await ctx.page.$eval('.ed-wave-canvas',
         (el) => el.getAttribute('data-wave-0'));
       await ctx.page.mouse.move(a.x, a.y);
       await ctx.page.mouse.down();
+      const b = await cellPoint(ctx.page, 0, 3);
       await ctx.page.mouse.move(b.x, b.y);
       await ctx.page.keyboard.press('Escape');
       await new Promise((r) => setTimeout(r, 200));
@@ -13247,14 +13313,41 @@ async function main() {
       'Tail para two.', '',
     ].join('\n');
 
+    // v3.6.0 Task 6 fix round 2 (R20 generalization): every point-taking
+    // helper below (`dragBetween`'s `a`/`b`, `dragBackTo`'s `at`) accepts
+    // EITHER a plain resolved `{x, y}` point OR a thunk — a
+    // `cellPoint(...)`/`edgeHandlePoint(...)` call wrapped in a function,
+    // resolved HERE, at the moment the point is actually needed, rather than
+    // by the caller ahead of time. `cellPoint` scrolls its own target into
+    // view; a point captured earlier and reused after a LATER `cellPoint`
+    // call (for the same or a different target) can go stale before it is
+    // ever pressed — the same defect class R20 fixed in `cellPoint` itself,
+    // showing up one layer up wherever a caller captured once and pressed
+    // later. `ownHandle` in T9d is the sharpest case: one `edgeHandlePoint`
+    // capture reused across THREE separate gestures, with a `cellPoint` call
+    // (which can scroll) between each — a single capture would be stale for
+    // the second and third use even though `edgeHandlePoint` itself never
+    // scrolls anything.
+    const resolvePoint = async (v) => (typeof v === 'function' ? v() : v);
+
     // A real press-move-release between two cells that may be on DIFFERENT
     // lanes. `dragCells` above is lane-locked (it mirrors the paint drag it
     // exists for); edge creation and endpoint dragging are not.
     const dragBetween = async (page, a, b) => {
-      await page.mouse.move(a.x, a.y);
+      // `a` is resolved and pressed BEFORE `b` is asked for at all — if `b`
+      // is a `cellPoint` thunk, resolving it can scroll the wrap, and doing
+      // that before `a` has been used would make `a` stale. The intermediate
+      // move uses `a`'s own (still fresh — nothing has scrolled since it
+      // resolved) coordinates rather than a true midpoint of `a` and `b`,
+      // since a midpoint needs `b` too and nothing here is asserted against
+      // its exact position; it only has to be a real, different point to
+      // exercise the drag-in-progress repaint before the final move commits.
+      const pa = await resolvePoint(a);
+      await page.mouse.move(pa.x, pa.y);
       await page.mouse.down();
-      await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2);
-      await page.mouse.move(b.x, b.y);
+      await page.mouse.move(pa.x + 8, pa.y + 8);
+      const pb = await resolvePoint(b);
+      await page.mouse.move(pb.x, pb.y);
       await page.mouse.up();
       await new Promise((r) => setTimeout(r, 250));
     };
@@ -13277,10 +13370,11 @@ async function main() {
     // a drag that never actually MOVED would leave `endpointDrag.at` at its
     // initial `null` instead of exercising `moveEdgeEnd`'s own refusal.
     const dragBackTo = async (page, at) => {
-      await page.mouse.move(at.x, at.y);
+      const pt = await resolvePoint(at);
+      await page.mouse.move(pt.x, pt.y);
       await page.mouse.down();
-      await page.mouse.move(at.x + 6, at.y);
-      await page.mouse.move(at.x, at.y);
+      await page.mouse.move(pt.x + 6, pt.y);
+      await page.mouse.move(pt.x, pt.y);
       await page.mouse.up();
       await new Promise((r) => setTimeout(r, 250));
     };
@@ -13322,9 +13416,11 @@ async function main() {
       assert.strictEqual(armed, 'armed',
         'T9a 前提失敗：按過武裝鈕之後要是 armed。Got ' + armed);
 
-      const a = await cellPoint(ctx.page, 0, 1);
-      const b = await cellPoint(ctx.page, 1, 3);
-      await dragBetween(ctx.page, a, b);
+      // v3.6.0 Task 6 fix round 2 (R20): thunks, not pre-resolved points —
+      // `dragBetween` resolves `a` and presses it before asking for `b`, so
+      // `b`'s own scroll (a different lane AND cycle) cannot leave `a` stale.
+      await dragBetween(ctx.page, () => cellPoint(ctx.page, 0, 1),
+        () => cellPoint(ctx.page, 1, 3));
 
       const after = await ctx.page.$eval('.ed-wave-overlay', (el) => ({
         edgemode: el.getAttribute('data-wave-edgemode'),
@@ -13524,9 +13620,13 @@ async function main() {
       // `shared` (the cell centre) is 16.8px off it — so grab the real
       // rendered `.ed-wave-edge-handle` instead of reusing the selection
       // click's point.
-      const sharedHandle = await edgeHandlePoint(ctx.page, 1, 'from');
-      const target = await cellPoint(ctx.page, 3, 0);   // gap cell 0, unused
-      await dragBetween(ctx.page, sharedHandle, target);
+      //
+      // v3.6.0 Task 6 fix round 2 (R20): both as thunks — `target`'s
+      // `cellPoint` scroll (gap lane, cell 0) is not guaranteed to leave the
+      // handle grabbed above still on screen, so it must not be resolved
+      // until `dragBetween` is done needing it.
+      await dragBetween(ctx.page, () => edgeHandlePoint(ctx.page, 1, 'from'),
+        () => cellPoint(ctx.page, 3, 0));   // gap cell 0, unused
 
       const gestures = await ctx.page.$eval('.ed-wave-overlay',
         (el) => el.getAttribute('data-wave-gestures'));
@@ -13643,7 +13743,17 @@ async function main() {
 
       // Now selected — the drawn handle exists; every drag below must
       // actually START inside it (`own`, the cell centre, is 16.8px off).
-      const ownHandle = await edgeHandlePoint(ctx.page, 0, 'to');
+      //
+      // v3.6.0 Task 6 fix round 2 (R20): a THUNK, not a resolved point —
+      // `ownHandle` is reused across three separate gestures below, each
+      // preceded by its own `cellPoint` call (`other`, `outOfRange`) that
+      // can scroll the wrap. `edgeHandlePoint` reads the handle's CURRENT
+      // `getBoundingClientRect()`, which moves on screen exactly like any
+      // other element when its scroll-container scrolls — a single capture
+      // reused three times across two intervening scrolls would be stale
+      // for the second and third gesture. Resolving it fresh at each use
+      // fixes all three at once.
+      const ownHandle = () => edgeHandlePoint(ctx.page, 0, 'to');
 
       const baseline = await ctx.page.evaluate(() => ({
         gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'),
