@@ -175,7 +175,7 @@ async function newPage(mdText, extraFiles, srvOpts) {
       if (window.__journeyRejection) window.__journeyRejection(msg);
     });
   });
-  await page.goto(b.url, { waitUntil: 'networkidle0' });
+  await page.goto(b.url, { waitUntil: 'networkidle2' });
   return Object.assign({ page, errs }, b);
 }
 
@@ -1484,7 +1484,7 @@ async function main() {
       'escape-cycle 前提失敗：第一次存檔就必須是乾淨的，got:\n' + JSON.stringify(first));
     // 重新載入＝從磁碟重新解析，這是跳脫唯一發生得了的地方；再打一個字讓這個
     // block 真的被重新序列化（沒被編輯過的 block 會被逐位元組原樣重播）。
-    await ctx.page.goto(ctx.url, { waitUntil: 'networkidle0' });
+    await ctx.page.goto(ctx.url, { waitUntil: 'networkidle2' });
     await new Promise((r) => setTimeout(r, 400));
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 250));
@@ -1524,7 +1524,7 @@ async function main() {
         return orig.apply(this, args);
       };
     });
-    await page.goto(b.url, { waitUntil: 'networkidle0' });
+    await page.goto(b.url, { waitUntil: 'networkidle2' });
     const table0 = await page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-type="table"]');
       el.scrollIntoView({ block: 'center' });
@@ -1613,7 +1613,7 @@ async function main() {
   {
     const b = await boot(['Alpha paragraph text.', '', '| A | B |', '|---|---|', '| 1 | 2 |', ''].join('\n'));
     const page = await browser.newPage();
-    await page.goto(b.url, { waitUntil: 'networkidle0' });
+    await page.goto(b.url, { waitUntil: 'networkidle2' });
 
     // Leave an uncommitted, unblurred burst open on the PARAGRAPH block —
     // this is the "burst elsewhere" state resolveBurst() will resolve.
@@ -3437,7 +3437,7 @@ async function main() {
     fs.writeFileSync(path.join(path.dirname(b.mdPath), 'one.png'), png);
     const ctx = Object.assign({ page: await browser.newPage() }, b);
     await ctx.page.setViewport({ width: 1400, height: 800 });
-    await ctx.page.goto(b.url, { waitUntil: 'networkidle0' });
+    await ctx.page.goto(b.url, { waitUntil: 'networkidle2' });
     await ctx.page.click('.content img');
     await new Promise((r) => setTimeout(r, 500));
     const before = await overlayState(ctx.page, '.lightbox');

@@ -141,7 +141,7 @@ async function runScenario(browser, lines, replacement, tableIndex, gesture) {
   const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
   try {
     const page = await newPage(browser);
-    await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+    await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
     const before = await tableTexts(page);
 
     const pId = await page.evaluate(() =>
