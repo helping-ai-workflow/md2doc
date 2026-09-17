@@ -1,0 +1,161 @@
+'use strict';
+const assert = require('assert');
+const G = require('../lib/editor/wave-geometry.js');
+const codec = require('../lib/editor/wave-codec.js');
+const D = require('../lib/editor/wave-draw.js');
+
+// This layer only produces strings and node descriptions, not pixels, so a
+// fake `document` that just records what was asked for is enough — no
+// browser needed, matching every other test in this file.
+function fakeDoc() {
+  return {
+    createElementNS: function (ns, tag) {
+      return {
+        ns: ns, tag: tag, attrs: {}, children: [],
+        setAttribute: function (k, v) { this.attrs[k] = String(v); },
+        getAttribute: function (k) { return this.attrs[k]; },
+        appendChild: function (c) { this.children.push(c); return c; },
+      };
+    },
+  };
+}
+
+function makeDrawer() {
+  return D.createDrawer({
+    d: fakeDoc(),
+    geometry: G,
+    codec: codec,
+    SIZES: { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 },
+    SVGNS: 'http://www.w3.org/2000/svg',
+    BRUSHES: ['0', '1', 'x', 'z', 'p', 'n', 'P', 'N', 'h', 'l', 'u', 'd',
+      '=', '2', '3', '4', '5', '6', '7', '8', '9', '|'],
+    labelsOf: function () { return []; },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 7: every level transition draws a ramp, `|` and same-level
+// runs draw a flat line, and the ramp's real end ratio is NOT
+// `SKIN_METRICS.slewEndRatio`.
+//
+// MEASURED against `node_modules/wavedrom` 3.5.0 (`waveSkin.default`), dumped
+// directly in node rather than recalled: the SAME-level blip `0m0` is
+// `m0,20 3,0 3,-10 3,10 11,0` (a down-and-back-up notch peaking at local
+// x=6 = 20-10 half height), which is what `wave-geometry.js`'s own
+// `SKIN_METRICS` comment and `wave-geometry.test.js`'s "斜坡終點即錨點"
+// assertion measure from. That brick never changes level, so it is not a
+// transition at all — the brief for this task explicitly warns not to
+// copy its shape.
+//
+// The bricks that actually change level are different:
+//   0m1 (0->1): `M0,20 3,20 9,0 20,0`            -> (0,20)(3,20)(9,0)(20,0)
+//   1m0 (1->0): `m0,0 3,0 6,20 11,0` (relative)  -> (0,0)(3,0)(9,20)(20,20)
+// Both put the diagonal segment from local x=3 to local x=9 out of a
+// 40-wide cycle — i.e. `slewStartRatio` (0.075) to 0.225, NOT to
+// `SKIN_METRICS.slewEndRatio` (0.15). Cross-checked against a real
+// node/edge render (`{signal:[{wave:'0.1.0...',node:'a.b.c...'}],
+// edge:['a-b']}`): the engine's own `gmark_a_b` endpoints sit at
+// `cycle*40 + 6`, i.e. exactly the ramp's MIDPOINT ((3+9)/2 = 6), not its
+// top. `SKIN_METRICS.slewEndRatio` is a correct, independently-pinned
+// value for where the anchor/edge sits (Task 5 depends on it and its own
+// test re-derives it against the engine) — it is just not the same
+// quantity as "where the visual ramp finishes", despite the two sharing a
+// name. Per this task's brief ("if the engine's geometry differs from the
+// brief's sketch, the engine wins"), the ramp drawn below ends at the
+// MEASURED 0.225, derived as `2*anchorRatio - slewStartRatio` so the
+// relationship to the two already-pinned ratios stays visible rather than
+// hardcoding a fourth magic number.
+{
+  const drawer = makeDrawer();
+  const W = 40;
+  const H = 20;
+  const s = G.SKIN_METRICS;
+  const rampStart = s.slewStartRatio * W; // 3
+  const rampEnd = (2 * s.anchorRatio - s.slewStartRatio) * W; // 9, NOT 6
+
+  // 0 -> 1: flat at the old level until rampStart, ramp to rampEnd, then
+  // flat at the new level.
+  const rise = drawer.brickPath('1', '0', W, H);
+  assert.ok(rise.indexOf(String(rampStart)) !== -1,
+    '上升沿的斜坡起點必須是 slewStartRatio × 寬：' + rise);
+  assert.ok(rise.indexOf(String(rampEnd)) !== -1,
+    '上升沿的斜坡終點必須是量測到的真實比例（0.225），不是 slewEndRatio(0.15)：' + rise);
+  assert.strictEqual(rise.indexOf('6'), -1,
+    '斜坡終點不得停在 anchorRatio(0.15 -> local 6)，那是錨點落點，不是磚的終點：' + rise);
+
+  // 1 -> 0 mirrors 0 -> 1.
+  const fall = drawer.brickPath('0', '1', W, H);
+  assert.ok(fall.indexOf(String(rampStart)) !== -1, '下降沿也要有斜坡起點：' + fall);
+  assert.ok(fall.indexOf(String(rampEnd)) !== -1, '下降沿也要有斜坡終點：' + fall);
+
+  // Same level (any brick that maps to the same y): flat line only.
+  const flat = drawer.brickPath('1', '1', W, H);
+  assert.strictEqual(flat.indexOf(String(rampStart)), -1, '同電位不得有斜坡：' + flat);
+
+  // `|` is a gap, not a transition — brickPath must refuse to ramp it even
+  // if handed a real previous level.
+  const gap = drawer.brickPath('|', '0', W, H);
+  assert.strictEqual(gap.indexOf(String(rampStart)), -1, 'gap 不得畫斜坡：' + gap);
+
+  // The very first cell of a lane has no previous level.
+  const first = drawer.brickPath('0', null, W, H);
+  assert.strictEqual(first.indexOf(String(rampStart)), -1,
+    '沒有前一格（lane 的第一格）不得畫斜坡：' + first);
+
+  console.log('wave-draw: brickPath 的斜坡比例跟真的變態磚（0m1/1m0）量測一致 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 7: `drawLane` must actually CALL `brickPath` for a real
+// level change, positioned at the cell that changed (not the cell before
+// it) — a `<path class="ed-wave-edge">`, not the old vertical
+// `<line class="ed-wave-edge">`. Bus/xxx boundaries are explicitly OUT of
+// scope for this task (`brickPath`'s own `yFor` only knows top/mid/bottom,
+// and the bus hexagon / xxx box already carry their own slanted/boxed
+// edges) and must keep drawing the old vertical `<line>`, unchanged.
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const sizes = { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 };
+
+  // -- rising edge: 0 -> 1 ---------------------------------------------------
+  const doc1 = { signal: [{ name: 'a', wave: '01' }] };
+  const layout1 = G.layoutOf(doc1, sizes);
+  const svg1 = fakeDoc().createElementNS('svg', 'svg');
+  drawer.drawLane(svg1, layout1, 0);
+
+  const edges1 = svg1.children.filter(function (c) { return c.attrs.class === 'ed-wave-edge'; });
+  assert.strictEqual(edges1.length, 1, '0->1 只有一個轉態邊界：' + JSON.stringify(edges1.map(function (e) { return e.tag; })));
+  assert.strictEqual(edges1[0].tag, 'path',
+    '真的電位轉態必須畫成 path（斜坡），不是 line（垂直瞬變）：' + JSON.stringify(edges1[0]));
+
+  const row1 = layout1.lanes[0];
+  const hi = row1.y + 7;
+  const lo = row1.y + row1.height - 9;
+  const cw = row1.cycleWidth;
+  const x0 = row1.originX + 1 * cw; // cycle 1 is where the value becomes '1'
+  const s = G.SKIN_METRICS;
+  const rampStartAbs = x0 + s.slewStartRatio * cw;
+  const rampEndAbs = x0 + (2 * s.anchorRatio - s.slewStartRatio) * cw;
+  const d1 = edges1[0].attrs.d;
+  assert.ok(d1.indexOf(String(rampStartAbs)) !== -1,
+    '斜坡起點必須落在新 run（cycle 1）自己的 originX 上，不是畫布原點：' + d1);
+  assert.ok(d1.indexOf(String(rampEndAbs)) !== -1,
+    '斜坡終點也必須落在新 run 的座標系裡：' + d1);
+  assert.ok(d1.indexOf(String(hi)) !== -1 && d1.indexOf(String(lo)) !== -1,
+    '斜坡必須真的連接 hi 跟 lo 這兩個電位高度：' + d1);
+
+  // -- bus boundary keeps the old vertical edge -----------------------------
+  const doc2 = { signal: [{ name: 'b', wave: '0=' }] };
+  const layout2 = G.layoutOf(doc2, sizes);
+  const svg2 = fakeDoc().createElementNS('svg', 'svg');
+  drawer.drawLane(svg2, layout2, 0);
+  const edges2 = svg2.children.filter(function (c) { return c.attrs.class === 'ed-wave-edge'; });
+  assert.strictEqual(edges2.length, 1, '0->bus 也只有一個邊界：' + JSON.stringify(edges2));
+  assert.strictEqual(edges2[0].tag, 'line',
+    'bus 邊界不在這個 task 的範圍內，必須維持原本的垂直 line：' + JSON.stringify(edges2[0]));
+
+  console.log('wave-draw: drawLane 只在真的電位轉態呼叫 brickPath，bus 邊界維持原狀 — OK');
+}
+
+console.log('wave-draw.test.js OK');
