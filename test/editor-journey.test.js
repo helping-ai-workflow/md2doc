@@ -9980,30 +9980,112 @@ async function main() {
       return count + MODAL_WALK_MARGIN;
     };
 
-    // The centre of one cell, in viewport coordinates, plus whether that point
-    // is actually ON the drawing. The canvas is a scroll container inside a
-    // fixed-width column: MEASURED in this session, a press 116px past its clip
-    // landed on the preview column instead, the mousedown listener never fired,
-    // and the result was indistinguishable from "the paint refused". Without
-    // this flag that is a silently green scenario.
+    // v3.6.0 Task 6 fix round 3 (R21): the ONE place `.ed-wave-canvas-wrap`
+    // gets scrolled to bring a press target into view, and the ONE place
+    // visibility is asserted afterward.
     //
-    // v3.6.0 Task 6 (ruling R18): this USED to derive lane pitch / cycle pitch
-    // by dividing the SVG's own `getBoundingClientRect()` by a lane/cycle
-    // count — `lh = r.height / laneCount`, `cw = r.width / cycleCount`. That
-    // division is only correct when the SVG's total height/width is made up
-    // ENTIRELY of lane rows / cycle columns and nothing else. Task 6 gave the
-    // canvas a 120px name column (`r.width` now also spans that) and a 22px+
-    // ruler/head band (`r.height` now also spans that), so both divisions
-    // silently produced the wrong pitch the moment this task landed — every
-    // call site pressed in the wrong place, and the failures looked like
-    // unrelated product bugs.
+    // Three rounds each rediscovered this arithmetic and each got a
+    // different piece of it wrong: R18 derived lane/cycle pitch by dividing
+    // a measured dimension by a count (only correct when the SVG holds
+    // nothing but lane rows and cycle columns — the name column and ruler
+    // band broke that). R20 captured a point, then let a LATER scroll (from
+    // resolving a second point) invalidate it before it was pressed. R21
+    // itself: `finding4a`'s bus-label press measured the real element's
+    // `getBoundingClientRect()` — accurate — and pressed it without ever
+    // checking whether the wrap's CURRENT scroll position actually shows
+    // it. `getBoundingClientRect()` returns a real, correct viewport
+    // position for content a scroll container has clipped; the press still
+    // lands on whatever IS painted at that pixel, not on the clipped
+    // element. Three different bugs, one common cause: locating a target
+    // and scrolling it into view are two different concerns, and every site
+    // that re-derives their combination gets one of the three wrong. This
+    // is the one place they are combined, so nothing else has to be.
     //
-    // Fixed the same way Task 5 fixed the same class of bug one fixture
-    // over: stop deriving, start measuring. `wave-draw.js` now publishes the
-    // geometry it actually used as `data-origin-x` / `data-origin-y` /
-    // `data-lane-height` / `data-cycle-width` on the canvas element itself
-    // (written straight from `layout`, never recomputed) — read those
-    // instead of dividing.
+    // `locate`: an async `(page) => Promise<{x, y, width, height}>` (a box
+    // in VIEWPORT coordinates) for whatever this call is looking for — an
+    // SVG-attribute computation for a cell (`cellPoint`), a DOM element's
+    // own rect for a handle or a label (`edgeHandlePoint`, `labelPoint`,
+    // `markPoint`). It asserts, WITH ITS OWN caller-specific message, if the
+    // thing it is looking for cannot be found at all (a different failure
+    // from "found it, but it is clipped", which is this function's job) —
+    // `pointInCanvas` never needs to know what "not found" means for a
+    // particular caller. Called TWICE: once to learn where the target
+    // starts, and again AFTER scrolling — scrolling moves the wrap's
+    // content, so anything `locate` reads (an SVG's own current position,
+    // an element's own current rect) has to be re-read, not re-scaled from
+    // the first reading, the same reason `cellPoint`'s round-2 fix re-read
+    // its rects post-scroll.
+    //
+    // `offscreenMsg` is either a string or a `(pt) => string`, so a caller
+    // that wants the FINAL resolved point in its message (`edgeHandlePoint`
+    // used to append `'Got ' + JSON.stringify(at)`) still can.
+    const pointInCanvas = async (page, locate, offscreenMsg) => {
+      const wrapMetrics = async () => {
+        const w = await page.evaluate(() => {
+          const wrap = document.querySelector('.ed-wave-canvas-wrap');
+          if (wrap === null) return null;
+          const r = wrap.getBoundingClientRect();
+          return { left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+            clientLeft: wrap.clientLeft, clientTop: wrap.clientTop,
+            clientWidth: wrap.clientWidth, clientHeight: wrap.clientHeight };
+        });
+        assert.ok(w, 'pointInCanvas: 畫布捲動容器（.ed-wave-canvas-wrap）不在畫面上');
+        return w;
+      };
+
+      const box0 = await locate(page);
+      const w0 = await wrapMetrics();
+      // Same arithmetic as `scrollCursorIntoView` in wave-ui.js: against the
+      // wrap's PADDING BOX (`clientLeft`/`clientWidth`), not
+      // `getBoundingClientRect()`, which would count the border and leave
+      // the target short of where it was asked to go.
+      const left = box0.x - (w0.left + w0.clientLeft);
+      const top = box0.y - (w0.top + w0.clientTop);
+      let dx = 0;
+      let dy = 0;
+      if (left < 0) dx = left;
+      else if (left + box0.width > w0.clientWidth) dx = left + box0.width - w0.clientWidth;
+      if (top < 0) dy = top;
+      else if (top + box0.height > w0.clientHeight) dy = top + box0.height - w0.clientHeight;
+      if (dx !== 0 || dy !== 0) {
+        await page.evaluate((ddx, ddy) => {
+          document.querySelector('.ed-wave-canvas-wrap').scrollLeft += ddx;
+          document.querySelector('.ed-wave-canvas-wrap').scrollTop += ddy;
+        }, dx, dy);
+      }
+
+      const box = await locate(page);
+      const w = await wrapMetrics();
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      const visible = x >= w.left && x <= w.right && y >= w.top && y <= w.bottom;
+      // Unchanged in strictness, now a POST-scroll check (R20, generalized
+      // here in R21): a target still not visible once we have scrolled all
+      // the way to it — the canvas is narrower/shorter than the wrap's clip
+      // even at its own scroll limit, or the target simply does not exist —
+      // is still a hard failure. This guard is what stops a blind press
+      // from looking like "nothing happened"; scrolling makes the ordinary
+      // case reachable, it does not make this advisory.
+      assert.strictEqual(visible, true,
+        typeof offscreenMsg === 'function' ? offscreenMsg({ x: x, y: y }) : offscreenMsg);
+      return { x: x, y: y, visible: visible };
+    };
+
+    // The centre of one cell, in viewport coordinates. The canvas is a
+    // scroll container inside a fixed-width column: MEASURED in this
+    // session, a press 116px past its clip landed on the preview column
+    // instead, the mousedown listener never fired, and the result was
+    // indistinguishable from "the paint refused". Without `pointInCanvas`'s
+    // visibility check that is a silently green scenario.
+    //
+    // v3.6.0 Task 6 (ruling R18): this USED to derive lane pitch / cycle
+    // pitch by dividing the SVG's own `getBoundingClientRect()` by a
+    // lane/cycle count. Fixed the same way Task 5 fixed the same class of
+    // bug one fixture over: stop deriving, start measuring. `wave-draw.js`
+    // publishes the geometry it actually used as `data-origin-x` /
+    // `data-origin-y` / `data-lane-height` / `data-cycle-width` on the
+    // canvas element itself (written straight from `layout`, never
+    // recomputed) — read those instead of dividing.
     //
     // `data-cycle-width` is lane 0's own width, not a diagram-wide constant
     // (Task 4 made `cycleWidth` per lane via `period`/`hscale`), so this
@@ -10012,94 +10094,48 @@ async function main() {
     // returning a point that is wrong for that lane. No fixture in this file
     // sets `period`, so this should never fire; if it does, the fixture is
     // telling you something true and `cellPoint` is the wrong tool for it.
-    // v3.6.0 Task 6 fix round 2 (R20): the 120px name column means fewer
-    // cycles fit in the same clip than before — MEASURED at this journey's
-    // default 800×600 viewport, ~3.4 cycles visible where 5 used to be — so a
-    // target cell being off the wrap's current scroll position is now the
-    // ORDINARY case, not a fixture bug. A real user scrolls to it; this now
-    // does too, the same way the keyboard path already does
-    // (`wave-ui.js`'s `scrollCursorIntoView`: read its own box against the
-    // wrap's PADDING BOX — `clientLeft`/`clientWidth`, not
-    // `getBoundingClientRect()`, which would count the border and leave the
-    // cell short) — one mechanism, not a second one invented for the test.
     const cellPoint = async (page, lane, cycle) => {
-      const at = await page.evaluate((l, c) => {
-        const svg = document.querySelector('.ed-wave-canvas');
-        const wrap = document.querySelector('.ed-wave-canvas-wrap');
-        if (!svg || !wrap) return null;
-        const laneCount = Number(svg.getAttribute('data-lane-count'));
-        const cycleWidth0 = Number(svg.getAttribute('data-cycle-width'));
-        for (let i = 0; i < laneCount; i++) {
-          const own = Number(svg.getAttribute('data-cycle-width-' + i));
-          if (own !== cycleWidth0) {
-            return { error: 'mixed cycleWidth across lanes (lane ' + i + ': ' + own +
-              ' vs lane 0: ' + cycleWidth0 + ') — cellPoint only answers for a ' +
-              'document where every lane shares one cycle width' };
+      const locate = async (p) => {
+        const box = await p.evaluate((l, c) => {
+          const svg = document.querySelector('.ed-wave-canvas');
+          if (svg === null) return null;
+          const laneCount = Number(svg.getAttribute('data-lane-count'));
+          const cycleWidth0 = Number(svg.getAttribute('data-cycle-width'));
+          for (let i = 0; i < laneCount; i++) {
+            const own = Number(svg.getAttribute('data-cycle-width-' + i));
+            if (own !== cycleWidth0) {
+              return { error: 'mixed cycleWidth across lanes (lane ' + i + ': ' + own +
+                ' vs lane 0: ' + cycleWidth0 + ') — cellPoint only answers for a ' +
+                'document where every lane shares one cycle width' };
+            }
           }
-        }
-        const originX = Number(svg.getAttribute('data-origin-x'));
-        const originY = Number(svg.getAttribute('data-origin-y'));
-        const laneHeight = Number(svg.getAttribute('data-lane-height'));
-        const cycleWidth = cycleWidth0;
-        // The cell's box in the SVG's OWN coordinate space (same units
-        // `wave-geometry.cellRect` returns) — fixed regardless of scroll,
-        // which is exactly why it is computed once, before any scrolling,
-        // and everything that depends on the CURRENT scroll position is
-        // computed fresh from it below instead of being derived once and
-        // reused.
-        const box = { x: originX + c * cycleWidth, y: originY + l * laneHeight,
-          width: cycleWidth, height: laneHeight };
-
-        // Scroll the target into view — same arithmetic as
-        // `scrollCursorIntoView` in wave-ui.js: against the wrap's padding
-        // box (`clientLeft`/`clientWidth`/`clientTop`/`clientHeight`), scaled
-        // from SVG units into rendered CSS px the same way the point below
-        // is (see the scale-factor comment there for why: the canvas does
-        // not currently apply CSS/zoom scaling, but computing the scale
-        // rather than assuming 1 costs one line and survives that changing).
-        const scaleOf = () => {
+          const originX = Number(svg.getAttribute('data-origin-x'));
+          const originY = Number(svg.getAttribute('data-origin-y'));
+          const laneHeight = Number(svg.getAttribute('data-lane-height'));
+          const cycleWidth = cycleWidth0;
+          // The cell's box in the SVG's OWN coordinate space (same units
+          // `wave-geometry.cellRect` returns), converted to VIEWPORT
+          // coordinates via the SVG's own CURRENT rect — read fresh on
+          // every call, which is what lets `pointInCanvas` call this again
+          // after scrolling and get the cell's NEW on-screen position
+          // rather than a stale one.
           const r = svg.getBoundingClientRect();
           const vb = svg.viewBox.baseVal;
-          return { x: vb.width > 0 ? r.width / vb.width : 1,
-            y: vb.height > 0 ? r.height / vb.height : 1 };
-        };
-        let scale = scaleOf();
-        let cbox = svg.getBoundingClientRect();
-        let wbox = wrap.getBoundingClientRect();
-        const left = (cbox.left + box.x * scale.x) - (wbox.left + wrap.clientLeft);
-        const top = (cbox.top + box.y * scale.y) - (wbox.top + wrap.clientTop);
-        const w = wrap.clientWidth;
-        const h = wrap.clientHeight;
-        if (left < 0) wrap.scrollLeft += left;
-        else if (left + box.width * scale.x > w) wrap.scrollLeft += left + box.width * scale.x - w;
-        if (top < 0) wrap.scrollTop += top;
-        else if (top + box.height * scale.y > h) wrap.scrollTop += top + box.height * scale.y - h;
-
-        // Re-read: scrolling just moved both rects, and a point computed
-        // from the PRE-scroll rects would be wrong in a new way — this is
-        // the whole reason the point is not computed until after the scroll
-        // above has already happened.
-        scale = scaleOf();
-        cbox = svg.getBoundingClientRect();
-        wbox = wrap.getBoundingClientRect();
-        const x = cbox.left + (box.x + box.width / 2) * scale.x;
-        const y = cbox.top + (box.y + box.height / 2) * scale.y;
-        return { x: x, y: y,
-          visible: x >= wbox.left && x <= wbox.right && y >= wbox.top && y <= wbox.bottom };
-      }, lane, cycle);
-      assert.ok(at, 'cellPoint: 畫布不在畫面上');
-      assert.strictEqual(at.error, undefined, 'cellPoint: ' + at.error);
-      // Unchanged in strictness, but now a POST-scroll check (R20): a cell
-      // still not visible once we have scrolled all the way to it — the
-      // canvas is narrower/shorter than the wrap's clip even at its own
-      // scroll limit, or the cell simply does not exist — is still a hard
-      // failure with the same message. This guard is what stops a blind
-      // press from looking like "painting didn't work"; scrolling makes the
-      // ordinary case reachable, it does not make this advisory.
-      assert.strictEqual(at.visible, true,
-        'cellPoint: lane ' + lane + ' cycle ' + cycle +
+          const scaleX = vb.width > 0 ? r.width / vb.width : 1;
+          const scaleY = vb.height > 0 ? r.height / vb.height : 1;
+          return {
+            x: r.left + (originX + c * cycleWidth) * scaleX,
+            y: r.top + (originY + l * laneHeight) * scaleY,
+            width: cycleWidth * scaleX,
+            height: laneHeight * scaleY,
+          };
+        }, lane, cycle);
+        assert.ok(box, 'cellPoint: 畫布不在畫面上');
+        assert.strictEqual(box.error, undefined, 'cellPoint: ' + box.error);
+        return box;
+      };
+      return pointInCanvas(page, locate, 'cellPoint: lane ' + lane + ' cycle ' + cycle +
         ' 的中心點落在畫布的可視範圍外，按下去會按到別的欄位（看起來會跟「塗不上去」一模一樣）');
-      return at;
     };
 
     // v3.6.0 Task 5 fix round 2（R16）：一個 edge 端點「把手」在畫面上的位置。
@@ -10128,42 +10164,43 @@ async function main() {
     //     不是退化成一個點（呼叫端把這個函式用在非 self-loop 的未選取 edge
     //     上，本來就沒有這個函式能給的答案），直接吵出來，不要悄悄回傳一個
     //     其實是整條線 bounding box 中心的錯誤點。
+    //
+    // v3.6.0 Task 6 fix round 3（R21）：一樣經過 `pointInCanvas` 捲進畫面——
+    // 這個把手是 `getBoundingClientRect()` 量出來的真實元素位置，跟
+    // `finding4a` 那個 bus 標籤是同一個風險：量得準不代表捲動容器現在真的
+    // 露出它。
     const edgeHandlePoint = async (page, edgeIndex, end) => {
-      const at = await page.evaluate((idx, e) => {
-        const wrap = document.querySelector('.ed-wave-canvas-wrap');
-        if (!wrap) return { error: 'no-wrap' };
-        const w = wrap.getBoundingClientRect();
-        const sel = '.ed-wave-edge-handle[data-edge-index="' + idx +
-          '"][data-edge-handle="' + e + '"]';
-        const h = document.querySelector(sel);
-        let r;
-        let via;
-        if (h !== null) {
-          r = h.getBoundingClientRect();
-          via = 'handle';
-        } else {
-          const p = document.querySelector(
-            '.ed-wave-edge-path[data-edge-index="' + idx + '"]');
-          if (p === null) return { error: 'no-handle-and-no-path' };
-          r = p.getBoundingClientRect();
-          if (r.width > 0.5 || r.height > 0.5) {
-            return { error: 'no-handle-and-path-not-degenerate',
-              width: r.width, height: r.height };
+      const locate = async (p) => {
+        const box = await p.evaluate((idx, e) => {
+          const sel = '.ed-wave-edge-handle[data-edge-index="' + idx +
+            '"][data-edge-handle="' + e + '"]';
+          const h = document.querySelector(sel);
+          let r;
+          let via;
+          if (h !== null) {
+            r = h.getBoundingClientRect();
+            via = 'handle';
+          } else {
+            const p2 = document.querySelector(
+              '.ed-wave-edge-path[data-edge-index="' + idx + '"]');
+            if (p2 === null) return { error: 'no-handle-and-no-path' };
+            r = p2.getBoundingClientRect();
+            if (r.width > 0.5 || r.height > 0.5) {
+              return { error: 'no-handle-and-path-not-degenerate',
+                width: r.width, height: r.height };
+            }
+            via = 'self-loop-path';
           }
-          via = 'self-loop-path';
-        }
-        const x = r.left + r.width / 2;
-        const y = r.top + r.height / 2;
-        return { x: x, y: y, via: via,
-          visible: x >= w.left && x <= w.right && y >= w.top && y <= w.bottom };
-      }, edgeIndex, end);
-      assert.ok(at && at.error === undefined,
-        'edgeHandlePoint: edge ' + edgeIndex + ' 端 ' + end + ' 量不到把手，也量不到一個退化成' +
-        '單點的 self-loop path。Got ' + JSON.stringify(at));
-      assert.strictEqual(at.visible, true,
+          return { x: r.left, y: r.top, width: r.width, height: r.height, via: via };
+        }, edgeIndex, end);
+        assert.ok(box && box.error === undefined,
+          'edgeHandlePoint: edge ' + edgeIndex + ' 端 ' + end + ' 量不到把手，也量不到一個退化成' +
+          '單點的 self-loop path。Got ' + JSON.stringify(box));
+        return box;
+      };
+      return pointInCanvas(page, locate, (pt) =>
         'edgeHandlePoint: edge ' + edgeIndex + ' 端 ' + end +
-        ' 的把手落在畫布的可視範圍外，按下去會按到別的東西。Got ' + JSON.stringify(at));
-      return at;
+        ' 的把手落在畫布的可視範圍外，按下去會按到別的東西。Got ' + JSON.stringify(pt));
     };
 
     // The saved block, parsed back: the lane names in the codec's display order.
@@ -13844,17 +13881,23 @@ async function main() {
       // the `<text>` entirely for an empty string — see its own comment)
       // would otherwise read as "click missed everything" rather than as
       // the test's own precondition failing.
-      const labelPoint = async () => {
-        const box = await ctx.page.evaluate(() => {
+      //
+      // v3.6.0 Task 6 fix round 3 (R21): routed through `pointInCanvas` —
+      // `getBoundingClientRect()` here is measured correctly, but a correct
+      // VIEWPORT position is not the same thing as "currently inside the
+      // wrap's visible clip" (`finding4a`'s own bus label is exactly this
+      // bug one fixture over).
+      const labelPoint = async () => pointInCanvas(ctx.page, async (p) => {
+        const box = await p.evaluate(() => {
           const t = document.querySelector('.ed-wave-buslabel');
           if (t === null) return null;
           const r = t.getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          return { x: r.left, y: r.top, width: r.width, height: r.height };
         });
         assert.ok(box !== null,
           'labelPoint 前提失敗：畫布上找不到 .ed-wave-buslabel（dat 這條 lane 應該有一個「D」）');
         return box;
-      };
+      }, 'labelPoint: .ed-wave-buslabel 捲動到底之後仍落在畫布的可視範圍外，按下去會按到別的東西');
       const clickAt = async (pt) => {
         await ctx.page.mouse.move(pt.x, pt.y);
         await ctx.page.mouse.down();
@@ -14072,16 +14115,19 @@ async function main() {
 
     // The centre of a mark's own bounding box — the placeholder circle
     // here, `labelPoint` above did the same for the text — never a cycle's.
-    const markPoint = async (page, selector) => {
-      const box = await page.evaluate((sel) => {
+    //
+    // v3.6.0 Task 6 fix round 3 (R21): routed through `pointInCanvas`, same
+    // reason as `labelPoint`.
+    const markPoint = async (page, selector) => pointInCanvas(page, async (p) => {
+      const box = await p.evaluate((sel) => {
         const t = document.querySelector(sel);
         if (t === null) return null;
         const r = t.getBoundingClientRect();
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        return { x: r.left, y: r.top, width: r.width, height: r.height };
       }, selector);
       assert.ok(box !== null, 'markPoint 前提失敗：畫布上找不到 ' + selector);
       return box;
-    };
+    }, 'markPoint: ' + selector + ' 捲動到底之後仍落在畫布的可視範圍外，按下去會按到別的東西');
 
     // T11c — press the PLACEHOLDER of an unlabelled bus cell: must open the
     // field for the right slot, exactly like pressing a labelled cell's
@@ -14272,15 +14318,22 @@ async function main() {
       // edge 未被畫出來的 `to` 把手的座標——這正是這個 finding 要驗證的
       // 重疊點。用真正畫出來的 `<text>` 的 bounding rect，不用算出來的
       // cell 中心，才是真的「按在標籤上」，跟 T11a 的 labelPoint 同一招。
-      const labelPoint = await ctx.page.evaluate(() => {
-        const labels = Array.from(document.querySelectorAll('.ed-wave-buslabel'));
-        const t = labels.find((el) => el.textContent === 'B');
-        if (t === undefined) return null;
-        const r = t.getBoundingClientRect();
-        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-      });
-      assert.ok(labelPoint !== null,
-        '前提失敗：畫布上找不到文字是「B」的 .ed-wave-buslabel');
+      //
+      // v3.6.0 Task 6 fix round 3（R21）：這裡正是本輪要修的那個缺陷本身
+      // ——`getBoundingClientRect()` 量出來的座標是準的（label「B」落在
+      // cycle 3，接近畫布可視範圍的右緣），但從來沒有捲動過去確認它真的
+      // 露在 `.ed-wave-canvas-wrap` 的可視範圍裡。改走 `pointInCanvas`。
+      const labelPoint = await pointInCanvas(ctx.page, async (p) => {
+        const box = await p.evaluate(() => {
+          const labels = Array.from(document.querySelectorAll('.ed-wave-buslabel'));
+          const t = labels.find((el) => el.textContent === 'B');
+          if (t === undefined) return null;
+          const r = t.getBoundingClientRect();
+          return { x: r.left, y: r.top, width: r.width, height: r.height };
+        });
+        assert.ok(box !== null, '前提失敗：畫布上找不到文字是「B」的 .ed-wave-buslabel');
+        return box;
+      }, '前提失敗：文字是「B」的 .ed-wave-buslabel 捲動到底之後仍落在畫布的可視範圍外');
 
       await ctx.page.mouse.move(labelPoint.x, labelPoint.y);
       await ctx.page.mouse.down();
