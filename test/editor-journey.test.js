@@ -59,8 +59,8 @@ async function boot(mdText, extraFiles, srvOpts) {
   }
   fs.writeFileSync(mdPath, mdText, 'utf8');
   // createEditorServer() takes a single options object ({ files, clientJs,
-  // idleTimeoutMs, listenPort }), not the (paths, opts) shape the original
-  // sketch assumed — see lib/editor/server.js. It returns
+  // connectionGraceMs, listenPort }), not the (paths, opts) shape the
+  // original sketch assumed — see lib/editor/server.js. It returns
   // { server, port, urlFor(absPath), close() }, no bare `.url`/`.port`
   // shortcut on the caller's side; the URL for a given file comes from
   // urlFor(), which maps the resolved path back to its /edit/:id index.
@@ -9309,10 +9309,27 @@ async function main() {
     const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
     // Scoped to these rows only (re-review G10). They sit still for a real
-    // heartbeat (two of them for two), and createEditorServer()'s 30s default
-    // is close enough to that to turn a slow bake into a mystery
-    // ERR_CONNECTION_REFUSED. No other scenario in this file is affected.
-    const DRAWIO_SRV_OPTS = { idleTimeoutMs: 10 * 60 * 1000 };
+    // heartbeat (two of them for two). Originally an `idleTimeoutMs`
+    // override, because the old ping-driven idle timer's 30s default was
+    // close enough to that stillness to turn a slow bake into a mystery
+    // ERR_CONNECTION_REFUSED.
+    //
+    // v3.6.0 audit note (Round 3): under the CURRENT connection-based
+    // mechanism this override is likely no longer load-bearing — every row
+    // below calls newPage() once, which opens its OWN dedicated server and
+    // ONE page that stays open (and therefore keeps its /api/alive
+    // connection open) for the row's whole duration, "sitting still" and
+    // all; nothing in this file's architecture holds a server across a gap
+    // with zero connections the way editor-client-runtime.test.js's shared
+    // server and multi-cell sweeps do (audited for that pattern — none
+    // found in this file: it has exactly 5 `.goto()` call sites total, and
+    // none of them repeat against one server the way a sweep does). Kept
+    // anyway, renamed to match the current option, rather than deleted —
+    // removing it is a behavior-neutral cleanup this fix is not the place
+    // for, and a stale `idleTimeoutMs` key (silently ignored by
+    // createEditorServer() now) would be actively misleading to leave in
+    // place under its old name.
+    const DRAWIO_SRV_OPTS = { connectionGraceMs: 10 * 60 * 1000 };
     const diagram = (name, id, value) =>
       '  <diagram name="' + name + '" id="' + id + '">\n' +
       '    <mxGraphModel dx="800" dy="600" grid="0" page="1" pageWidth="850" pageHeight="1100">\n' +

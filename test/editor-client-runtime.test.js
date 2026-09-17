@@ -96,18 +96,31 @@ async function setup() {
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  // S2 Task 4: an EXPLICIT idle timeout, because this one server is shared by
-  // 33 scenarios spread across the whole file while every scenario in between
-  // runs against its own short-lived server. createEditorServer()'s default is
-  // 30s of no requests, and the S2 轉換 group in the middle now sits idle for
-  // longer than that — the symptom is a bare
-  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0` from the
-  // NEXT shared-server scenario, which reads as a broken test rather than as a
-  // stopwatch. The timeout is the product's own dev-server convenience and
-  // nothing in this suite asserts it; srv.close() at the end still tears it
-  // down deterministically.
+  // S2 Task 4: an EXPLICIT connection grace, because this one server is
+  // shared by 33 scenarios spread across the whole file while every scenario
+  // in between runs against its own short-lived server. v3.6.0 replaced
+  // createEditorServer()'s liveness mechanism: it used to be a 30s-of-no-
+  // /api/ping idle timer (this override used to read `idleTimeoutMs`), and is
+  // now a held-open `/api/alive` connection — the server closes itself a
+  // short `connectionGraceMs` (default 5s) after the LAST such connection
+  // drops, which is exactly correct product behaviour for a real closed tab,
+  // but wrong for THIS fixture: this shared server legitimately has zero
+  // open connections for the whole stretch other scenarios spend driving
+  // their OWN dedicated servers (the S2 轉換 sweep in the middle is one such
+  // stretch, and multi-minute). MEASURED on the coordinator's machine: with
+  // the 5s default, that sweep alone was enough to close this server mid-run
+  // — every scenario after it then failed with a bare
+  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0`, 0
+  // AssertionErrors, reading as a broken test rather than as what it was
+  // (this server correctly noticing nobody was attached to it and closing,
+  // exactly as designed). The grace is the product's own dev-server
+  // convenience and nothing in this suite asserts it; srv.close() at the end
+  // still tears it down deterministically. This override does NOT change
+  // createEditorServer()'s default — see lib/editor/server.js — it only
+  // exempts this one shared test fixture from a timing window that was never
+  // meant to describe "no scenario is currently using this specific server".
   const srv = await createEditorServer({
-    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+    files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
   });
   return { dir, mdPath, srv, url: srv.urlFor(mdPath) };
 }
@@ -743,12 +756,33 @@ async function paragraphSelByText(page, prefix) {
 // fixtures anywhere in that doc risks disturbing one of those invariants.
 // Isolation also means each table scenario's undo stack / save state can
 // never leak into another.
+// v3.6.0: `connectionGraceMs` override, for the same class of reason the
+// shared server at the top of this file has one (see its own comment) —
+// NOT because this factory's servers are themselves shared across
+// scenarios (each call makes a fresh, independent one), but because some of
+// its 200+ call sites hold ONE instance across several sequential
+// open/close page cycles within a single scenario (e.g. the v2.11.1 §Tab
+// non-regression block's six sub-cases, each opening and closing its own
+// page against the same server) or across a many-cell sweep (this file's
+// S2 conversion-matrix and S3/S4 T8 sweeps). Between one page closing and
+// the next opening, the connection count is briefly zero; on an ordinary
+// machine that gap is the same order of magnitude as a reload (measured
+// elsewhere in this codebase at 55-73ms), but this suite runs on a machine
+// that has demonstrably gone slow enough under memory pressure to kill long
+// runs outright, and a single stalled reconnect past the 5s default would
+// close this fixture out from under an unrelated scenario. None of these
+// 200+ call sites test the liveness feature itself, so a generous grace
+// costs nothing real — see lib/editor/server.js for the mechanism and
+// DEFAULT_CONNECTION_GRACE_MS for the product's own (unchanged) default.
+const FIXTURE_SRV_OPTS = { connectionGraceMs: 30 * 60 * 1000 };
+
 async function setupTableDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-table-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -768,12 +802,16 @@ async function tableBlockSel(page, index) {
 // ── Phase-3 Task 4 (list WYSIWYG) helpers ────────────────────────────────
 // Same isolation reasoning as setupTableDoc() above: list scenarios get
 // their own doc/server so undo-stack / save state never leaks between them.
+// Same FIXTURE_SRV_OPTS reasoning too (see its own comment above
+// setupTableDoc()) — this factory is what backs tnrSrv's six sequential
+// open/close sub-cases further down this file.
 async function setupListDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-list-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -1454,13 +1492,15 @@ async function travelPointer(page, from, to, steps) {
 
 // ── §10-gap fix (block-level insert/delete) helpers ─────────────────────
 // Own isolated doc/server per scenario group, same isolation reasoning as
-// setupTableDoc()/setupListDoc() above.
+// setupTableDoc()/setupListDoc() above — and the same FIXTURE_SRV_OPTS
+// reasoning (see the comment above setupTableDoc()).
 async function setupBlockOpsDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-blockops-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -4420,12 +4460,17 @@ async function gutterGeometry(page, sel) {
       const sweepDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-'));
       const sweepMdPath = path.join(sweepDir, 'doc.md');
       fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
-      // An EXPLICIT idle timeout for the same reason the shared server at the
-      // top of this file has one: 72 cells on one server outlive
-      // createEditorServer()'s 30s default, and the symptom is a bare
-      // net::ERR_CONNECTION_REFUSED that reads as a broken test.
+      // An EXPLICIT connection grace, for the same reason the shared server
+      // at the top of this file has one (see its own comment — this override
+      // used to read `idleTimeoutMs` before v3.6.0 replaced the liveness
+      // mechanism): the 72 cells below drive ONE `page`/`sweepSrv` pair
+      // through 72 sequential `page.goto()` reconnects, and while each
+      // reconnect's own gap is normally tiny (a reload-sized gap, not a
+      // multi-second one), 72 of them is 72 chances for one to land badly on
+      // a loaded machine. This is not testing liveness — it is a conversion
+      // matrix — so a generous grace costs nothing real.
       const sweepSrv = await createEditorServer({
-        files: [sweepMdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+        files: [sweepMdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
       });
       try {
         const page = await newPage(browser);
@@ -4633,8 +4678,10 @@ async function gutterGeometry(page, sel) {
           const degDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-deg-'));
           const degMd = path.join(degDir, 'doc.md');
           fs.writeFileSync(degMd, DEG, 'utf8');
+          // Same connection-grace reasoning as sweepSrv just above (12
+          // sequential reconnects here instead of 72, same risk shape).
           const degSrv = await createEditorServer({
-            files: [degMd], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+            files: [degMd], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
           });
           try {
             const dpage = await newPage(browser);
@@ -15693,7 +15740,18 @@ async function gutterGeometry(page, sel) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-t7-sweep-'));
       const mdPath = path.join(dir, 'sweep.md');
       fs.writeFileSync(mdPath, sweepOriginal, 'utf8');
-      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      // v3.6.0 audit finding (Round 3): same connection-grace reasoning as
+      // the S2/S3 sweeps above (see the comment near the top of this file) —
+      // this one server/page pair is reused for 12 list items × 3 gestures =
+      // 36 sequential `page.goto()` reconnects below ("One server and one
+      // page for the whole sweep; only the navigation is repeated" is this
+      // very sweep's own comment). It did not carry the old `idleTimeoutMs`
+      // override, apparently by oversight rather than by having been proven
+      // safe — added here for consistency with every other many-reconnect
+      // sweep in this file, none of which test liveness itself.
+      const srv = await createEditorServer({
+        files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
+      });
       try {
         // blockmap.js emits one li block per item in document order, and
         // lib/md2doc.js's render walk consumes that array in lockstep — so the
@@ -19247,12 +19305,15 @@ async function gutterGeometry(page, sel) {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s3-t8-'));
         const mdPath = path.join(dir, 'doc.md');
         fs.writeFileSync(mdPath, shape.md, 'utf8');
-        // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
-        // has one: eight cells on one server outlive createEditorServer()'s
-        // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
-        // that reads as a broken test.
+        // An EXPLICIT connection grace, for the same reason the S2 sweep's
+        // server has one (see its own comment near the top of this file):
+        // this outer T8_SHAPES loop repeats createEditorServer() once per
+        // shape, and the INNER T8_OPS loop below drives repeated
+        // `page.goto()` reconnects against each one — same many-reconnects-
+        // on-one-server shape as the S2 sweep, not the liveness feature
+        // itself.
         const srv8 = await createEditorServer({
-          files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+          files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
         });
         try {
           const page = await newPage(browser);
