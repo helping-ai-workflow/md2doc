@@ -15023,6 +15023,63 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 選取 edge 在窄視窗下會自動展開側欄，且只在那一拍展開 — OK');
     }
+
+    // ── v3.6.0 Task 13 fix round 4：選取 edge、拖曳它的把手，畫布本身的
+    // 矩形全程一根汗毛都不准動 ──────────────────────────────────────────────
+    //
+    // 這條測的是「性質」本身，不是只重新檢查 T9d 的狀態列會不會綠——如果某個
+    // 修法把 reflow 換個地方藏起來，T9d 剛好還是綠的，只重跑 T9d 抓不到那種
+    // 迴歸。診斷過程（task-13-report.md fix round 4）量出來真正的缺陷是
+    // 遮擋，不是位移：`.ed-wave-canvas` 自己的矩形從按下到放開全程都不會
+    // 變，選取 edge 之後側欄的自動展開／收窄（fix round 3、4）調整的是側欄
+    // 自己的寬度，不是畫布。這裡直接在按下、拖曳中、放開三個時間點比較
+    // `.ed-wave-canvas` 的 `getBoundingClientRect()`，斷言三個都跟按下前
+    // 逐值相同。
+    {
+      const ctx = await newPage(EDGE_FORK_MD);
+      await openWave(ctx.page);
+
+      const own = await cellPoint(ctx.page, 1, 2); // req cell 2 = 'b'
+      const selectPt = { x: own.x - 27, y: own.y };
+      await clickAt(ctx.page, selectPt);
+      const picked = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-selected-edge'));
+      assert.strictEqual(picked, '0', '前提失敗：必須選到 a~>b（index 0）。Got ' + picked);
+
+      const canvasRect = () => ctx.page.$eval('.ed-wave-canvas', (el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      });
+
+      const before = await canvasRect();
+
+      // 抓選取之後真正畫出來的把手，不是算出來的座標——跟 T9d 同一招。
+      const handle = await edgeHandlePoint(ctx.page, 0, 'to');
+      await ctx.page.mouse.move(handle.x, handle.y);
+      await ctx.page.mouse.down();
+      const duringPress = await canvasRect();
+      await ctx.page.mouse.move(handle.x + 6, handle.y);
+      const duringDrag = await canvasRect();
+      await ctx.page.mouse.move(handle.x, handle.y);
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await canvasRect();
+
+      assert.deepStrictEqual(duringPress, before,
+        'Critical：按下把手的那一刻，畫布本身的矩形不准移動。Got ' +
+        JSON.stringify({ before: before, duringPress: duringPress }));
+      assert.deepStrictEqual(duringDrag, before,
+        'Critical：拖曳過程中，畫布本身的矩形不准移動。Got ' +
+        JSON.stringify({ before: before, duringDrag: duringDrag }));
+      assert.deepStrictEqual(after, before,
+        'Critical：放開之後，畫布本身的矩形還是不准移動。Got ' +
+        JSON.stringify({ before: before, after: after }));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 13 fix round 4: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 選取 edge 之後拖曳它的把手，畫布本身的矩形全程不變 — OK');
+    }
   }
 
   await browser.close();
