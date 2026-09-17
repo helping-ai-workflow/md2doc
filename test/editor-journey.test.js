@@ -15157,6 +15157,118 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 選取 edge 之後拖曳它的把手，畫布本身的矩形全程不變 — OK');
     }
+
+    // ── v3.6.0 Task 14: rail 瘦身與選取合一 ─────────────────────────────────
+    //
+    // 每一列曾經塞 7 個控制項（＋ / 名字 / ▲ / ▼ / ✕ / 複製 / 空白列，群組的
+    // 頭一列還多一顆 解散群組），200px 的 rail 裡放不下，中文按鈕被壓成直排。
+    // 它們現在全部在工具列的 訊號 / 群組 分區，作用於 `selection` —— 跟畫布
+    // 共用同一個選取，而不是另外維護一個只服務「建立群組」的 `laneMultiSelect`。
+    //
+    // 這一列同時釘住三件事，因為它們是同一個決定的三個面：列裡剩下什麼、
+    // 名字欄真的放得下、以及原始碼裡只剩一套選取。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const perRow = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-row')].map((r) => ({
+          buttons: r.querySelectorAll('button').length,
+          handles: r.querySelectorAll('.ed-wave-lane-handle').length,
+          inputs: r.querySelectorAll('input').length,
+        })));
+      assert.ok(perRow.length > 0, 'Task 14 前提失敗：rail 必須有列');
+      for (const r of perRow) {
+        assert.strictEqual(r.buttons, 0,
+          'Task 14: rail 每列不得再有按鈕。Got ' + JSON.stringify(perRow));
+        assert.strictEqual(r.handles, 1,
+          'Task 14: 每列一個拖曳把手。Got ' + JSON.stringify(perRow));
+        assert.strictEqual(r.inputs, 1,
+          'Task 14: 每列一個名字欄。Got ' + JSON.stringify(perRow));
+      }
+
+      // 名字欄要放得下最長的 fixture 名稱，不得出現直排文字。120px 不是
+      // 美感門檻，是「四個中文字加一點餘裕」——直排是欄寬不夠時瀏覽器
+      // 自己會做的事，而 .ed-wave-group 那一顆【刻意】直排的鈕就在同一個
+      // 容器裡，所以這裡量的是 input 自己的矩形。
+      const widths = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => ({
+          w: i.getBoundingClientRect().width,
+          writing: getComputedStyle(i).writingMode,
+        })));
+      assert.ok(widths.length > 0, 'Task 14 前提失敗：要有名字欄');
+      for (const w of widths) {
+        assert.ok(w.w >= 120, 'Task 14: 名字欄至少 120px，實際 ' + w.w);
+        assert.ok(w.writing.indexOf('horizontal') === 0,
+          'Task 14: 名字欄不得直排。Got ' + w.writing);
+      }
+
+      // 選取只有一套。整棵原始碼，不只 wave-ui.js —— 生產者在
+      // wave-panels.js、消費者在 wave-ui.js，只掃一邊會讓另一邊留著。
+      for (const rel of ['lib/editor/wave-ui.js', 'lib/editor/wave-panels.js',
+        'lib/editor/wave-draw.js', 'lib/md2doc.js']) {
+        const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+        assert.strictEqual(src.indexOf('laneMultiSelect'), -1,
+          'Task 14: laneMultiSelect 必須完全消失，選取只剩 selection 一套 —— ' +
+          rel + ' 裡還有');
+      }
+
+      // 工具列的 訊號 分區作用在 selection 上：點 rail 的一列選中它，
+      // 刪除 就刪那一條。點的是列的空白處而不是名字欄 —— 名字欄自己
+      // 要能被點進去打字（見 laneRow 的註解）。
+      const namesOf = () => ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value));
+      const before = await namesOf();
+      assert.deepStrictEqual(before, ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'Task 14 前提失敗：fixture 的 lane 名字。Got ' + JSON.stringify(before));
+
+      await ctx.page.evaluate(() => {
+        const row = document.querySelector('.ed-wave-lane-row[data-lane="1"]');
+        const r = row.getBoundingClientRect();
+        // elementFromPoint，不是矩形比較：把手右邊、名字欄左邊那道 gap 是
+        // 這一列唯一「不是欄位」的可點處，而它只有 6px 寬。
+        const handle = row.querySelector('.ed-wave-lane-handle');
+        const hr = handle.getBoundingClientRect();
+        const el = document.elementFromPoint(hr.left + hr.width / 2, r.top + r.height / 2);
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: hr.left + 1, clientY: r.top + r.height / 2 }));
+      });
+      await new Promise((r) => setTimeout(r, 250));
+      const picked = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-row.is-selected')]
+          .map((el) => el.getAttribute('data-lane')));
+      assert.deepStrictEqual(picked, ['1'],
+        'Task 14: 點 rail 的一列要選中它。Got ' + JSON.stringify(picked));
+
+      await pressClick(ctx.page, '.ed-wave-signal-delete');
+      await new Promise((r) => setTimeout(r, 350));
+      const afterDelete = await namesOf();
+      assert.deepStrictEqual(afterDelete, ['clk', 'dat', 'ack', 'gap', ''],
+        'Task 14: 工具列的 刪除 要刪掉 selection 那一條。Got ' +
+        JSON.stringify(afterDelete));
+      const said = await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status'));
+      assert.ok(said.indexOf('Ctrl+Z') !== -1,
+        'Task 14: 刪掉 lane 之後要講得出怎麼拿回來。Got ' + JSON.stringify(said));
+
+      // 把手的拖曳排序：走 codec.moveLane，不是 rail 自己第二套順序邏輯。
+      // 用真的 DragEvent + DataTransfer 派發，不是直接呼叫內部函數。
+      await ctx.page.evaluate(() => {
+        const rows = [...document.querySelectorAll('.ed-wave-lane-row')];
+        const src = rows[2].querySelector('.ed-wave-lane-handle');
+        const dt = new DataTransfer();
+        src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+        rows[0].dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        rows[0].dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+      });
+      await new Promise((r) => setTimeout(r, 350));
+      const afterDrag = await namesOf();
+      assert.deepStrictEqual(afterDrag, ['ack', 'clk', 'dat', 'gap', ''],
+        'Task 14: 拖曳把手要把那一條 lane 搬到落點上。Got ' + JSON.stringify(afterDrag));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 14: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: rail 每列只剩把手與名字，選取合一 — OK');
+    }
   }
 
   await browser.close();
