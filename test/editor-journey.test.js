@@ -14636,7 +14636,36 @@ async function main() {
       assert.ok(edgePath.indexOf(to.x + ',' + to.y) !== -1,
         'edge path 終點必須正好是目的錨點座標，不是格中心。Got ' + edgePath);
 
-      // 解除武裝：標記必須消失。
+      // 一個成功的拖曳自己就會解除武裝（`finishEdgeDrag` 的
+      // `setEdgeMode(changed ? 'idle' : 'armed')`）——round 1 這裡少了
+      // 這一步：緊接著又按了一次武裝鈕，以為是在「解除」，實際上那一按
+      // 的當下模式早就已經是 idle，於是那一按是把它「武裝」回去，
+      // MEASURED（拿同一支手勢在真瀏覽器量 data-wave-edgemode）：
+      // drag-drop 之後已經是 idle／0 顆標記，緊接著那次按鈕點擊把它變成
+      // armed／13 顆，斷言「按完之後必須是 0」自然就對著一個剛武裝好的
+      // 畫面失敗——`13 !== 0` 本身沒有錯，是量錯了時間點。這裡先確認拖曳
+      // 自己就已經解除武裝，直接照這個結果斷言。
+      const modeAfterDrag = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edgemode'));
+      assert.strictEqual(modeAfterDrag, 'idle',
+        '成功建立一條 edge 的拖曳必須自己解除武裝。Got ' + modeAfterDrag);
+      const countAfterDrag = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-transition').length);
+      assert.strictEqual(countAfterDrag, 0,
+        '拖曳自己解除武裝之後，轉態標記必須跟著消失。Got ' + countAfterDrag);
+
+      // 另外武裝一次、不拖曳，直接再按一次按鈕解除——這才是真正在測
+      // 「解除武裝按鈕本身」清得掉標記，不是靠上面那次拖曳的副作用。
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
+      await new Promise((r) => setTimeout(r, 120));
+      const armedAgain = await ctx.page.evaluate(() => ({
+        mode: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-edgemode'),
+        count: document.querySelectorAll('.ed-wave-transition').length,
+      }));
+      assert.strictEqual(armedAgain.mode, 'armed',
+        '重新按一次武裝鈕必須回到 armed。Got ' + JSON.stringify(armedAgain));
+      assert.ok(armedAgain.count > 0, '重新武裝之後必須重新畫出轉態標記。Got ' + JSON.stringify(armedAgain));
+
       await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
       await new Promise((r) => setTimeout(r, 120));
       const idleAgain = await ctx.page.evaluate(() =>
