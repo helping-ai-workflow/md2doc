@@ -10378,10 +10378,45 @@ async function main() {
           // count, and each cycle is classified by what is painted over its
           // midpoint — a rect is x, a polygon is a bus, a clock path is a clock,
           // and a plain line is read as high/mid/low by which third of its row
-          // it sits in. Transition edges are vertical and sit ON a boundary, so
-          // a cycle's midpoint never falls inside one; gap markers and bus
+          // it sits in. Since Task 7, an in-lane level transition is a RAMP
+          // (a diagonal from `slewStartRatio` to `slewEndRatio` of the NEW
+          // cycle, not a vertical line sitting on the boundary the way it used
+          // to), but the ramp's own span (0.075-0.225 of the cycle) never
+          // reaches the cycle's own midpoint (0.5), so a midpoint sample still
+          // never lands on one — the mechanism this comment used to describe
+          // (a vertical line exactly on a boundary can't be under a midpoint)
+          // no longer holds, but the conclusion still does, for a different
+          // reason. Edge annotations (`.ed-wave-edge-*`), gap markers and bus
           // labels are excluded by class (gaps have their own per-cycle
           // comparison above).
+          //
+          // v3.6.0 Task 8 fix round 1 (ruling R27): `shapes` gained an X-BOUND
+          // alongside the class exclusions above — `.ed-wave-lane-label` /
+          // `.ed-wave-group-label` (Task 8's name column) sit left of the
+          // grid entirely, and rather than naming those two classes here (a
+          // deny-list this suite would have to keep extending every task that
+          // draws something new in the name column — Task 9's ruler text is
+          // the very next one), anything whose measured horizontal CENTRE
+          // falls left of `gridXs[0]` — the grid's own measured left edge,
+          // the same kind of measurement R19 already uses for the vertical
+          // axis (`gridTop`) — drops out, structurally, whatever class it
+          // carries. The two mechanisms are complementary, not alternatives:
+          // the x-bound catches name-column content the class list was never
+          // meant to enumerate, and the class list keeps catching things that
+          // genuinely sit INSIDE the grid (the cursor box, the selection
+          // tint, gap markers, bus labels, edge annotations) that no x-bound
+          // could tell apart from a real brick.
+          //
+          // CENTRE, not the shape's own left edge (`x0`): Task 4 lets a
+          // lane's `phase` push its `originX` left of `nameColWidth`, so a
+          // legitimate cycle-0 brick on such a lane can have `x0 <
+          // gridXs[0]` while still being a real, mostly-in-grid shape — a
+          // bound on `x0` would wrongly drop exactly that brick. A bound on
+          // the shape's own centre only drops something the grid's first
+          // line runs through or past the MIDDLE of, which a real brick
+          // straddling the name-column edge under phase is not (see the
+          // probe in task-8-report.md — no fixture in this suite currently
+          // reaches that case, checked directly).
           //
           // v3.6.0 Task 6 fix round 1 (R19): `rowH = gridBottom / laneCount`
           // and `top = i * rowH` used to be exact because lane 0's band
@@ -10424,7 +10459,7 @@ async function main() {
             return { tag: el.tagName, cls: el.getAttribute('class') || '',
               x0: b.x, x1: b.x + b.width, cy: b.y + b.height / 2,
               y0: b.y, y1: b.y + b.height };
-          });
+          }).filter((sh) => (sh.x0 + sh.x1) / 2 >= gridXs[0]);
           const painted = [];
           const paintedCounts = [];
           for (let i = 0; i < engineLaneCount; i++) {
