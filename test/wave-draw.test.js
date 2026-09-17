@@ -15,8 +15,43 @@ function fakeDoc() {
         setAttribute: function (k, v) { this.attrs[k] = String(v); },
         getAttribute: function (k) { return this.attrs[k]; },
         appendChild: function (c) { this.children.push(c); return c; },
+        // v3.6.0 Task 8: `renderCanvas` (unlike the per-lane helpers this
+        // file already exercised) wires up a real event listener on the
+        // canvas it returns — needed once the new test below calls
+        // `renderCanvas` itself rather than `drawLane`/`renderEdges` in
+        // isolation.
+        addEventListener: function () {},
       };
     },
+    // `drawNames` builds its label text the same way `renderEdges`'s own
+    // `.ed-wave-edge-label` does elsewhere in this file: a plain text node
+    // child, not `.textContent`, so the walk below can read `t.children[0].text`.
+    createTextNode: function (text) { return { text: text }; },
+  };
+}
+
+/**
+ * A minimal but complete `state` for `renderCanvas` — the brief's own
+ * snippet passes `{}`, which crashes before reaching any assertion:
+ * `renderCanvas` unconditionally reads `state.dataEdit`, `state.canvasWrap`,
+ * `state.overlay` and calls `canvas.addEventListener`, none of which exist on
+ * `{}`. MEASURED by running the brief's literal call first — it throws
+ * `Cannot read properties of undefined (reading 'retire')` before the `clk`
+ * assertion is ever reached, which is not the RED this task's Step 2 expects.
+ * This fixture supplies just enough state for `renderCanvas` to complete a
+ * paint with no cursor, no selection and no in-flight drag — the same "quiet"
+ * state `render()` starts from in `wave-ui.js`.
+ */
+function fakeCanvasState() {
+  return {
+    dataEdit: null,
+    cursor: null,
+    selection: null,
+    canvasWrap: { textContent: '', appendChild: function () {} },
+    overlay: { setAttribute: function () {} },
+    onCanvasDown: function () {},
+    endpointDrag: null,
+    pendingFrom: null,
   };
 }
 
@@ -191,6 +226,46 @@ function makeDrawer() {
   assertNoRamp('1d', '1md 是曲線，直到格尾才到低電位');
 
   console.log('wave-draw: drawLane 只在真的電位轉態呼叫 brickPath，bus/z/u/d 邊界維持原狀 — OK');
+}
+
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 8：畫布自己畫得出 lane 名稱
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = { signal: [
+    { name: 'clk', wave: '01' },
+    ['read path', { name: 'rd_en', wave: '01' }],
+  ] };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  // `renderCanvas` REPLACES the canvas it is handed — it builds and returns
+  // a brand new `<svg>` rather than mutating `svg` in place (see its own
+  // "v3.5.0 Task 11" comment) — so the walk below has to read the RETURN
+  // VALUE, not the `svg` that was passed in.
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const texts = [];
+  (function walk(n) {
+    if (n.tag === 'text') texts.push(n);
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  const names = texts.map(function (t) {
+    return (t.children[0] && t.children[0].text) || t.text || '';
+  });
+  assert.ok(names.indexOf('clk') !== -1, '畫布上必須有 clk：' + JSON.stringify(names));
+  assert.ok(names.indexOf('rd_en') !== -1, '畫布上必須有 rd_en');
+  assert.ok(names.indexOf('read path') !== -1, '群組名也要在畫布上');
+
+  // 名稱靠右對齊，右緣留 nameGap = 10
+  const clk = texts.find(function (t) {
+    return ((t.children[0] && t.children[0].text) || t.text) === 'clk';
+  });
+  assert.strictEqual(clk.attrs['text-anchor'], 'end', '名稱靠右對齊');
+  assert.strictEqual(Number(clk.attrs.x), 120 - 10, '右緣留 10px 的 nameGap');
+
+  console.log('wave-draw: 畫布自己畫出 lane 與群組名稱 — OK');
 }
 
 console.log('wave-draw.test.js OK');
