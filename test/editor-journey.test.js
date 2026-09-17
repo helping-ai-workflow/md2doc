@@ -10474,7 +10474,22 @@ async function main() {
               cls.indexOf('ed-wave-cursor') === -1 &&
               cls.indexOf('ed-wave-gap') === -1 &&
               cls.indexOf('ed-wave-buslabel') === -1 &&
-              cls.indexOf('ed-wave-edge') === -1;
+              cls.indexOf('ed-wave-edge') === -1 &&
+              // v3.6.0 Task 11 fix round 1 (ruling R32): drawTransitions()
+              // paints its dots ON geometry.anchorOfCell -- INSIDE the
+              // grid, not off in the name column like the lane/group
+              // labels R27's x-bound exists for. R27 kept the class list
+              // (this one included) specifically for marks that genuinely
+              // sit inside the grid, which an x-bound structurally cannot
+              // tell apart from a real brick -- a transition dot is that
+              // second kind, not the first, so it belongs here rather than
+              // needing its own bound. Not reachable today: every scenario
+              // this comparison runs against (`bricks()`, above) never arms
+              // edge mode, so no `.ed-wave-transition` element exists for
+              // this filter to even see. It is here so a FUTURE T6b fixture
+              // that does arm cannot silently miscount a transition dot as
+              // a brick.
+              cls.indexOf('ed-wave-transition') === -1;
           }).map((el) => {
             const b = el.getBBox();
             return { tag: el.tagName, cls: el.getAttribute('class') || '',
