@@ -9935,6 +9935,26 @@ async function main() {
       await new Promise((r) => setTimeout(r, 250));
     };
 
+    // v3.6.0 Task 14: pick a lane the way a person does — press its ROW in
+    // the rail, not its name field. The field is deliberately excluded from
+    // the row's own click handler (`wave-panels.js`'s `laneRow`): a repaint
+    // fired from inside a field someone is still typing in rebuilds that
+    // field from the document and eats what they typed. The handle is the
+    // one part of the row that is present on every lane and never flexes
+    // away, so that is what this presses — through `pressClick`, i.e.
+    // through a real pointer at a coordinate the browser hit-tests, never a
+    // synthetic `.click()`.
+    const selectLane = async (page, at, shift) => {
+      const sel = '.ed-wave-lane-row[data-lane="' + at + '"] .ed-wave-lane-handle';
+      if (shift === true) await page.keyboard.down('Shift');
+      try {
+        await pressClick(page, sel);
+      } finally {
+        if (shift === true) await page.keyboard.up('Shift');
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
     // v3.5.0 Task 10 fix round 3: the dialog's own focusable-element count,
     // computed the SAME way `wave-ui.js`'s own `modalRoots()`/`focusables()`
     // do — same `FOCUSABLE` selector, same disabled/hidden/getClientRects
@@ -10801,16 +10821,26 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
-      const labels = await ctx.page.evaluate(() =>
-        Array.from(document.querySelectorAll('.ed-wave-lane-add')).map((b) => ({
-          at: b.getAttribute('data-insert-at'),
-          lands: b.getAttribute('data-lands-in'),
-          title: b.title,
-        })));
-      const head = labels.find((l) => l.at === '1');
-      const tail = labels.find((l) => l.at === '3');
-      assert.ok(head && tail, 'T6c 前提失敗：群組的頭與尾都要有一顆 ＋。Got ' +
-        JSON.stringify(labels));
+      // v3.6.0 Task 14: the ＋ that used to sit on every row is one 新增
+      // button in the toolbar's 訊號 section, inserting after the selected
+      // lane — so the two insert positions this row contrasts are reached
+      // by SELECTING lane 0 (insert at 1, the group's head) and lane 2
+      // (insert at 3, just past its tail). What it publishes before it is
+      // pressed moved with it: `data-insert-at` / `data-lands-in` and the
+      // tooltip are on the button now, refreshed by `render()`.
+      const insertLabel = () => ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-wave-signal-add');
+        return { at: b.getAttribute('data-insert-at'),
+          lands: b.getAttribute('data-lands-in'), title: b.title };
+      });
+      await selectLane(ctx.page, 0);
+      const head = await insertLabel();
+      await selectLane(ctx.page, 2);
+      const tail = await insertLabel();
+      assert.strictEqual(head.at, '1',
+        'T6c 前提失敗：選 lane 0 之後新增要落在位置 1。Got ' + JSON.stringify(head));
+      assert.strictEqual(tail.at, '3',
+        'T6c 前提失敗：選 lane 2 之後新增要落在位置 3。Got ' + JSON.stringify(tail));
       assert.notStrictEqual(head.lands, tail.lands,
         'T6c: 群組的頭與尾必須指向不同的落點，否則這個案例分辨不出任何東西。Got ' +
         JSON.stringify([head, tail]));
@@ -10828,7 +10858,8 @@ async function main() {
       });
       assert.strictEqual(await span(), '1-2', 'T6c 前提失敗：群組一開始蓋住 row 1-2');
 
-      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="3"]');
+      // lane 2 is still the selection, so this is the insert at 3.
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 250));
       assert.strictEqual(await span(), '1-2',
         'T6c: 在群組尾巴新增的 lane 不得被吸進群組裡');
@@ -10839,7 +10870,8 @@ async function main() {
 
       // And the head really does join, so the pair above is a real asymmetry
       // and not two spellings of the same behaviour.
-      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 250));
       assert.strictEqual(await span(), '1-3',
         'T6c: 在群組頭插入的 lane 必須真的進群組（群組因此多蓋一列）');
@@ -11119,46 +11151,77 @@ async function main() {
         'T6h: 改完名字游標要留在同一個欄位。Got ' + JSON.stringify(got));
       assert.strictEqual(got.value, 'clkX', 'T6h: 欄位內容要是改過的那個。Got ' + got.value);
 
-      // …and the ＋ hands the keyboard to the lane it just made.
-      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="1"]');
-      await new Promise((r) => setTimeout(r, 300));
-      const added = await ctx.page.evaluate(() => document.activeElement.getAttribute
+      // …and 新增 hands the keyboard to the lane it just made. v3.6.0
+      // Task 14: this is the toolbar's 訊號 section now, acting after the
+      // selected lane, so lane 0 is picked first and the new row is 1.
+      const focusKey = () => ctx.page.evaluate(() => document.activeElement.getAttribute
         ? document.activeElement.getAttribute('data-focus-key') : null);
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
+      await new Promise((r) => setTimeout(r, 300));
+      const added = await focusKey();
       assert.strictEqual(added, 'lane-name-1',
         'T6h: 新增 lane 之後游標要落在新那一條的名字欄。Got ' + JSON.stringify(added));
 
-      // …and walking a lane all the way to an EDGE. The last press of that walk
-      // targets a button that is `disabled` at the edge, and `.focus()` on a
-      // disabled button is inert — measured before the fix, three ▲ put the
-      // cursor on `lane-up-2`, `lane-up-1` and then BODY, mid-gesture, and the
-      // fourth press did nothing at all. Focus on body is the state that turns
-      // the next Backspace into「delete the selected blocks」.
-      const focusKey = () => ctx.page.evaluate(() => document.activeElement.getAttribute
-        ? document.activeElement.getAttribute('data-focus-key') : null);
+      // …and the REORDER. v3.6.0 Task 14 replaced the per-row ▲/▼ with a
+      // drag on the row's own handle, so the walk-to-the-edge case those
+      // two buttons had is gone with them — but the property they were
+      // pinning is not: a gesture that rebuilds the rail must hand the
+      // keyboard back to the row the lane ARRIVED at, and never to
+      // `document.body` (the state that turns the next Backspace into
+      // 「delete the selected blocks」).
+      const dragLane = async (from, to) => {
+        await ctx.page.evaluate((f, t) => {
+          const rowOf = (k) => document.querySelector('.ed-wave-lane-row[data-lane="' + k + '"]');
+          const dt = new DataTransfer();
+          rowOf(f).querySelector('.ed-wave-lane-handle')
+            .dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+          rowOf(t).dispatchEvent(new DragEvent('dragover',
+            { bubbles: true, cancelable: true, dataTransfer: dt }));
+          rowOf(t).dispatchEvent(new DragEvent('drop',
+            { bubbles: true, cancelable: true, dataTransfer: dt }));
+        }, from, to);
+        await new Promise((r) => setTimeout(r, 300));
+      };
       const laneCount = await ctx.page.evaluate(() => Number(
         document.querySelector('.ed-wave-canvas').getAttribute('data-lane-count')));
-      assert.ok(laneCount >= 3, 'T6h 前提失敗：要有夠多 lane 才走得到邊。Got ' + laneCount);
-      // push lane 2 to the top
-      for (let at = 2; at > 0; at--) {
-        await pressClick(ctx.page, '.ed-wave-lane-up[data-focus-key="lane-up-' + at + '"]');
-        await new Promise((r) => setTimeout(r, 250));
-        const k = await focusKey();
-        assert.notStrictEqual(k, null,
-          'T6h: ▲ 走到第 ' + at + ' 步時游標掉到 body 上了');
-      }
-      assert.strictEqual(await focusKey(), 'lane-down-0',
-        'T6h: 推到頂之後 ▲ 已經 disabled，游標要交給同一列還活著的 ▼。Got ' +
+      assert.ok(laneCount >= 3, 'T6h 前提失敗：要有夠多 lane 才搬得動。Got ' + laneCount);
+      const namesBeforeDrag = await ctx.page.evaluate(() => Array.from(
+        document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value));
+      await dragLane(2, 0);
+      assert.strictEqual(await focusKey(), 'lane-name-0',
+        'T6h: 把 lane 拖到第 0 列之後，游標要落在它【到達】的那一列。Got ' +
         JSON.stringify(await focusKey()));
-      // and to the bottom
-      const last = laneCount - 1;
-      for (let at = 0; at < last; at++) {
-        await pressClick(ctx.page, '.ed-wave-lane-down[data-focus-key="lane-down-' + at + '"]');
-        await new Promise((r) => setTimeout(r, 250));
-        assert.notStrictEqual(await focusKey(), null,
-          'T6h: ▼ 走到第 ' + at + ' 步時游標掉到 body 上了');
-      }
-      assert.strictEqual(await focusKey(), 'lane-up-' + last,
-        'T6h: 推到底之後 ▼ 已經 disabled，游標要交給 ▲。Got ' + JSON.stringify(await focusKey()));
+      const namesAfterDrag = await ctx.page.evaluate(() => Array.from(
+        document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value));
+      assert.strictEqual(namesAfterDrag[0], namesBeforeDrag[2],
+        'T6h 前提失敗：拖曳要真的把那一條 lane 搬到第 0 列。before=' +
+        JSON.stringify(namesBeforeDrag) + ' after=' + JSON.stringify(namesAfterDrag));
+
+      // …and the one gesture that DISABLES the button it was pressed on.
+      // 刪除 empties the selection, so the repaint it causes leaves that
+      // button `disabled`, and `.focus()` on a disabled control is inert —
+      // the same fact the (now retired) ▲ walk above used to pin. Landing
+      // on body here is the same defect wearing a different button.
+      await selectLane(ctx.page, 1);
+      await pressClick(ctx.page, '.ed-wave-signal-delete');
+      await new Promise((r) => setTimeout(r, 350));
+      const afterDelete = await ctx.page.evaluate(() => ({
+        key: document.activeElement.getAttribute
+          ? document.activeElement.getAttribute('data-focus-key') : null,
+        tag: document.activeElement.tagName,
+        inOverlay: document.querySelector('.ed-wave-overlay')
+          .contains(document.activeElement),
+        disabled: document.querySelector('.ed-wave-signal-delete').disabled,
+      }));
+      assert.strictEqual(afterDelete.disabled, true,
+        'T6h 前提失敗：刪完之後沒有選取了，這顆按鈕本來就該變 disabled。Got ' +
+        JSON.stringify(afterDelete));
+      assert.notStrictEqual(afterDelete.tag, 'BODY',
+        'T6h: 按下一顆會把自己變 disabled 的按鈕之後，鍵盤不得掉到 body 上。Got ' +
+        JSON.stringify(afterDelete));
+      assert.strictEqual(afterDelete.inOverlay, true,
+        'T6h: 而且要留在對話框裡。Got ' + JSON.stringify(afterDelete));
       assert.strictEqual(ctx.errs.length, 0, 'T6h: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T6h a committed gesture hands the keyboard cursor back — OK');
@@ -11854,14 +11917,22 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
-      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      // v3.6.0 Task 14: the insert is the toolbar's 訊號 新增, acting after
+      // the selected lane — so selecting lane 0 is what aims it at display
+      // position 1, the position inside group `bus` this row needs. The
+      // selection survives the first commit (`carryMarks` traces lane 0 to
+      // lane 0), so the second press aims at the same place without having
+      // to re-pick anything, which is exactly the two-edits-one-path
+      // collision this row is about.
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
       const one = await ctx.page.evaluate(() => window.__edTestWaveState());
       assert.strictEqual(one.seam === null ? null : one.seam.ops, 1,
         'T7d 前提失敗：第一次插入必須是寫得回去的。Got ' + JSON.stringify(one.seam));
       assert.strictEqual(one.unwritten, false, 'T7d 前提失敗：第一次不該被拒絕');
 
-      await pressClick(ctx.page, '[data-focus-key="lane-add-1"]');
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
       const two = await ctx.page.evaluate(() => window.__edTestWaveState());
       assert.strictEqual(two.seam === null ? null : two.seam.ops, 1,
@@ -12000,9 +12071,25 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
-      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      // v3.6.0 Task 14: two inserts at two DIFFERENT positions, each worth
+      // one line — which is all this row needs of them (it is about the
+      // block map after a failed render, not about where a lane lands).
+      // They have to be the two ENDS: the seam plans both edits against the
+      // one original source, so two inserts that end up at adjacent paths
+      // collide there and only one of them writes back (measured while
+      // migrating this row: ops 1, endLine 14 — the +1 session this
+      // scenario's own comment says is too weak to catch the defect).
+      // The toolbar's 新增 inserts at 0 when nothing is selected and after
+      // the selection otherwise, so「nothing selected」then「the last lane
+      // selected」is the head and the tail.
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
-      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      // Derived from the rail, not written as a number: the press above
+      // just changed how many rows there are.
+      const lastRow = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-lane-row').length - 1);
+      await selectLane(ctx.page, lastRow);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
       const two = await ctx.page.evaluate(() => window.__edTestWaveState());
       assert.strictEqual(two.seam === null ? null : two.seam.ops, 2,
@@ -12072,9 +12159,25 @@ async function main() {
     {
       const ctx = await newPage(WAVE_MD);
       await openWave(ctx.page);
-      await pressClick(ctx.page, '[data-focus-key="lane-add-0"]');
+      // v3.6.0 Task 14: two inserts at two DIFFERENT positions, each worth
+      // one line — which is all this row needs of them (it is about the
+      // block map after a failed render, not about where a lane lands).
+      // They have to be the two ENDS: the seam plans both edits against the
+      // one original source, so two inserts that end up at adjacent paths
+      // collide there and only one of them writes back (measured while
+      // migrating this row: ops 1, endLine 14 — the +1 session this
+      // scenario's own comment says is too weak to catch the defect).
+      // The toolbar's 新增 inserts at 0 when nothing is selected and after
+      // the selection otherwise, so「nothing selected」then「the last lane
+      // selected」is the head and the tail.
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
-      await pressClick(ctx.page, '[data-focus-key="lane-add-6"]');
+      // Derived from the rail, not written as a number: the press above
+      // just changed how many rows there are.
+      const lastRow = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-lane-row').length - 1);
+      await selectLane(ctx.page, lastRow);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 400));
       await ctx.page.evaluate(() => {
         const orig = window.fetch;
@@ -12585,7 +12688,13 @@ async function main() {
         'Got ' + JSON.stringify(geo));
 
       // The lane the cursor is standing on is removed underneath it.
-      await pressClick(ctx.page, '.ed-wave-lane-remove[data-focus-key="lane-remove-5"]');
+      // v3.6.0 Task 14: through the toolbar's 訊號 刪除, which acts on
+      // `selection` — and `selection` is what the arrow keys above just
+      // made, on lane 5. No extra picking step: that the keyboard's own
+      // selection is the one the toolbar acts on is the whole point of the
+      // single-selection change, and the ✕ this replaces could only ever
+      // delete the row it was printed on.
+      await pressClick(ctx.page, '.ed-wave-signal-delete');
       await new Promise((r) => setTimeout(r, 400));
       const shrunk = await at();
       assert.strictEqual(shrunk.lanes, '5', 'T8c 前提失敗：那一條 lane 要真的被刪掉');
@@ -12625,14 +12734,28 @@ async function main() {
 
       // …and a lane MOVE carries the marks with the lane. It is the one
       // gesture that changes which lane a row index names, and the keyboard
-      // already follows the lane (▲ hands focus to the button the moved lane
-      // arrives at). Before this the cell cursor and the rail highlight did
-      // not: they stayed on the row number and so named the lane that had
-      // been displaced into it — two answers to「我在哪」, pointing at
-      // different lanes.
+      // already follows the lane (the drop hands focus to the name field of
+      // the row the lane ARRIVED at). Before this the cell cursor and the
+      // rail highlight did not: they stayed on the row number and so named
+      // the lane that had been displaced into it — two answers to「我在哪」,
+      // pointing at different lanes.
       const beforeMove = await ctx.page.evaluate(() => Array.from(
         document.querySelectorAll('.ed-wave-lane-name')).map((n) => n.value));
-      await pressClick(ctx.page, '.ed-wave-lane-up[data-focus-key="lane-up-2"]');
+      // v3.6.0 Task 14: the move is a drag on the row's own handle now
+      // (the per-row ▲/▼ are gone with the rest of the rail's buttons).
+      // Real `DragEvent`s carrying a real `DataTransfer`, dispatched at the
+      // handle and at the destination row — the same three events a mouse
+      // drag produces, and the same three the product listens for.
+      await ctx.page.evaluate(() => {
+        const rowOf = (k) => document.querySelector('.ed-wave-lane-row[data-lane="' + k + '"]');
+        const dt = new DataTransfer();
+        rowOf(2).querySelector('.ed-wave-lane-handle')
+          .dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+        rowOf(1).dispatchEvent(new DragEvent('dragover',
+          { bubbles: true, cancelable: true, dataTransfer: dt }));
+        rowOf(1).dispatchEvent(new DragEvent('drop',
+          { bubbles: true, cancelable: true, dataTransfer: dt }));
+      });
       await new Promise((r) => setTimeout(r, 400));
       const moved = await ctx.page.evaluate(() => {
         const c = document.querySelector('[data-ed-wave-cursor]');
@@ -12644,7 +12767,7 @@ async function main() {
         };
       });
       assert.strictEqual(moved.cell, '1,3',
-        'T8c: ▲ 把游標那條 lane 往上搬，游標要跟著它。Got ' + JSON.stringify(moved));
+        'T8c: 把游標那條 lane 拖上去，游標要跟著它。Got ' + JSON.stringify(moved));
       assert.strictEqual(moved.names[1], beforeMove[2],
         'T8c: 游標所在的那一列，必須還是同一條 lane。before=' +
         JSON.stringify(beforeMove) + ' after=' + JSON.stringify(moved.names));
@@ -12653,7 +12776,7 @@ async function main() {
 
       // …and BACK again, which is where the first attempt at this broke. It
       // swapped the two indexes on the way out and nothing swapped them back,
-      // so ▲ then Ctrl+Z left both marks one row off — pointing at the
+      // so a move then Ctrl+Z left both marks one row off — pointing at the
       // neighbour, with nothing on screen to say so — and the next brush key
       // painted a lane the user was not looking at. The marks are carried by
       // lane IDENTITY now, through the one funnel every store movement takes,
@@ -12680,7 +12803,7 @@ async function main() {
       // edit THAT lane. A cursor one row off looks identical on screen.
       const paintedRow = await ctx.page.evaluate(() => {
         // A Tab would do this too — the drawing is a tab stop — but it is 30
-        // controls away from the button the ▲ left the keyboard on.
+        // controls away from the field the drop left the keyboard in.
         document.querySelector('.ed-wave-canvas').focus();
         const svg = document.querySelector('.ed-wave-canvas');
         const n = Number(svg.getAttribute('data-lane-count'));
@@ -13207,8 +13330,15 @@ async function main() {
       }));
       assert.strictEqual(open.input, 1, 'T8h 前提失敗：改名欄位要開著');
 
-      // The press the old teardown ate.
-      await pressClick(ctx.page, '.ed-wave-lane-add[data-insert-at="0"]');
+      // The press the old teardown ate. v3.6.0 Task 14: the ＋ that used to
+      // sit on every rail row is the toolbar's 訊號 新增 — same question
+      // (does a press landing while the rename field is open still do its
+      // job?), asked of the button that now does that job. Nothing is
+      // selected here, which is exactly the case that inserts at position 0
+      // — the insert this row needs, because it is what pushes the group
+      // from `from=1` to `from=2` and renumbers the teardown's own
+      // nominated key out from under it.
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 600));
       const pressed = await ctx.page.evaluate(() => {
         const ae = document.activeElement;
@@ -13222,7 +13352,7 @@ async function main() {
         };
       });
       assert.strictEqual(pressed.lanes, String(Number(open.lanes) + 1),
-        'T8h: 改名欄位開著時按下的那顆 ＋ 必須真的加一條 lane —— 被吃掉的那一版' +
+        'T8h: 改名欄位開著時按下的 新增 必須真的加一條 lane —— 被吃掉的那一版' +
         '按了完全沒反應，而使用者要再按一次才知道。Got ' + JSON.stringify(pressed));
       assert.strictEqual(pressed.input, 0, 'T8h: 而且那個欄位要收掉');
       assert.notStrictEqual(pressed.tag, 'BODY',
@@ -13468,15 +13598,18 @@ async function main() {
         JSON.stringify(said.text));
       assert.ok(said.text.indexOf('MD 原始碼') !== -1,
         'T8j: 還要說可以從哪裡改它。Got ' + JSON.stringify(said.text));
-      // ＋ still refuses, and now the refusal is not the only thing on screen.
-      await pressClick(ctx.page, '.ed-wave-lane-add');
+      // 新增 still refuses, and now the refusal is not the only thing on
+      // screen. (v3.6.0 Task 14: the toolbar's, since the rail has no
+      // buttons left — and it is reachable here precisely because 新增 is
+      // the one 訊號 button that does not need a selection.)
+      await pressClick(ctx.page, '.ed-wave-signal-add');
       await new Promise((r) => setTimeout(r, 300));
       const after = await ctx.page.evaluate(() => ({
         status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
         notice: document.querySelectorAll('.ed-wave-nolanes:not([hidden])').length,
       }));
       assert.strictEqual(after.notice, 1,
-        'T8j: 按過 ＋ 之後那條說明還要在。Got ' + JSON.stringify(after));
+        'T8j: 按過 新增 之後那條說明還要在。Got ' + JSON.stringify(after));
       assert.strictEqual(ctx.errs.length, 0, 'T8j: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8j the header says which key discards, and a block with no editable lanes says so — OK');
