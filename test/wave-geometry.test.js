@@ -873,16 +873,38 @@ const FLAT = {
   const derivedAnchorRatio = Number(sock[1]) / cycleUnit;
   assert.strictEqual(derivedAnchorRatio, M.anchorRatio,
     'pinned anchorRatio 必須跟 waveSkin 現場推導的一致 —— 不一致代表 wavedrom 換了 skin，要重新 pin');
-  assert.strictEqual(M.slewEndRatio, M.anchorRatio, '斜坡終點即錨點');
 
-  // MEASURED：轉態磚 `0m0` 的 path 是 'm0,20 3,0 3,-…'，第一段長 3 → 3/40。
-  const ramp = skinText.match(/"id":"0m0"\},\["path",\{"d":"m0,\d+ (\d+),0 /);
-  assert.ok(ramp !== null, 'skin 必須有 0m0 這個 path（引擎版本變了才會沒有）');
-  const derivedSlewStartRatio = Number(ramp[1]) / cycleUnit;
+  // v3.6.0 Task 7 fix round 1（R23）：轉態磚要從 `0m1`／`1m0`（真的變電位）
+  // 量，不是從 `0m0`（同電位的 blip，長得像轉態但根本沒變電位）量 —— 上一輪
+  // 從 `0m0` 量到 slewStartRatio 剛好對，但 slewEndRatio 因此被錯量成
+  // anchorRatio 本人，這個測試也曾經斷言那個錯的關係（'斜坡終點即錨點'）。
+  //
+  // MEASURED：`0m1` 的 path 是 'M0,20 3,20 9,0 20,0'（絕對座標，也就是
+  // (0,20)->(3,20)->(9,0)->(20,0)）：維持舊電位到 x=3（slewStartRatio =
+  // 3/40），斜坡在 x=9 到達新電位（slewEndRatio = 9/40）。
+  const rise = skinText.match(/"id":"0m1"\},\["path",\{"d":"M0,(\d+) (\d+),\d+ (\d+),0 (\d+),0/);
+  assert.ok(rise !== null, 'skin 必須有 0m1 這個 path（引擎版本變了才會沒有）');
+  const derivedSlewStartRatio = Number(rise[2]) / cycleUnit;
+  const derivedSlewEndRatio = Number(rise[3]) / cycleUnit;
   assert.strictEqual(derivedSlewStartRatio, M.slewStartRatio,
-    'pinned slewStartRatio 必須跟 waveSkin 現場推導的一致');
+    'pinned slewStartRatio 必須跟 0m1 現場推導的一致');
+  assert.strictEqual(derivedSlewEndRatio, M.slewEndRatio,
+    'pinned slewEndRatio 必須跟 0m1 現場推導的一致（不是 0m0）');
+
+  // 跟 `1m0`（1->0）對答案：'m0,0 3,0 6,20 11,0' 是相對座標，解出來是
+  // (0,0)->(3,0)->(9,20)->(20,20) —— 跟 0m1 同一段 3-to-9，方向相反。
+  const fall = skinText.match(/"id":"1m0"\},\["path",\{"d":"m0,0 (\d+),0 (\d+),\d+ (\d+),0/);
+  assert.ok(fall !== null, 'skin 必須有 1m0 這個 path');
+  const fallStart = Number(fall[1]);
+  const fallEnd = fallStart + Number(fall[2]);
+  assert.strictEqual(fallStart / cycleUnit, M.slewStartRatio, '1m0 也必須跟 slewStartRatio 對上');
+  assert.strictEqual(fallEnd / cycleUnit, M.slewEndRatio, '1m0 也必須跟 slewEndRatio 對上');
 
   assert.ok(M.slewStartRatio < M.slewEndRatio, '斜坡必須有寬度');
+
+  // 真正的關係：錨點是斜坡的中點（50% 跨越點），不是斜坡的終點。
+  assert.strictEqual(M.anchorRatio, (M.slewStartRatio + M.slewEndRatio) / 2,
+    '錨點是斜坡的中點（50% 跨越點）—— R23 修正前這裡斷言的是「斜坡終點即錨點」，量錯了');
 
   // 直接跟引擎對答案：同一份 doc 的 gmark 端點必須落在 anchorRatio 上。
   const src = { signal: [{ name: 'w', wave: '0.1.0...', node: 'a.b.c...' }], edge: ['a-b'] };

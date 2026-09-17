@@ -34,44 +34,41 @@ function makeDrawer() {
 }
 
 // ---------------------------------------------------------------------------
-// v3.6.0 Task 7: every level transition draws a ramp, `|` and same-level
-// runs draw a flat line, and the ramp's real end ratio is NOT
-// `SKIN_METRICS.slewEndRatio`.
+// v3.6.0 Task 7 fix round 1 (ruling R23): every level transition draws a
+// ramp, `|` and same-level runs draw a flat line, and the ramp's end is
+// `SKIN_METRICS.slewEndRatio` directly — repinned to the measured 0.225 (was
+// wrongly 0.15) in `wave-geometry.js`, so `brickPath` below now reads it
+// straight off `SKIN_METRICS` instead of recomputing it.
 //
 // MEASURED against `node_modules/wavedrom` 3.5.0 (`waveSkin.default`), dumped
 // directly in node rather than recalled: the SAME-level blip `0m0` is
 // `m0,20 3,0 3,-10 3,10 11,0` (a down-and-back-up notch peaking at local
-// x=6 = 20-10 half height), which is what `wave-geometry.js`'s own
-// `SKIN_METRICS` comment and `wave-geometry.test.js`'s "斜坡終點即錨點"
-// assertion measure from. That brick never changes level, so it is not a
-// transition at all — the brief for this task explicitly warns not to
-// copy its shape.
+// x=6 = 20-10 half height), which is what `wave-geometry.js`'s
+// `SKIN_METRICS` comment and `wave-geometry.test.js` originally (wrongly)
+// measured `slewEndRatio` from. That brick never changes level, so it is
+// not a transition at all — the brief for this task explicitly warns not
+// to copy its shape.
 //
 // The bricks that actually change level are different:
 //   0m1 (0->1): `M0,20 3,20 9,0 20,0`            -> (0,20)(3,20)(9,0)(20,0)
 //   1m0 (1->0): `m0,0 3,0 6,20 11,0` (relative)  -> (0,0)(3,0)(9,20)(20,20)
 // Both put the diagonal segment from local x=3 to local x=9 out of a
-// 40-wide cycle — i.e. `slewStartRatio` (0.075) to 0.225, NOT to
-// `SKIN_METRICS.slewEndRatio` (0.15). Cross-checked against a real
-// node/edge render (`{signal:[{wave:'0.1.0...',node:'a.b.c...'}],
-// edge:['a-b']}`): the engine's own `gmark_a_b` endpoints sit at
-// `cycle*40 + 6`, i.e. exactly the ramp's MIDPOINT ((3+9)/2 = 6), not its
-// top. `SKIN_METRICS.slewEndRatio` is a correct, independently-pinned
-// value for where the anchor/edge sits (Task 5 depends on it and its own
-// test re-derives it against the engine) — it is just not the same
-// quantity as "where the visual ramp finishes", despite the two sharing a
-// name. Per this task's brief ("if the engine's geometry differs from the
-// brief's sketch, the engine wins"), the ramp drawn below ends at the
-// MEASURED 0.225, derived as `2*anchorRatio - slewStartRatio` so the
-// relationship to the two already-pinned ratios stays visible rather than
-// hardcoding a fourth magic number.
+// 40-wide cycle — `slewStartRatio` (0.075) to `slewEndRatio` (0.225).
+// Cross-checked against a real node/edge render
+// (`{signal:[{wave:'0.1.0...',node:'a.b.c...'}],edge:['a-b']}`): the
+// engine's own `gmark_a_b` endpoints sit at `cycle*40 + 6`, i.e. exactly the
+// ramp's MIDPOINT ((3+9)/2 = 6), not its top — `anchorRatio` (0.15) is that
+// midpoint, `(slewStartRatio + slewEndRatio) / 2`, and is a genuinely
+// different quantity from "where the visual ramp finishes" despite the two
+// having shared a value (0.15) before this fix. See `wave-geometry.js`'s
+// `SKIN_METRICS` comment for the full derivation.
 {
   const drawer = makeDrawer();
   const W = 40;
   const H = 20;
   const s = G.SKIN_METRICS;
   const rampStart = s.slewStartRatio * W; // 3
-  const rampEnd = (2 * s.anchorRatio - s.slewStartRatio) * W; // 9, NOT 6
+  const rampEnd = s.slewEndRatio * W; // 9, since R23 repinned slewEndRatio to 0.225
 
   // 0 -> 1: flat at the old level until rampStart, ramp to rampEnd, then
   // flat at the new level.
@@ -79,9 +76,9 @@ function makeDrawer() {
   assert.ok(rise.indexOf(String(rampStart)) !== -1,
     '上升沿的斜坡起點必須是 slewStartRatio × 寬：' + rise);
   assert.ok(rise.indexOf(String(rampEnd)) !== -1,
-    '上升沿的斜坡終點必須是量測到的真實比例（0.225），不是 slewEndRatio(0.15)：' + rise);
+    '上升沿的斜坡終點必須是 slewEndRatio × 寬（R23 已重新量成 0.225）：' + rise);
   assert.strictEqual(rise.indexOf('6'), -1,
-    '斜坡終點不得停在 anchorRatio(0.15 -> local 6)，那是錨點落點，不是磚的終點：' + rise);
+    '斜坡終點不得停在 anchorRatio(0.15 -> local 6)，那是錨點的中點落點，不是磚的終點：' + rise);
 
   // 1 -> 0 mirrors 0 -> 1.
   const fall = drawer.brickPath('0', '1', W, H);
@@ -136,7 +133,7 @@ function makeDrawer() {
   const x0 = row1.originX + 1 * cw; // cycle 1 is where the value becomes '1'
   const s = G.SKIN_METRICS;
   const rampStartAbs = x0 + s.slewStartRatio * cw;
-  const rampEndAbs = x0 + (2 * s.anchorRatio - s.slewStartRatio) * cw;
+  const rampEndAbs = x0 + s.slewEndRatio * cw;
   const d1 = edges1[0].attrs.d;
   assert.ok(d1.indexOf(String(rampStartAbs)) !== -1,
     '斜坡起點必須落在新 run（cycle 1）自己的 originX 上，不是畫布原點：' + d1);
