@@ -14677,6 +14677,40 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 武裝時的轉態標記與吸附、拖曳頭尾相接 — OK');
     }
+
+    // ── v3.6.0 Task 12: 工具列分區 ───────────────────────────────────────
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const groups = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-tool-group')].map((g) => {
+          const cap = g.querySelector('.ed-wave-tool-caption');
+          return {
+            caption: cap ? cap.textContent : null,
+            buttons: g.querySelectorAll('button').length,
+          };
+        }));
+
+      const captions = groups.map((g) => g.caption);
+      assert.deepStrictEqual(captions,
+        ['週期', '電位', '訊號', '群組', '關聯線', '歷史', '匯出', '檔案'],
+        '八個分區，順序固定：' + JSON.stringify(captions));
+
+      const byCaption = Object.fromEntries(groups.map((g) => [g.caption, g.buttons]));
+      assert.strictEqual(byCaption['週期'], 5, '週期：插入/刪除/複製/貼上插入/貼上覆蓋');
+      assert.strictEqual(byCaption['電位'], 22, '電位：22 個筆刷');
+      assert.strictEqual(byCaption['訊號'], 4, '訊號：新增/空白列/刪除/複製');
+      assert.strictEqual(byCaption['群組'], 2, '群組：建立/解散');
+      assert.strictEqual(byCaption['關聯線'], 1);
+      assert.strictEqual(byCaption['歷史'], 2, '歷史：復原/重做');
+      assert.strictEqual(byCaption['匯出'], 3, '匯出：SVG/PNG/複製 WaveJSON');
+      assert.strictEqual(byCaption['檔案'], 2, '檔案：保留並關閉/放棄');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 12: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 工具列八個分區與按鈕數 — OK');
+    }
   }
 
   await browser.close();
