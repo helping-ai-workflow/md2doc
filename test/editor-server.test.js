@@ -38,6 +38,49 @@ function clientIdOf(pageBody) {
   return ed.drawioClientId;
 }
 
+// Opens a real long-lived HTTP connection to GET /api/alive, mirroring what
+// a browser's EventSource does on the wire (a GET, headers arrive, the body
+// never ends). Resolves once the response headers land; `.close()` aborts
+// the underlying socket, which is what a closed/navigated-away tab does —
+// the server sees this as the response's own 'close' event, exactly the
+// event a real dropped EventSource produces.
+function openAlive(port, fileId, clientId) {
+  return new Promise((resolve, reject) => {
+    const r = http.request(
+      { host: '127.0.0.1', port, method: 'GET',
+        path: '/api/alive?fileId=' + fileId + '&clientId=' + encodeURIComponent(clientId) },
+      (res) => {
+        res.on('data', () => {}); // drain keepalive comments; never 'end's on its own
+        resolve({ status: res.statusCode, headers: res.headers, close: () => req.destroy() });
+      });
+    r.on('error', reject);
+    const req = r;
+    r.end();
+  });
+}
+
+// Waits for server.js's 'md2doc-auto-close' event (the same signal cli.js
+// listens on to print its exit line) or times out with a rejection that
+// names what was waited for — never a silent hang.
+function waitForAutoClose(server, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout waiting for: ' + label)), timeoutMs);
+    server.once('md2doc-auto-close', (reason) => { clearTimeout(t); resolve(reason); });
+  });
+}
+
+// Asserts NO 'md2doc-auto-close' fires within `ms` — the negative-space
+// assertion the "must stay alive" scenarios need. Resolves with nothing;
+// throws (via the caller's own assert) only if a caller checks a captured
+// flag, so every call site here pairs it with an explicit reason to fail on.
+function assertNoAutoCloseFor(server, ms) {
+  return new Promise((resolve, reject) => {
+    const onClose = (reason) => reject(new Error('md2doc-auto-close fired unexpectedly, reason=' + reason));
+    server.once('md2doc-auto-close', onClose);
+    setTimeout(() => { server.removeListener('md2doc-auto-close', onClose); resolve(); }, ms);
+  });
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-srv-'));
   const mdPath = path.join(dir, 'doc.md');
@@ -776,6 +819,221 @@ function clientIdOf(pageBody) {
       srv.close();
     }
     console.log('server: /api/asset accepts drawio .drawio/.xml by content, refuses the rest — OK');
+  }
+
+  // ==========================================================================
+  // Liveness via a real connection (GET /api/alive), replacing the idle
+  // timer as the signal that a browser tab is still open. A backgrounded
+  // (merely unfocused) tab's setInterval ping is throttled by the browser —
+  // measured on this branch at roughly once per minute once Chrome's real
+  // throttling is allowed to engage (see LIVENESS-REPORT.md) — which is
+  // slower than the old 30s idle deadline, so a tab the user only alt-tabbed
+  // away from used to look exactly like a closed one. A held-open connection
+  // is not a timer and is not subject to that clamp.
+  // ==========================================================================
+
+  // (1) A tab that stops pinging entirely but holds its /api/alive connection
+  // open must NOT be closed — this is the defect itself, reproduced directly:
+  // no /api/ping calls at all, for well past any old idle deadline, and the
+  // session must still be alive because the connection never dropped.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-noping-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Alive\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '', connectionGraceMs: 150 });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      const cid = clientIdOf(page.body);
+      const conn = await openAlive(srv.port, 0, cid);
+      assert.strictEqual(conn.status, 200, '/api/alive must accept the connection');
+      assert.strictEqual(conn.headers['content-type'], 'text/event-stream; charset=utf-8',
+        '/api/alive must serve an SSE content-type, got ' + conn.headers['content-type']);
+
+      // No /api/ping at all — wait comfortably past connectionGraceMs, the
+      // old default idleTimeoutMs (30000, no longer relevant), and a margin.
+      await assertNoAutoCloseFor(srv.server, 600);
+
+      // And the server is provably still serving.
+      const still = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(still.status, 200,
+        '(1): a tab holding its connection open with zero pings must not be closed');
+      conn.close();
+    } finally {
+      srv.close();
+    }
+    console.log('server: (1) a held-open /api/alive connection with no pings keeps the session alive — OK');
+  }
+
+  // (2) Closing the ONLY connection closes the session, after the grace
+  // period — the other half of the trade: the server must still clean itself
+  // up once the tab genuinely closes, not just refrain from ever closing.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-close-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Alive\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '', connectionGraceMs: 150 });
+    try {
+      const page = await req(srv.port, 'GET', '/edit/0');
+      const cid = clientIdOf(page.body);
+      const conn = await openAlive(srv.port, 0, cid);
+      assert.strictEqual(conn.status, 200);
+
+      const closeWait = waitForAutoClose(srv.server, 5000, 'auto-close after last connection drops');
+      conn.close();
+      const reason = await closeWait;
+      assert.strictEqual(reason, 'idle',
+        '(2): the last-connection-drops close must use the same reason cli.js already prints a line for');
+
+      // The server must actually be gone, not merely have emitted the event.
+      let refused = false;
+      try {
+        await req(srv.port, 'GET', '/edit/0');
+      } catch (e) {
+        refused = true;
+      }
+      assert.ok(refused, '(2): after auto-close the server must actually stop accepting connections');
+    } finally {
+      srv.close();
+    }
+    console.log('server: (2) closing the only connection closes the session after the grace period — OK');
+  }
+
+  // (3) Closing ONE of TWO connections must NOT close the session — the
+  // multi-tab (and by extension multi-file, since the count is global across
+  // the whole server process) requirement.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-two-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Alive\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '', connectionGraceMs: 150 });
+    try {
+      const pageA = await req(srv.port, 'GET', '/edit/0');
+      const cidA = clientIdOf(pageA.body);
+      const pageB = await req(srv.port, 'GET', '/edit/0');
+      const cidB = clientIdOf(pageB.body);
+      assert.notStrictEqual(cidA, cidB, 'two tab loads must mint two distinct client ids');
+
+      const connA = await openAlive(srv.port, 0, cidA);
+      const connB = await openAlive(srv.port, 0, cidB);
+      assert.strictEqual(connA.status, 200);
+      assert.strictEqual(connB.status, 200);
+
+      const guard = assertNoAutoCloseFor(srv.server, 600);
+      connA.close();
+      await guard;
+
+      const still = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(still.status, 200,
+        '(3): closing one of two open tabs must not close the server while the other is still open');
+      connB.close();
+    } finally {
+      srv.close();
+    }
+    console.log('server: (3) closing one of two connections does not close the session — OK');
+  }
+
+  // (3b) The same, but the second connection belongs to a DIFFERENT file —
+  // `md2doc --edit a.md b.md` serves both from one server/session, so the
+  // closing decision must be global across files, not per-file.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-multifile-'));
+    const mdA = path.join(dir, 'a.md');
+    const mdB = path.join(dir, 'b.md');
+    fs.writeFileSync(mdA, '# A\n', 'utf8');
+    fs.writeFileSync(mdB, '# B\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdA, mdB], clientJs: '', connectionGraceMs: 150 });
+    try {
+      const pageA = await req(srv.port, 'GET', '/edit/0');
+      const cidA = clientIdOf(pageA.body);
+      const pageB = await req(srv.port, 'GET', '/edit/1');
+      const cidB = clientIdOf(pageB.body);
+
+      const connA = await openAlive(srv.port, 0, cidA);
+      const connB = await openAlive(srv.port, 1, cidB);
+
+      const guard = assertNoAutoCloseFor(srv.server, 600);
+      connA.close();
+      await guard;
+
+      const still = await req(srv.port, 'GET', '/edit/1');
+      assert.strictEqual(still.status, 200,
+        '(3b): closing the tab for a.md must not close the server while b.md\'s tab is still open');
+      connB.close();
+    } finally {
+      srv.close();
+    }
+    console.log('server: (3b) multi-file — closing one file\'s tab does not close the session — OK');
+  }
+
+  // (4) A disconnect immediately followed by a reconnect (an F5 reload) must
+  // NOT close the session — this is the trap named in the design: without a
+  // grace window, every refresh would kill the session, because the old
+  // connection's close and the new connection's open are two separate events
+  // with a real (if small) gap between them.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-reload-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Alive\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '', connectionGraceMs: 400 });
+    try {
+      const page1 = await req(srv.port, 'GET', '/edit/0');
+      const cid1 = clientIdOf(page1.body);
+      const conn1 = await openAlive(srv.port, 0, cid1);
+      assert.strictEqual(conn1.status, 200);
+
+      const guard = assertNoAutoCloseFor(srv.server, 700); // > connectionGraceMs
+      conn1.close();
+      // Reconnect quickly, well inside connectionGraceMs — a fresh page load
+      // mints a fresh client id, exactly like a real reload does.
+      await new Promise((r) => setTimeout(r, 30));
+      const page2 = await req(srv.port, 'GET', '/edit/0');
+      const cid2 = clientIdOf(page2.body);
+      const conn2 = await openAlive(srv.port, 0, cid2);
+      assert.strictEqual(conn2.status, 200);
+      await guard;
+
+      const still = await req(srv.port, 'GET', '/edit/0');
+      assert.strictEqual(still.status, 200,
+        '(4): a reload (disconnect immediately followed by reconnect) must not close the session');
+      conn2.close();
+    } finally {
+      srv.close();
+    }
+    console.log('server: (4) a disconnect immediately followed by a reconnect (reload) does not close — OK');
+  }
+
+  // (5) Sanity: /api/ping alone (no /api/alive connection ever made) must
+  // NOT keep a session alive forever by itself once neverOpenedGraceMs has
+  // elapsed and no connection ever showed up — pinging is no longer the
+  // liveness mechanism. This is the mirror image of (1): (1) proves ping is
+  // not NECESSARY for liveness, this proves it is not SUFFICIENT either.
+  // Uses the never-opened path (unchanged, see its own comment in server.js)
+  // since that is the one remaining timer-based deadline in this file.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-alive-pingonly-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Alive\n', 'utf8');
+    const srv = await createEditorServer({
+      files: [mdPath], clientJs: '', neverOpenedGraceMs: 300, connectionGraceMs: 60000,
+    });
+    try {
+      // The page is fetched (marks started=true, disarming neverOpenedTimer
+      // in the OLD design) — but under the new design `started` no longer
+      // means "safe forever"; only an actual connection does. Pings keep
+      // firing, no /api/alive connection is ever opened.
+      await req(srv.port, 'GET', '/edit/0');
+      const closeWait = waitForAutoClose(srv.server, 5000, 'auto-close with pings but no connection');
+      const pingInterval = setInterval(() => {
+        req(srv.port, 'POST', '/api/ping', {}).catch(() => {});
+      }, 80);
+      const reason = await closeWait;
+      clearInterval(pingInterval);
+      assert.ok(reason === 'idle' || reason === 'never-opened',
+        '(5): a session with pings but no /api/alive connection must eventually close, got reason=' + reason);
+    } finally {
+      srv.close();
+    }
+    console.log('server: (5) pinging alone (no connection) does not keep a session alive forever — OK');
   }
 
   console.log('editor-server.test.js OK');
