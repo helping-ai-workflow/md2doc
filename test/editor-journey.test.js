@@ -12544,12 +12544,45 @@ async function main() {
       const bottom = await at();
       assert.strictEqual(bottom.cell, '5,4',
         'T8c 前提失敗：要走到最後一條 lane 的最後一個 cycle。Got ' + JSON.stringify(bottom));
-      // The drawing is wider than its column at this viewport (MEASURED in this
-      // session: clientWidth 230 against a 240px drawing at 5 cycles), so the
-      // last cycle is off the clip and walking onto it has to bring the view.
-      assert.ok(bottom.scrollLeft > 0,
-        'T8c: 游標走出欄位的裁切範圍時必須把畫面帶過去 —— 否則鍵盤游標在一個' +
-        '使用者看不到的地方。Got ' + JSON.stringify(bottom));
+      // v3.6.0 Task 13 fix round 2: this used to assert `scrollLeft > 0`.
+      // That held at the suite's old 282px canvas width (MEASURED then:
+      // clientWidth 230 against a 240px drawing at 5 cycles), but Task 13
+      // widened the canvas to 518px at this SAME 800x600 viewport (part of
+      // the width-budget fix), and this fixture's content — 120px name
+      // column + 5 cycles * 48px = 360px — now fits inside 518px whole.
+      // Nothing scrolls, `scrollLeft` stays 0, and the old assertion read
+      // that as a failure even though the cursor landed exactly where this
+      // scenario's own message says it must: somewhere the user CAN see.
+      // `scrollLeft` was always a PROXY for that — evidence the requirement
+      // held, not the requirement itself — so this asserts the requirement
+      // directly: the cursor's own rect must sit inside the canvas-wrap's
+      // visible client box. That is true whichever way it gets satisfied —
+      // scrolled into view, or the column simply being wide enough already
+      // — and it still catches the real regression this row exists for: a
+      // cursor drawn past the clip with nothing bringing it back.
+      const geo = await ctx.page.evaluate(() => {
+        const cursor = document.querySelector('[data-ed-wave-cursor]');
+        const wrap = document.querySelector('.ed-wave-canvas-wrap');
+        if (cursor === null || wrap === null) return null;
+        const c = cursor.getBoundingClientRect();
+        const w = wrap.getBoundingClientRect();
+        return {
+          cursor: { left: c.left, right: c.right, top: c.top, bottom: c.bottom },
+          wrap: { left: w.left, right: w.right, top: w.top, bottom: w.bottom },
+        };
+      });
+      assert.ok(geo !== null, 'T8c: 游標與畫布欄位都要找得到，Got ' + JSON.stringify(geo));
+      // Half a pixel of slack for sub-pixel layout rounding, not for the
+      // requirement itself — a cursor genuinely off the clip misses this by
+      // whole pixels, never by less than one.
+      const visible = geo.cursor.left >= geo.wrap.left - 0.5 &&
+        geo.cursor.right <= geo.wrap.right + 0.5 &&
+        geo.cursor.top >= geo.wrap.top - 0.5 &&
+        geo.cursor.bottom <= geo.wrap.bottom + 0.5;
+      assert.ok(visible,
+        'T8c: 游標走到最後一格之後，游標自己的矩形必須落在畫布可視範圍之內 —— ' +
+        '否則鍵盤游標在一個使用者看不到的地方（不論是靠捲動、還是欄位本來就夠寬都算數）。' +
+        'Got ' + JSON.stringify(geo));
 
       // The lane the cursor is standing on is removed underneath it.
       await pressClick(ctx.page, '.ed-wave-lane-remove[data-focus-key="lane-remove-5"]');
@@ -12674,6 +12707,77 @@ async function main() {
       assert.strictEqual(ctx.errs.length, 0, 'T8c: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/T8c the cell cursor survives every repaint, and is clamped and scrolled into view — OK');
+    }
+    // T8c-scroll — v3.6.0 Task 13 fix round 2: the SCROLL half of the same
+    // requirement, on a fixture that genuinely overflows this suite's
+    // 800x600 viewport. WAVE_MD (T8c above) no longer overflows after
+    // Task 13's width-budget change, so T8c's own walk-to-End no longer
+    // scrolls anything — its rewritten assertion above checks that the
+    // cursor stays VISIBLE, which holds whichever way that happens to be
+    // true (wide enough, or scrolled). This scenario is the other half:
+    // confirm scrolling itself still works when the content is actually
+    // too wide to fit, so that mechanism does not go untested just because
+    // the suite's other fixture stopped needing it.
+    //
+    // Cycle count derived, not guessed: `SIZES.nameColWidth` is 120,
+    // `SIZES.cycleWidth` is 48 (wave-ui.js), and `.ed-wave-canvas-wrap`'s
+    // own clientWidth at 800x600 is 518px after Task 13 (MEASURED against
+    // this exact build, this task's own width-budget probe) — so a lane
+    // needs more than (518 - 120) / 48 ≈ 8.3 cycles to overflow. 16 cycles
+    // gives content width 120 + 16*48 = 888px, ~370px past the clip: a
+    // comfortable margin, not a bare pass, so a modest future width change
+    // does not silently defuse this fixture the same way it defused the
+    // original one. If `.ed-wave-canvas-wrap` ever grows enough to swallow
+    // 888px too, this scenario fails LOUD (`scrollLeft` stays 0) rather
+    // than silently passing — re-derive the cycle count from a fresh
+    // measurement at that point, do not just raise the number blind.
+    {
+      const WIDE_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "  { name: 'clk', wave: '0101010101010101' },",
+        '] }',
+        '```', '',
+      ].join('\n');
+      const ctx = await newPage(WIDE_MD);
+      await openWave(ctx.page);
+      const before = await ctx.page.evaluate(() =>
+        document.querySelector('.ed-wave-canvas-wrap').scrollLeft);
+      assert.strictEqual(before, 0, 'T8c-scroll 前提失敗：還沒走過去，欄位不該先捲過');
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 200));
+      const after = await ctx.page.evaluate(() => {
+        const wrap = document.querySelector('.ed-wave-canvas-wrap');
+        const cursor = document.querySelector('[data-ed-wave-cursor]');
+        const c = cursor === null ? null : cursor.getBoundingClientRect();
+        const w = wrap.getBoundingClientRect();
+        return {
+          scrollLeft: wrap.scrollLeft,
+          cell: cursor === null ? null : cursor.getAttribute('data-cell'),
+          cursorLeft: c === null ? null : c.left, cursorRight: c === null ? null : c.right,
+          wrapLeft: w.left, wrapRight: w.right,
+        };
+      });
+      assert.strictEqual(after.cell, '0,15',
+        'T8c-scroll 前提失敗：要走到唯一那條 lane 的最後一個 cycle（16 個 cycle，index 0-15）。' +
+        'Got ' + JSON.stringify(after));
+      // The requirement this whole pair exists for: scrolling really
+      // happened (this scenario's OWN half of it — T8c above no longer can
+      // show this on its own fixture) AND the cursor is still visible
+      // afterward (scrolling that does not actually bring the cursor into
+      // view would be worse than not scrolling at all).
+      assert.ok(after.scrollLeft > 0,
+        'T8c-scroll：這份文件在這個視窗下真的畫不完，游標走到最後一格必須真的把欄位捲過去。Got ' +
+        JSON.stringify(after));
+      assert.ok(after.cursorLeft >= after.wrapLeft - 0.5 && after.cursorRight <= after.wrapRight + 0.5,
+        'T8c-scroll：捲動之後，游標本身還是必須落在可視範圍內。Got ' + JSON.stringify(after));
+      assert.strictEqual(ctx.errs.length, 0,
+        'T8c-scroll: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: wave/T8c-scroll a genuinely overflowing lane still scrolls the cursor into view — OK');
     }
     // T8d — Escape is layered: the rail's rename field first, the editor
     // second. Before this, Escape at that field ran the editor's own
