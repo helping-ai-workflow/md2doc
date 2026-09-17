@@ -349,4 +349,43 @@ function makeDrawer() {
   console.log('wave-draw: every 錨在 (index+base)，不是裸 index — OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 9 fix round 1（R29）：foot.text 與 foot.tick 同時存在時，
+// 兩者不准疊在同一個 y —— 修之前兩者共用同一條 footHeight 帶，這裡直接
+// 斷言兩條帶的 y 不相等，並且 tick 帶比較靠近 lane（比 text 帶的 y 小）。
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = {
+    signal: [{ name: 'a', wave: '0101' }],
+    foot: { text: 'footer', tick: 0 },
+  };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  assert.strictEqual(L.footTextHeight, 20, '版面必須疊出第二條 foot 帶（R29）');
+
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const byClass = {};
+  (function walk(n) {
+    const c = n.attrs && n.attrs.class;
+    if (c) { byClass[c] = byClass[c] || []; byClass[c].push(n); }
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  const footText = (byClass['ed-wave-foot-text'] || [])[0];
+  const footTick = (byClass['ed-wave-ruler-tick'] || [])[0];
+  assert.ok(footText !== undefined, 'foot.text 必須畫出來');
+  assert.ok(footTick !== undefined, 'foot.tick 必須畫出來');
+  assert.notStrictEqual(Number(footText.attrs.y), Number(footTick.attrs.y),
+    'foot.text 跟 foot.tick 不准疊在同一個 y（R29 之前的缺陷）：' +
+    JSON.stringify({ text: footText.attrs.y, tick: footTick.attrs.y }));
+  // 帶的疊法是鏡射 head：tick 帶貼著 lane，text 帶在更外側 —— foot 是往下
+  // 疊，所以 tick 的 y 必須比 text 的 y 小（更靠近 lane）。
+  assert.ok(Number(footTick.attrs.y) < Number(footText.attrs.y),
+    'foot 的 tick 帶必須比 text 帶更靠近 lane（y 更小）');
+
+  console.log('wave-draw: foot.text 與 foot.tick 疊成兩條獨立的帶（R29）— OK');
+}
+
 console.log('wave-draw.test.js OK');

@@ -1157,6 +1157,42 @@ const FLAT = {
         size.label + '／head+foot：height 必須含 originY 與 footHeight 兩端');
       verifyInvariant(L, size.label + '／head+foot（originY=42）');
     }
+
+    // v3.6.0 Task 9 fix round 1（R29）：foot 同時有 text 與 tick——合法的
+    // WaveJSON，且是這條 ruling 存在的理由：`footHeight` 那一條帶原本兩者
+    // 共用同一個 y，這裡驗它們疊成兩條各自獨立的帶，height 因此多長出
+    // footTextHeight，且矩陣裡帶 mixed period／phase 的文件仍然通過同一組
+    // 不變量——foot 帶疊高不准悄悄弄壞 x 軸那三條。
+    {
+      const doc = {
+        signal: [
+          { name: 'a', wave: '01010101' },
+          { name: 'wide', wave: '01', period: 6 },
+          { name: 'narrow', wave: '0101010101010101', period: 0.5, phase: 1.5 },
+        ],
+        foot: { text: 'F', tick: 0 },
+      };
+      const L = G.layoutOf(doc, size.opts);
+      assert.strictEqual(L.footHeight, 22,
+        size.label + '／foot text+tick：footHeight（tick 帶）不變');
+      assert.strictEqual(L.footTextHeight, 20,
+        size.label + '／foot text+tick：footTextHeight（text 帶）新疊上去的那一條');
+      assert.strictEqual(L.height,
+        L.originY + L.lanes.length * L.laneHeight + 22 + 20,
+        size.label + '／foot text+tick：height 必須含兩條疊帶');
+      verifyInvariant(L, size.label + '／foot text+tick（兩條疊帶）');
+    }
+
+    // 反例：只有 foot.tick，沒有 foot.text —— 這條 pin 住「舊文件的 height
+    // 不會因為這次 fix 悄悄長高」，跟上面 R29 的正例互為對照組。
+    {
+      const doc = { signal: [{ name: 'a', wave: '01010101' }], foot: { tick: 0 } };
+      const L = G.layoutOf(doc, size.opts);
+      assert.strictEqual(L.footTextHeight, 0,
+        size.label + '／foot 只有 tick：footTextHeight 必須是 0，不因為這次 fix 長出來');
+      assert.strictEqual(L.height, L.originY + L.lanes.length * L.laneHeight + 22,
+        size.label + '／foot 只有 tick：height 跟這次 fix 之前一樣，不准長高');
+    }
   }
 
   console.log('wave-geometry: R14 三條不變量在 period/phase/hscale 矩陣下成立 — OK');
@@ -1314,7 +1350,23 @@ const FLAT = {
   const footed = { signal: [{ name: 'a', wave: '01' }], foot: { tick: 0 } };
   const L3 = G.layoutOf(footed, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
   assert.strictEqual(L3.footHeight, 22, 'foot 刻度佔一條帶');
+  assert.strictEqual(L3.footTextHeight, 0, '只有 foot.tick，沒有第二條 foot 標題帶（R29）');
   assert.strictEqual(L3.height, 22 + 40 + 22);
+
+  // v3.6.0 Task 9 fix round 1（R29）：foot.text 也疊出自己的一條帶，跟
+  // head.text 對稱——單獨一個 foot.text 就要疊出 footTextHeight，兩者都設
+  // 時兩條帶都要算進 height。
+  const footTextOnly = { signal: [{ name: 'a', wave: '01' }], foot: { text: 'F' } };
+  const L4 = G.layoutOf(footTextOnly, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
+  assert.strictEqual(L4.footHeight, 22, '只有 foot.text 仍算 hasBanner，footHeight 不變');
+  assert.strictEqual(L4.footTextHeight, 20, 'foot.text 疊出一條 20px 的標題帶');
+  assert.strictEqual(L4.height, 22 + 40 + 22 + 20, 'height 含 footHeight 與 footTextHeight 兩條');
+
+  const footBoth = { signal: [{ name: 'a', wave: '01' }], foot: { text: 'F', tick: 0 } };
+  const L5 = G.layoutOf(footBoth, { laneHeight: 40, cycleWidth: 20, nameColWidth: 120 });
+  assert.strictEqual(L5.footHeight, 22, 'foot text+tick：footHeight（tick 帶）不變');
+  assert.strictEqual(L5.footTextHeight, 20, 'foot text+tick：footTextHeight（text 帶）新疊上去');
+  assert.strictEqual(L5.height, 22 + 40 + 22 + 20, 'foot text+tick：height 含兩條疊帶');
 
   // 名稱欄仍然不是格子
   assert.strictEqual(G.cellAt(L1, 10, 30), null, '名稱欄不得回傳格子');
