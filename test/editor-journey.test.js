@@ -14551,6 +14551,88 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: wave/re-review-item1 從沒被選過的 self-loop 第一次按下就選得到、也刪得掉 — OK');
     }
+
+    // ── v3.6.0 Task 11: 武裝時的轉態標記與吸附 ─────────────────────────
+    //
+    // 武裝前後畫布上的轉態標記必須出現/消失；武裝後往同一顆錨點左右各
+    // 19px（格寬 48 的 40%）按下，三次都必須吸附到同一個 cell —— 這是
+    // Task 5/7 修好「線畫在哪」之後，這個 task 修的「怎麼瞄」。
+    //
+    // 選字：brief 本身的 Step 6 用 `[data-focus-key="tool-ed-wave-edge-arm"]`，
+    // 但 `wave-ui.js` 的 `panels.toolButton('ed-wave-edge-arm', ...)` 把
+    // `data-focus-key` 設成 `cls` 本身（沒有 `tool-` 前綴）—— MEASURED：
+    // 全 repo grep 不到任何一處 `tool-ed-wave-edge-arm` 字面值，brief 那個
+    // 選字器會直接找不到元素、整支 scenario 在按鈕這一步就丟出
+    // `No element found for selector`。這裡照抄畫布上真正存在的那個。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      const idleCount = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-transition').length);
+      assert.strictEqual(idleCount, 0, 'idle 時畫布上不該有任何轉態標記。Got ' + idleCount);
+
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
+      await new Promise((r) => setTimeout(r, 120));
+
+      const geom = await ctx.page.evaluate(() => {
+        const dot = document.querySelectorAll('.ed-wave-transition')[1];
+        if (!dot) return { ok: false };
+        const dr = dot.getBoundingClientRect();
+        return { cx: dr.left + dr.width / 2, cy: dr.top + dr.height / 2, ok: true };
+      });
+      assert.strictEqual(geom.ok, true, '武裝後必須有轉態標記');
+
+      for (const dx of [-19, 0, 19]) {
+        await ctx.page.mouse.move(geom.cx + dx, geom.cy);
+        await new Promise((r) => setTimeout(r, 80));
+        const hot = await ctx.page.evaluate(() => {
+          const hs = [...document.querySelectorAll('.ed-wave-transition[data-hot]')];
+          return hs.length === 1 ? Number(hs[0].getAttribute('cx')) : null;
+        });
+        assert.notStrictEqual(hot, null, 'dx=' + dx + ' 必須恰好一個熱點');
+      }
+
+      // 拖曳：從第一顆錨點拖到第三顆錨點，畫出來的 edge 起訖點必須正好落在
+      // 那兩顆錨點的座標上（不是格中心）—— 這才是使用者原本抱怨「線應該
+      // 頭尾相接」的直接證據，不只是標記畫對地方。
+      const anchors = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-transition')].map((d) => ({
+          x: Number(d.getAttribute('cx')), y: Number(d.getAttribute('cy')),
+        })));
+      const svgBox = await ctx.page.$eval('.ed-wave-canvas', (el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+      });
+      const from = anchors[0];
+      const to = anchors[2];
+      await ctx.page.mouse.move(svgBox.left + from.x, svgBox.top + from.y);
+      await ctx.page.mouse.down();
+      await ctx.page.mouse.move(svgBox.left + to.x, svgBox.top + to.y, { steps: 5 });
+      await ctx.page.mouse.up();
+      await new Promise((r) => setTimeout(r, 150));
+      const edgePath = await ctx.page.evaluate(() => {
+        const p = document.querySelector('.ed-wave-edge-path');
+        return p ? p.getAttribute('d') : null;
+      });
+      assert.ok(edgePath !== null, '拖曳完成後畫布上必須有一條 edge path');
+      assert.ok(edgePath.indexOf('M' + from.x + ',' + from.y) === 0,
+        'edge path 起點必須正好是來源錨點座標，不是格中心。Got ' + edgePath);
+      assert.ok(edgePath.indexOf(to.x + ',' + to.y) !== -1,
+        'edge path 終點必須正好是目的錨點座標，不是格中心。Got ' + edgePath);
+
+      // 解除武裝：標記必須消失。
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
+      await new Promise((r) => setTimeout(r, 120));
+      const idleAgain = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-transition').length);
+      assert.strictEqual(idleAgain, 0, '解除武裝之後轉態標記必須消失。Got ' + idleAgain);
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 11: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 武裝時的轉態標記與吸附、拖曳頭尾相接 — OK');
+    }
   }
 
   await browser.close();

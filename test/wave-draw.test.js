@@ -609,4 +609,79 @@ function makeDrawer() {
   console.log('wave-draw: 22 個電位圖示全部由畫布的同一批繪製函式產生 — OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 11：武裝時才畫轉態標記，且標記落在錨點上
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = { signal: [{ name: 'w', wave: '0.1.0...' }] };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+
+  const countMarks = function (svg) {
+    let marks = 0;
+    (function walk(n) {
+      if (n.attrs && n.attrs.class === 'ed-wave-transition') marks += 1;
+      (n.children || []).forEach(walk);
+    })(svg);
+    return marks;
+  };
+
+  // idle：完全不畫
+  {
+    const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const state = fakeCanvasState();
+    state.edgeMode = 'idle';
+    const rendered = drawer.renderCanvas(svg, doc, L, state);
+    assert.strictEqual(countMarks(rendered), 0, 'idle 時完全不畫轉態標記');
+  }
+
+  // 未帶 edgeMode（既有呼叫方，如 fakeCanvasState() 本身）也不畫 —— 補齊 idle
+  // 之外「這個欄位根本不存在」的那一支，避免 undefined 被誤判成武裝。
+  {
+    const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+    assert.strictEqual(countMarks(rendered), 0, '沒有 edgeMode 欄位時視同 idle');
+  }
+
+  // armed：畫在 transitionsOf 回報的 cell 0/2/4，落在錨點，不是格中心
+  {
+    const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const state = fakeCanvasState();
+    state.edgeMode = 'armed';
+    const rendered = drawer.renderCanvas(svg, doc, L, state);
+    const at = [];
+    (function walk(n) {
+      if (n.attrs && n.attrs.class === 'ed-wave-transition') at.push(Number(n.attrs.cx));
+      (n.children || []).forEach(walk);
+    })(rendered);
+    assert.deepStrictEqual(at, [0, 2, 4].map(function (c) {
+      return G.anchorOfCell(L, 0, c).x;
+    }), '標記畫在錨點上，不是格中心：' + JSON.stringify(at));
+  }
+
+  // hoverBoundary 命中的那一顆帶 data-hot、半徑變大；其餘不帶
+  {
+    const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const state = fakeCanvasState();
+    state.edgeMode = 'armed';
+    state.hoverBoundary = { laneIndex: 0, cell: 2 };
+    const rendered = drawer.renderCanvas(svg, doc, L, state);
+    const dots = [];
+    (function walk(n) {
+      if (n.attrs && n.attrs.class === 'ed-wave-transition') dots.push(n);
+      (n.children || []).forEach(walk);
+    })(rendered);
+    const hot = dots.filter(function (n) { return n.attrs['data-hot'] !== undefined; });
+    const cold = dots.filter(function (n) { return n.attrs['data-hot'] === undefined; });
+    assert.strictEqual(hot.length, 1, '恰好一顆命中 hoverBoundary 的標記帶 data-hot：' +
+      JSON.stringify(dots.map(function (n) { return n.attrs; })));
+    assert.strictEqual(cold.length, 2, '其餘標記不帶 data-hot');
+    assert.strictEqual(Number(hot[0].attrs.cx), G.anchorOfCell(L, 0, 2).x, 'data-hot 落在 cell 2');
+    assert.ok(Number(hot[0].attrs.r) > Number(cold[0].attrs.r),
+      '命中的標記半徑必須比一般標記大：hot=' + hot[0].attrs.r + ' cold=' + cold[0].attrs.r);
+  }
+
+  console.log('wave-draw: 轉態標記只在武裝時出現且落在錨點上 — OK');
+}
+
 console.log('wave-draw.test.js OK');
