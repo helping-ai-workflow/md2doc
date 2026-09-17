@@ -14760,6 +14760,78 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 右欄五面板、九個欄位、source 與寫回一致 — OK');
     }
+
+    // ── v3.6.0 Task 13 fix round 1 (Critical 2): 展開的側欄不能蓋住 關閉 ──────
+    //
+    // 這條專門重現 reviewer 的原始症狀：`.ed-wave-side[data-expanded]` 沒有
+    // `position: relative` 的祖先可以當 containing block，於是它是相對整個
+    // viewport 定位，而不是相對對話框——在窄視窗下會蓋住標題列的 關閉 按鈕。
+    // 一個幾何斷言（比較 rect）不夠：真正的症狀是「按下去按到別的東西」，所以
+    // 這裡直接在 關閉 按鈕自己的座標上做 elementFromPoint 命中測試，跟 reviewer
+    // 重現時用的方法一樣，並且真的按一次確認對話框會關掉。
+    {
+      const ctx = await newPage(WAVE_MD);
+      // reviewer 重現用的視窗尺寸，比這批其他情境都窄——.ed-wave-side 的
+      // <1100px 收合／展開分支只在這麼窄的地方才會動。
+      await ctx.page.setViewport({ width: 600, height: 400 });
+      await openWave(ctx.page);
+
+      // 展開側欄：點任何一個 section title 都會設 data-expanded（見
+      // wave-panels.js 的 section()）。
+      await pressClick(ctx.page, '[data-focus-key="section-document"]');
+      await new Promise((r) => setTimeout(r, 120));
+
+      const hit = await ctx.page.evaluate(() => {
+        const closeBtn = document.querySelector('.ed-wave-close');
+        const r = closeBtn.getBoundingClientRect();
+        const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return { isCloseBtn: el === closeBtn, tag: el ? el.tagName : null, cls: el ? el.className : null };
+      });
+      assert.strictEqual(hit.isCloseBtn, true,
+        'Critical 2：展開側欄之後，關閉按鈕自己座標上的 hit-test 必須還是關閉按鈕本身。' +
+        'Got ' + hit.tag + '.' + hit.cls);
+
+      // 比 hit-test 更直接：真的按一次，對話框必須真的關掉。
+      await pressClick(ctx.page, '.ed-wave-close');
+      await new Promise((r) => setTimeout(r, 150));
+      const overlayGone = await ctx.page.evaluate(() => document.querySelector('.ed-wave-overlay') === null);
+      assert.strictEqual(overlayGone, true, 'Critical 2：按下關閉必須真的關掉對話框');
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 13 fix round 1: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: Critical 2 — 展開的側欄不再蓋住關閉按鈕 — OK');
+    }
+
+    // ── v3.6.0 Task 13 fix round 1: 展開的側欄有路收回去 ─────────────────────
+    {
+      const ctx = await newPage(WAVE_MD);
+      await ctx.page.setViewport({ width: 800, height: 600 });
+      await openWave(ctx.page);
+
+      await pressClick(ctx.page, '[data-focus-key="section-document"]');
+      await new Promise((r) => setTimeout(r, 120));
+      const expandedWidth = await ctx.page.$eval('.ed-wave-side',
+        (el) => Math.round(el.getBoundingClientRect().width));
+      assert.ok(expandedWidth > 100, '展開之後側欄必須真的變寬。Got ' + expandedWidth);
+
+      await ctx.page.waitForSelector('.ed-wave-side-collapse');
+      await pressClick(ctx.page, '.ed-wave-side-collapse');
+      await new Promise((r) => setTimeout(r, 120));
+      const collapsedWidth = await ctx.page.$eval('.ed-wave-side',
+        (el) => Math.round(el.getBoundingClientRect().width));
+      const stillExpanded = await ctx.page.$eval('.ed-wave-side',
+        (el) => el.hasAttribute('data-expanded'));
+      assert.strictEqual(stillExpanded, false, '按下收合按鈕必須真的移除 data-expanded');
+      assert.ok(collapsedWidth < expandedWidth,
+        '收合之後側欄必須真的變窄，不是永久佔用畫布空間。Got ' + collapsedWidth +
+        ' vs 展開時 ' + expandedWidth);
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 13 fix round 1: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 展開的側欄有路收回去，不是單向門 — OK');
+    }
   }
 
   await browser.close();

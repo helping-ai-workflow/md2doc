@@ -1037,6 +1037,87 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 }
 
 // ---------------------------------------------------------------------------
+// T30：v3.6.0 Task 13 fix round 1（Critical 1）—— 同一個物件在同一個 session 裡
+// 拿到兩個新欄位，兩次都要 toPatch() ok。`toPatch()` 永遠是拿 SESSION 一開始
+// 的原始文字去比對現在的 doc（不是逐手勢累計），所以「兩個新欄位」不必是同一個
+// gesture 打進去的——分兩次 apply、中間夾別的動作，一樣會撞到同一個 bug：舊版
+// `diffMembers` 對每一個新 key 各自推一條 `insert` edit，而兩條 edit 都是對著
+// 「這個物件目前最後一個既有成員」算插入點，兩個 edit 誰都看不到誰，於是落在
+// 同一個 offset 上，被 patchSource 自己的「兩個 edit 落在同一個地方」防呆擋下
+// 來——不是間歇性的，是每一次都會，因為根源不是隨機的 race，是同一個 anchor。
+//
+// Lane 面板的 period/phase 是這個 bug 第一個會被使用者摸到的入口，但六個尺規
+// 欄位（head/foot 的 tick/tock/every）走的是同一條 `diffMembers`，一樣中招
+// ——所以下面兩段都測：lane pair 與 ruler pair，外加一段三個新欄位一次疊上去
+// 確認不是只修了「剛好兩個」這個特例。
+// ---------------------------------------------------------------------------
+{
+  // lane pair：period 再 phase，兩次個別 apply，兩次都要 ok。
+  const s = S.createStore(GSRC);
+  assert.strictEqual(s.apply('set period', (d) => C.setLaneField(d, 0, 'period', 2)), true);
+  const afterPeriod = s.toPatch();
+  assert.strictEqual(afterPeriod.ok, true,
+    'T30：只加一個新欄位必須 ok（這條本來就沒壞，先確認沒被新程式改壞）。Got ' +
+    JSON.stringify(afterPeriod));
+  assert.strictEqual(s.apply('set phase', (d) => C.setLaneField(d, 0, 'phase', 3)), true);
+  const afterPhase = s.toPatch();
+  assert.strictEqual(afterPhase.ok, true,
+    'T30：Critical 1 —— 同一條 lane 先 period 後 phase，第二次 toPatch 必須還是 ok。Got ' +
+    JSON.stringify(afterPhase));
+  const back = C.parseSource(afterPhase.text);
+  assert.strictEqual(back.ok, true, 'T30：patch 出來的文字必須讀得回來');
+  assert.strictEqual(back.doc.signal[0].period, 2, 'T30：period 必須真的寫回');
+  assert.strictEqual(back.doc.signal[0].phase, 3, 'T30：phase 必須真的寫回');
+  assert.strictEqual(typeof back.doc.signal[0].period, 'number',
+    'T30：period 必須是數字，不是字串（wave-geometry 的 typeof 閘門只認數字）');
+  assert.strictEqual(typeof back.doc.signal[0].phase, 'number', 'T30：phase 同理');
+}
+{
+  // ruler pair：head.tick 再 head.every，兩個都是 head 這個已存在物件的新欄位。
+  const HSRC = [
+    '{ head: { text: "T" }, signal: [',
+    '  { name: "a", wave: "01" },',
+    ']}',
+  ].join('\n');
+  const s = S.createStore(HSRC);
+  assert.strictEqual(
+    s.apply('set head.tick', (d) => C.setBannerField(d, 'head', 'tick', '3')), true);
+  assert.strictEqual(s.toPatch().ok, true, 'T30：只加 head.tick 必須 ok');
+  assert.strictEqual(
+    s.apply('set head.every', (d) => C.setBannerField(d, 'head', 'every', '2')), true);
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, true,
+    'T30：Critical 1 的尺規版本 —— head.tick 後 head.every，第二次 toPatch 必須 ok。Got ' +
+    JSON.stringify(patch));
+  const back = C.parseSource(patch.text);
+  assert.strictEqual(back.ok, true);
+  assert.strictEqual(back.doc.head.text, 'T', 'T30：原本就有的 head.text 不准被動到');
+  assert.strictEqual(back.doc.head.tick, '3');
+  assert.strictEqual(back.doc.head.every, '2');
+}
+{
+  // 三個新欄位疊在同一個物件上（不是只修了「剛好兩個」的特例）。
+  const FSRC = [
+    '{ foot: {}, signal: [',
+    '  { name: "a", wave: "01" },',
+    ']}',
+  ].join('\n');
+  const s = S.createStore(FSRC);
+  s.apply('set foot.tick', (d) => C.setBannerField(d, 'foot', 'tick', '1'));
+  s.apply('set foot.tock', (d) => C.setBannerField(d, 'foot', 'tock', '2'));
+  s.apply('set foot.every', (d) => C.setBannerField(d, 'foot', 'every', '3'));
+  const patch = s.toPatch();
+  assert.strictEqual(patch.ok, true,
+    'T30：三個新欄位疊在同一個 session 上也必須 ok，不是只有剛好兩個才修好。Got ' +
+    JSON.stringify(patch));
+  const back = C.parseSource(patch.text);
+  assert.strictEqual(back.ok, true);
+  assert.strictEqual(back.doc.foot.tick, '1');
+  assert.strictEqual(back.doc.foot.tock, '2');
+  assert.strictEqual(back.doc.foot.every, '3');
+}
+
+// ---------------------------------------------------------------------------
 // T15：守衛要有牙齒 —— 不碰 DOM、不執行字串。
 // 清單跟 wave-codec.test.js 同一份，只少掉 `require(`（本檔正當地 require codec）。
 // 樣式與咬痕 copy 自 test/wave-geometry.test.js：散文讓路給守衛，不是反過來。
