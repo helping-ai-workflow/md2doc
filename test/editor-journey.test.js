@@ -13823,15 +13823,28 @@ async function main() {
       await assertNoop('own cell');
 
       // (b) onto the cell holding the edge's OTHER end ('a', clk cell 1).
-      const other = await cellPoint(ctx.page, 0, 1);
-      await dragBetween(ctx.page, ownHandle, other);
+      //
+      // v3.6.0 Task 6 fix round 4 (R20 residual, review finding): thunk, not
+      // a pre-resolved point — `dragBetween` resolves and presses `a`
+      // FIRST, and `a` here IS `ownHandle`, the thing a later `cellPoint`
+      // call can scroll. Resolving `other` before `dragBetween` even runs
+      // left it a plain point that could go stale the moment `ownHandle`'s
+      // OWN resolution (also `cellPoint`-backed, inside `edgeHandlePoint`)
+      // scrolled — the exact staleness `dragCells`/T6g/T9a/T9c were already
+      // fixed for. Doesn't fire today (`EDGE_FORK_MD` is 5 cycles, every
+      // point already fits the ~282px client width at this viewport with no
+      // scroll needed), which is exactly why it is dangerous: both drops
+      // below assert a NO-OP refusal, the one shape a stale point fails
+      // silently into ("nothing happened" is what the assertion wants to
+      // see either way), and this fixture is one `wave:` string away from
+      // getting wider, the same way `WAVE_MD` did in this task.
+      await dragBetween(ctx.page, ownHandle, () => cellPoint(ctx.page, 0, 1));
       await assertNoop('other end\'s cell');
 
       // (c) out of range: the blank spacer row (lane 4) is a real, hittable
       // point on the canvas — `cellAt` answers it like any other cell — but
       // it has zero cells of its own, so `moveEdgeEnd` refuses it.
-      const outOfRange = await cellPoint(ctx.page, 4, 0);
-      await dragBetween(ctx.page, ownHandle, outOfRange);
+      await dragBetween(ctx.page, ownHandle, () => cellPoint(ctx.page, 4, 0));
       await assertNoop('out of range (spacer row)');
 
       assert.strictEqual(ctx.errs.length, 0, 'T9d: 不得有 pageerror: ' + ctx.errs.join(' | '));
