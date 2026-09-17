@@ -388,4 +388,109 @@ function makeDrawer() {
   console.log('wave-draw: foot.text 與 foot.tick 疊成兩條獨立的帶（R29）— OK');
 }
 
+// ---------------------------------------------------------------------------
+// v3.6.0 Task 9 fix round 2（ruling R30）：尺規跟 grid 的刻度數/間距是
+// DIAGRAM 的，不是任何一條 lane 的，也不是 cell 數。
+//
+// MEASURED against `node_modules/wavedrom` 3.5.0 —— coordinator 給的兩個
+// fixture（`period: 4` / `hscale: 2, period: 1`），逐值核對：
+//
+//   period: 4   引擎：17 個刻度，值 0..16，間距 40px，svg 寬 700
+//   hscale: 2   引擎：5 個刻度（跟修之前一樣的數量——這正是「數量相同、
+//               間距不同」的那個反例，只算數量的斷言抓不到）
+//
+// 這裡不斷言引擎自己的像素（那組尺寸是引擎預設值，不是我們的 SIZES），而是
+// 用同一顆 fixture 餵我們自己的 layoutOf/renderCanvas，斷言「值」跟「x 間距
+// 是同一個 diagramPitch」——結構跟引擎一致，數字換算成我們自己的
+// nameColWidth=120／cycleWidth=48 尺寸。
+//
+// RED 用暫時還原＋重跑驗過（round 2 修正前）：
+//   period:4  舊碼畫 5 個刻度（0..4），x 間距 192（lane 0 自己的
+//             cycleWidth，被 period 拉寬），grid 也只有 5 條、x 間距 48
+//             （對，但條數錯——這是 CLAUDE.md 記過的「cell 當 cycle 用」）。
+//   hscale:2  舊碼的 ruler 剛好是對的（lane 0 的 cycleWidth 已經乘了
+//             hscale，period=1 時不會被 period 拉開），但 grid 仍然錯——
+//             x 間距是沒乘 hscale 的 48，不是 96，條數剛好一樣（5），純粹
+//             間距錯，數量抓不到。
+// ---------------------------------------------------------------------------
+{
+  const drawer = makeDrawer();
+  const doc = { signal: [{ name: 'a', wave: '0101', period: 4 }], head: { tick: 0 } };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  assert.strictEqual(L.width, 888, '前提：period 4 把 width 拉成 888（跟 coordinator 量的一致）');
+
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const ticks = [];
+  const grids = [];
+  (function walk(n) {
+    if (n.attrs && n.attrs.class === 'ed-wave-ruler-tick') ticks.push(n);
+    if (n.tag === 'line' && n.attrs && n.attrs.class === 'ed-wave-grid') grids.push(n);
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  const values = ticks.map(function (t) { return t.children[0].text; });
+  const expectedValues = [];
+  for (let i = 0; i <= 16; i += 1) expectedValues.push(String(i));
+  assert.deepStrictEqual(values, expectedValues,
+    'period:4 必須是 17 個刻度、值 0..16（引擎量到 17，不是 layout.cycles+1 的 5）：' +
+    JSON.stringify(values));
+
+  const xs = ticks.map(function (t) { return Number(t.attrs.x); });
+  const expectedXs = [];
+  for (let i = 0; i <= 16; i += 1) expectedXs.push(120 + i * 48);
+  assert.deepStrictEqual(xs, expectedXs,
+    'period:4 的刻度間距必須是 diagram pitch（48），不是 lane 0 自己的 cycleWidth（192）：' +
+    JSON.stringify(xs));
+
+  assert.strictEqual(grids.length, 17, 'grid 線也要用同一個 diagram 邊界數（17），不是 layout.cycles+1（5）');
+  const gridXs = grids.map(function (g) { return Number(g.attrs.x1); });
+  assert.deepStrictEqual(gridXs, expectedXs,
+    'grid 線的 x 也必須是同一個 diagramPitch（48）派生出來的，跟尺規共用一份算式');
+
+  console.log('wave-draw: period 讓尺規跟 grid 都用 diagram cycle 數，不是 cell 數（R30）— OK');
+}
+
+{
+  const drawer = makeDrawer();
+  const doc = {
+    signal: [{ name: 'a', wave: '0101' }],
+    head: { tick: 0 },
+    config: { hscale: 2 },
+  };
+  const L = G.layoutOf(doc, { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 });
+  assert.strictEqual(L.width, 504, '前提：hscale 2 把 width 拉成 504（跟 coordinator 量的一致）');
+
+  const svg = fakeDoc().createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const rendered = drawer.renderCanvas(svg, doc, L, fakeCanvasState());
+
+  const ticks = [];
+  const grids = [];
+  (function walk(n) {
+    if (n.attrs && n.attrs.class === 'ed-wave-ruler-tick') ticks.push(n);
+    if (n.tag === 'line' && n.attrs && n.attrs.class === 'ed-wave-grid') grids.push(n);
+    (n.children || []).forEach(walk);
+  })(rendered);
+
+  const values = ticks.map(function (t) { return t.children[0].text; });
+  assert.deepStrictEqual(values, ['0', '1', '2', '3', '4'],
+    'hscale:2 是 5 個刻度（跟舊碼「碰巧」畫出的數量一樣，這條只釘數量不夠）：' +
+    JSON.stringify(values));
+
+  const xs = ticks.map(function (t) { return Number(t.attrs.x); });
+  assert.deepStrictEqual(xs, [120, 216, 312, 408, 504],
+    'hscale:2 的刻度間距必須是 96（cycleWidth 48 × hscale 2），這條 ruler 舊碼本來就對，' +
+    '但下面的 grid 斷言是這個 fixture 真正的 RED：' + JSON.stringify(xs));
+
+  // 這才是這個 fixture 真正抓到的迴歸：grid 舊碼沒乘 hscale，間距停在 48
+  // （x 只到 312），跟 ticks 對不上。
+  assert.strictEqual(grids.length, 5, 'grid 線數量（5）不是這個 fixture 的問題所在');
+  const gridXs = grids.map(function (g) { return Number(g.attrs.x1); });
+  assert.deepStrictEqual(gridXs, [120, 216, 312, 408, 504],
+    'grid 線的間距必須也乘 hscale（96），不是沒乘 hscale 的 48：' + JSON.stringify(gridXs));
+
+  console.log('wave-draw: hscale 讓 grid 跟尺規共用同一個乘了 hscale 的 pitch（R30）— OK');
+}
+
 console.log('wave-draw.test.js OK');
