@@ -103,13 +103,14 @@ function makeDrawer() {
 }
 
 // ---------------------------------------------------------------------------
-// v3.6.0 Task 7: `drawLane` must actually CALL `brickPath` for a real
-// level change, positioned at the cell that changed (not the cell before
-// it) — a `<path class="ed-wave-edge">`, not the old vertical
-// `<line class="ed-wave-edge">`. Bus/xxx boundaries are explicitly OUT of
-// scope for this task (`brickPath`'s own `yFor` only knows top/mid/bottom,
-// and the bus hexagon / xxx box already carry their own slanted/boxed
-// edges) and must keep drawing the old vertical `<line>`, unchanged.
+// v3.6.0 Task 7 fix round 2 (ruling R24): `drawLane` must actually CALL
+// `brickPath` for a real level change, positioned at the cell that changed
+// (not the cell before it) — a `<path class="ed-wave-edge">`, not the old
+// vertical `<line class="ed-wave-edge">`. But ONLY for `000`<->`111`: bus,
+// `xxx` and clock stay out of scope as before, and `zzz`/`uuu`/`ddd` are
+// ALSO excluded now (R24) — `isRampPair` is an allow-list of the one pair
+// actually measured to be a straight ramp, not a deny-list that silently
+// opts every other brick into that same shape by default.
 // ---------------------------------------------------------------------------
 {
   const drawer = makeDrawer();
@@ -152,7 +153,44 @@ function makeDrawer() {
   assert.strictEqual(edges2[0].tag, 'line',
     'bus 邊界不在這個 task 的範圍內，必須維持原本的垂直 line：' + JSON.stringify(edges2[0]));
 
-  console.log('wave-draw: drawLane 只在真的電位轉態呼叫 brickPath，bus 邊界維持原狀 — OK');
+  // -- R24: z/u/d boundaries keep the old vertical edge too ------------------
+  //
+  // Each case names the real engine brick that makes "no ramp, for now" the
+  // honest answer — MEASURED against `node_modules/wavedrom` 3.5.0's
+  // `waveSkin`, dumped directly, not recalled.
+  function assertNoRamp(wave, why) {
+    const doc = { signal: [{ name: 'x', wave: wave }] };
+    const layout = G.layoutOf(doc, sizes);
+    const svg = fakeDoc().createElementNS('svg', 'svg');
+    drawer.drawLane(svg, layout, 0);
+    const edges = svg.children.filter(function (c) { return c.attrs.class === 'ed-wave-edge'; });
+    assert.strictEqual(edges.length, 1, wave + ' 只有一個邊界：' + JSON.stringify(edges));
+    assert.strictEqual(edges[0].tag, 'line',
+      wave + ' 還不得畫斜坡（' + why + '）：' + JSON.stringify(edges[0]));
+  }
+
+  // 0->z: engine brick `0mz` is "m0,20 3,0 C 10,10 15,10 20,10" — a CURVE
+  // that only reaches mid-height at x=20 (ratio 0.5), not our straight
+  // 3-to-9 ramp.
+  assertNoRamp('0z', '0mz 是曲線，到 ratio 0.5 才到中電位');
+
+  // z->1: engine brick `zm1` is "M0,10 6,10 9,0 20,0" — the ramp starts at
+  // x=6 (ratio 0.15), not x=3 (ratio 0.075) like `0m1`.
+  assertNoRamp('z1', 'zm1 的斜坡從 x=6 開始，不是 x=3');
+
+  // 0->u: engine brick `0mu` is "m0,20 3,0 C 7,10 10.107603,0 20,0" — a
+  // curve, not a straight line.
+  assertNoRamp('0u', '0mu 是曲線');
+
+  // 1->d: engine brick `1md` is "m0,0 3,0 c 4,10 7,20 17,20" — a curve that
+  // does not reach the low level until the very end of the cell (x=20).
+  // (The reverse direction, d->1, happens to use `dm1` = "M0,20 3,20 9,0
+  // 20,0" — identical to `0m1`, a straight ramp, by the same y-coincidence
+  // as `um0` above — but `isRampPair` checks brick NAMES, not directions,
+  // so both directions of every `z`/`u`/`d` pair are excluded uniformly.)
+  assertNoRamp('1d', '1md 是曲線，直到格尾才到低電位');
+
+  console.log('wave-draw: drawLane 只在真的電位轉態呼叫 brickPath，bus/z/u/d 邊界維持原狀 — OK');
 }
 
 console.log('wave-draw.test.js OK');
