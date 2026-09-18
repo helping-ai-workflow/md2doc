@@ -15648,6 +15648,33 @@ async function main() {
         '已刪掉 3 條 lane —— Ctrl+Z 可以拿回來',
         'F3: 而且要講得出刪了幾條、怎麼拿回來');
 
+      // …and the keyboard lands on the lane that TOOK THEIR PLACE.
+      //
+      // fix round 2 (N-2). T6h's own delete case asserts the other half of
+      // this — that the keyboard does not end on `document.body` when the
+      // nominated destination is gone — and it stays green whether or not
+      // 刪除 nominates one at all, because the fallback ladder ends at
+      // `panel.focus()` either way. So it pins `restoreFocus`'s `inert`
+      // rung and pins NOTHING about `focusOverride = 'lane-name-' + lo`.
+      //
+      // This is the half a user feels: delete a range from the middle of the
+      // rail and the cursor is sitting in the name of whatever moved up into
+      // it, ready to be typed over — not parked on the dialog with no visible
+      // caret. The VALUE is asserted, not only the key: `lane-name-1` exists
+      // both before and after this delete, so a key-only assertion would also
+      // pass on a repaint that simply left the keyboard where it already was.
+      const landed = await ctx.page.evaluate(() => {
+        const ae = document.activeElement;
+        return {
+          key: ae && ae.getAttribute ? ae.getAttribute('data-focus-key') : null,
+          value: typeof ae.value === 'string' ? ae.value : null,
+          tag: ae ? ae.tagName : null,
+        };
+      });
+      assert.deepStrictEqual(landed, { key: 'lane-name-1', value: 'gap', tag: 'INPUT' },
+        'F3/N-2: 刪掉一段 lane 之後，鍵盤要落在遞補上來的那一條的名字欄（gap，' +
+        '現在在顯示位置 1），而不是退回對話框本身。Got ' + JSON.stringify(landed));
+
       // 複製與空白列：範圍收掉之後，兩顆都作用在 selection 的第一條上。
       await selectLane(ctx.page, 0);
       await pressClick(ctx.page, '.ed-wave-signal-copy');
