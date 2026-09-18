@@ -4,14 +4,30 @@
 
 Single-file renderer. Everything lives in `lib/md2doc.js`:
 
-| Region | Purpose | Approx range |
+Every row carries an ANCHOR — a string you can `grep -n` for — because line
+numbers here go stale fast and silently. Five of the six rows were wrong by
+thousands of lines until v3.6.0 Task 18 re-measured them. **Re-derive from the
+anchor; do not trust the number.** Ranges below are measured at commit
+`f9a418b` against a 5892-line file.
+
+| Region | Purpose | Range — anchor to `grep -n` |
 |---|---|---|
-| Top | Inline-script tag discovery (WaveDrom / Mermaid local-or-CDN) | lines 30–100 |
-| `marked` block | Custom renderer (`code` / `heading` / `image` / `html` / `paragraph` / `listitem` / `blockquote` / `table`) + TOC builder + section index | lines 108–375 |
-| Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | just above `let bodyHtml` |
-| `<style>` block | Embedded CSS for HTML output | lines 380–820 |
-| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | lines 3760–5611 (`<!-- Reader runtime -->` to its `</script>`) |
-| Output dispatch | `.html` write or puppeteer-driven `.pdf` export | lines 1300–end |
+| Top | `require`s, deferred-diagram placeholder constants, inline-script tag discovery (WaveDrom / Mermaid, `firstExistingPath` → `safeResolve` → `inlineScriptTag`), KaTeX CSS inlining | 1–170 — `function inlineScriptTag(` (106); ends at the `── marked setup` banner |
+| `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 171–372 — `marked.use({` (190) |
+| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 373–5643 — `async function renderMarkdown(` (373); `module.exports = { renderMarkdown };` (5644) |
+| ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 403–627 — `// ── Local image assets` (403); ends just above `let bodyHtml` (628) |
+| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 628–1173 — `const renderer = new Renderer();` (647), `function buildTocTree(` (686) |
+| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1174–5613 — `// ── HTML template` (1174), `const html = ` + backtick (2132), closing `</html>` + backtick (5613) |
+| ⤷ `<style>` block | Embedded CSS for HTML output | 2138–3709 — `<style>` (2138) to its `</style>` (3709) |
+| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3760–5611 — `<!-- Reader runtime -->` (3760) to its `</script>` (5611) |
+| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5646–5822 — `async function bakeGraphviz(` (5649) |
+| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 5824–5892 (end) — `// ── CLI` (5824), `const [,, src, dst] = process.argv;` (5826) |
+
+⚠ Deriving the reader-runtime range with a naive `grep -n '</script>'` gets the
+wrong answer: line 3761 is `<script id="reader-section-data" …>…</script>`, a
+one-line JSON data tag that opens and closes between the `<!-- Reader runtime -->`
+marker and the runtime's own `<script>` at 3762. Take the LAST `</script>` before
+`</body>`, or anchor on `})();` + `</script>` at 5610–5611.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
