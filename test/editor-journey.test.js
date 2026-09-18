@@ -15871,8 +15871,8 @@ async function main() {
         'T15/SVG 前提失敗：這個 fixture 的 clk 必須真的用到 <use>，' +
         '否則底下那條 missing 斷言什麼都證明不了。Got ' + standalone.uses);
       assert.deepStrictEqual(standalone.missing, [],
-        'T15/SVG: 匯出的檔案裡有解析不到的 <use>（skin 沒被帶上，離開這一頁' +
-        '就是半張圖）。Got ' + JSON.stringify(standalone.missing));
+        'T15/SVG: 匯出的檔案裡有解析不到的 <use>（skin 的 <defs> 沒被帶上，' +
+        '離開這一頁就是半張圖）。Got ' + JSON.stringify(standalone.missing));
       assert.ok(standalone.styles > 0,
         'T15/SVG: skin 的 <style> 也要帶上，否則所有文字都是瀏覽器預設字體。' +
         'Got ' + standalone.styles);
@@ -15942,7 +15942,9 @@ async function main() {
         const bx = blank.getContext('2d');
         bx.fillStyle = '#ffffff'; bx.fillRect(0, 0, blank.width, blank.height);
         const blankBlob = await new Promise((ok) => blank.toBlob(ok, 'image/png'));
-        // 同一份匯出文字，但 <defs> 被拿掉 —— skin 沒帶上時會畫成的樣子。
+        // 同一份匯出文字，但 <defs> 被拿掉 —— skin 的 <defs> 沒帶上時會畫成的
+        // 樣子。只有 defs 那一半：<style> 掉了反而會【多】墨水，見上面的
+        // MEASURED 段。
         const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
         const defs = doc.querySelector('defs');
         if (defs !== null) defs.remove();
@@ -15982,8 +15984,8 @@ async function main() {
         'T15/PNG 前提失敗：拿掉 <defs> 的那份也該畫得出東西（文字與 <use> 以外的' +
         '線），否則這個差分比較沒有基準。Got ' + png.strippedInk);
       assert.ok(png.ink > png.strippedInk * 2,
-        'T15/PNG: 匯出的 PNG 必須明顯比「skin 沒帶上」的版本多墨水 —— 一張空的' +
-        '或半張的圖在這裡就會停下來。Got ink=' + png.ink + ' stripped=' +
+        'T15/PNG: 匯出的 PNG 必須明顯比「skin 的 <defs> 沒帶上」的版本多墨水' +
+        ' —— 一張空的或半張的圖在這裡就會停下來。Got ink=' + png.ink + ' stripped=' +
         png.strippedInk + ' / ' + png.pixels + ' pixels');
 
       // ── 複製 WaveJSON ──────────────────────────────────────────────────
