@@ -16051,6 +16051,16 @@ async function main() {
           .map((h) => ({ cx: Number(h.getAttribute('cx')), cy: Number(h.getAttribute('cy')) }));
         return {
           names: [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value),
+          // 名字列表【不足以】描述這份文件。`codec.moveLane` 會讓 lane 進出
+          // group，而攤平後的顯示順序完全表達不出那件事——本 scenario 的
+          // `atTop` 那一步就是活例子：名字列表跟沒動過的 fixture 一字不差，
+          // group 樹卻已經不同。rail 的 group tag 是 `geometry.groupSpansOf`
+          // 直接畫出來的（它走的是真的樹），所以這裡讀它，一個「保住顯示順序
+          // 但重新掛父／打散 group」的 regression 才會被抓到。fixture 自己的
+          // 註解就寫著這條規則：攤平索引與 group 樹是這批靜默缺陷住的地方。
+          groups: [...document.querySelectorAll('.ed-wave-group')].map((g) =>
+            g.textContent + ':' + g.getAttribute('data-group-from') +
+            '-' + g.getAttribute('data-group-to')),
           range: o.getAttribute('data-wave-lane-range'),
           cursor: o.getAttribute('data-wave-cursor'),
           status: o.getAttribute('data-wave-status'),
@@ -16075,6 +16085,10 @@ async function main() {
       const opened = await waveState();
       assert.deepStrictEqual(opened.names, ORDER0,
         'Task 16 前提失敗：fixture 的 lane 名字。Got ' + JSON.stringify(opened.names));
+      const GROUPS0 = ['bus:1-2'];
+      assert.deepStrictEqual(opened.groups, GROUPS0,
+        'Task 16 前提失敗：fixture 的 group 樹（clk 在 group 外，req/dat 在 bus 裡）。Got ' +
+        JSON.stringify(opened.groups));
 
       // ── 沒有選取時：不動文件，而且說得出為什麼 ──
       // 一個什麼都不做又什麼都不說的鍵，跟一個根本沒綁的鍵在使用者那裡長得
@@ -16083,6 +16097,8 @@ async function main() {
       const noSel = await waveState();
       assert.deepStrictEqual(noSel.names, ORDER0,
         'Task 16：沒有選取時 Alt+↓ 不得動到順序。Got ' + JSON.stringify(noSel.names));
+      assert.deepStrictEqual(noSel.groups, GROUPS0,
+        'Task 16：沒有選取時 Alt+↓ 不得動到 group 樹。Got ' + JSON.stringify(noSel.groups));
       assert.strictEqual(noSel.gestures, '0',
         'Task 16：沒有選取時 Alt+↓ 不得記成一次 gesture。Got ' + noSel.gestures);
       assert.ok(noSel.status.indexOf('先選一條 lane') !== -1,
@@ -16100,6 +16116,13 @@ async function main() {
       const moved1 = await waveState();
       assert.deepStrictEqual(moved1.names, ['req', 'clk', 'dat', 'ack', 'gap', ''],
         'Task 16：Alt+↓ 要把選取的那一條往下搬一格。Got ' + JSON.stringify(moved1.names));
+      // 這一步把 clk 搬【進】了 group bus —— 名字列表看不出來，group 樹看得出來。
+      assert.deepStrictEqual(moved1.groups, ['bus:0-2'],
+        'Task 16：Alt+↓ 把 clk 搬進 group bus，bus 的範圍要從 1-2 變成 0-2。Got ' +
+        JSON.stringify(moved1.groups));
+      assert.ok(moved1.status.indexOf('bus') !== -1,
+        'Task 16：搬進一個 group 是要講出來的，不能只留「已寫回」。Got ' +
+        JSON.stringify(moved1.status));
       assert.strictEqual(moved1.range, '1,1',
         'Task 16：搬完之後選取要跟著那一條走到新位置。Got ' + moved1.range);
       assert.strictEqual(moved1.focus, 'lane-name-1',
@@ -16116,6 +16139,12 @@ async function main() {
       const moved2 = await waveState();
       assert.deepStrictEqual(moved2.names, ['req', 'dat', 'clk', 'ack', 'gap', ''],
         'Task 16：連按兩次 Alt+↓ 要把同一條 lane 搬兩格。Got ' + JSON.stringify(moved2.names));
+      // 而這一步把它搬【出來】了。
+      assert.deepStrictEqual(moved2.groups, ['bus:0-1'],
+        'Task 16：第二次 Alt+↓ 把 clk 搬出 group bus，bus 要縮回 0-1。Got ' +
+        JSON.stringify(moved2.groups));
+      assert.ok(moved2.status.indexOf('群組外') !== -1,
+        'Task 16：搬出 group 同樣要講出來。Got ' + JSON.stringify(moved2.status));
       assert.strictEqual(moved2.range, '2,2',
         'Task 16：第二次搬完選取仍要在那一條上。Got ' + moved2.range);
       assert.strictEqual(moved2.focus, 'lane-name-2',
@@ -16150,19 +16179,36 @@ async function main() {
         'Task 16：格游標必須跟著那一條 lane 到新的列號，不能留在舊列號上。Got ' + up1.cursor);
       assert.strictEqual(up1.range, '1,1',
         'Task 16：選取同樣跟著走。Got ' + up1.range);
+      assert.deepStrictEqual(up1.groups, ['bus:0-2'],
+        'Task 16：Alt+↑ 把 clk 又搬回 group bus 裡。Got ' + JSON.stringify(up1.groups));
 
       // ── 兩端：refuse，而且說得出為什麼 ──
+      // ── 這一步是整段裡唯一名字列表【驗不出東西】的一步 ──
+      // clk 變成 group bus 的第一條。攤平後的名字是 clk/req/dat/ack/gap/''，
+      // 跟【完全沒動過】的 fixture 一字不差——所以單看名字，這條斷言是空的：
+      // 一個保住顯示順序卻打散 group 的 regression 也會通過。真正變了的是
+      // group 樹（bus 從 1-2 變成 0-2），下面兩條才是這一步的證據。
       await altPress('ArrowUp');
       const atTop = await waveState();
       assert.deepStrictEqual(atTop.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
-        'Task 16：再一次 Alt+↑ 要搬到最上面。Got ' + JSON.stringify(atTop.names));
+        'Task 16：Alt+↑ 把 clk 搬成 group bus 的第一條，攤平順序回到起點。Got ' +
+        JSON.stringify(atTop.names));
+      assert.deepStrictEqual(atTop.groups, ['bus:0-2'],
+        'Task 16：clk 這時是 group bus 的第一條（bus 涵蓋 0-2），不是文件最上面。Got ' +
+        JSON.stringify(atTop.groups));
+      assert.notDeepStrictEqual(atTop.groups, opened.groups,
+        'Task 16：這一步的名字列表跟沒動過的 fixture 相同，所以 group 樹【必須】不同，' +
+        '否則這一整步等於沒驗到東西。names=' + JSON.stringify(atTop.names) +
+        ' groups=' + JSON.stringify(atTop.groups));
       assert.strictEqual(atTop.range, '0,0',
-        'Task 16：搬到最上面之後選取在第 1 列。Got ' + atTop.range);
+        'Task 16：搬完之後選取在顯示位置 0。Got ' + atTop.range);
       const gesturesAtTop = atTop.gestures;
       await altPress('ArrowUp');
       const topRefused = await waveState();
       assert.deepStrictEqual(topRefused.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
         'Task 16：已經在最上面時 Alt+↑ 不得動到順序。Got ' + JSON.stringify(topRefused.names));
+      assert.deepStrictEqual(topRefused.groups, atTop.groups,
+        'Task 16：被拒絕的 Alt+↑ 不得動到 group 樹。Got ' + JSON.stringify(topRefused.groups));
       assert.strictEqual(topRefused.gestures, gesturesAtTop,
         'Task 16：被拒絕的 Alt+↑ 不得記成一次 gesture。Got ' + topRefused.gestures);
       assert.ok(topRefused.status.indexOf('第一條') !== -1,
@@ -16174,6 +16220,8 @@ async function main() {
       const bottomRefused = await waveState();
       assert.deepStrictEqual(bottomRefused.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
         'Task 16：已經在最下面時 Alt+↓ 不得動到順序。Got ' + JSON.stringify(bottomRefused.names));
+      assert.deepStrictEqual(bottomRefused.groups, atTop.groups,
+        'Task 16：被拒絕的 Alt+↓ 不得動到 group 樹。Got ' + JSON.stringify(bottomRefused.groups));
       assert.strictEqual(bottomRefused.gestures, gesturesAtBottom,
         'Task 16：被拒絕的 Alt+↓ 不得記成一次 gesture。Got ' + bottomRefused.gestures);
       assert.ok(bottomRefused.status.indexOf('最後一條') !== -1,
@@ -16250,17 +16298,23 @@ async function main() {
 
       // 沒有轉態點的 lane（fixture 最後那個 `{}` 空白列）：說得出為什麼，
       // 游標不動。
-      for (let k = 0; k < 5; k += 1) {
+      // 步數由【現在畫面上的 lane 數】就地推導，不是字面值 5：游標此刻在第 0
+      // 列，空白列是最後一列，所以要走 `lanes - 1` 步。寫死的常數在 fixture
+      // 長大時是沒人 grep 得到的那一種——本 repo 已經為它紅過一次（brush roster
+      // 11→22 撞上一個寫死 60 的 Tab 上限）。
+      const laneCount = (await waveState()).names.length;
+      for (let k = 0; k < laneCount - 1; k += 1) {
         await ctx.page.keyboard.press('ArrowDown');
         await new Promise((r) => setTimeout(r, 90));
       }
       const onSpacer = await waveState();
-      assert.strictEqual(onSpacer.cursor, '5,0',
-        'Task 16 前提失敗：游標要停在空白列上。Got ' + onSpacer.cursor);
+      const spacerCell = (laneCount - 1) + ',0';
+      assert.strictEqual(onSpacer.cursor, spacerCell,
+        'Task 16 前提失敗：游標要停在最後一列（空白列）上。Got ' + onSpacer.cursor);
       await ctx.page.keyboard.press('ArrowRight');
       await new Promise((r) => setTimeout(r, 120));
       const noTrans = await waveState();
-      assert.strictEqual(noTrans.cursor, '5,0',
+      assert.strictEqual(noTrans.cursor, spacerCell,
         'Task 16：沒有轉態點的 lane 上，武裝時的 → 不得移動游標。Got ' + noTrans.cursor);
       assert.ok(noTrans.status.indexOf('轉態點') !== -1,
         'Task 16：沒有轉態點時要說得出為什麼。Got ' + JSON.stringify(noTrans.status));
