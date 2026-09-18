@@ -16123,6 +16123,33 @@ async function main() {
       assert.ok(moved1.status.indexOf('bus') !== -1,
         'Task 16：搬進一個 group 是要講出來的，不能只留「已寫回」。Got ' +
         JSON.stringify(moved1.status));
+      // 同一件事，換一個【完全獨立】的來源再問一次：`window.__edWaveSourceProbe()`
+      // 是 `store.toPatch()` 會寫回去的那串 bytes 本人（`wave-ui.js` 建構時無條件
+      // 掛上去的，這個檔案更早的兩個場景已經在用）。把它 parse 回來讀
+      // `codec.lanePaths`，路徑長度本身就是 group 歸屬：`['signal',0,2]` 是「在
+      // signal[0] 這個 group 裡的第 3 個」，`['signal',1]` 是「直接掛在 signal 底下」。
+      // 上面那條 group 斷言讀的是 rail，而 rail 是 `geometry.groupSpansOf` 畫的；
+      // 這一條連 `groupSpansOf` 都不經過，所以兩者不可能一起錯。
+      //
+      // 只放在這一步：`toPatch()` 到了 `atTop` 那一步會拒絕（整個 `signal` 需要
+      // 重新序列化），probe 那時回的是一句拒絕說明而不是 WaveJSON——rail 讀法在
+      // 那一步才是唯一的選擇，在這一步不是。
+      const movedSrc = await ctx.page.evaluate(() => window.__edWaveSourceProbe());
+      const movedDoc = waveCodec.parseSource(movedSrc);
+      assert.strictEqual(movedDoc.ok, true,
+        'Task 16：搬完之後寫回去的 bytes 必須還 parse 得回來。Got ' +
+        JSON.stringify(movedSrc));
+      const placed = waveCodec.lanePaths(movedDoc.doc).map((path) => {
+        let v = movedDoc.doc;
+        for (const seg of path) v = v[seg];
+        return (v === null || typeof v !== 'object' || v.name === undefined
+          ? '{}' : v.name) + '@' + path.join('.');
+      });
+      assert.deepStrictEqual(placed, [
+        'req@signal.0.1', 'clk@signal.0.2', 'dat@signal.0.3',
+        'ack@signal.1', 'gap@signal.2', '{}@signal.3',
+      ], 'Task 16：從寫回去的 bytes 讀，clk 必須真的巢在 group bus 裡（signal.0.*），' +
+        '不是只有 rail 這樣畫。Got ' + JSON.stringify(placed) + '\n' + movedSrc);
       assert.strictEqual(moved1.range, '1,1',
         'Task 16：搬完之後選取要跟著那一條走到新位置。Got ' + moved1.range);
       assert.strictEqual(moved1.focus, 'lane-name-1',
