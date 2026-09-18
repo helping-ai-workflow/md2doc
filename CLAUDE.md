@@ -23,11 +23,24 @@ anchor; do not trust the number.** Ranges below are measured at commit
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5646–5822 — `async function bakeGraphviz(` (5649) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 5824–5892 (end) — `// ── CLI` (5824), `const [,, src, dst] = process.argv;` (5826) |
 
-⚠ Deriving the reader-runtime range with a naive `grep -n '</script>'` gets the
-wrong answer: line 3761 is `<script id="reader-section-data" …>…</script>`, a
-one-line JSON data tag that opens and closes between the `<!-- Reader runtime -->`
-marker and the runtime's own `<script>` at 3762. Take the LAST `</script>` before
-`</body>`, or anchor on `})();` + `</script>` at 5610–5611.
+⚠ **Both closing-tag anchors above have the same trap: their first occurrence in
+the file is not theirs.** "to its `</style>`" and "to its `</script>`" are
+descriptions, not recipes — grep for either one and take the first hit and you
+land thousands of lines from the region.
+
+- `</script>` — line **3761** is `<script id="reader-section-data" …>…</script>`,
+  a one-line JSON data tag that opens AND closes between the
+  `<!-- Reader runtime -->` marker and the runtime's own `<script>` at 3762. The
+  runtime's is the LAST `</script>` before `</body>`; or anchor on `})();` +
+  `</script>` at 5610–5611.
+- `</style>` — line **168** is `` return `<style data-md2doc-math>${css}</style>`; ``
+  inside the KaTeX CSS inliner, **3541 lines** before the real one. That one is
+  the LAST `</style>` before `</head>` (3711). There are exactly two in the file
+  today; `<style` matches four lines, two of which are prose in comments
+  (4470, 5502).
+
+Recipe for both: **last occurrence before the enclosing close tag**, never the
+first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 

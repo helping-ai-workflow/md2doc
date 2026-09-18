@@ -662,12 +662,37 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
         const content = document.querySelector('.content');
         const host = document.querySelector('.content .mermaid.diagram-scroll');
         const svg = host && host.querySelector(':scope > svg');
+        // v3.6.0 Task 18 fix round 1: the label SET, not just the width.
+        // A width comparison cannot tell "all 40 stages fit" from "mermaid
+        // drew 12 and those 12 fit" -- both report a rendered width inside
+        // the column, and the second one is a cropped diagram wearing the
+        // first one's number. Every label is read by its own box against the
+        // svg's, which is the question "did anything go missing" actually
+        // asked. `.nodeLabel` is mermaid's own class and there are exactly
+        // 40 of them, each unique: this fixture has 0 <text> elements and 79
+        // <foreignObject>s (see 5b's header), so a <text>-based count reads
+        // zero here and a <foreignObject> count reads 79.
+        const svgBox = svg ? svg.getBoundingClientRect() : null;
+        const labels = [];
+        if (svg) {
+          svg.querySelectorAll('.nodeLabel').forEach((node) => {
+            const t = (node.textContent || '').trim();
+            if (!/^Stage \d+$/.test(t)) return;
+            const r = node.getBoundingClientRect();
+            labels.push({ t: t, inside: r.left >= svgBox.left - 1 && r.right <= svgBox.right + 1 });
+          });
+        }
+        const seen = [...new Set(labels.map((x) => x.t))];
         return {
           contentW: Math.round(content.clientWidth),
           found: !!svg,
           inlineMaxWidth: svg ? svg.style.maxWidth : null,
           inlineWidth: svg ? svg.style.width : null,
           rendered: svg ? Math.round(svg.getBoundingClientRect().width) : null,
+          labelCount: seen.length,
+          insideCount: labels.filter((x) => x.inside).length,
+          hasFirst: seen.indexOf('Stage 0') !== -1,
+          hasLast: seen.indexOf('Stage 39') !== -1,
         };
       });
       assert.ok(flowPrint.found,
@@ -681,6 +706,21 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
       assert.ok(flowPrint.rendered <= flowPrint.contentW,
         'in print the flowchart must fit the column, or the PDF is not a small ' +
         'diagram but a cropped one. got ' + JSON.stringify(flowPrint));
+      // …and the half the width above cannot see. The row above stays green
+      // for a flowchart that lost 28 of its 40 stages, because what is left
+      // fits. MEASURED at both the 1280 viewport this block runs at and an
+      // A4-width one (794x1123): 40 labels, 40 of them inside the svg's own
+      // box, Stage 0 and Stage 39 both present, in print as on screen.
+      assert.strictEqual(flowPrint.labelCount, 40,
+        'in print every one of the 40 stage labels must still be drawn — a ' +
+        'width that fits the column proves nothing if the diagram lost stages ' +
+        'to get there. got ' + JSON.stringify(flowPrint));
+      assert.strictEqual(flowPrint.insideCount, 40,
+        'and each of them must sit inside the svg box, not hang past its edge ' +
+        'where the page would cut it. got ' + JSON.stringify(flowPrint));
+      assert.ok(flowPrint.hasFirst && flowPrint.hasLast,
+        'and the two ends by name, because a count of 40 is also what 40 ' +
+        'copies of Stage 0 would report. got ' + JSON.stringify(flowPrint));
       await mermPage.emulateMediaType(null);
     } finally {
       await mermPage.close();
