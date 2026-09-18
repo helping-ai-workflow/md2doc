@@ -11203,23 +11203,43 @@ async function main() {
       // button `disabled`, and `.focus()` on a disabled control is inert —
       // the same fact the (now retired) ▲ walk above used to pin. Landing
       // on body here is the same defect wearing a different button.
-      await selectLane(ctx.page, 1);
+      //
+      // fix round 1 (F4): the lane deleted is the LAST one, and that is what
+      // makes this row isolate the `inert` guard rather than merely pass
+      // over it. 刪除 nominates `lane-name-<lo>` as its destination, and on
+      // any other row that field still exists afterwards — `restoreFocus`
+      // finds it, focuses it, and never reaches the disabled-button rung of
+      // the ladder at all. Delete the last lane and `lane-name-<lo>` is
+      // gone, so the fallback IS the button the press left the keyboard on,
+      // which is disabled. Asserted below: that the nominated key really is
+      // absent (otherwise this row silently goes back to testing nothing),
+      // and only then that the keyboard did not land on body.
+      const lastLane = await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-lane-row').length - 1);
+      await selectLane(ctx.page, lastLane);
       await pressClick(ctx.page, '.ed-wave-signal-delete');
       await new Promise((r) => setTimeout(r, 350));
-      const afterDelete = await ctx.page.evaluate(() => ({
+      const afterDelete = await ctx.page.evaluate((gone) => ({
         key: document.activeElement.getAttribute
           ? document.activeElement.getAttribute('data-focus-key') : null,
         tag: document.activeElement.tagName,
         inOverlay: document.querySelector('.ed-wave-overlay')
           .contains(document.activeElement),
         disabled: document.querySelector('.ed-wave-signal-delete').disabled,
-      }));
+        destination: document.querySelectorAll(
+          '[data-focus-key="lane-name-' + gone + '"]').length,
+      }), lastLane);
       assert.strictEqual(afterDelete.disabled, true,
         'T6h 前提失敗：刪完之後沒有選取了，這顆按鈕本來就該變 disabled。Got ' +
         JSON.stringify(afterDelete));
+      assert.strictEqual(afterDelete.destination, 0,
+        'T6h 前提失敗：刪掉最後一條之後，刪除指名的那個落點必須真的不在了 —— ' +
+        '它還在的話 restoreFocus 根本走不到 disabled 那一階，這一列就沒有在測 ' +
+        '任何東西。Got ' + JSON.stringify(afterDelete));
       assert.notStrictEqual(afterDelete.tag, 'BODY',
-        'T6h: 按下一顆會把自己變 disabled 的按鈕之後，鍵盤不得掉到 body 上。Got ' +
-        JSON.stringify(afterDelete));
+        'T6h: 指名的落點不在了，退而求其次的那個又剛好是剛剛按下、現在已經 ' +
+        'disabled 的按鈕 —— `.focus()` 對 disabled 是空操作，鍵盤仍然不得掉到 ' +
+        'body 上。Got ' + JSON.stringify(afterDelete));
       assert.strictEqual(afterDelete.inOverlay, true,
         'T6h: 而且要留在對話框裡。Got ' + JSON.stringify(afterDelete));
       assert.strictEqual(ctx.errs.length, 0, 'T6h: 不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -15401,6 +15421,253 @@ async function main() {
         'Task 14: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: rail 每列只剩把手與名字，選取合一 — OK');
+    }
+
+    // ── v3.6.0 Task 14 fix round 1 (F1)：工具列不得公告一個它不會採用的落點 ──
+    //
+    // `selection` 有三個寫入點不走 `repaintDrawing()` 而是自己內聯呼叫 drawer，
+    // 於是 `paintSelectionState` 沒跑。兩道補救各有破口：`onCanvasUp` 的
+    // `commit('paint', …)` 只在**真的改到東西**時才帶出 `render()`（回 false 那條
+    // 走 `panels.say('這個動作沒有改變任何東西')`，不呼叫 `afterStoreMoved`），而
+    // `canvas.focus()` 只在畫布**還沒有**鍵盤時才觸發 `enterDrawing` →
+    // `repaintDrawing`。兩個破口同時開著的手勢就是這一列走的：畫布已經有鍵盤了，
+    // 再按一個「值已經等於目前筆刷」的格子。
+    //
+    // 斷言的不是 disabled 旗標而是 `data-insert-at` / `data-lands-in`：那兩個屬性
+    // 是本任務自己寫下的契約 ——「the button says which container it is about to
+    // use BEFORE it is pressed」——而 `addLaneFromToolbar` 讀的是**即時**的
+    // `selection`，所以屬性一旦過期，按鈕就公告了一個它按下去不會採用的落點。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const look = () => ctx.page.evaluate(() => {
+        const b = document.querySelector('.ed-wave-signal-add');
+        const ov = document.querySelector('.ed-wave-overlay');
+        const c = document.querySelector('[data-ed-wave-cursor]');
+        return {
+          at: b.getAttribute('data-insert-at'),
+          lands: b.getAttribute('data-lands-in'),
+          range: ov.getAttribute('data-wave-lane-range'),
+          status: ov.getAttribute('data-wave-status'),
+          cell: c === null ? null : c.getAttribute('data-cell'),
+        };
+      });
+      // A press on a cell, with no brush-button press in front of it —
+      // `paintCell` presses the brush first, and a <button> press takes the
+      // keyboard off the canvas, which re-opens the `enterDrawing` road this
+      // row needs shut.
+      const pressCell = async (lane, cycle) => {
+        const at = await cellPoint(ctx.page, lane, cycle);
+        await ctx.page.mouse.move(at.x, at.y);
+        await ctx.page.mouse.down();
+        await ctx.page.mouse.up();
+        await new Promise((r) => setTimeout(r, 300));
+      };
+
+      // First press: the canvas did not have the keyboard, so `canvas.focus()`
+      // fires `enterDrawing` and the toolbar is refreshed on the way past.
+      // This is the control — it is what makes the SECOND press's staleness a
+      // difference rather than a state that was never right.
+      await pressCell(1, 2);
+      const first = await look();
+      assert.deepStrictEqual({ cell: first.cell, range: first.range,
+        at: first.at, lands: first.lands },
+        { cell: '1,2', range: '1,1', at: '2', lands: 'bus' },
+        'F1 前提失敗：第一次按壓之後工具列要對得上 req（插在 2，bus 裡）。Got ' +
+        JSON.stringify(first));
+
+      // Second press: the canvas already has the keyboard, and ack's cycle 4
+      // is already `1` — which is the brush — so `commit` returns false and
+      // neither road runs.
+      await pressCell(3, 4);
+      const second = await look();
+      assert.strictEqual(second.cell, '3,4',
+        'F1 前提失敗：第二次按壓要真的落在 ack 的 cycle 4 上。Got ' +
+        JSON.stringify(second));
+      assert.strictEqual(second.status, '這個動作沒有改變任何東西',
+        'F1 前提失敗：第二次按壓必須是「沒有改變任何東西」那條路 —— 否則 commit ' +
+        '會帶出 render() 把症狀蓋掉，這一列就什麼都沒測到。Got ' +
+        JSON.stringify(second));
+      assert.strictEqual(second.range, '3,3',
+        'F1: 按過畫布之後，工具列讀到的選取必須是畫布上那一條。Got ' +
+        JSON.stringify(second));
+      assert.deepStrictEqual({ at: second.at, lands: second.lands },
+        { at: '4', lands: '' },
+        'F1: 按鈕不得公告一個它不會採用的落點 —— 它按下去會插在 4（群組外），' +
+        '屬性卻還停在前一個選取的 2（bus 裡）。Got ' + JSON.stringify(second));
+
+      assert.strictEqual(ctx.errs.length, 0, 'F1: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 一次沒有改變任何東西的按壓之後，工具列公告的落點仍然是真的 — OK');
+    }
+
+    // ── v3.6.0 Task 14 fix round 1 (F2)：追不到的那一端必須被丟掉，不是留在舊號碼上 ──
+    //
+    // `carryMarks` 只在「範圍的第一條 lane 追得到」時才重追另一端。追不到時整段
+    // 被跳過，兩端都留在舊號碼上，而 `renderCanvas` 的 clamp 只夾上界、從不收合
+    // 範圍 —— 於是 `刪除` / `建立群組` 這種 structural op 會作用在使用者沒選過的
+    // lane 上。那正是被退休掉的 lane multi-select 靠 member-by-member 重追擋住的
+    // hazard，所以這個角落原本是**退步**。
+    //
+    // 可達路徑（就是這一列走的）：在群組頭插一條 → 選起「那條新的」到它下面兩條
+    // → 撤銷那次插入 → 範圍的第一條 lane 消失。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const namesOf = () => ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value));
+      const rangeOf = () => ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-lane-range'));
+
+      // 在 bus 的頭插一條，它落在顯示位置 1。
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-add');
+      await new Promise((r) => setTimeout(r, 350));
+      const grown = await namesOf();
+      assert.deepStrictEqual(grown, ['clk', '', 'req', 'dat', 'ack', 'gap', ''],
+        'F2 前提失敗：新的 lane 要落在顯示位置 1。Got ' + JSON.stringify(grown));
+
+      // 範圍 = 新的那條(1) .. dat(3)。第一條就是等一下會消失的那條。
+      await selectLane(ctx.page, 1);
+      await selectLane(ctx.page, 3, true);
+      assert.strictEqual(await rangeOf(), '1,3',
+        'F2 前提失敗：Shift+點要造出 1..3 的範圍。Got ' + await rangeOf());
+
+      await pressClick(ctx.page, '.ed-wave-undo');
+      await new Promise((r) => setTimeout(r, 400));
+      const back = await namesOf();
+      assert.deepStrictEqual(back, ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'F2 前提失敗：復原要真的把那條新 lane 拿掉。Got ' + JSON.stringify(back));
+      assert.strictEqual(await rangeOf(), '2,2',
+        'F2: 範圍的第一條 lane 追不到了，就只剩下另一端還算數的那一條（dat，現在在 2）——' +
+        '留在舊號碼 1,3 上會把 req 與 ack 一起框進來，而使用者兩條都沒選過。Got ' +
+        await rangeOf());
+
+      await pressClick(ctx.page, '.ed-wave-signal-delete');
+      await new Promise((r) => setTimeout(r, 400));
+      const afterDelete = await namesOf();
+      assert.deepStrictEqual(afterDelete, ['clk', 'req', 'ack', 'gap', ''],
+        'F2: 刪除只能刪掉還追得到的那一條（dat）。留在舊號碼上會刪掉 req/dat/ack ' +
+        '三條。Got ' + JSON.stringify(afterDelete));
+
+      assert.strictEqual(ctx.errs.length, 0, 'F2: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 追不到的那一端被丟掉，structural op 碰不到沒選過的 lane — OK');
+    }
+
+    // ── v3.6.0 Task 14 fix round 1 (F3)：Shift+點造出的多條選取，以及吃它的六顆按鈕 ──
+    //
+    // 本批把六顆原本 NOT_YET_WIRED 的按鈕接上線，而 round 0 只有「新增」與
+    // 單條「刪除」拿到覆蓋。加寬 lane 範圍的手勢（`laneRow` 裡唯一那條
+    // `ev.shiftKey === true` 分支）、`laneTo !== laneIndex` 的狀態、bottom-up
+    // 的刪除迴圈、建立群組／解散群組／複製／空白列與 `laneIsInGroup`，
+    // 全部沒有任何一條測試走過。這一列走它們。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+      const namesOf = () => ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value));
+      const state = () => ctx.page.evaluate(() => ({
+        range: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lane-range'),
+        rows: [...document.querySelectorAll('.ed-wave-lane-row.is-selected')]
+          .map((el) => el.getAttribute('data-lane')),
+        make: document.querySelector('.ed-wave-group-make').disabled,
+        dissolve: document.querySelector('.ed-wave-group-dissolve').disabled,
+        copy: document.querySelector('.ed-wave-signal-copy').disabled,
+        groups: [...document.querySelectorAll('.ed-wave-group')].map((g) =>
+          g.textContent + ':' + g.getAttribute('data-group-from') + '-' +
+          g.getAttribute('data-group-to')),
+      }));
+
+      // 什麼都沒選：建立群組與解散群組都不該是上了膛的按鈕。
+      const idle = await state();
+      assert.deepStrictEqual({ make: idle.make, dissolve: idle.dissolve, copy: idle.copy },
+        { make: true, dissolve: true, copy: true },
+        'F3: 沒有選取時這三顆都必須是 disabled。Got ' + JSON.stringify(idle));
+
+      // 一條 lane：建立群組還是不行（要兩條），解散群組看它在不在群組裡。
+      await selectLane(ctx.page, 3);          // ack，群組外
+      const one = await state();
+      assert.deepStrictEqual({ range: one.range, rows: one.rows, make: one.make,
+        dissolve: one.dissolve, copy: one.copy },
+        { range: '3,3', rows: ['3'], make: true, dissolve: true, copy: false },
+        'F3: 選一條群組外的 lane —— 建立群組還缺一條，解散群組沒有群組可解。Got ' +
+        JSON.stringify(one));
+      await selectLane(ctx.page, 1);          // req，在 bus 裡
+      const inGroup = await state();
+      assert.strictEqual(inGroup.dissolve, false,
+        'F3: 選到群組裡的 lane，解散群組就該可用（laneIsInGroup）。Got ' +
+        JSON.stringify(inGroup));
+
+      // Shift+點加寬：這是唯一會做出 laneTo !== laneIndex 的手勢。
+      await selectLane(ctx.page, 3);
+      await selectLane(ctx.page, 4, true);
+      const wide = await state();
+      assert.deepStrictEqual({ range: wide.range, rows: wide.rows, make: wide.make },
+        { range: '3,4', rows: ['3', '4'], make: false },
+        'F3: Shift+點要把範圍加寬到 3..4，rail 兩列一起亮，建立群組才上得了膛。Got ' +
+        JSON.stringify(wide));
+
+      // 建立群組：空標題 + 立刻開改名欄位。
+      await pressClick(ctx.page, '.ed-wave-group-make');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.strictEqual(await ctx.page.evaluate(() =>
+        document.querySelectorAll('.ed-wave-group-input').length), 1,
+        'F3: 建立群組之後改名欄位要立刻開著');
+      await ctx.page.keyboard.type('pair');
+      await ctx.page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 400));
+      const made = await state();
+      assert.ok(made.groups.indexOf('pair:3-4') !== -1,
+        'F3: 新群組要蓋住 3..4。Got ' + JSON.stringify(made.groups));
+      assert.deepStrictEqual(await namesOf(), ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'F3: 建立群組不得動到任何 lane 的順序或名字');
+
+      // 解散群組：lane 原位放回去。
+      await selectLane(ctx.page, 3);
+      assert.strictEqual((await state()).dissolve, false,
+        'F3 前提失敗：lane 3 現在在 pair 裡，解散群組要可用');
+      await pressClick(ctx.page, '.ed-wave-group-dissolve');
+      await new Promise((r) => setTimeout(r, 400));
+      const dissolved = await state();
+      assert.deepStrictEqual(dissolved.groups.filter((g) => g.indexOf('pair:') === 0), [],
+        'F3: pair 要不見了。Got ' + JSON.stringify(dissolved.groups));
+      assert.deepStrictEqual(await namesOf(), ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'F3: 解散群組也不得動到 lane 的順序');
+
+      // n >= 2 的刪除：斷言真的刪掉「那一段」。
+      await selectLane(ctx.page, 1);
+      await selectLane(ctx.page, 3, true);
+      assert.strictEqual((await state()).range, '1,3', 'F3 前提失敗：範圍要是 1..3');
+      await pressClick(ctx.page, '.ed-wave-signal-delete');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.deepStrictEqual(await namesOf(), ['clk', 'gap', ''],
+        'F3: 刪除要刪掉 req/dat/ack 這一整段（n=3），剩下 clk/gap/空白列');
+      assert.strictEqual(await ctx.page.$eval('.ed-wave-overlay',
+        (el) => el.getAttribute('data-wave-status')),
+        '已刪掉 3 條 lane —— Ctrl+Z 可以拿回來',
+        'F3: 而且要講得出刪了幾條、怎麼拿回來');
+
+      // 複製與空白列：範圍收掉之後，兩顆都作用在 selection 的第一條上。
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-copy');
+      await new Promise((r) => setTimeout(r, 400));
+      assert.deepStrictEqual(await namesOf(), ['clk', 'clk', 'gap', ''],
+        'F3: 複製要把 clk 接在它自己後面');
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-blank');
+      await new Promise((r) => setTimeout(r, 400));
+      const badged = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-row')]
+          .filter((r) => r.querySelector('.ed-wave-lane-badge') !== null)
+          .map((r) => r.getAttribute('data-lane')));
+      assert.deepStrictEqual(badged, ['1', '4'],
+        'F3: 空白列要插在 clk 後面（顯示位置 1），而且 rail 上要掛得出「空白列」' +
+        'badge —— 原本那條 {} 現在在 4。Got ' + JSON.stringify(badged));
+
+      assert.strictEqual(ctx.errs.length, 0, 'F3: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: Shift+點的多條選取，與吃它的六顆工具列按鈕 — OK');
     }
   }
 
