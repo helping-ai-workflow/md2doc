@@ -631,6 +631,83 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
       await mermPage.close();
     }
 
+    // ── 5c. Third engine, and the one that measures in points ───────────────
+    //
+    // The graph engine is the case that pins WHICH width the rule reads. It
+    // writes width="4069pt" against a viewBox of 4069 user units, while its
+    // label font-size is in those user units — so a natural width taken from
+    // the attribute would divide points by pixels and the floor would be
+    // compared against a number that is 4/3 out. MEASURED here: 4069 units
+    // natural, fitted into the 918px column at 0.226.
+    //
+    // It also answers the question the other two cannot: is the treatment
+    // general, or does it happen to fit the two engines it was written
+    // against?
+    const dotMdPath = path.join(tmpDir, 'dot.md');
+    const dotHtmlPath = path.join(tmpDir, 'dot.html');
+    fs.writeFileSync(dotMdPath, [
+      '# Graph', '',
+      '```dot',
+      'digraph { rankdir=LR; ' + Array.from({ length: 45 }, (_, i) => 'N' + i).join(' -> ') + '; }',
+      '```', '',
+    ].join('\n'), 'utf8');
+    const dotRun = spawnSync(process.execPath, [LIB, dotMdPath, dotHtmlPath], { cwd: REPO, encoding: 'utf8' });
+    assert.strictEqual(dotRun.status, 0, 'dot fixture renders: ' + dotRun.stderr);
+
+    const dotPage = await browser.newPage();
+    try {
+      await dotPage.setViewport({ width: 1280, height: 900 });
+      await dotPage.goto('file://' + dotHtmlPath, { waitUntil: 'load' });
+      await dotPage.waitForFunction(
+        () => !!document.querySelector('.content .graphviz > svg'), { timeout: 20000 });
+      await new Promise((r) => setTimeout(r, 400));
+
+      const graph = await dotPage.evaluate(() => {
+        const content = document.querySelector('.content');
+        const host = document.querySelector('.content .graphviz');
+        const svg = host.querySelector(':scope > svg');
+        const natural = parseFloat((svg.getAttribute('viewBox') || '').split(/[\s,]+/)[2]);
+        const rect = svg.getBoundingClientRect();
+        let minFont = Infinity;
+        svg.querySelectorAll('text, tspan, foreignObject *').forEach((node) => {
+          let carries = false;
+          for (let c = node.firstChild; c; c = c.nextSibling) {
+            if (c.nodeType === 3 && c.nodeValue.trim()) { carries = true; break; }
+          }
+          if (!carries) return;
+          const size = parseFloat(getComputedStyle(node).fontSize);
+          if (isFinite(size) && size > 0 && size < minFont) minFont = size;
+        });
+        return {
+          contentW: Math.round(content.clientWidth),
+          widthAttr: svg.getAttribute('width'),
+          natural: +natural.toFixed(1),
+          rendered: Math.round(rect.width),
+          minFont,
+          effective: +(minFont * (rect.width / natural)).toFixed(2),
+          fittedLabel: +(minFont * Math.min(1, content.clientWidth / natural)).toFixed(2),
+          scrolls: host.scrollWidth > host.clientWidth,
+          overflowX: getComputedStyle(host).overflowX,
+        };
+      });
+
+      assert.match(graph.widthAttr, /pt$/,
+        'precondition: this row exists because the graph engine states its width ' +
+        'in points against a user-unit viewBox. If that stops being true it stops ' +
+        'guarding the units. got ' + JSON.stringify(graph));
+      assert.ok(graph.fittedLabel < 6,
+        'precondition: fitted, this graph draws ' + graph.fittedLabel + 'px labels');
+      assert.strictEqual(graph.rendered, Math.round(graph.natural),
+        'a third engine gets the same treatment as the other two, and at the ' +
+        'viewBox width rather than the point width. got ' + JSON.stringify(graph));
+      assert.ok(graph.scrolls && graph.overflowX === 'auto',
+        'with the same real scroll extent. got ' + JSON.stringify(graph));
+      assert.ok(graph.effective >= FLOOR,
+        'and labels above the same floor of ' + FLOOR + 'px. got ' + graph.effective);
+    } finally {
+      await dotPage.close();
+    }
+
     console.log('md2doc reader-panels test passed');
   } finally {
     await browser.close();
