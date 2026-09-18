@@ -663,7 +663,9 @@ const FLAT = {
   assert.strictEqual(edges[0].edge.shape, '~>');
 
   // 端點落在該格的錨點（v3.6.0 Task 5：不是格子正中央，是引擎畫轉態斜坡
-  // 結束的那一點）——與 anchorOfCell 同一個運算式算出來的，不另算一份。
+  // 的中點、50% 跨越點——R23 修正過「斜坡結束」那個舊說法，見下方
+  // SKIN_METRICS 區塊 `anchorRatio === (slewStartRatio + slewEndRatio) / 2`
+  // 那條斷言）——與 anchorOfCell 同一個運算式算出來的，不另算一份。
   const a0 = G.anchorOfCell(layout, 0, 1);
   assert.strictEqual(edges[0].from.x, a0.x);
   assert.strictEqual(edges[0].from.y, a0.y);
@@ -1241,8 +1243,10 @@ const FLAT = {
 // v3.6.0 Task 5：錨點落在斜坡終點；命中取最近邊界；轉態點可列舉
 //
 // 使用者回報「連線應該要頭尾相接」——量到的病因：畫布把 edge 端點畫在格子
-// 正中央，引擎卻是畫在轉態磚斜坡結束的那一點，在預設 40px 的 cycle 寬下差了
-// 17px，一條標注上升緣的線因此肉眼可見地沒有接上那個緣。`anchorOfCell` 是
+// 正中央，引擎卻是畫在轉態磚斜坡的中點（50% 跨越點，不是斜坡結束——R23），
+// 差了 `(0.5 - anchorRatio)` 個 cycle：引擎自己的 40px cycle 上是 14px，
+// 編輯器畫布的 48px cycle 上是 16.8px（使用者看到的就是後者）。一條標注
+// 上升緣的線因此肉眼可見地沒有接上那個緣。`anchorOfCell` 是
 // 修法：跟 `cellRect` 一樣問「哪一格」，但回傳的是 `SKIN_METRICS.anchorRatio`
 // 那個偏移點，不是格子中心。
 // ---------------------------------------------------------------------------
