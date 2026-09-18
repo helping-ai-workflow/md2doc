@@ -4,14 +4,50 @@
 
 Single-file renderer. Everything lives in `lib/md2doc.js`:
 
-| Region | Purpose | Approx range |
+Every row carries an ANCHOR — a string you can `grep -n` for — because line
+numbers here go stale fast and silently. Five of the six rows were wrong by
+thousands of lines until v3.6.0 Task 18 re-measured them. **Re-derive from the
+anchor; do not trust the number.** Ranges below are measured at commit
+`f9a418b` against a 5892-line file.
+
+| Region | Purpose | Range — anchor to `grep -n` |
 |---|---|---|
-| Top | Inline-script tag discovery (WaveDrom / Mermaid local-or-CDN) | lines 30–100 |
-| `marked` block | Custom renderer (`code` / `heading` / `image` / `html` / `paragraph` / `listitem` / `blockquote` / `table`) + TOC builder + section index | lines 108–375 |
-| Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | just above `let bodyHtml` |
-| `<style>` block | Embedded CSS for HTML output | lines 380–820 |
-| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox | lines 850–1300 |
-| Output dispatch | `.html` write or puppeteer-driven `.pdf` export | lines 1300–end |
+| Top | `require`s, deferred-diagram placeholder constants, inline-script tag discovery (WaveDrom / Mermaid, `firstExistingPath` → `safeResolve` → `inlineScriptTag`), KaTeX CSS inlining | 1–170 — `function inlineScriptTag(` (106); ends at the `── marked setup` banner |
+| `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 171–372 — `marked.use({` (190) |
+| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 373–5643 — `async function renderMarkdown(` (373); `module.exports = { renderMarkdown };` (5644) |
+| ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 403–627 — `// ── Local image assets` (403); ends just above `let bodyHtml` (628) |
+| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 628–1173 — `const renderer = new Renderer();` (647), `function buildTocTree(` (686) |
+| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1174–5613 — `// ── HTML template` (1174), `const html = ` + backtick (2132), closing `</html>` + backtick (5613) |
+| ⤷ `<style>` block | Embedded CSS for HTML output | 2138–3709 — `<style>` (2138) to its `</style>` (3709) |
+| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3760–5611 — `<!-- Reader runtime -->` (3760) to its `</script>` (5611) |
+| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5646–5822 — `async function bakeGraphviz(` (5649) |
+| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 5824–5892 (end) — `// ── CLI` (5824), `const [,, src, dst] = process.argv;` (5826) |
+
+⚠ **Both closing-tag anchors above have the same trap: the one you want is the
+LAST occurrence inside its region, never the first hit `grep` prints.** "to its
+`</style>`" and "to its `</script>`" are descriptions, not recipes — grep for
+either one, take the first hit, and you land thousands of lines from the region.
+The two tags are NOT symmetric about WHERE the decoy sits, which is why they are
+spelled out separately rather than under one sentence.
+
+- `</script>` — `grep -n '</script>' lib/md2doc.js` prints **seven** lines today:
+  **111, 147, 924, 1272, 3748, 3761, 5611**. First-hit readers land on **111**,
+  inside `inlineScriptTag`. **3761 is the sixth occurrence, not the first**: it is
+  `<script id="reader-section-data" …>…</script>`, a one-line JSON data tag that
+  opens AND closes between the `<!-- Reader runtime -->` marker and the runtime's
+  own `<script>` at 3762 — i.e. the decoy that sits INSIDE the region you are
+  aiming at, which is a different hazard from the one grep hands you first. The
+  runtime's own is the LAST `</script>` before `</body>`; or anchor on `})();` +
+  `</script>` at 5610–5611.
+- `</style>` — here the first hit IS the decoy, and that asymmetry is the point.
+  `grep -n '</style>'` prints exactly **two** lines, **168** and **3709**. Line
+  168 is `` return `<style data-md2doc-math>${css}</style>`; `` inside the KaTeX
+  CSS inliner, **3541 lines** before the real one. The real one is the LAST
+  `</style>` before `</head>` (3711). `<style` (no slash) matches four lines, two
+  of which are prose in comments (4470, 5502).
+
+Recipe for both: **last occurrence before the enclosing close tag**, never the
+first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
@@ -206,11 +242,128 @@ The `<style>` block is built inside a template literal, so **a backtick anywhere
 comment you add there breaks the whole file** — and the break is a syntax error far from
 where you typed it. This bit v3.5.0 twice, in two different tasks.
 
-Run `node --check lib/md2doc.js` before every commit that touches that file. It is also
-where every `.ed-wave-*` rule lives: visual properties (stroke, fill, opacity, dashes)
-belong there as CSS classes, not as inline SVG attributes — a renderer with two styling
-mechanisms means the next person changing colours edits one and silently misses the
-other.
+**`node --check` does NOT catch it.** A stray backtick usually closes the literal early
+and leaves something that still PARSES — the file is valid JavaScript that means a
+different thing, and the damage only appears when the renderer runs. v3.6.0's Task 10 shipped
+exactly that: `node --check` clean, then `renderMarkdown` died at runtime with
+`wave is not defined`.
+
+So the check is not a syntax check. Either render a real document
+(`node bin/md2doc.js some.md` and confirm it exits 0 and writes the HTML), or count the
+backticks in the file and confirm the total is unchanged from the previous commit — a
+correct edit to a CSS comment never changes that count.
+
+**Say which count you took.** There are two, they differ, and both are correct — which is
+how v3.6.0 spent a review round on two agents reporting 352 and 348 and each thinking the
+other had miscounted. Measured at v3.5.0 (`be5cea1`) and again at v3.6.0, identical at
+both, this branch moved neither:
+
+- **352** — every backtick byte in the file.
+- **4** of those are `` \` `` escapes, all on ONE line (4474, inside a nested template
+  literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``).
+- **348** — structural backticks, i.e. the ones that actually open or close a literal.
+
+Both totals are even, which is the property the check is really after; an odd one either
+way means a literal is unbalanced. Quote the number AND its definition, or the next reader
+re-litigates it.
+
+Related and separate: **a backslash collapses the same way a backtick does.** Earlier in
+the v3.6.0 batch a `\s` inside the literal became a bare `s` and silently disabled half a
+feature. Nothing in the file is collapsing today.
+
+That `<style>` block is also where every `.ed-wave-*` rule lives: visual properties
+(stroke, fill, opacity, dashes) belong there as CSS classes, not as inline SVG attributes
+— a renderer with two styling mechanisms means the next person changing colours edits one
+and silently misses the other.
+
+## A False Sentence Next to Correct Code Costs a Fix Round
+
+v3.6.0 found four of these, none of which reddened a single test:
+
+- `test/wave-geometry.test.js` asserted `'斜坡終點即錨點'`. The number was right and the
+  reason was wrong — the engine's anchor is the ramp's **midpoint**, the 50% crossing. The
+  claim had been derived from `0m0`, which is a same-level blip, not a transition.
+- `isLineBrick` was a **deny-list**, so its comment described what it excluded while the
+  code silently included `zzz`/`uuu`/`ddd`, whose geometry nobody had measured.
+- `edgeHitAt`'s comment said "`SIZES.nameColWidth` is 0 in this file" three lines from the
+  commit that changed it to 120.
+- `renderUnmodelled`'s neighbour claimed "zero occurrences of `hscale`, `period` or
+  `phase`" a task after all three were modelled.
+
+Each one would have sent the next reader to a wrong conclusion, and one of them (the first)
+had already misled this project's own design notes for three tasks. When you change a
+value, grep the file for prose that names it. A comment is an assertion with no test.
+
+## Prefer an Allow-List Wherever a Rule Selects Cases
+
+`isLineBrick` excluded bus, `xxx` and clock, and therefore silently admitted every brick
+nobody had thought about. Rewritten as `isRampPair` — both sides must be `000` or `111` —
+the next brush someone adds defaults to the OLD behaviour instead of to unverified new
+behaviour.
+
+The same shape appeared in `editor-journey.test.js`: T6b excluded decorations by class
+name, so every new decoration had to be added to the list. Bounding the collection to the
+grid's own measured extent excludes the whole name column at once, permanently. Keep a
+deny-list only for things that genuinely fall INSIDE the allowed region.
+
+Watch the escape hatch: the allow-list must test the same thing the exclusion does.
+`uuu` maps to the level `'1'`, so a check written against level characters would have let
+it straight back through a list built on brick names.
+
+## Counting Is the Weakest Assertion
+
+Two defects in one task survived a count and died to a position:
+
+- `every` filters on `(index + base)`, not the bare index, so `head:{tick:3, every:2}`
+  keeps labels **4 and 6**. The brief's assertion counted labels, and both behaviours give
+  the same count for its fixture.
+- Under `config.hscale: 2` the ruler's tick COUNT was already right and only its PITCH was
+  wrong, so a count-only check passed on a ruler drawn at half the correct spacing.
+
+Pin label text and x positions. Counting proves a loop ran, not that it ran over the right
+things.
+
+## A Test That Measures the Product Still Needs the Product to Draw in the Right Place
+
+T6b buckets shapes into lane rows by measuring the painted grid rather than reading the
+canvas's published attributes, deliberately: *"An editor that draws nothing is
+indistinguishable from a correct one when both halves of the comparison come from the same
+source."* That property is worth keeping — but when Task 6 moved the canvas origin and the
+grid lines were still drawn from `y1='0'`, the measurement anchored on the wrong place and
+the failure stopped naming its cause. A measurement-based test does not stop being useful
+when the drawing is wrong; it stops being diagnostic.
+
+## Three Ways a Puppeteer Press Lands Somewhere Else
+
+v3.6.0's name column and ruler band broke every press helper in `editor-journey.test.js`,
+three times, three different ways:
+
+1. **Derived coordinates.** `cellPoint` computed a cell from `svg.height / laneCount` and
+   `svg.width / cycleCount`. Both divisions are wrong the moment the SVG contains anything
+   that is not lanes and cycles.
+2. **Coordinates captured before a scroll.** `dragBetween(a, b)` resolved `b` before
+   pressing `a`, and pressing `a` can scroll. The stale drop point produced "nothing
+   happened" — which is exactly what a no-op-refusal assertion wants to see.
+3. **Coordinates measured but clipped.** `getBoundingClientRect()` returns viewport
+   coordinates even for content a scroll container has clipped, so a press on an element
+   6px past the edge silently hit whatever was painted there instead.
+
+All three now go through one `pointInCanvas(page, locate, msg)`: scroll, re-read, assert
+visibility as a POST-condition. Resolve a point at the last possible moment, never before
+a call that can scroll, and never reimplement the scroll arithmetic beside it.
+
+## A Probe Fixture Shaped Like the Real One Is Not the Real One
+
+A Task 8 self-check reported five dropped shapes where the suite's actual fixture drops
+six, because its probe document omitted a lane and a `{}` spacer. The count never shipped,
+but the evidence audited a document nobody runs. Use the literal fixture.
+
+## Copying a Linked Worktree Does Not Detach It
+
+A linked worktree's `.git` is a pointer file holding an absolute gitdir path. `cp -r` it to
+`/tmp` and the copy's git commands operate on the ORIGINAL worktree's index — during
+v3.6.0 that briefly staged a stale blob into the tree being reviewed. Probe in place, or
+create a real worktree with `git worktree add`.
 
 ## Do NOT Stage
 

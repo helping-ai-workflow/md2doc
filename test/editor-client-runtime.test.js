@@ -11459,13 +11459,31 @@ async function gutterGeometry(page, sel) {
     }
 
     // ── Task 6 acceptance: Tab must work on this repo's own CHANGELOG.md ───
-    // The measurement this whole half of the task turns on. 58 of that file's
-    // 72 list items are hard-wrapped, and — this is the part that decides the
-    // design — NOT ONE of the 14 single-line items shares a run with a
-    // hard-wrapped one. So the bystander half of §3.4 alone changes nothing
-    // here (14/72 accept Tab before, 14/72 after); what makes Tab usable is
-    // letting a column-only key TARGET a hard-wrapped item, carrying its own
-    // lines across with the same colDelta the bystander rule uses.
+    // The measurement this whole half of the task turns on, AS TAKEN WHEN the
+    // task was written: 58 of that file's 72 list items were hard-wrapped,
+    // and — this is the part that decided the design — not one of the 14
+    // single-line items shared a run with a hard-wrapped one. So the
+    // bystander half of §3.4 alone changed nothing here (14/72 accepted Tab
+    // before, 14/72 after); what makes Tab usable is letting a column-only
+    // key TARGET a hard-wrapped item, carrying its own lines across with the
+    // same colDelta the bystander rule uses.
+    //
+    // Those numbers are kept in the past tense on purpose — they are a record
+    // of a measurement, and rewriting them would fabricate a reading of a
+    // file that no longer exists. RE-MEASURED at v3.6.0 with this scenario's
+    // own `rate` computation, because the sentence used to be written in the
+    // present tense and had been false for a long time (v3.5.0 `be5cea1`:
+    // 320 items / 292 hard-wrapped / 28 single-line — already about 4.4x the
+    // 72 back then, and 4.8x it today at 349):
+    //
+    //     be5cea1 (v3.5.0)  total 320  hardWrapped 292  single-line  28
+    //     v3.6.0 HEAD       total 349  hardWrapped 317  single-line  32
+    //
+    // In both readings `columnOnlyAccepts === total`, i.e. the assertion
+    // below holds for a reason that has not changed. The DESIGN conclusion is
+    // also unchanged, and in fact stronger: the hard-wrapped share went from
+    // 58/72 (81%) to 317/349 (91%), so a Tab that could only reach single-
+    // line items would be even less usable today than when it was rejected.
     //
     // Asserted against the real file, not a fixture: the accept rate, the key
     // actually landing, and — the property the replay exists for — that no
