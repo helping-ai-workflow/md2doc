@@ -10453,11 +10453,12 @@ async function main() {
           // by accident: `bricks()` (this whole comparison) is only ever
           // called against `WAVE_MD` and its edited/emptied forms, none of
           // which set `period`/`phase`/`hscale` on any lane, and this
-          // block's own pre-assertion (`got.unmodelled === ''`, a few lines
-          // below) would fail first and stop the run before this bound was
+          // block's own pre-assertion (the `got.source` scan a few lines
+          // below — it used to read `data-wave-unmodelled`, which Task 18
+          // emptied) would fail first and stop the run before this bound was
           // ever exercised on such a document. A future T6b fixture that
-          // adds `phase` needs `got.unmodelled` widened before it gets
-          // here — and needs this residual re-examined once it does.
+          // adds `phase` needs that scan widened before it gets here — and
+          // needs this residual re-examined once it does.
           //
           // v3.6.0 Task 6 fix round 1 (R19): `rowH = gridBottom / laneCount`
           // and `top = i * rowH` used to be exact because lane 0's band
@@ -10553,8 +10554,16 @@ async function main() {
             wave: svg.getAttribute('data-wave-3'),
             waves: Array.from({ length: lanes },
               (_, i) => svg.getAttribute('data-wave-' + i)),
-            unmodelled: document.querySelector('.ed-wave-overlay')
-              .getAttribute('data-wave-unmodelled'),
+            // v3.6.0 Task 18: the precondition below used to be read off
+            // `data-wave-unmodelled`. That attribute stopped being able to
+            // answer this question when Task 18 converged
+            // `renderUnmodelled` — it is now empty for EVERY document,
+            // including one that does set `period`/`phase`/`hscale`, so the
+            // old guard would have stayed green while saying nothing. Read
+            // the document's own bytes instead — the 原始碼 panel is
+            // `writeBack`'s output, repainted on every render, so it
+            // reflects any edit this block made before getting here.
+            source: document.querySelector('.ed-wave-source').textContent,
             preview: document.querySelector('.ed-wave-preview')
               .getAttribute('data-wave-preview') };
         });
@@ -10580,11 +10589,17 @@ async function main() {
         assert.ok(got.engine.filter((row) => row !== '').length > 1,
           'T6b: 至少要有兩條 lane 真的畫了東西，否則整排都是「空 vs 空」。Got ' +
           JSON.stringify(got.engine));
-        // period / phase / hscale change what the ENGINE paints and the drawing
-        // does not model them; they also rescale the gap arithmetic above.
-        assert.strictEqual(got.unmodelled, '',
-          'T6b: 這個 fixture 不得帶 period/phase/hscale。Got ' +
-          JSON.stringify(got.unmodelled));
+        // period / phase / hscale rescale the ENGINE's own bricks, and the
+        // gap arithmetic above divides by a hardcoded 40 to turn an engine
+        // `translate(x)` back into a cycle index. Neither `bricks()` nor
+        // that division survives a rescaled engine, so this fixture must
+        // not carry any of the three — asserted against the document's own
+        // text, which is the thing the claim is actually about.
+        for (const key of ['period', 'phase', 'hscale']) {
+          assert.strictEqual(got.source.indexOf(key), -1,
+            'T6b: 這個 fixture 不得帶 ' + key + '（上面的 gap 換算寫死了引擎的 40px）。Got ' +
+            JSON.stringify(got.source));
+        }
         // Gaps, per lane and by POSITION — not a document-wide count. A count
         // stays green when the marker is drawn one cycle to the left or on the
         // neighbouring lane, which is exactly the class of bug it was there for.
@@ -11247,10 +11262,23 @@ async function main() {
       console.log('journey: wave/T6h a committed gesture hands the keyboard cursor back — OK');
     }
 
-    // T6i — the three properties the drawing does not model. The editor used to
-    // ship an hscale CONTROL whose effect the canvas ignored; it is gone, and a
-    // document carrying any of the three now says so instead of drawing a
-    // confident wrong picture.
+    // T6i — v3.6.0 Task 18 (spec A5). This block used to assert the opposite
+    // of what it asserts now, and the inversion is the deliverable, not a
+    // relaxation: through v3.5.0 the drawing ignored `config.hscale` and a
+    // lane's `period`/`phase`, so it said so out loud rather than painting a
+    // confident wrong picture. Task 4 put all three into `layoutOf`'s
+    // per-lane geometry and Task 9 (R30) put `hscale` into the diagram pitch
+    // the ruler and grid share, so the canvas and the engine now draw the
+    // same geometry — and a notice claiming otherwise became the false
+    // statement.
+    //
+    // So the assertions are: the canvas geometry MOVES with the properties
+    // (the half that could still silently rot), and the notice no longer
+    // names them (the half Task 18 changed). `phase` shifts `originX`, which
+    // the canvas does not publish per lane — `test/wave-geometry.test.js`'s
+    // per-lane metrics block pins that one directly, and
+    // `test/wave-draw.test.js` pins the `period: 4` / `hscale: 2` ruler and
+    // grid against the engine's own tick values.
     {
       const SCALED_MD = [
         '# W', '',
@@ -11263,6 +11291,38 @@ async function main() {
         '```', '',
         'Tail para two.', '',
       ].join('\n');
+      // The same two lanes with none of the three set — the control against
+      // which "the geometry moved" is a measurement rather than a guess.
+      const BASE_MD = [
+        '# W', '',
+        '```wavedrom',
+        '{ signal: [',
+        "    { name: 'clk', wave: 'p...' },",
+        "    ['bus', { name: 'req', wave: '0.1.' }]",
+        '  ] }',
+        '```', '',
+        'Tail para two.', '',
+      ].join('\n');
+      // Per-lane cycle widths, keyed by that lane's own wave string so the
+      // two documents are compared lane-for-lane and not by an index that a
+      // group header could shift.
+      const widthsByWave = (page) => page.evaluate(() => {
+        const svg = document.querySelector('.ed-wave-canvas');
+        const n = Number(svg.getAttribute('data-lane-count'));
+        const out = {};
+        for (let i = 0; i < n; i += 1) {
+          out[svg.getAttribute('data-wave-' + i)] =
+            Number(svg.getAttribute('data-cycle-width-' + i));
+        }
+        return out;
+      });
+
+      const base = await newPage(BASE_MD);
+      await openWave(base.page);
+      const baseWidths = await widthsByWave(base.page);
+      assert.strictEqual(base.errs.length, 0, 'T6i: 不得有 pageerror: ' + base.errs.join(' | '));
+      await base.page.close(); base.srv.close();
+
       const ctx = await newPage(SCALED_MD);
       await openWave(ctx.page);
       const got = await ctx.page.evaluate(() => ({
@@ -11270,21 +11330,44 @@ async function main() {
           .getAttribute('data-wave-unmodelled'),
         noticeHidden: document.querySelector('.ed-wave-unmodelled').hidden,
         notice: document.querySelector('.ed-wave-unmodelled').textContent,
-        hscaleControls: document.querySelectorAll('.ed-wave-hscale').length,
+        hscaleControls: document.querySelectorAll('.ed-wave-config-hscale').length,
         canvas: !!document.querySelector('.ed-wave-canvas'),
       }));
-      assert.strictEqual(got.hscaleControls, 0,
-        'T6i: 不得留著一個畫布根本不理會的 hscale 控制項。Got ' + got.hscaleControls);
+      got.widths = await widthsByWave(ctx.page);
+      // The control is back (Task 13) — and now the canvas honours it, which
+      // is why it is allowed to exist. It is asserted present rather than
+      // absent: through v3.5.0 this line read `=== 0`, because a control
+      // whose effect the drawing ignored was worse than no control.
+      assert.strictEqual(got.hscaleControls, 1,
+        'T6i: hscale 控制項要在。Got ' + got.hscaleControls);
       assert.strictEqual(got.canvas, true, 'T6i: 其他東西還是可以編輯');
-      assert.strictEqual(got.noticeHidden, false, 'T6i: 提示必須看得見');
-      for (const what of ['config.hscale', 'period', 'phase']) {
-        assert.ok(got.unmodelled.indexOf(what) !== -1,
-          'T6i: 提示要指名 ' + what + '。Got ' + JSON.stringify(got.unmodelled));
-        assert.ok(got.notice.indexOf(what) !== -1,
-          'T6i: 畫面上的字要指名 ' + what + '。Got ' + JSON.stringify(got.notice));
+      // `clk` carries period 2 under a global hscale 2 → 4× the base width;
+      // `req` carries only the hscale → 2×. A drawing that ignored either
+      // would leave one of these at 1×.
+      assert.ok(baseWidths['p...'] > 0 && baseWidths['0.1.'] > 0,
+        'T6i: 前提：對照組兩條 lane 都要量到寬度。Got ' + JSON.stringify(baseWidths));
+      assert.strictEqual(got.widths['p...'], baseWidths['p...'] * 4,
+        'T6i: period 2 × hscale 2 必須把那條 lane 的 cycle 寬拉成 4 倍。Got ' +
+        JSON.stringify(got.widths) + ' vs ' + JSON.stringify(baseWidths));
+      assert.strictEqual(got.widths['0.1.'], baseWidths['0.1.'] * 2,
+        'T6i: 只帶 hscale 2 的那條要是 2 倍。Got ' +
+        JSON.stringify(got.widths) + ' vs ' + JSON.stringify(baseWidths));
+      // …and now that all three are drawn, the notice must not go on
+      // claiming they are not. An empty attribute AND a hidden notice: the
+      // two are separate failures (a notice left visible with stale text
+      // would pass an attribute-only check).
+      assert.strictEqual(got.unmodelled, '',
+        'T6i: period/phase/hscale 已經畫得出來，不得再列進「畫不出來」。Got ' +
+        JSON.stringify(got.unmodelled));
+      assert.strictEqual(got.noticeHidden, true,
+        'T6i: 沒有東西要報時提示要收起來。Got ' + JSON.stringify(got.notice));
+      for (const word of ['hscale', 'period', 'phase']) {
+        assert.strictEqual(got.notice.indexOf(word), -1,
+          'T6i: 提示不得再指名 ' + word + '。Got ' + JSON.stringify(got.notice));
       }
-      // …and a document carrying none of them says nothing at all, so the
-      // notice is a signal and not wallpaper.
+      // …and a document carrying none of them says nothing at all either, so
+      // the notice is a signal and not wallpaper.
+      assert.strictEqual(ctx.errs.length, 0, 'T6i: 不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       const plain = await newPage(WAVE_MD);
       await openWave(plain.page);
@@ -11297,7 +11380,7 @@ async function main() {
       assert.strictEqual(quiet.hidden, true, 'T6i: 提示要收起來');
       assert.strictEqual(plain.errs.length, 0, 'T6i: 不得有 pageerror: ' + plain.errs.join(' | '));
       await plain.page.close(); plain.srv.close();
-      console.log('journey: wave/T6i the editor says which properties the drawing does not model, and ships no control for them — OK');
+      console.log('journey: wave/T6i period/phase/hscale move the canvas geometry, and the notice no longer claims otherwise — OK');
     }
 
     // ── fix round 2 ────────────────────────────────────────────────────
