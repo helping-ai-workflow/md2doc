@@ -415,6 +415,61 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
         'and its smallest label must now clear the declared floor of ' + FLOOR +
         'px. got ' + wide.effective + 'px');
 
+      // The overflow must stay INSIDE the host. This is a headline outcome of
+      // the task and nothing was asserting it, which is the shape this repo
+      // keeps getting caught by.
+      //
+      // Read the four numbers below before changing them, because the obvious
+      // one is the weakest. MEASURED, by flipping .diagram-scroll's overflow-x
+      // from auto to visible and re-rendering:
+      //
+      //   documentElement.scrollWidth   1280 -> 1280   (does NOT move)
+      //   body.scrollWidth              1280 -> 2818   (moves)
+      //   .content scrollWidth           918 -> 2480   (moves)
+      //   window.scrollX after scrollTo(9999, 0)   0 -> 0
+      //
+      // documentElement holds flat because a SEPARATE rule, "html, body {
+      // overflow-x: clip }" near the top of the stylesheet, is what keeps the
+      // page itself from scrolling — so asserting only the documentElement
+      // pair would pass while a 2480px waveform hung out of the column with
+      // its right-hand two thirds CLIPPED and unreachable, which is worse than
+      // the shrunk copy this task replaced. It is asserted anyway, because it
+      // is the claim being made and it becomes the live one the moment that
+      // clip rule is touched; body and .content are the pair that moves today.
+      //
+      // Ablation, quoted from the run: with overflow-x flipped to visible these
+      // report "a diagram at natural size must not give the CONTENT COLUMN a
+      // scroll extent ... 2480 !== 918". Reaching them needed the
+      // wide.overflowX assertion above relaxed for the length of the ablation,
+      // because that one fires first on the same flip — these sit BEHIND a
+      // mechanism assertion and answer a different question, namely what
+      // happens when a host keeps overflow-x: auto and the overflow escapes
+      // anyway (the class landing on the wrong element, say).
+      const contained = await widePage.evaluate(() => {
+        const de = document.documentElement;
+        const content = document.querySelector('.content');
+        window.scrollTo(9999, 0);
+        const scrolledX = window.scrollX;
+        window.scrollTo(0, 0);
+        return {
+          deScrollW: de.scrollWidth, deClientW: de.clientWidth,
+          bodyScrollW: document.body.scrollWidth, bodyClientW: document.body.clientWidth,
+          contentScrollW: content.scrollWidth, contentClientW: content.clientWidth,
+          scrolledX,
+        };
+      });
+      assert.strictEqual(contained.contentScrollW, contained.contentClientW,
+        'a diagram at natural size must not give the CONTENT COLUMN a scroll ' +
+        'extent — that is the number that moves when the host stops clipping. ' +
+        'got ' + JSON.stringify(contained));
+      assert.strictEqual(contained.bodyScrollW, contained.bodyClientW,
+        'nor the body. got ' + JSON.stringify(contained));
+      assert.strictEqual(contained.deScrollW, contained.deClientW,
+        'nor the document element. got ' + JSON.stringify(contained));
+      assert.strictEqual(contained.scrolledX, 0,
+        'and the reading page must not scroll sideways when asked to. got ' +
+        JSON.stringify(contained));
+
       // Shrink-to-fit is still the default for everything that survives it.
       assert.strictEqual(mid.rendered, desk.contentW,
         'a diagram whose labels stay above the floor when fitted must keep ' +
@@ -704,6 +759,49 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
         'with the same real scroll extent. got ' + JSON.stringify(graph));
       assert.ok(graph.effective >= FLOOR,
         'and labels above the same floor of ' + FLOOR + 'px. got ' + graph.effective);
+
+      // Print, because this was the only engine without that guard and print is
+      // precisely the class of regression that got through once: section 5's
+      // print row passed while a real PDF came out cropped. What the other two
+      // rows guard is not identical — mermaid's row exists because mermaid
+      // writes an inline max-width that a plain rule cannot beat, while this
+      // engine writes none, so the thing under test here is simply that the
+      // print block hands a scrolling host back to shrink-to-fit at all.
+      //
+      // Ablation, quoted from the run: deleting the print block's
+      // ".diagram-scroll > svg" rule reports "the graph must fit the printed
+      // column ... {\"contentW\":1260,...,\"rendered\":4069}". Reaching it
+      // needed sections 5 and 5b's own print rows relaxed for the length of
+      // the ablation, since the print rules are shared and those fire first.
+      // That shadowing is the point rather than a weakness: what this row is
+      // here for is the engine-specific regression, a print rule that one day
+      // stops covering this engine while still covering the other two.
+      await dotPage.emulateMediaType('print');
+      await new Promise((r) => setTimeout(r, 200));
+      const graphPrint = await dotPage.evaluate(() => {
+        const content = document.querySelector('.content');
+        const host = document.querySelector('.content .graphviz.diagram-scroll');
+        const svg = host && host.querySelector(':scope > svg');
+        return {
+          contentW: Math.round(content.clientWidth),
+          found: !!svg,
+          inlineWidth: svg ? svg.style.width : null,
+          rendered: svg ? Math.round(svg.getBoundingClientRect().width) : null,
+          overflowX: host ? getComputedStyle(host).overflowX : null,
+        };
+      });
+      assert.ok(graphPrint.found,
+        'precondition: the print check needs the graph to still be carrying the ' +
+        'class. got ' + JSON.stringify(graphPrint));
+      assert.ok(graphPrint.inlineWidth,
+        'precondition: and to still be carrying the inline width the print rules ' +
+        'have to override. got ' + JSON.stringify(graphPrint));
+      assert.strictEqual(graphPrint.overflowX, 'visible',
+        'print must give the host its overflow back. got ' + JSON.stringify(graphPrint));
+      assert.ok(graphPrint.rendered <= graphPrint.contentW,
+        'and the graph must fit the printed column, or the PDF is a cropped ' +
+        'diagram rather than a small one. got ' + JSON.stringify(graphPrint));
+      await dotPage.emulateMediaType(null);
     } finally {
       await dotPage.close();
     }

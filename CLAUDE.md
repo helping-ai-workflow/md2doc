@@ -10,7 +10,7 @@ Single-file renderer. Everything lives in `lib/md2doc.js`:
 | `marked` block | Custom renderer (`code` / `heading` / `image` / `html` / `paragraph` / `listitem` / `blockquote` / `table`) + TOC builder + section index | lines 108–375 |
 | Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | just above `let bodyHtml` |
 | `<style>` block | Embedded CSS for HTML output | lines 380–820 |
-| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | lines 850–1300 |
+| `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | lines 3760–5611 (`<!-- Reader runtime -->` to its `</script>`) |
 | Output dispatch | `.html` write or puppeteer-driven `.pdf` export | lines 1300–end |
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
