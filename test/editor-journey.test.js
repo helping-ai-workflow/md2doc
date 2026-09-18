@@ -15438,14 +15438,41 @@ async function main() {
           'Task 14: 名字欄不得直排。Got ' + w.writing);
       }
 
-      // 選取只有一套。整棵原始碼，不只 wave-ui.js —— 生產者在
-      // wave-panels.js、消費者在 wave-ui.js，只掃一邊會讓另一邊留著。
-      for (const rel of ['lib/editor/wave-ui.js', 'lib/editor/wave-panels.js',
-        'lib/editor/wave-draw.js', 'lib/md2doc.js']) {
-        const src = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+      // 選取只有一套。整棵 lib/ 原始碼 —— 生產者在 wave-panels.js、消費者
+      // 在 wave-ui.js，只掃一邊會讓另一邊留著。
+      //
+      // v3.6.0 final review L1：這裡本來點名四個檔（wave-ui / wave-panels /
+      // wave-draw / md2doc）卻在上一行自稱「整棵原始碼」。結果誠實（reviewer
+      // 用 String.indexOf 查過沒被掃到的 wave-geometry.js、wave-codec.js、
+      // wave-store.js、client.js 四者皆乾淨），自述不誠實——而一份手寫名單
+      // 本身就是下一個漏網之魚的來源：新開一個 lib/editor/*.js 不會有任何
+      // 東西提醒你把它加進來。改成走整棵樹，名單就不可能再跟宣告分家。
+      const walkLibJs = (dir) => {
+        const out = [];
+        for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) out.push(...walkLibJs(full));
+          else if (ent.name.endsWith('.js')) out.push(full);
+        }
+        return out;
+      };
+      const libSrcRoot = path.join(__dirname, '..', 'lib');
+      const libJsPaths = walkLibJs(libSrcRoot);
+      // 掃描範圍自己要有下限。一個掃到 0 個檔案的 guard，綠得跟一個掃到 26
+      // 個檔案的 guard 一模一樣，而那正是本批付過錢的「空綠」形狀——把樹走
+      // 錯一層、或未來把 lib/ 搬走，都會靜默地把這條 guard 變成一句空話。
+      // 26 是 HEAD 上的實數；門檻取 20，讓正常的增刪不會來吵。
+      assert.ok(libJsPaths.length >= 20,
+        'Task 14 前提失敗：lib/ 底下應該掃得到 20 個以上的 .js，實際 ' +
+        libJsPaths.length + ' 個——掃描範圍壞了，這條 guard 沒有檢測力');
+      for (const full of libJsPaths) {
+        // client.js 帶著一個字面 NUL byte，grep 會把它判成 binary 而不印出
+        // 匹配；String.indexOf 不受影響（見 CLAUDE.md），而這裡本來就是用
+        // indexOf 在查。
+        const src = fs.readFileSync(full, 'utf8');
         assert.strictEqual(src.indexOf('laneMultiSelect'), -1,
           'Task 14: laneMultiSelect 必須完全消失，選取只剩 selection 一套 —— ' +
-          rel + ' 裡還有');
+          path.relative(libSrcRoot, full) + ' 裡還有');
       }
 
       // 工具列的 訊號 分區作用在 selection 上：點 rail 的一列選中它，

@@ -3,6 +3,32 @@ const assert = require('assert');
 const G = require('../lib/editor/wave-geometry.js');
 const codec = require('../lib/editor/wave-codec.js');
 const D = require('../lib/editor/wave-draw.js');
+// v3.6.0 final review L2: the brush roster is IMPORTED, never re-typed.
+// `test/wave-codec.test.js` already set this precedent (`waveUi.BRUSHES`);
+// this file carried two separate 22-entry literal copies — one in
+// `makeDrawer`'s deps bag, one at the head of the icon block — guarded only
+// by `assert.strictEqual(BRUSHES.length, 22, ...)`, which cannot see a
+// roster whose CONTENTS diverged while its length did not.
+//
+// What the import buys, stated as MEASURED rather than as hoped: the icon
+// block below now walks the roster production actually uses, instead of a
+// transcription of it. It does NOT buy a new red, and saying it did would be
+// this branch's own most-repeated defect. Flipping `lib/editor/wave-ui.js`'s
+// `BRUSHES` from 'z' to 'Z' and rerunning this file prints OK — before AND
+// after this change — because `levelIcon` returns an `<svg>` for ANY single
+// character ('Z', 'Q' and '~' all measured), so a drifted roster cannot
+// redden the icon assertions from either side. The copies' only other
+// consumer, `makeDrawer`'s deps bag, reaches exactly one line of production
+// code (`wave-draw.js`'s canvas `aria-label`), which this file never
+// asserts on.
+//
+// So this is a fix to the CLAIM, not to the detection power: a file whose
+// own log line says 「22 個電位圖示全部由畫布的同一批繪製函式產生」 should be
+// reading the roster production uses, not a copy that can quietly stop being
+// it. Removing the second opinion is strictly better than adding a third
+// assertion about it.
+const waveUi = require('../lib/editor/wave-ui.js');
+const BRUSHES = waveUi.BRUSHES;
 
 // This layer only produces strings and node descriptions, not pixels, so a
 // fake `document` that just records what was asked for is enough — no
@@ -62,8 +88,7 @@ function makeDrawer() {
     codec: codec,
     SIZES: { laneHeight: 34, cycleWidth: 48, nameColWidth: 120 },
     SVGNS: 'http://www.w3.org/2000/svg',
-    BRUSHES: ['0', '1', 'x', 'z', 'p', 'n', 'P', 'N', 'h', 'l', 'u', 'd',
-      '=', '2', '3', '4', '5', '6', '7', '8', '9', '|'],
+    BRUSHES: BRUSHES,
     labelsOf: function () { return []; },
   });
 }
@@ -496,14 +521,14 @@ function makeDrawer() {
 // ---------------------------------------------------------------------------
 // v3.6.0 Task 10：電位圖示重用 brick 繪製，不是第二套實作
 //
-// `BRUSHES` 是 22 個（brief 的 roster，跟 wave-ui.js 自己的常數與
-// wave-codec.test.js 的 isBrushKey 斷言同一份字面值）。每個都要有圖示，
-// 而且圖示的線條必須來自跟畫布同一批函式 —— 不是為了工具列另外手畫一套。
+// `BRUSHES` 是 22 個，而且是從 wave-ui.js `require` 進來的那一份本人，
+// 不是抄寫的同一份字面值（final review L2）。每個都要有圖示，而且圖示的
+// 線條必須來自跟畫布同一批函式 —— 不是為了工具列另外手畫一套。
 // ---------------------------------------------------------------------------
 {
   const drawer = makeDrawer();
-  const BRUSHES = ['0', '1', 'x', 'z', 'p', 'n', 'P', 'N', 'h', 'l', 'u', 'd',
-    '=', '2', '3', '4', '5', '6', '7', '8', '9', '|'];
+  // 數量仍然釘住：這條擋的不是「拷貝分歧」（import 之後已經不可能），
+  // 而是「roster 自己被無聲改大改小」。內容的正確性由上面的 import 負責。
   assert.strictEqual(BRUSHES.length, 22, '筆刷 roster 是 22 個');
 
   function collectTag(node, tag) {
