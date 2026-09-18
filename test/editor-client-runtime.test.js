@@ -96,18 +96,31 @@ async function setup() {
     '![a figure](block.png)', '',
   ].join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  // S2 Task 4: an EXPLICIT idle timeout, because this one server is shared by
-  // 33 scenarios spread across the whole file while every scenario in between
-  // runs against its own short-lived server. createEditorServer()'s default is
-  // 30s of no requests, and the S2 轉換 group in the middle now sits idle for
-  // longer than that — the symptom is a bare
-  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0` from the
-  // NEXT shared-server scenario, which reads as a broken test rather than as a
-  // stopwatch. The timeout is the product's own dev-server convenience and
-  // nothing in this suite asserts it; srv.close() at the end still tears it
-  // down deterministically.
+  // S2 Task 4: an EXPLICIT connection grace, because this one server is
+  // shared by 33 scenarios spread across the whole file while every scenario
+  // in between runs against its own short-lived server. v3.6.0 replaced
+  // createEditorServer()'s liveness mechanism: it used to be a 30s-of-no-
+  // /api/ping idle timer (this override used to read `idleTimeoutMs`), and is
+  // now a held-open `/api/alive` connection — the server closes itself a
+  // short `connectionGraceMs` (default 5s) after the LAST such connection
+  // drops, which is exactly correct product behaviour for a real closed tab,
+  // but wrong for THIS fixture: this shared server legitimately has zero
+  // open connections for the whole stretch other scenarios spend driving
+  // their OWN dedicated servers (the S2 轉換 sweep in the middle is one such
+  // stretch, and multi-minute). MEASURED on the coordinator's machine: with
+  // the 5s default, that sweep alone was enough to close this server mid-run
+  // — every scenario after it then failed with a bare
+  // `net::ERR_CONNECTION_REFUSED at http://127.0.0.1:<port>/edit/0`, 0
+  // AssertionErrors, reading as a broken test rather than as what it was
+  // (this server correctly noticing nobody was attached to it and closing,
+  // exactly as designed). The grace is the product's own dev-server
+  // convenience and nothing in this suite asserts it; srv.close() at the end
+  // still tears it down deterministically. This override does NOT change
+  // createEditorServer()'s default — see lib/editor/server.js — it only
+  // exempts this one shared test fixture from a timing window that was never
+  // meant to describe "no scenario is currently using this specific server".
   const srv = await createEditorServer({
-    files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+    files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
   });
   return { dir, mdPath, srv, url: srv.urlFor(mdPath) };
 }
@@ -258,10 +271,13 @@ async function newPage(browser) {
 }
 
 // Two table scenarios below deliberately use a REMOTE image src — that is what
-// makes the cell unsupported. Their `networkidle0` navigation then waits on a
-// real fetch to example.com, which never settles offline (a 30s navigation
-// timeout). Stub the host at the request layer: the fixture keeps its meaning
-// and the page load stays hermetic.
+// makes the cell unsupported. Their `networkidle2` navigation would otherwise
+// wait on a real fetch to example.com, which never settles offline (a 30s
+// navigation timeout). Stub the host at the request layer: the fixture keeps
+// its meaning and the page load stays hermetic — independent of whichever
+// networkidle variant the wait uses, and of the editor's own permanent
+// /api/alive stream (see that constant's own comment in lib/editor/client.js
+// for why the wait moved off `networkidle0`).
 async function newPageStubbingRemote(browser) {
   const page = await newPage(browser);
   await page.setRequestInterception(true);
@@ -740,12 +756,33 @@ async function paragraphSelByText(page, prefix) {
 // fixtures anywhere in that doc risks disturbing one of those invariants.
 // Isolation also means each table scenario's undo stack / save state can
 // never leak into another.
+// v3.6.0: `connectionGraceMs` override, for the same class of reason the
+// shared server at the top of this file has one (see its own comment) —
+// NOT because this factory's servers are themselves shared across
+// scenarios (each call makes a fresh, independent one), but because some of
+// its 200+ call sites hold ONE instance across several sequential
+// open/close page cycles within a single scenario (e.g. the v2.11.1 §Tab
+// non-regression block's six sub-cases, each opening and closing its own
+// page against the same server) or across a many-cell sweep (this file's
+// S2 conversion-matrix and S3/S4 T8 sweeps). Between one page closing and
+// the next opening, the connection count is briefly zero; on an ordinary
+// machine that gap is the same order of magnitude as a reload (measured
+// elsewhere in this codebase at 55-73ms), but this suite runs on a machine
+// that has demonstrably gone slow enough under memory pressure to kill long
+// runs outright, and a single stalled reconnect past the 5s default would
+// close this fixture out from under an unrelated scenario. None of these
+// 200+ call sites test the liveness feature itself, so a generous grace
+// costs nothing real — see lib/editor/server.js for the mechanism and
+// DEFAULT_CONNECTION_GRACE_MS for the product's own (unchanged) default.
+const FIXTURE_SRV_OPTS = { connectionGraceMs: 30 * 60 * 1000 };
+
 async function setupTableDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-table-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -765,12 +802,16 @@ async function tableBlockSel(page, index) {
 // ── Phase-3 Task 4 (list WYSIWYG) helpers ────────────────────────────────
 // Same isolation reasoning as setupTableDoc() above: list scenarios get
 // their own doc/server so undo-stack / save state never leaks between them.
+// Same FIXTURE_SRV_OPTS reasoning too (see its own comment above
+// setupTableDoc()) — this factory is what backs tnrSrv's six sequential
+// open/close sub-cases further down this file.
 async function setupListDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-list-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -1451,13 +1492,15 @@ async function travelPointer(page, from, to, steps) {
 
 // ── §10-gap fix (block-level insert/delete) helpers ─────────────────────
 // Own isolated doc/server per scenario group, same isolation reasoning as
-// setupTableDoc()/setupListDoc() above.
+// setupTableDoc()/setupListDoc() above — and the same FIXTURE_SRV_OPTS
+// reasoning (see the comment above setupTableDoc()).
 async function setupBlockOpsDoc(rows) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editor-blockops-'));
   const mdPath = path.join(dir, 'doc.md');
   const original = rows.join('\n');
   fs.writeFileSync(mdPath, original, 'utf8');
-  const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+  const srv = await createEditorServer(
+    Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, FIXTURE_SRV_OPTS));
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
@@ -1595,7 +1638,7 @@ async function gutterGeometry(page, sel) {
     //    dead") ────────────────────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
       const blockId = await page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
       const sel = '.ed-block[data-block-id="' + blockId + '"]';
@@ -1650,7 +1693,7 @@ async function gutterGeometry(page, sel) {
           req.continue();
         }
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const blockId = await page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
@@ -1715,7 +1758,7 @@ async function gutterGeometry(page, sel) {
           req.continue();
         }
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const blockId = await page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="paragraph"]').getAttribute('data-block-id'));
@@ -1777,7 +1820,7 @@ async function gutterGeometry(page, sel) {
     // just-committed change (it is the newest op on the undo stack).
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -1838,7 +1881,7 @@ async function gutterGeometry(page, sel) {
     //    B opens ─────────────────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -1879,7 +1922,7 @@ async function gutterGeometry(page, sel) {
     // there is no lockout: clicking C afterward must still open an editor.
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -1948,7 +1991,7 @@ async function gutterGeometry(page, sel) {
           req.continue();
         }
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -2019,7 +2062,7 @@ async function gutterGeometry(page, sel) {
           req.continue();
         }
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -2091,7 +2134,7 @@ async function gutterGeometry(page, sel) {
     //    retired click-select-then-bar flow, re-expressed as focus ─────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const blockIds = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block')).map((el) => el.getAttribute('data-block-id')));
@@ -2241,7 +2284,7 @@ async function gutterGeometry(page, sel) {
       const { srv: s2srv, url: s2url } = await setupTableDoc(['# Heading', '', 'A paragraph.', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2url, { waitUntil: 'networkidle0' });
+        await page.goto(s2url, { waitUntil: 'networkidle2' });
 
         const headingSel = await blockSelByType(page, 'heading');
         await openGutterMenu(page, headingSel);
@@ -2314,7 +2357,7 @@ async function gutterGeometry(page, sel) {
       const { srv: t4Srv, url: t4Url } = await setupTableDoc(['A paragraph.', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(t4Url, { waitUntil: 'networkidle0' });
+        await page.goto(t4Url, { waitUntil: 'networkidle2' });
 
         const paraSel = await blockSelByType(page, 'paragraph');
         await openGutterMenu(page, paraSel);
@@ -2369,7 +2412,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2bUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 2');
         assert.strictEqual(
@@ -2393,7 +2436,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2cUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2cUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '引用');
         assert.strictEqual(await saveAndRead(page, s2cMdPath), '# Doc\n\n> A paragraph.\n', 'to quote');
@@ -2415,7 +2458,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2dUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2dUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '標題 3');
         await page.waitForFunction(() => !!document.querySelector('.content h3'), { timeout: 5000 });
@@ -2447,7 +2490,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2eUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2eUrl, { waitUntil: 'networkidle2' });
 
         await openGutterMenu(page, await tableBlockSel(page, 0));
         assert.strictEqual(
@@ -2477,7 +2520,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', '---', '', '<div>raw</div>', '', 'tail', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2eeUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2eeUrl, { waitUntil: 'networkidle2' });
 
         // Fixture sanity FIRST: if the renderer ever stopped emitting these as
         // their own blocks, the assertions below would pass without the guard
@@ -2525,7 +2568,7 @@ async function gutterGeometry(page, sel) {
       const { srv: s2fSrv, url: s2fUrl } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s2fUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s2fUrl, { waitUntil: 'networkidle2' });
 
         // MIGRATED by v3.1.0 Task E (修正 4 / controller Ruling 13). This
         // asserted ['轉換成 ›','建立副本','刪除'] under RULING F-O, which
@@ -2572,7 +2615,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3aUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3aUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
         assert.strictEqual(
@@ -2597,7 +2640,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3bUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '待辦清單');
         // §4.1: data-list-type and data-task are ORTHOGONAL axes, so a ul that
@@ -2625,7 +2668,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- [x] alpha', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3cUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3cUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
         assert.strictEqual(
@@ -2651,7 +2694,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  - child', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3dUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3dUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
         // §3.3: only the grip's block converts — the child keeps its own type
@@ -2683,7 +2726,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3eUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3eUrl, { waitUntil: 'networkidle2' });
 
         const before = fs.readFileSync(s3eMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
@@ -2750,7 +2793,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3fUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3fUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'gap is ~5px'), '編號列表');
         // A list-type conversion changes the item's MARKER and nothing else —
@@ -2812,7 +2855,7 @@ async function gutterGeometry(page, sel) {
           '## Tail', '', '1. healthy', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s3gUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s3gUrl, { waitUntil: 'networkidle2' });
 
         const bannerNow = () => page.evaluate(() => {
           const b = document.querySelector('.ed-conflict');
@@ -2858,7 +2901,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4aUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4aUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
         const out = await saveAndRead(page, s4aMdPath);
@@ -2881,7 +2924,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4bUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '標題 2');
         const out = await saveAndRead(page, s4bMdPath);
@@ -2903,7 +2946,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grandchild', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4cUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4cUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
         const out = await saveAndRead(page, s4cMdPath);
@@ -2936,7 +2979,7 @@ async function gutterGeometry(page, sel) {
           '  - delta', '    - epsilon', '- zeta', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4dUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4dUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'beta'), '文字');
         const out = await saveAndRead(page, s4dMdPath);
@@ -2958,7 +3001,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '  - charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4eUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4eUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'beta'), '程式碼');
         const out = await saveAndRead(page, s4eMdPath);
@@ -2983,7 +3026,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '3. charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4fUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4fUrl, { waitUntil: 'networkidle2' });
 
         const before = fs.readFileSync(s4fMdPath, 'utf8');
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
@@ -3031,7 +3074,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4gUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4gUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'charlie'), '文字');
         assert.strictEqual(
@@ -3074,7 +3117,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- a', '  - a1', '1. b', '   - b1', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4hUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4hUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'a'), '文字');
         const out = await saveAndRead(page, s4hMdPath);
@@ -3114,7 +3157,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- a', '  - b', '    - c', '  - d', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4iUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4iUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
         const out = await saveAndRead(page, s4iMdPath);
@@ -3152,7 +3195,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '1. bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4jUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s4jUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
         const out = await saveAndRead(page, s4jMdPath);
@@ -3190,7 +3233,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5aUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5aUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
         const out = await saveAndRead(page, s5aMdPath);
@@ -3226,7 +3269,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'bravo', '', '## Tail', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5bUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
         assert.strictEqual(await saveAndRead(page, s5bMdPath), '# Doc\n\n- bravo\n\n## Tail\n',
@@ -3245,7 +3288,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '', 'bravo', '', '1. charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5cUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5cUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
         const out = await saveAndRead(page, s5cMdPath);
@@ -3272,7 +3315,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5dUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5dUrl, { waitUntil: 'networkidle2' });
 
         const before = fs.readFileSync(s5dMdPath, 'utf8');
         assert.strictEqual(before, '# Doc\n\n- alpha\n- bravo\n- charlie\n', 'fixture sanity');
@@ -3306,7 +3349,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5eUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5eUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '文字');
         assert.strictEqual(await saveAndRead(page, s5eMdPath),
@@ -3333,7 +3376,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '## Sub', '', '- alpha', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5fUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5fUrl, { waitUntil: 'networkidle2' });
 
         const subSel = await page.evaluate(() => {
           const els = Array.from(document.querySelectorAll('.ed-block[data-block-type="heading"]'));
@@ -3374,7 +3417,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- a', '', '1. b', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5gUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5gUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await liBlockSelByText(page, 'b'), '項目符號列表');
         const out = await saveAndRead(page, s5gMdPath);
@@ -3416,7 +3459,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- a', '', '- b', '', '1. c', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5hUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5hUrl, { waitUntil: 'networkidle2' });
 
         const before = fs.readFileSync(s5hMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
@@ -3476,7 +3519,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  - beta', '', 'gamma', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5iUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s5iUrl, { waitUntil: 'networkidle2' });
 
         await convertVia(page, await blockSelByType(page, 'paragraph'), '項目符號列表');
         const out = await saveAndRead(page, s5iMdPath);
@@ -3523,7 +3566,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'alpha', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6aUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6aUrl, { waitUntil: 'networkidle2' });
 
         await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '建立副本');
         await page.waitForFunction(
@@ -3556,7 +3599,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- a', '  - a1', '- b', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6bUrl, { waitUntil: 'networkidle2' });
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'a'), '建立副本');
         await page.waitForFunction(
@@ -3591,7 +3634,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- [x] done', '- [ ] todo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6cUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6cUrl, { waitUntil: 'networkidle2' });
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'done'), '建立副本');
         await page.waitForFunction(
@@ -3626,7 +3669,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6dUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6dUrl, { waitUntil: 'networkidle2' });
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
         await page.waitForFunction(
@@ -3654,7 +3697,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- gap is ~5px', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6eUrl2, { waitUntil: 'networkidle0' });
+        await page.goto(s6eUrl2, { waitUntil: 'networkidle2' });
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'gap is ~5px'), '建立副本');
         await page.waitForFunction(
@@ -3684,7 +3727,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'alpha', '', '- a', '- b', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6eUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6eUrl, { waitUntil: 'networkidle2' });
         const s6eBefore = fs.readFileSync(s6eMdPath, 'utf8');
 
         await clickGutterMenuItem(page, await blockSelByType(page, 'paragraph'), '建立副本');
@@ -3742,7 +3785,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s6fUrl, { waitUntil: 'networkidle0' });
+        await page.goto(s6fUrl, { waitUntil: 'networkidle2' });
         const s6fBefore = fs.readFileSync(s6fMdPath, 'utf8');
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
@@ -3829,7 +3872,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', 'alpha', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(s6gUrl, { waitUntil: 'networkidle0' });
+          await page.goto(s6gUrl, { waitUntil: 'networkidle2' });
 
           const sel = await blockSelByType(page, 'paragraph');
           await pressHandleWithDirtyBurst(page, sel, ' EDITED');
@@ -3860,7 +3903,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', 'alpha', '', 'bravo', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(s6hUrl, { waitUntil: 'networkidle0' });
+          await page.goto(s6hUrl, { waitUntil: 'networkidle2' });
 
           const sel = await blockSelByType(page, 'paragraph');
           await pressHandleWithDirtyBurst(page, sel, ' EDITED');
@@ -3919,7 +3962,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- alpha', '  - child', '', '## Tail', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7aUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7aUrl, { waitUntil: 'networkidle2' });
           const geo = await page.evaluate(() =>
             Array.from(document.querySelectorAll('.ed-block')).map((b) => {
               const ins = b.querySelector(':scope > .ed-insert');
@@ -3969,7 +4012,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7bUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7bUrl, { waitUntil: 'networkidle2' });
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
@@ -4007,7 +4050,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- alpha', '  - child', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7cUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7cUrl, { waitUntil: 'networkidle2' });
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
@@ -4034,7 +4077,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '1. alpha', '   - child', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7dUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7dUrl, { waitUntil: 'networkidle2' });
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
@@ -4065,7 +4108,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7eUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7eUrl, { waitUntil: 'networkidle2' });
           const t7eBefore = fs.readFileSync(t7eMd, 'utf8');
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
           await page.waitForFunction(
@@ -4116,7 +4159,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- alpha', '  - child', '    - grand', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7fUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7fUrl, { waitUntil: 'networkidle2' });
           await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '段落');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
@@ -4164,7 +4207,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- a', '', '- b', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7gUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7gUrl, { waitUntil: 'networkidle2' });
           const t7gBefore = fs.readFileSync(t7gMd, 'utf8');
           assert.deepStrictEqual(await runUnsupported(page), ['P', 'P'],
             'FIXTURE SANITY: this run must really be degraded, or the refusal below is ' +
@@ -4196,7 +4239,7 @@ async function gutterGeometry(page, sel) {
           await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
         try {
           const page = await newPage(browser);
-          await page.goto(t7hUrl, { waitUntil: 'networkidle0' });
+          await page.goto(t7hUrl, { waitUntil: 'networkidle2' });
           const sel = await liBlockSelByText(page, 'alpha');
           const editEl = sel + ' > .ed-li-text';
           await page.click(editEl);
@@ -4417,12 +4460,17 @@ async function gutterGeometry(page, sel) {
       const sweepDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-'));
       const sweepMdPath = path.join(sweepDir, 'doc.md');
       fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
-      // An EXPLICIT idle timeout for the same reason the shared server at the
-      // top of this file has one: 72 cells on one server outlive
-      // createEditorServer()'s 30s default, and the symptom is a bare
-      // net::ERR_CONNECTION_REFUSED that reads as a broken test.
+      // An EXPLICIT connection grace, for the same reason the shared server
+      // at the top of this file has one (see its own comment — this override
+      // used to read `idleTimeoutMs` before v3.6.0 replaced the liveness
+      // mechanism): the 72 cells below drive ONE `page`/`sweepSrv` pair
+      // through 72 sequential `page.goto()` reconnects, and while each
+      // reconnect's own gap is normally tiny (a reload-sized gap, not a
+      // multi-second one), 72 of them is 72 chances for one to land badly on
+      // a loaded machine. This is not testing liveness — it is a conversion
+      // matrix — so a generous grace costs nothing real.
       const sweepSrv = await createEditorServer({
-        files: [sweepMdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+        files: [sweepMdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
       });
       try {
         const page = await newPage(browser);
@@ -4436,7 +4484,7 @@ async function gutterGeometry(page, sel) {
             // cannot poison the next one, and the byte comparison below is
             // always against the pristine fixture.
             fs.writeFileSync(sweepMdPath, SWEEP_MD, 'utf8');
-            await page.goto(sweepSrv.urlFor(sweepMdPath), { waitUntil: 'networkidle0' });
+            await page.goto(sweepSrv.urlFor(sweepMdPath), { waitUntil: 'networkidle2' });
             await clearBanner(page);
 
             const sel = await sweepSel(page, src.kind, src.needle);
@@ -4593,7 +4641,7 @@ async function gutterGeometry(page, sel) {
             await setupTableDoc(['# Doc', '', '| A | B |', '|---|---|', '| 1 | 2 |', '']);
           try {
             const tpage = await newPage(browser);
-            await tpage.goto(turl, { waitUntil: 'networkidle0' });
+            await tpage.goto(turl, { waitUntil: 'networkidle2' });
             const tbefore = fs.readFileSync(tmd, 'utf8');
             const tsel = await tableBlockSel(tpage, 0);
             for (const tgt of TARGETS) {
@@ -4630,15 +4678,17 @@ async function gutterGeometry(page, sel) {
           const degDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-deg-'));
           const degMd = path.join(degDir, 'doc.md');
           fs.writeFileSync(degMd, DEG, 'utf8');
+          // Same connection-grace reasoning as sweepSrv just above (12
+          // sequential reconnects here instead of 72, same risk shape).
           const degSrv = await createEditorServer({
-            files: [degMd], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+            files: [degMd], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
           });
           try {
             const dpage = await newPage(browser);
             for (const tgt of TARGETS) {
               const cell = 'li(degraded run) → ' + tgt.id;
               fs.writeFileSync(degMd, DEG, 'utf8');
-              await dpage.goto(degSrv.urlFor(degMd), { waitUntil: 'networkidle0' });
+              await dpage.goto(degSrv.urlFor(degMd), { waitUntil: 'networkidle2' });
               await clearBanner(dpage);
               assert.deepStrictEqual(await runUnsupported(dpage), ['P', 'P'],
                 'PRECONDITION ' + cell + ': this run must really be degraded, or the refusal ' +
@@ -4700,7 +4750,7 @@ async function gutterGeometry(page, sel) {
     //    type + Enter commits; file line updated on save ──────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -4749,7 +4799,7 @@ async function gutterGeometry(page, sel) {
     //    ** visible in the edit root's text); Esc reverts exactly ─────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const boldId = await page.evaluate(() => {
         const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -4799,7 +4849,7 @@ async function gutterGeometry(page, sel) {
     //    swaps in the in-place monospace textarea immediately") ───────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const blockIds = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -4842,7 +4892,7 @@ async function gutterGeometry(page, sel) {
     //    are unchanged from the ± version: '# Heading' -> '## Heading'. ────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const headingId = await page.evaluate(() =>
         document.querySelector('.ed-block[data-block-type="heading"]').getAttribute('data-block-id'));
@@ -4907,7 +4957,7 @@ async function gutterGeometry(page, sel) {
     //    plain Enter commits it and it round-trips to the saved source ────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -4982,7 +5032,7 @@ async function gutterGeometry(page, sel) {
     //    Ctrl+Shift+V, and has its own sibling scenario immediately below.
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -5070,7 +5120,7 @@ async function gutterGeometry(page, sel) {
     //    flavours present; the only difference is the keystroke.
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -5140,7 +5190,7 @@ async function gutterGeometry(page, sel) {
     //    corrupt it — degrade-never-lose ─────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -5202,7 +5252,7 @@ async function gutterGeometry(page, sel) {
         if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
         req.continue();
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -5263,7 +5313,7 @@ async function gutterGeometry(page, sel) {
     //    starts cleanly and independently — neither leaks into the other.
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
@@ -5323,7 +5373,7 @@ async function gutterGeometry(page, sel) {
     //    intercepted with preventDefault() before either branch runs) ─────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Burst undo target');
       const editEl = sel + ' > *';
@@ -5448,7 +5498,7 @@ async function gutterGeometry(page, sel) {
         if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
         req.continue();
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Burst bold undo target');
       const editEl = sel + ' > *';
@@ -5498,7 +5548,7 @@ async function gutterGeometry(page, sel) {
     //    to the file on save ──────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Blur commit target');
       const editEl = sel + ' > *';
@@ -5546,7 +5596,7 @@ async function gutterGeometry(page, sel) {
           req.continue();
         }
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Burst failure target');
       const editEl = sel + ' > *';
@@ -5583,7 +5633,7 @@ async function gutterGeometry(page, sel) {
     //    via Ctrl+Enter/Esc/✓/✕ (which keep working unchanged) ────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       // Located by its distinctive <img alt> (an image-only paragraph's
       // textContent is empty, so paragraphSelByText()'s prefix match can't
@@ -5635,7 +5685,7 @@ async function gutterGeometry(page, sel) {
     //    selection is collapsed; hidden once the session ends (Esc) ───────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Bold toggle target');
       const editEl = sel + ' > *';
@@ -5702,7 +5752,7 @@ async function gutterGeometry(page, sel) {
     //    unwrap" branch ───────────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Bold toggle target');
       const editEl = sel + ' > *';
@@ -5740,7 +5790,7 @@ async function gutterGeometry(page, sel) {
     //    gains **word**, and the re-rendered page shows <strong> ─────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Bold commit target');
       const editEl = sel + ' > *';
@@ -5795,7 +5845,7 @@ async function gutterGeometry(page, sel) {
     //    ─────────────────────────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Strike toggle target');
       const editEl = sel + ' > *';
@@ -5833,7 +5883,7 @@ async function gutterGeometry(page, sel) {
     //    ~~word~~, and the re-rendered page shows <del> ──────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Strike commit target');
       const editEl = sel + ' > *';
@@ -5871,7 +5921,7 @@ async function gutterGeometry(page, sel) {
     //    (marked passes raw inline <u> through untouched, by design) ─────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Underline commit target');
       const editEl = sel + ' > *';
@@ -5911,7 +5961,7 @@ async function gutterGeometry(page, sel) {
     //    serializeCode()) ───────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Backtick target');
       const editEl = sel + ' > *';
@@ -5960,7 +6010,7 @@ async function gutterGeometry(page, sel) {
       await page.evaluateOnNewDocument(() => {
         window.prompt = () => 'https://example.org';
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Link target paragraph');
       const editEl = sel + ' > *';
@@ -6002,7 +6052,7 @@ async function gutterGeometry(page, sel) {
         window.__promptQueue = ['https://edited.example', ''];
         window.prompt = () => window.__promptQueue.shift();
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'A existing link');
       const editEl = sel + ' > *';
@@ -6066,7 +6116,7 @@ async function gutterGeometry(page, sel) {
         window.__promptCalls = 0;
         window.prompt = () => { window.__promptCalls++; return 'https://probe.example/'; };
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Whitespace only link target');
       const editEl = sel + ' > *';
@@ -6100,7 +6150,7 @@ async function gutterGeometry(page, sel) {
     {
       const page = await newPage(browser);
       await page.evaluateOnNewDocument(() => { window.prompt = () => 'https://mixed.example/'; });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Whitespace mixed link bold');
       const editEl = sel + ' > *';
@@ -6160,7 +6210,7 @@ async function gutterGeometry(page, sel) {
           return origRemove(type, listener, opts);
         };
       });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Rerender reset target');
       const editEl = sel + ' > *';
@@ -6270,7 +6320,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const tableCount = await page.evaluate(
           () => document.querySelectorAll('.ed-block[data-block-type="table"]').length);
@@ -6372,7 +6422,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'onetwo');
@@ -6434,7 +6484,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'x');
@@ -6499,7 +6549,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, '1');
@@ -6559,7 +6609,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPageStubbingRemote(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         assert.strictEqual(
@@ -6604,7 +6654,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPageStubbingRemote(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         const { x, y } = await colBoundaryCoords(page, table0, 0);
@@ -6636,7 +6686,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await hoverAndClickColInsert(page, table0, 1); // boundary after column B (index 1)
@@ -6674,7 +6724,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await hoverAndClickRowInsert(page, table0, 0); // boundary after the FIRST body row (1 | 2)
@@ -6708,7 +6758,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         assert.strictEqual(
@@ -6770,7 +6820,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const colB = await colGripCoords(page, table0, 1);
@@ -6870,7 +6920,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const row0 = await rowGripCoords(page, table0, 0);
@@ -6926,7 +6976,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         await hoverColumnCell(page, table0, 0);
@@ -7087,7 +7137,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         await page.hover('.ed-block[data-block-type="table"] tbody td');
         await page.waitForFunction(() => {
           const g = document.querySelector('.ed-te-grip-row');
@@ -7183,7 +7233,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const para0 = await page.evaluate(() => {
           const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
@@ -7337,7 +7387,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         await hoverBodyRowCell(page, table0, 0);
@@ -7371,7 +7421,7 @@ async function gutterGeometry(page, sel) {
       const { srv: tsrv, url: turl } = await setupTableDoc(['| A | B |', '|---|---|', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         await hoverHeaderRowCell(page, table0);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -7396,7 +7446,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y);
@@ -7446,7 +7496,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Fixture sanity: the header <tr> itself starts with no `class`
@@ -7520,7 +7570,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Open the burst on a body cell and type into it — this is the state
@@ -7593,7 +7643,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const rowCorner = await page.evaluate((ts) => {
@@ -7760,7 +7810,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Row grip: start on a REAL cell of the anchored row, well inside
@@ -7846,7 +7896,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Hover row 1 (body index 0) to arm its row grip.
@@ -7937,7 +7987,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const from = await rowGripCoords(page, table0, 2); // row "3"
@@ -7990,7 +8040,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const from = await rowGripCoords(page, table0, 2);
@@ -8039,7 +8089,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const probe = await page.evaluate((s) => {
           const table = document.querySelector(s + ' table');
@@ -8109,7 +8159,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         // 把最後一個資料列拖到最頂 → 它成為新表頭，其餘順序不變
         const from = await rowGripCoords(page, table0, 2); // Carol
@@ -8154,7 +8204,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const from = await rowGripCoords(page, table0, 0);
         const to = await page.evaluate((s) => {
@@ -8188,7 +8238,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'Alice'); // burst opens HERE, before any drag
         const from = await rowGripCoords(page, table0, 0);
@@ -8226,7 +8276,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // 1) Alice (first body row) -> above the header: she becomes the header.
@@ -8294,7 +8344,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Fixture sanity: the three columns really are graded differently,
@@ -8356,7 +8406,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         await hoverAndClickRowInsert(page, table0, 0);           // 插一列（裸 td，無 style）
         await page.waitForFunction((s) =>
@@ -8392,7 +8442,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const from = await rowGripCoords(page, table0, 2);
@@ -8468,7 +8518,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const from = await rowGripCoords(page, table0, 2); // row "3"
@@ -8565,7 +8615,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         // Fixture sanity: confirm the three columns really do land on three
         // DIFFERENT grades before trusting the move assertion below.
@@ -8633,7 +8683,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         await hoverAndClickColInsert(page, table0, 0);
         await page.waitForFunction((s) =>
@@ -8677,7 +8727,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         assert.deepStrictEqual(
           await page.evaluate((s) => Array.from(document.querySelectorAll(s + ' table colgroup col'))
@@ -8747,7 +8797,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
 
         // 1) type in the paragraph — append text via the WYSIWYG editor
         // (caret starts at the end, per openWysiwygEditor()'s placeCaretAtEnd()).
@@ -8852,7 +8902,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         // Open burst on the first li of list 0 (Alpha item) and type.
@@ -8888,7 +8938,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- Alpha item', '- Bravo item', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const alphaLi = await listBlockSel(page, 0);
         await openWysiwyg(page, alphaLi);
@@ -8922,7 +8972,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -8991,7 +9041,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9058,7 +9108,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const ooo = await liBlockSelByText(page, 'OOO');
         await openWysiwyg(page, ooo);
@@ -9158,7 +9208,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const charlie = await liBlockSelByText(page, 'Charlie');
         await openWysiwyg(page, charlie);
@@ -9215,7 +9265,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // OOO is line 4 (1-indexed source line, matching blocks' own
         // startLine/endLine) — select it alone as a STANDING SET via the
@@ -9270,7 +9320,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9316,7 +9366,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         // sanity: Bravo starts out nested under Alpha.
@@ -9384,7 +9434,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9435,7 +9485,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9507,7 +9557,7 @@ async function gutterGeometry(page, sel) {
           if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
           req.continue();
         });
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9590,7 +9640,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- ab', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9675,7 +9725,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 0:b | 1:b1 | 1:b2 | 0:c',
@@ -9747,7 +9797,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9815,7 +9865,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- alpha', '  - nested item', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         const nestedSel = await liBlockSelByText(page, 'nested item');
 
@@ -9898,7 +9948,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- alpha', '- beta', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -9965,7 +10015,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- alpha', '  - nested item', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, await liBlockSelByText(page, 'nested item'));
@@ -10028,7 +10078,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- a', '  - b', '    - x', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:b | 2:x',
           'sanity: the fixture must start as a > b > x');
@@ -10097,7 +10147,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         assert.strictEqual(await runShapeOf(page, list0), '0:b | 1:b1 | 2:x | 1:b2',
           'sanity: the fixture must start as b > (b1 > ol:x, b2)');
@@ -10185,7 +10235,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- Alpha item', '- Bravo item', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         const bravoSel = await liBlockSelByText(page, 'Bravo item');
 
@@ -10256,7 +10306,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         const beforeShape = await runShapeOf(page, list0);
 
@@ -10305,7 +10355,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         assert.strictEqual(await runShapeOf(page, list0), '0:a | 1:x | 0:b',
           'sanity: the fixture must start as a > (ol:x) and a sibling bullet b');
@@ -10380,7 +10430,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- a', '  - b', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, await liBlockSelByText(page, 'b'));
@@ -10430,7 +10480,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // Per-li arch: canWysiwygForLi() handles .ed-li-check spans correctly
         // (serializeBlocks() consumes them without flagging unsupported), so
@@ -10482,7 +10532,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // (i) The unsupported li (contains <video>) must NOT be armed.
         const badLiArmed = await page.evaluate(() => {
@@ -10552,7 +10602,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // Edit the SUPPORTED `outer` li (positioned before the loose blank).
         await openWysiwyg(page, await liBlockSelByText(page, 'outer'));
@@ -10607,7 +10657,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // Edit the SUPPORTED `b` li (positioned AFTER the loose blank).
         await openWysiwyg(page, await liBlockSelByText(page, 'b'));
@@ -10659,7 +10709,7 @@ async function gutterGeometry(page, sel) {
         const lorig = c.rows.join('\n');
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
 
           // Locate the outer item — the one whose own surface is empty.
           const empty = await page.evaluate(() => {
@@ -10723,7 +10773,7 @@ async function gutterGeometry(page, sel) {
       const { srv: lsrv, url: lurl } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const armed = await page.evaluate((ids) => ids.filter((id) => {
           const el = document.querySelector(
             '.ed-block[data-block-id="' + id + '"] > .ed-li-text');
@@ -10835,7 +10885,7 @@ async function gutterGeometry(page, sel) {
         const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
 
           // The child of the nest is the deepest item — and the only one of the
           // nest's members that owns a source line, hence the only armed one.
@@ -10968,7 +11018,7 @@ async function gutterGeometry(page, sel) {
         const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
 
           const child = await page.evaluate((t) => {
             const hit = Array.prototype.slice.call(document.querySelectorAll(
@@ -11044,7 +11094,7 @@ async function gutterGeometry(page, sel) {
         const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(c.rows);
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
 
           // The only ARMED item whose own text is exactly 'b' is the real
           // nested one — the code-block lookalike is not a block at all.
@@ -11081,7 +11131,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- - a', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         await page.waitForSelector('.ed-block[data-block-type="li"]');
         assert.strictEqual(
           await page.evaluate(() =>
@@ -11126,7 +11176,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- alpha', '  cont', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const wrappedArmed = await page.evaluate(() => {
           const hit = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
@@ -11186,7 +11236,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const a2Sel = await liBlockSelByText(page, 'a2');
         await openWysiwyg(page, a2Sel);
@@ -11227,7 +11277,7 @@ async function gutterGeometry(page, sel) {
       const lorig = rows.join('\n');
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         const beforeShape = await runShapeOf(page, list0);
 
@@ -11276,7 +11326,7 @@ async function gutterGeometry(page, sel) {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
@@ -11317,7 +11367,7 @@ async function gutterGeometry(page, sel) {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         await openWysiwyg(page, await liBlockSelByText(page, 'bravo'));
         await page.keyboard.down('Shift');
@@ -11361,7 +11411,7 @@ async function gutterGeometry(page, sel) {
       }, headingSel);
       try {
         const page = await newPage(browser);
-        await page.goto(hurl, { waitUntil: 'networkidle0' });
+        await page.goto(hurl, { waitUntil: 'networkidle2' });
 
         assert.strictEqual(await headingTag(page), 'H2', 'sanity: the fixture starts at H2');
 
@@ -11446,7 +11496,7 @@ async function gutterGeometry(page, sel) {
       const csrv = await createEditorServer({ files: [cmdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(csrv.urlFor(cmdPath), { waitUntil: 'networkidle0' });
+        await page.goto(csrv.urlFor(cmdPath), { waitUntil: 'networkidle2' });
 
         // (1) The accept rate, computed the way client.js's own gate computes
         //     it. `columnOnly` (Tab / Shift+Tab) must accept EVERY item;
@@ -11559,7 +11609,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# List doc', '', '- a', '  1. x', '  1) y', '- d', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         await openWysiwyg(page, await liBlockSelByText(page, 'a'));
         await page.keyboard.type('Z');
         await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
@@ -11593,7 +11643,7 @@ async function gutterGeometry(page, sel) {
         const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
           await openWysiwyg(page, await liBlockSelByText(page, 'a'));
           await page.keyboard.type('Z');
           await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
@@ -11614,7 +11664,7 @@ async function gutterGeometry(page, sel) {
         const { srv: lsrv, url: lurl, mdPath: lmdPath } = await setupListDoc(rows);
         try {
           const page = await newPage(browser);
-          await page.goto(lurl, { waitUntil: 'networkidle0' });
+          await page.goto(lurl, { waitUntil: 'networkidle2' });
           await openWysiwyg(page, await liBlockSelByText(page, 'p'));
           await page.keyboard.type('Z');
           await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); });
@@ -11649,7 +11699,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         await openWysiwyg(page, await liBlockSelByText(page, 'alpha'));
         await page.keyboard.type(' EDITED');
@@ -11685,7 +11735,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -11750,7 +11800,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Doc', '', '- Only item', '', 'Trailer']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
 
         await openWysiwyg(page, list0);
@@ -11849,7 +11899,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(murl, { waitUntil: 'networkidle0' });
+        await page.goto(murl, { waitUntil: 'networkidle2' });
 
         // 1) paragraph edit (Ctrl+A -> type -> Enter commits and ends the burst).
         const paraSel = await paragraphSelByText(page, 'Paragraph text here for editing.');
@@ -12053,7 +12103,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f1url, { waitUntil: 'networkidle0' });
+        await page.goto(f1url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Mid-burst save target text here.');
         const editEl = sel + ' > *';
@@ -12099,7 +12149,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f2url, { waitUntil: 'networkidle0' });
+        await page.goto(f2url, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'Row1');
@@ -12154,7 +12204,7 @@ async function gutterGeometry(page, sel) {
           if (req.method() === 'POST' && req.url().endsWith('/api/render')) renderRequestCount++;
           req.continue();
         });
-        await page.goto(f3url, { waitUntil: 'networkidle0' });
+        await page.goto(f3url, { waitUntil: 'networkidle2' });
 
         const table0 = await tableBlockSel(page, 0);
         await clickCellWithText(page, table0, 'bold target word here');
@@ -12230,7 +12280,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f4url, { waitUntil: 'networkidle0' });
+        await page.goto(f4url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Discard resurrection target text here.');
         const editEl = sel + ' > *';
@@ -12305,7 +12355,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f5url, { waitUntil: 'networkidle0' });
+        await page.goto(f5url, { waitUntil: 'networkidle2' });
 
         const sel = '.ed-block[data-block-type="heading"]';
         const editEl = sel + ' > *';
@@ -12422,7 +12472,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f6aUrl, { waitUntil: 'networkidle0' });
+        await page.goto(f6aUrl, { waitUntil: 'networkidle2' });
 
         const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
         const pEditEl = pSel + ' > *';
@@ -12493,7 +12543,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f6bUrl, { waitUntil: 'networkidle0' });
+        await page.goto(f6bUrl, { waitUntil: 'networkidle2' });
 
         const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
         const pEditEl = pSel + ' > *';
@@ -12599,7 +12649,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f7Url, { waitUntil: 'networkidle0' });
+        await page.goto(f7Url, { waitUntil: 'networkidle2' });
 
         const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
         const pEditEl = pSel + ' > *';
@@ -12715,7 +12765,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(f8Url, { waitUntil: 'networkidle0' });
+        await page.goto(f8Url, { waitUntil: 'networkidle2' });
 
         const pSel = await paragraphSelByText(page, 'Dirty paragraph target text here.');
         const pEditEl = pSel + ' > *';
@@ -12802,7 +12852,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'Para one.', '', 'Para two.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'Para one.');
         await page.hover(sel);
         await page.click(sel + ' .ed-insert');
@@ -12828,7 +12878,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'Para one.', '', 'Para two.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'Para one.');
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
@@ -12862,7 +12912,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'Para one.', '', 'Para two.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'Para one.');
         await clickInsertMenuItem(page, sel, '表格');
         await page.waitForSelector('.ed-block[data-block-type="table"] td');
@@ -12893,7 +12943,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'ParaA.', '', 'ParaB.', '', 'ParaC.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'ParaB.');
         await clickGutterMenuItem(page, sel, '刪除');
         await page.waitForFunction(
@@ -12916,7 +12966,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'ParaA.', '', 'ParaB.', '', 'ParaC.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'ParaB.');
         await clickGutterMenuItem(page, sel, '刪除');
         await page.waitForFunction(
@@ -12946,7 +12996,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'Para one.', '', 'Para two.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const sel = await paragraphSelByText(page, 'Para one.');
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
@@ -12984,7 +13034,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
 
         const dirtySel = await paragraphSelByText(page, 'Dirty target text here.');
         await openWysiwyg(page, dirtySel);
@@ -13054,7 +13104,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
 
         const hSel = await paragraphSelByText(page, 'Heading anchor.');
         await clickInsertMenuItem(page, hSel, '標題');
@@ -13139,7 +13189,7 @@ async function gutterGeometry(page, sel) {
       const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
         const baseTitle = await page.evaluate(() => document.title);
         assert.ok(!baseTitle.startsWith('●'), 'sanity: freshly-loaded page must not start dirty');
 
@@ -13191,7 +13241,7 @@ async function gutterGeometry(page, sel) {
         ['# Doc', '', 'Earlier edit target.', '', 'Insert anchor.']);
       try {
         const page = await newPage(browser);
-        await page.goto(biUrl, { waitUntil: 'networkidle0' });
+        await page.goto(biUrl, { waitUntil: 'networkidle2' });
 
         // An EARLIER, real, committed edit — the op a wrongly-double-cascaded
         // Ctrl+Z would incorrectly reach past the insert and revert too.
@@ -13249,7 +13299,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Task doc', '', '- [ ] todo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // Locate the checkbox span.
         const checkSel = '.ed-block[data-block-type="li"] .ed-li-check';
@@ -13310,7 +13360,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Task doc', '', '1. [ ] todo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         const checkSel = '.ed-block[data-block-type="li"] .ed-li-check';
         await page.waitForSelector(checkSel);
@@ -13349,7 +13399,7 @@ async function gutterGeometry(page, sel) {
         ]);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
 
         // Find the first checkbox (the '- [ ] todo' item).
         const todoCheckSel = await page.evaluate(() => {
@@ -13418,7 +13468,7 @@ async function gutterGeometry(page, sel) {
       const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // 1) 欄搬移：B 移到最左
@@ -13483,7 +13533,7 @@ async function gutterGeometry(page, sel) {
       const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Reads the whole table back as rows of trimmed cell text — the
@@ -13602,7 +13652,7 @@ async function gutterGeometry(page, sel) {
       const { srv: s1Srv, url: s1Url, mdPath: s1MdPath } = await setupTableDoc(s1Rows);
       try {
         const page = await newPage(browser);
-        await page.goto(s1Url, { waitUntil: 'networkidle0' });
+        await page.goto(s1Url, { waitUntil: 'networkidle2' });
         const pSel = await paragraphSelByText(page, 'Para one.');
         const table1 = await tableBlockSel(page, 1);
 
@@ -13702,7 +13752,7 @@ async function gutterGeometry(page, sel) {
       const { srv: s2Srv, url: s2Url, mdPath: s2MdPath } = await setupTableDoc(s2Rows);
       try {
         const page = await newPage(browser);
-        await page.goto(s2Url, { waitUntil: 'networkidle0' });
+        await page.goto(s2Url, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const pSel = await paragraphSelByText(page, 'Tail paragraph.');
 
@@ -13750,7 +13800,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(s3Url, { waitUntil: 'networkidle0' });
+        await page.goto(s3Url, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         const HL = 'rgba(59, 130, 246, 0.15)';
         const bgOf = (sel) => page.evaluate((s) =>
@@ -13807,7 +13857,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(s4Url, { waitUntil: 'networkidle0' });
+        await page.goto(s4Url, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         // Promote the LAST body row ('3') to header by dropping it above the
@@ -13897,7 +13947,7 @@ async function gutterGeometry(page, sel) {
       const { srv: lsrv, url: lurl } = await setupListDoc(['# List doc', '', '- Alpha', '  - Bravo', '- Charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(lurl, { waitUntil: 'networkidle0' });
+        await page.goto(lurl, { waitUntil: 'networkidle2' });
         const handles = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
             .map((b) => ({
@@ -14020,7 +14070,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Doc', '', '- a', '', '- - b', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(zurl, { waitUntil: 'networkidle0' });
+        await page.goto(zurl, { waitUntil: 'networkidle2' });
 
         // The zero-line outer is the indent-0 li whose own .ed-li-text is
         // empty (its content is its child, which starts on its line).
@@ -14125,7 +14175,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Doc', '', '- alpha', '- bravo', '- charlie', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(nurl, { waitUntil: 'networkidle0' });
+        await page.goto(nurl, { waitUntil: 'networkidle2' });
         const bravoSel = await liBlockSelByText(page, 'bravo');
         await page.hover(bravoSel);
         await page.click(bravoSel + ' .ed-handle');
@@ -14165,7 +14215,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(gurl, { waitUntil: 'networkidle0' });
+        await page.goto(gurl, { waitUntil: 'networkidle2' });
         const geo = await page.evaluate(() => {
           const blocks = Array.from(document.querySelectorAll('.ed-block'));
           return blocks.map((b) => {
@@ -14228,7 +14278,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(curl, { waitUntil: 'networkidle0' });
+        await page.goto(curl, { waitUntil: 'networkidle2' });
         const ctr = await page.evaluate(() => {
           const blocks = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           return blocks.map((b) => {
@@ -14312,7 +14362,7 @@ async function gutterGeometry(page, sel) {
           .concat(['', '- bullet', '- [ ] task', '']));
       try {
         const page = await newPage(browser);
-        await page.goto(wurl, { waitUntil: 'networkidle0' });
+        await page.goto(wurl, { waitUntil: 'networkidle2' });
         const measured = await page.evaluate(() => {
           const lis = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const plainTextLefts = [];
@@ -14402,7 +14452,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(purl, { waitUntil: 'networkidle0' });
+        await page.goto(purl, { waitUntil: 'networkidle2' });
         const geo = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block:not([data-block-type="li"])')).map((b) => {
             const p = b.querySelector(':scope > .ed-insert');
@@ -14472,7 +14522,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(surl, { waitUntil: 'networkidle0' });
+        await page.goto(surl, { waitUntil: 'networkidle2' });
         const geo = await page.evaluate(() => {
           const splitter = document.getElementById('sidebar-splitter');
           if (!splitter) return null;
@@ -14576,7 +14626,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(bystanderRows);
       try {
         const page = await newPage(browser);
-        await page.goto(burl, { waitUntil: 'networkidle0' });
+        await page.goto(burl, { waitUntil: 'networkidle2' });
         const targetSel = await liBlockSelByText(page, 'target item');
         await openWysiwyg(page, targetSel);
         await page.keyboard.press('Tab');
@@ -14626,7 +14676,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(taskRows);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const checkSelFor = async (lead) => {
           const sel = await page.evaluate((t) => {
             const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
@@ -14680,7 +14730,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(eurl, { waitUntil: 'networkidle0' });
+        await page.goto(eurl, { waitUntil: 'networkidle2' });
         const sel = await page.evaluate(() => {
           const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
             .find((el) => {
@@ -14723,7 +14773,7 @@ async function gutterGeometry(page, sel) {
       const { srv: dsrv, url: durl, mdPath: dmdPath } = await setupBlockOpsDoc(fenceRows);
       try {
         const page = await newPage(browser);
-        await page.goto(durl, { waitUntil: 'networkidle0' });
+        await page.goto(durl, { waitUntil: 'networkidle2' });
         const codeSel = await page.evaluate(() => {
           const el = document.querySelector('.ed-block[data-block-type="code"]');
           return el ? '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]' : null;
@@ -14755,7 +14805,7 @@ async function gutterGeometry(page, sel) {
       const { srv: isrv, url: iurl, mdPath: imdPath } = await setupBlockOpsDoc(fenceRows);
       try {
         const page = await newPage(browser);
-        await page.goto(iurl, { waitUntil: 'networkidle0' });
+        await page.goto(iurl, { waitUntil: 'networkidle2' });
         const codeSel = await page.evaluate(() => {
           const el = document.querySelector('.ed-block[data-block-type="code"]');
           return el ? '.ed-block[data-block-id="' + el.getAttribute('data-block-id') + '"]' : null;
@@ -14792,7 +14842,7 @@ async function gutterGeometry(page, sel) {
       const { srv: nsrv, url: nurl, mdPath: nmdPath } = await setupBlockOpsDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(nurl, { waitUntil: 'networkidle0' });
+        await page.goto(nurl, { waitUntil: 'networkidle2' });
         const alphaSel = await paragraphSelByText(page, 'Alpha');
         const charlieSel = await paragraphSelByText(page, 'Charlie');
         await openBlockEditor(page, alphaSel);
@@ -14845,7 +14895,7 @@ async function gutterGeometry(page, sel) {
       const { srv: gsrv, url: gurl, mdPath: gmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(gurl, { waitUntil: 'networkidle0' });
+        await page.goto(gurl, { waitUntil: 'networkidle2' });
         const sel = await page.evaluate(() => {
           const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
             .find((el) => {
@@ -14959,7 +15009,7 @@ async function gutterGeometry(page, sel) {
       const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         const info = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
             .map((el, i) => {
@@ -14996,7 +15046,7 @@ async function gutterGeometry(page, sel) {
         const problems = [];
         for (let k = 0; k < liBlocks.length; k++) {
           fs.writeFileSync(mdPath, fixture, 'utf8');
-          await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+          await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
           const meta = await page.evaluate((i) => {
             const el = document.querySelectorAll('.ed-block[data-block-type="li"]')[i];
             const t = el && el.querySelector(':scope > .ed-li-text');
@@ -15071,7 +15121,7 @@ async function gutterGeometry(page, sel) {
         const problems = [];
         for (let k = 0; k < liBlocks.length; k++) {
           fs.writeFileSync(wmdPath, fixture, 'utf8');
-          await page.goto(wurl, { waitUntil: 'networkidle0' });
+          await page.goto(wurl, { waitUntil: 'networkidle2' });
           const meta = await page.evaluate((i) => {
             const el = document.querySelectorAll('.ed-block[data-block-type="li"]')[i];
             const t = el && el.querySelector(':scope > .ed-li-text');
@@ -15134,7 +15184,7 @@ async function gutterGeometry(page, sel) {
       const { srv: rsrv, url: rurl, mdPath: rmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(rurl, { waitUntil: 'networkidle0' });
+        await page.goto(rurl, { waitUntil: 'networkidle2' });
         const sel = await page.evaluate(() => {
           const el = document.querySelectorAll('.ed-block[data-block-type="li"]')[1];
           return '.ed-block[data-block-type="li"][data-block-id="' +
@@ -15177,7 +15227,7 @@ async function gutterGeometry(page, sel) {
       const { srv: csrv, url: curl, mdPath: cmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(curl, { waitUntil: 'networkidle0' });
+        await page.goto(curl, { waitUntil: 'networkidle2' });
         const toggle = async (lead) => {
           const sel = await page.evaluate((t) => {
             const li = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
@@ -15197,7 +15247,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(await saveAndRead(page, cmdPath),
           '# Tasks\n\n- [x] alpha\n- [ ] bravo\n- [ ] charlie\n',
           'both directions of the toggle must reach the file');
-        await page.goto(curl, { waitUntil: 'networkidle0' });
+        await page.goto(curl, { waitUntil: 'networkidle2' });
         assert.deepStrictEqual(await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]')).map((el) => {
             const c = el.querySelector(':scope > .ed-li-check');
@@ -15231,7 +15281,7 @@ async function gutterGeometry(page, sel) {
       const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         const sel = await page.evaluate(() => {
           const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'))
             .find((e) => e.querySelector(':scope > .ed-li-text').textContent.trim() === 'bravo');
@@ -15312,7 +15362,7 @@ async function gutterGeometry(page, sel) {
         const { srv: hsrv, url: hurl, mdPath: hmdPath } = await setupListDoc(c.rows);
         try {
           const page = await newPage(browser);
-          await page.goto(hurl, { waitUntil: 'networkidle0' });
+          await page.goto(hurl, { waitUntil: 'networkidle2' });
           await c.pick(page);
           await page.keyboard.press('End');
           await page.keyboard.type('Z');
@@ -15349,7 +15399,7 @@ async function gutterGeometry(page, sel) {
       const { srv: msrv, url: murl, mdPath: mmdPath } = await setupListDoc(rows);
       try {
         const page = await newPage(browser);
-        await page.goto(murl, { waitUntil: 'networkidle0' });
+        await page.goto(murl, { waitUntil: 'networkidle2' });
         const litSel = await paragraphSelByText(page, 'literal');
         await openWysiwyg(page, litSel);
         await page.keyboard.press('End');
@@ -15452,7 +15502,7 @@ async function gutterGeometry(page, sel) {
           await setupListDoc(c.rows);
         try {
           const page = await newPage(browser);
-          await page.goto(durl, { waitUntil: 'networkidle0' });
+          await page.goto(durl, { waitUntil: 'networkidle2' });
           const sel = await liSelByPrefix(page, c.target);
           await clickGutterMenuItem(page, sel, '刪除');
           await settleEditor(page);
@@ -15535,7 +15585,7 @@ async function gutterGeometry(page, sel) {
           '   2. delta', '      1. epsilon', '2. zeta', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(b1rUrl, { waitUntil: 'networkidle0' });
+        await page.goto(b1rUrl, { waitUntil: 'networkidle2' });
 
         // FIXTURE SANITY, stated because the whole point of the scenario is
         // its SHAPE: beta is not the run's head, gamma is deeper than beta,
@@ -15708,7 +15758,18 @@ async function gutterGeometry(page, sel) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-t7-sweep-'));
       const mdPath = path.join(dir, 'sweep.md');
       fs.writeFileSync(mdPath, sweepOriginal, 'utf8');
-      const srv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
+      // v3.6.0 audit finding (Round 3): same connection-grace reasoning as
+      // the S2/S3 sweeps above (see the comment near the top of this file) —
+      // this one server/page pair is reused for 12 list items × 3 gestures =
+      // 36 sequential `page.goto()` reconnects below ("One server and one
+      // page for the whole sweep; only the navigation is repeated" is this
+      // very sweep's own comment). It did not carry the old `idleTimeoutMs`
+      // override, apparently by oversight rather than by having been proven
+      // safe — added here for consistency with every other many-reconnect
+      // sweep in this file, none of which test liveness itself.
+      const srv = await createEditorServer({
+        files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
+      });
       try {
         // blockmap.js emits one li block per item in document order, and
         // lib/md2doc.js's render walk consumes that array in lockstep — so the
@@ -15750,7 +15811,7 @@ async function gutterGeometry(page, sel) {
         // change that starts reporting something for these items fails HERE,
         // with this explanation, instead of quietly turning the sweep back
         // into a tripwire that guards nothing.
-        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         const run3 = await page.evaluate(new Function('prefix', RUN_SPAN_FN + `
           const lis = Array.prototype.slice.call(
             document.querySelectorAll('.ed-block[data-block-type="li"]'));
@@ -15794,7 +15855,7 @@ async function gutterGeometry(page, sel) {
             // from the same bytes. One server and one page for the whole
             // sweep; only the navigation is repeated.
             fs.writeFileSync(mdPath, sweepOriginal, 'utf8');
-            await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+            await page.goto(srv.urlFor(mdPath), { waitUntil: 'networkidle2' });
             const sel = await page.evaluate((i) => {
               const lis = document.querySelectorAll('.ed-block[data-block-type="li"]');
               const el = lis[i];
@@ -15868,7 +15929,7 @@ async function gutterGeometry(page, sel) {
       const ssrv = await createEditorServer({ files: [mdPath], clientJs: CLIENT_SRC });
       try {
         const page = await newPage(browser);
-        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         await settleEditor(page);
         await fn(page, mdPath);
         await page.close();
@@ -16927,7 +16988,7 @@ async function gutterGeometry(page, sel) {
         // Class B — armed surface, null burst.
         {
           const page = await newPage(browser);
-          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tabUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const alpha = await liBlockSelByText(page, 'alpha');
           await openWysiwyg(page, alpha);
@@ -16966,7 +17027,7 @@ async function gutterGeometry(page, sel) {
         // marker, which is chrome and not an edit surface.
         {
           const page = await newPage(browser);
-          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tabUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const beta = await liBlockSelByText(page, 'beta');
           await page.click(beta + ' > .ed-li-marker');
@@ -16994,7 +17055,7 @@ async function gutterGeometry(page, sel) {
         // Class A, second shape: Escape out of a burst leaves BODY focused.
         {
           const page = await newPage(browser);
-          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tabUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const alpha = await liBlockSelByText(page, 'alpha');
           await openWysiwyg(page, alpha);
@@ -17017,7 +17078,7 @@ async function gutterGeometry(page, sel) {
         // inside .ed-block" would trap focus on the button it lands on.
         {
           const page = await newPage(browser);
-          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tabUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const bq = await page.evaluate(() => {
             const b = Array.prototype.slice.call(document.querySelectorAll('.ed-block'))
@@ -17043,7 +17104,7 @@ async function gutterGeometry(page, sel) {
         // place and produced the most jarring symptom of both classes.
         {
           const page = await newPage(browser);
-          await page.goto(tabUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tabUrl, { waitUntil: 'networkidle2' });
           const idx = await page.evaluate(() => {
             const all = Array.prototype.slice.call(document.querySelectorAll('.ed-handle, .ed-insert'));
             return {
@@ -17076,7 +17137,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const bravo = await liBlockSelByText(page, 'bravo');
           await openWysiwyg(page, bravo);
@@ -17099,7 +17160,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const bravo = await liBlockSelByText(page, 'bravo');
           await openWysiwyg(page, bravo);
@@ -17122,7 +17183,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const one = await liBlockSelByText(page, 'one');
           await openWysiwyg(page, one);
@@ -17147,7 +17208,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const alpha = await liBlockSelByText(page, 'alpha');
           await openWysiwyg(page, alpha);
@@ -17164,7 +17225,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const bravo = await liBlockSelByText(page, 'bravo');
           await openWysiwyg(page, bravo);
@@ -17183,7 +17244,7 @@ async function gutterGeometry(page, sel) {
         {
           const page = await newPage(browser);
           resetTnr();
-          await page.goto(tnrUrl, { waitUntil: 'networkidle0' });
+          await page.goto(tnrUrl, { waitUntil: 'networkidle2' });
           await armKeyRecorder(page);
           const one = await liBlockSelByText(page, 'one');
           const bravo = await liBlockSelByText(page, 'bravo');
@@ -17226,7 +17287,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(hovUrl, { waitUntil: 'networkidle0' });
+        await page.goto(hovUrl, { waitUntil: 'networkidle2' });
         const beta = await liBlockSelByText(page, 'beta');
         const geo = await gutterGeometry(page, beta);
         // Spec §4.2's number contract, MIGRATED (v3.0.1): the pair moved a
@@ -17343,7 +17404,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(bandUrl, { waitUntil: 'networkidle0' });
+        await page.goto(bandUrl, { waitUntil: 'networkidle2' });
         // A blockquote is a DEGRADED block: a click ON it opens the in-place
         // source editor. A click in its GUTTER must not.
         const bq = await page.evaluate(() => {
@@ -17393,7 +17454,7 @@ async function gutterGeometry(page, sel) {
         await setupListDoc(['# Doc', '', '- alpha', '- beta', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(setUrl, { waitUntil: 'networkidle0' });
+        await page.goto(setUrl, { waitUntil: 'networkidle2' });
         const beta = await liBlockSelByText(page, 'beta');
         await openWysiwyg(page, beta);
         await page.keyboard.press('End');
@@ -19262,12 +19323,15 @@ async function gutterGeometry(page, sel) {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s3-t8-'));
         const mdPath = path.join(dir, 'doc.md');
         fs.writeFileSync(mdPath, shape.md, 'utf8');
-        // An EXPLICIT idle timeout, for the same reason the S2 sweep's server
-        // has one: eight cells on one server outlive createEditorServer()'s
-        // 30s default and the symptom is a bare net::ERR_CONNECTION_REFUSED
-        // that reads as a broken test.
+        // An EXPLICIT connection grace, for the same reason the S2 sweep's
+        // server has one (see its own comment near the top of this file):
+        // this outer T8_SHAPES loop repeats createEditorServer() once per
+        // shape, and the INNER T8_OPS loop below drives repeated
+        // `page.goto()` reconnects against each one — same many-reconnects-
+        // on-one-server shape as the S2 sweep, not the liveness feature
+        // itself.
         const srv8 = await createEditorServer({
-          files: [mdPath], clientJs: CLIENT_SRC, idleTimeoutMs: 30 * 60 * 1000,
+          files: [mdPath], clientJs: CLIENT_SRC, connectionGraceMs: 30 * 60 * 1000,
         });
         try {
           const page = await newPage(browser);
@@ -19294,7 +19358,7 @@ async function gutterGeometry(page, sel) {
             // repeated. A cell that DID write despite refusing therefore
             // cannot poison the next one.
             fs.writeFileSync(mdPath, shape.md, 'utf8');
-            await page.goto(srv8.urlFor(mdPath), { waitUntil: 'networkidle0' });
+            await page.goto(srv8.urlFor(mdPath), { waitUntil: 'networkidle2' });
             await settleEditor(page);
 
             // ── PRECONDITIONS ────────────────────────────────────────────
@@ -20115,7 +20179,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle0' });
+        await page.goto(ssrv.urlFor(mdPath), { waitUntil: 'networkidle2' });
         await settleEditor(page);
         await fn(page, mdPath);
         await page.close();
@@ -23159,7 +23223,7 @@ async function gutterGeometry(page, sel) {
       const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const detached = await page.evaluate(() => {
           const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
@@ -23176,7 +23240,7 @@ async function gutterGeometry(page, sel) {
         assert.deepStrictEqual(written, ['0', '1'],
           'a refused clamp must write NO data-indent at all, got: ' + JSON.stringify(written));
 
-        await page.reload({ waitUntil: 'networkidle0' });
+        await page.reload({ waitUntil: 'networkidle2' });
         const shuffled = await page.evaluate(() => {
           const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const out = run.slice();
@@ -23198,7 +23262,7 @@ async function gutterGeometry(page, sel) {
       const { srv, url } = await setupListDoc(['- alpha', '  - beta', '  - gamma', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const answer = await page.evaluate(() => {
           const run = Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]'));
           const r = window.__edTestClampProbe(run, run[1], 1, { removed: true });
@@ -23247,7 +23311,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'Bravo item', true);
@@ -23272,7 +23336,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const list0 = await listBlockSel(page, 0);
         await openWysiwyg(page, list0);
         await placeCaretInListText(page, list0, 'Bravo item', true);
@@ -23314,7 +23378,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const tsel = await tableBlockSel(page, 0);
         await hoverHeaderRowCell(page, tsel);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -23342,7 +23406,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const tsel = await tableBlockSel(page, 0);
         const bodyY = await page.evaluate((sl) => {
           const rows = document.querySelector(sl).querySelectorAll('tbody tr');
@@ -23374,7 +23438,7 @@ async function gutterGeometry(page, sel) {
         await page.setViewport({ width: 1400, height: 900 });
         const errors = [];
         page.on('pageerror', (e) => errors.push(String(e && e.message)));
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const tsel = await tableBlockSel(page, 0);
         await hoverHeaderRowCell(page, tsel);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -23414,7 +23478,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const tsel = await tableBlockSel(page, 0);
         await hoverHeaderRowCell(page, tsel);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -23442,7 +23506,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         const tsel = await tableBlockSel(page, 0);
         await hoverHeaderRowCell(page, tsel);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -23494,7 +23558,7 @@ async function gutterGeometry(page, sel) {
         // stylesheet's own 1080px breakpoint, and the probe below reads the
         // DESKTOP attribute (data-ed-outline-hidden, not data-sidebar-open).
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         assert.deepStrictEqual(
           await page.evaluate(() => ({
@@ -23553,7 +23617,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Toolbar bold target');
         const editEl = sel + ' > *';
@@ -23611,7 +23675,7 @@ async function gutterGeometry(page, sel) {
       const { srv, url } = await setupTableDoc(['# Doc', '', '- alpha', '- bravo', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await liBlockSelByText(page, 'alpha');
         await openGutterMenu(page, sel);
@@ -23662,7 +23726,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Paste anchor');
         const editEl = sel + ' > *';
@@ -23732,7 +23796,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Drop anchor');
         assert.strictEqual(
@@ -23808,7 +23872,7 @@ async function gutterGeometry(page, sel) {
       try {
         const page = await newPage(browser);
         await page.setViewport({ width: 1400, height: 900 });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Diagram anchor');
         assert.strictEqual(
@@ -23923,7 +23987,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         // PRIME: consume the always-falls-back first commit on a block this
         // scenario otherwise ignores.
@@ -24018,7 +24082,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
         await page.waitForFunction(
           () => !!document.querySelector('.content .mermaid svg'), { timeout: 10000 });
 
@@ -24088,7 +24152,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const aSel = await paragraphSelByText(page, 'Id3 para A');
         await openWysiwyg(page, aSel);
@@ -24152,7 +24216,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const aSel = await paragraphSelByText(page, 'Case4 para A');
         await openWysiwyg(page, aSel);
@@ -24243,7 +24307,7 @@ async function gutterGeometry(page, sel) {
             return origRemove(type, listener, opts);
           };
         });
-        await page.goto(url, { waitUntil: 'networkidle0' });
+        await page.goto(url, { waitUntil: 'networkidle2' });
 
         const sel = await paragraphSelByText(page, 'Case5 freeze target');
         await openWysiwyg(page, sel);
@@ -24402,7 +24466,7 @@ async function gutterGeometry(page, sel) {
       const { srv: tsrv, url: turl } = await setupTableDoc(tallTableRows(N));
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         const { scrollY: before, headerBottom } = await scrollRowIntoView(page, table0, fromIndex);
@@ -24464,7 +24528,7 @@ async function gutterGeometry(page, sel) {
       const { srv: tsrv, url: turl } = await setupTableDoc(longDocWithTableRows());
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
         await scrollToTable(page, table0);
 
@@ -24524,7 +24588,7 @@ async function gutterGeometry(page, sel) {
         ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         await typeIntoCell(page, table0, 1, 0, 'PROBE'); // body row "2"/col0 -> "2PROBE"
@@ -24573,7 +24637,7 @@ async function gutterGeometry(page, sel) {
         ['| Col1 | Col2 |', '|---|---|', '| 1 | a |', '| 2 | b |', '| 3 | c |', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(turl, { waitUntil: 'networkidle0' });
+        await page.goto(turl, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
 
         await clickCellWithText(page, table0, 'Col2');
@@ -24649,7 +24713,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'alpha', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s4url, { waitUntil: 'networkidle0' });
+        await page.goto(s4url, { waitUntil: 'networkidle2' });
         const btn = '.ed-toolbar [data-ed-tb="save"]';
 
         assert.strictEqual(await page.$eval(btn, (b) => b.disabled), true,
@@ -24715,7 +24779,7 @@ async function gutterGeometry(page, sel) {
         await setupTableDoc(['# Doc', '', 'alpha', '']);
       try {
         const page = await newPage(browser);
-        await page.goto(s5url, { waitUntil: 'networkidle0' });
+        await page.goto(s5url, { waitUntil: 'networkidle2' });
         const btn = '.ed-toolbar [data-ed-tb="save"]';
 
         const sel = await paragraphSelByText(page, 'alpha');
@@ -24786,7 +24850,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(t7url, { waitUntil: 'networkidle0' });
+        await page.goto(t7url, { waitUntil: 'networkidle2' });
 
         // Surface A: paragraph via ⠿ → MD 原始碼.
         const paraSel = await paragraphSelByText(page, 'Alpha bold text here.');
@@ -24877,7 +24941,7 @@ async function gutterGeometry(page, sel) {
       ]);
       try {
         const page = await newPage(browser);
-        await page.goto(t7burl, { waitUntil: 'networkidle0' });
+        await page.goto(t7burl, { waitUntil: 'networkidle2' });
 
         // Warm-up: a real commit on a DIFFERENT block, so the repair below
         // goes through applyPatch() rather than the always-fallback first
@@ -24947,7 +25011,7 @@ async function gutterGeometry(page, sel) {
     try {
       const page = await newPage(browser);
       await page.setViewport({ width: 1400, height: 900 });
-      await page.goto(url, { waitUntil: 'networkidle0' });
+      await page.goto(url, { waitUntil: 'networkidle2' });
 
       const list0 = await listBlockSel(page, 0);
       await openWysiwyg(page, list0);

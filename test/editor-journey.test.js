@@ -59,8 +59,8 @@ async function boot(mdText, extraFiles, srvOpts) {
   }
   fs.writeFileSync(mdPath, mdText, 'utf8');
   // createEditorServer() takes a single options object ({ files, clientJs,
-  // idleTimeoutMs, listenPort }), not the (paths, opts) shape the original
-  // sketch assumed — see lib/editor/server.js. It returns
+  // connectionGraceMs, listenPort }), not the (paths, opts) shape the
+  // original sketch assumed — see lib/editor/server.js. It returns
   // { server, port, urlFor(absPath), close() }, no bare `.url`/`.port`
   // shortcut on the caller's side; the URL for a given file comes from
   // urlFor(), which maps the resolved path back to its /edit/:id index.
@@ -175,7 +175,7 @@ async function newPage(mdText, extraFiles, srvOpts) {
       if (window.__journeyRejection) window.__journeyRejection(msg);
     });
   });
-  await page.goto(b.url, { waitUntil: 'networkidle0' });
+  await page.goto(b.url, { waitUntil: 'networkidle2' });
   return Object.assign({ page, errs }, b);
 }
 
@@ -1484,7 +1484,7 @@ async function main() {
       'escape-cycle 前提失敗：第一次存檔就必須是乾淨的，got:\n' + JSON.stringify(first));
     // 重新載入＝從磁碟重新解析，這是跳脫唯一發生得了的地方；再打一個字讓這個
     // block 真的被重新序列化（沒被編輯過的 block 會被逐位元組原樣重播）。
-    await ctx.page.goto(ctx.url, { waitUntil: 'networkidle0' });
+    await ctx.page.goto(ctx.url, { waitUntil: 'networkidle2' });
     await new Promise((r) => setTimeout(r, 400));
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 250));
@@ -1524,7 +1524,7 @@ async function main() {
         return orig.apply(this, args);
       };
     });
-    await page.goto(b.url, { waitUntil: 'networkidle0' });
+    await page.goto(b.url, { waitUntil: 'networkidle2' });
     const table0 = await page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-type="table"]');
       el.scrollIntoView({ block: 'center' });
@@ -1613,7 +1613,7 @@ async function main() {
   {
     const b = await boot(['Alpha paragraph text.', '', '| A | B |', '|---|---|', '| 1 | 2 |', ''].join('\n'));
     const page = await browser.newPage();
-    await page.goto(b.url, { waitUntil: 'networkidle0' });
+    await page.goto(b.url, { waitUntil: 'networkidle2' });
 
     // Leave an uncommitted, unblurred burst open on the PARAGRAPH block —
     // this is the "burst elsewhere" state resolveBurst() will resolve.
@@ -3437,7 +3437,7 @@ async function main() {
     fs.writeFileSync(path.join(path.dirname(b.mdPath), 'one.png'), png);
     const ctx = Object.assign({ page: await browser.newPage() }, b);
     await ctx.page.setViewport({ width: 1400, height: 800 });
-    await ctx.page.goto(b.url, { waitUntil: 'networkidle0' });
+    await ctx.page.goto(b.url, { waitUntil: 'networkidle2' });
     await ctx.page.click('.content img');
     await new Promise((r) => setTimeout(r, 500));
     const before = await overlayState(ctx.page, '.lightbox');
@@ -9309,10 +9309,27 @@ async function main() {
     const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
     // Scoped to these rows only (re-review G10). They sit still for a real
-    // heartbeat (two of them for two), and createEditorServer()'s 30s default
-    // is close enough to that to turn a slow bake into a mystery
-    // ERR_CONNECTION_REFUSED. No other scenario in this file is affected.
-    const DRAWIO_SRV_OPTS = { idleTimeoutMs: 10 * 60 * 1000 };
+    // heartbeat (two of them for two). Originally an `idleTimeoutMs`
+    // override, because the old ping-driven idle timer's 30s default was
+    // close enough to that stillness to turn a slow bake into a mystery
+    // ERR_CONNECTION_REFUSED.
+    //
+    // v3.6.0 audit note (Round 3): under the CURRENT connection-based
+    // mechanism this override is likely no longer load-bearing — every row
+    // below calls newPage() once, which opens its OWN dedicated server and
+    // ONE page that stays open (and therefore keeps its /api/alive
+    // connection open) for the row's whole duration, "sitting still" and
+    // all; nothing in this file's architecture holds a server across a gap
+    // with zero connections the way editor-client-runtime.test.js's shared
+    // server and multi-cell sweeps do (audited for that pattern — none
+    // found in this file: it has exactly 5 `.goto()` call sites total, and
+    // none of them repeat against one server the way a sweep does). Kept
+    // anyway, renamed to match the current option, rather than deleted —
+    // removing it is a behavior-neutral cleanup this fix is not the place
+    // for, and a stale `idleTimeoutMs` key (silently ignored by
+    // createEditorServer() now) would be actively misleading to leave in
+    // place under its old name.
+    const DRAWIO_SRV_OPTS = { connectionGraceMs: 10 * 60 * 1000 };
     const diagram = (name, id, value) =>
       '  <diagram name="' + name + '" id="' + id + '">\n' +
       '    <mxGraphModel dx="800" dy="600" grid="0" page="1" pageWidth="850" pageHeight="1100">\n' +

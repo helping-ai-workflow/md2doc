@@ -3,7 +3,40 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.6.0 — 未發布
+## v3.6.1 — 未發布
+
+`md2doc --edit` 的 session 會在瀏覽器分頁還開著的時候被關掉——只要使用者切走一段時間
+就會發生。這一版把「還有沒有人在看」的判斷從計時器換成連線。
+
+### Fixed
+
+- **切走不再殺掉 session。** 舊的 idle timeout 由 `client.js` 每 10 秒打一次
+  `/api/ping` 驅動，而 Chrome 會把背景分頁的計時器節流到大約每分鐘一次
+  （在這個分支上實測：間隔先長到 39.5 秒、再穩定在 ~60 秒），超過舊的 30 秒 idle 死線。
+  改用一條**held-open 的連線**（`GET /api/alive`，SSE）當存活訊號——**連線不受同一種節流影響**。
+  Server 對它這個 process 服務的**所有分頁與檔案**全域計算開著的連線數，
+  在最後一條斷掉之後關閉。
+- **關掉 HTML 就關掉 server。** 這正是要的語意：分頁關了，背景不再堆一個沒人用的 process。
+  斷線後有一段**實測 ~5 秒**的寬限期，用來吸收 F5 重新整理自己的「先斷再連」。
+- `/api/ping` 本身沒有變，它另一個工作（drawio 的 staleness heartbeat）照舊；
+  它只是不再與 session 存活有任何關係。
+
+### Changed
+
+- 測試套件裡受影響的 `page.goto()` / `page.reload()` 等待條件從 `networkidle0` 改成
+  `networkidle2`。原因是結構性的：編輯頁現在**刻意**永遠握著一條連線，
+  而 `networkidle0` 要求零連線，兩者不可能同時成立。
+  所有 286 個站點都查過是否有斷言依賴 puppeteer 自己的零連線語意——**沒有**：
+  套件裡每一條 request-count 斷言都走明確的 `page.on('request')` 攔截並過濾特定端點
+  （例如 `POST /api/render`），從不依賴導覽的 settle 條件。
+
+### Known limitations
+
+- **分頁關掉之後再用瀏覽器歷史紀錄開回同一個 URL，server 已經不在了。**
+  那是與「關掉分頁」完全相同的關閉路徑，是刻意的設計而不是缺陷——
+  寫在這裡，免得在使用時才被發現。重開一次 `md2doc --edit` 即可。
+
+## v3.6.0 — 2026-09-18
 
 這一版從一份回報開始，抱怨兩件事：**閱讀頁上的寬圖被縮到看不懂**，以及**波形編輯器
 擠在一個放不下它自己的對話框裡**。兩件事各自被追到底，各自量過，這裡是結果。

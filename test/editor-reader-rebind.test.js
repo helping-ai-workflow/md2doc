@@ -64,7 +64,7 @@ async function setup() {
   try {
     const page = await browser.newPage();
     page.on('dialog', (d) => d.accept());
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
     const headingIds = await page.evaluate(() =>
       Array.from(document.querySelectorAll('[data-reader-heading]')).map((n) => n.id));
