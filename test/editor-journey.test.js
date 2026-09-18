@@ -16227,9 +16227,30 @@ async function main() {
           'Task 16：跳完之後選取只剩一格寬。Got ' + JSON.stringify(s));
       }
 
+
+      // 停在【每一顆轉態點右邊】時的第一次 →：因為武裝時的游標只准停在轉態
+      // 點上，它會往【左】吸到最右邊那一顆。看起來跟按鍵方向相反，所以這裡
+      // 明確釘住，不是留給下一個人重新猜。clk（`p....`）只有 cycle 1 那一顆
+      // 轉態點，End 走的是沒被攔的那條路（← / → 才被攔），所以到得了 cycle 5。
+      await ctx.page.keyboard.press('ArrowUp');
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.keyboard.press('End');
+      await new Promise((r) => setTimeout(r, 120));
+      const pastEnd = await waveState();
+      assert.strictEqual(pastEnd.cursor, '0,4',
+        'Task 16 前提失敗：End 要把游標帶到 clk 的最後一格。Got ' + pastEnd.cursor);
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      const snapped = await waveState();
+      assert.strictEqual(snapped.cursor, '0,0',
+        'Task 16：停在所有轉態點右邊時，→ 要吸回最右邊那一顆轉態點（clk 只有一顆，' +
+        '在 cycle 1）。Got ' + snapped.cursor);
+      assert.strictEqual(snapped.hot.length, 1,
+        'Task 16：吸回來之後一樣要恰好一顆熱轉態點。Got ' + JSON.stringify(snapped.hot));
+
       // 沒有轉態點的 lane（fixture 最後那個 `{}` 空白列）：說得出為什麼，
       // 游標不動。
-      for (let k = 0; k < 4; k += 1) {
+      for (let k = 0; k < 5; k += 1) {
         await ctx.page.keyboard.press('ArrowDown');
         await new Promise((r) => setTimeout(r, 90));
       }
