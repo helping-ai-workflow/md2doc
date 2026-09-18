@@ -23,21 +23,28 @@ anchor; do not trust the number.** Ranges below are measured at commit
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5646–5822 — `async function bakeGraphviz(` (5649) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 5824–5892 (end) — `// ── CLI` (5824), `const [,, src, dst] = process.argv;` (5826) |
 
-⚠ **Both closing-tag anchors above have the same trap: their first occurrence in
-the file is not theirs.** "to its `</style>`" and "to its `</script>`" are
-descriptions, not recipes — grep for either one and take the first hit and you
-land thousands of lines from the region.
+⚠ **Both closing-tag anchors above have the same trap: the one you want is the
+LAST occurrence inside its region, never the first hit `grep` prints.** "to its
+`</style>`" and "to its `</script>`" are descriptions, not recipes — grep for
+either one, take the first hit, and you land thousands of lines from the region.
+The two tags are NOT symmetric about WHERE the decoy sits, which is why they are
+spelled out separately rather than under one sentence.
 
-- `</script>` — line **3761** is `<script id="reader-section-data" …>…</script>`,
-  a one-line JSON data tag that opens AND closes between the
-  `<!-- Reader runtime -->` marker and the runtime's own `<script>` at 3762. The
-  runtime's is the LAST `</script>` before `</body>`; or anchor on `})();` +
+- `</script>` — `grep -n '</script>' lib/md2doc.js` prints **seven** lines today:
+  **111, 147, 924, 1272, 3748, 3761, 5611**. First-hit readers land on **111**,
+  inside `inlineScriptTag`. **3761 is the sixth occurrence, not the first**: it is
+  `<script id="reader-section-data" …>…</script>`, a one-line JSON data tag that
+  opens AND closes between the `<!-- Reader runtime -->` marker and the runtime's
+  own `<script>` at 3762 — i.e. the decoy that sits INSIDE the region you are
+  aiming at, which is a different hazard from the one grep hands you first. The
+  runtime's own is the LAST `</script>` before `</body>`; or anchor on `})();` +
   `</script>` at 5610–5611.
-- `</style>` — line **168** is `` return `<style data-md2doc-math>${css}</style>`; ``
-  inside the KaTeX CSS inliner, **3541 lines** before the real one. That one is
-  the LAST `</style>` before `</head>` (3711). There are exactly two in the file
-  today; `<style` matches four lines, two of which are prose in comments
-  (4470, 5502).
+- `</style>` — here the first hit IS the decoy, and that asymmetry is the point.
+  `grep -n '</style>'` prints exactly **two** lines, **168** and **3709**. Line
+  168 is `` return `<style data-md2doc-math>${css}</style>`; `` inside the KaTeX
+  CSS inliner, **3541 lines** before the real one. The real one is the LAST
+  `</style>` before `</head>` (3711). `<style` (no slash) matches four lines, two
+  of which are prose in comments (4470, 5502).
 
 Recipe for both: **last occurrence before the enclosing close tag**, never the
 first occurrence in the file.
@@ -244,11 +251,30 @@ exactly that: `node --check` clean, then `renderMarkdown` died at runtime with
 So the check is not a syntax check. Either render a real document
 (`node bin/md2doc.js some.md` and confirm it exits 0 and writes the HTML), or count the
 backticks in the file and confirm the total is unchanged from the previous commit — a
-correct edit to a CSS comment never changes that count. It is also
-where every `.ed-wave-*` rule lives: visual properties (stroke, fill, opacity, dashes)
-belong there as CSS classes, not as inline SVG attributes — a renderer with two styling
-mechanisms means the next person changing colours edits one and silently misses the
-other.
+correct edit to a CSS comment never changes that count.
+
+**Say which count you took.** There are two, they differ, and both are correct — which is
+how v3.6.0 spent a review round on two agents reporting 352 and 348 and each thinking the
+other had miscounted. Measured at v3.5.0 (`be5cea1`) and again at v3.6.0, identical at
+both, this branch moved neither:
+
+- **352** — every backtick byte in the file.
+- **4** of those are `` \` `` escapes, all on ONE line (4474, inside a nested template
+  literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``).
+- **348** — structural backticks, i.e. the ones that actually open or close a literal.
+
+Both totals are even, which is the property the check is really after; an odd one either
+way means a literal is unbalanced. Quote the number AND its definition, or the next reader
+re-litigates it.
+
+Related and separate: **a backslash collapses the same way a backtick does.** Earlier in
+the v3.6.0 batch a `\s` inside the literal became a bare `s` and silently disabled half a
+feature. Nothing in the file is collapsing today.
+
+That `<style>` block is also where every `.ed-wave-*` rule lives: visual properties
+(stroke, fill, opacity, dashes) belong there as CSS classes, not as inline SVG attributes
+— a renderer with two styling mechanisms means the next person changing colours edits one
+and silently misses the other.
 
 ## A False Sentence Next to Correct Code Costs a Fix Round
 
