@@ -16269,6 +16269,14 @@ async function main() {
       assert.strictEqual(parked.cursor, '1,0',
         'Task 16 前提失敗：游標要先停在 req 的 cycle 1 上。Got ' + parked.cursor);
 
+      // 還沒武裝時的 Alt+→：出聲拒絕，不動游標。
+      await altPress('ArrowRight');
+      const notArmed = await waveState();
+      assert.strictEqual(notArmed.cursor, '1,0',
+        'Task 16：還沒武裝時 Alt+→ 不得移動游標。Got ' + notArmed.cursor);
+      assert.ok(notArmed.status.indexOf('武裝') !== -1,
+        'Task 16：還沒武裝時 Alt+→ 要說得出為什麼。Got ' + JSON.stringify(notArmed.status));
+
       await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
       await new Promise((r) => setTimeout(r, 150));
       await ctx.page.evaluate(() => { document.querySelector('.ed-wave-canvas').focus(); });
@@ -16276,17 +16284,41 @@ async function main() {
       assert.strictEqual(armed.mode, 'armed',
         'Task 16 前提失敗：要處於武裝狀態。Got ' + armed.mode);
 
+      // ── 武裝時，沒有修飾鍵的方向鍵仍然一格一格走 ──
+      // 這是 fix round 3 那條回歸本人：跳躍只可能停在轉態點上，所以把它綁在
+      // 裸的 ← / → 上，等於把「不是轉態點的那些格」從鍵盤上整個拿掉。req 是
+      // `0.1.0`，轉態點只有 0/2/4，cycle 2（索引 1）就是跳躍永遠到不了的那種
+      // 格；鍵盤要能停在那裡，畫出來的 edge 才可能跟滑鼠拖出來的逐位元組相同
+      // ——journey 更早的 T9b 釘的就是那件事，而它正是被這條綁定弄紅的。
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      const perCell = await waveState();
+      assert.strictEqual(perCell.cursor, '1,1',
+        'Task 16：武裝時裸的 → 仍然只走一格，非轉態格必須到得了。Got ' + perCell.cursor);
+      assert.strictEqual(perCell.hot.length, 0,
+        'Task 16：一格一格走不會點亮任何轉態點。Got ' + JSON.stringify(perCell.hot));
+
+      // 武裝時 Shift+方向鍵也照樣延伸選取（round 0 連這條一起弄丟了）。
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('ArrowLeft');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 120));
+      const extended = await waveState();
+      assert.strictEqual(extended.cursor, '1,0',
+        'Task 16：武裝時 Shift+← 仍然把游標往左移一格。Got ' + extended.cursor);
+      assert.strictEqual(extended.selBox.w, extended.curBox.w * 2,
+        'Task 16：武裝時 Shift+← 仍然把選取延伸到兩格寬。Got ' + JSON.stringify(extended));
+
       // req 的轉態點是 cycle 0 / 2 / 4。逐一斷言【確切】落點，不是「有換過」。
       const walk = [
         ['ArrowRight', '1,2'], ['ArrowRight', '1,4'], ['ArrowRight', '1,4'],
         ['ArrowLeft', '1,2'], ['ArrowLeft', '1,0'], ['ArrowLeft', '1,0'],
       ];
       for (const [key, want] of walk) {
-        await ctx.page.keyboard.press(key);
-        await new Promise((r) => setTimeout(r, 120));
+        await altPress(key);
         const s = await waveState();
         assert.strictEqual(s.cursor, want,
-          'Task 16：武裝時按 ' + key + ' 要跳到 ' + want + '。Got ' + s.cursor);
+          'Task 16：武裝時按 Alt+' + key + ' 要跳到 ' + want + '。Got ' + s.cursor);
         assert.strictEqual(s.hot.length, 1,
           'Task 16：每一步都要恰好一顆熱轉態點。Got ' + JSON.stringify(s.hot));
         // 熱點必須落在游標【自己那一格】裡——由游標矩形推導，不是釘死的座標。
@@ -16306,7 +16338,7 @@ async function main() {
       // 停在【每一顆轉態點右邊】時的第一次 →：因為武裝時的游標只准停在轉態
       // 點上，它會往【左】吸到最右邊那一顆。看起來跟按鍵方向相反，所以這裡
       // 明確釘住，不是留給下一個人重新猜。clk（`p....`）只有 cycle 1 那一顆
-      // 轉態點，End 走的是沒被攔的那條路（← / → 才被攔），所以到得了 cycle 5。
+      // 轉態點；裸的 End 與裸的 → 都不會被跳躍攔走，所以到得了 cycle 5。
       await ctx.page.keyboard.press('ArrowUp');
       await new Promise((r) => setTimeout(r, 120));
       await ctx.page.keyboard.press('End');
@@ -16314,12 +16346,11 @@ async function main() {
       const pastEnd = await waveState();
       assert.strictEqual(pastEnd.cursor, '0,4',
         'Task 16 前提失敗：End 要把游標帶到 clk 的最後一格。Got ' + pastEnd.cursor);
-      await ctx.page.keyboard.press('ArrowRight');
-      await new Promise((r) => setTimeout(r, 120));
+      await altPress('ArrowRight');
       const snapped = await waveState();
       assert.strictEqual(snapped.cursor, '0,0',
-        'Task 16：停在所有轉態點右邊時，→ 要吸回最右邊那一顆轉態點（clk 只有一顆，' +
-        '在 cycle 1）。Got ' + snapped.cursor);
+        'Task 16：停在所有轉態點右邊時，Alt+→ 要吸回最右邊那一顆轉態點（clk 只有' +
+        '一顆，在 cycle 1）。Got ' + snapped.cursor);
       assert.strictEqual(snapped.hot.length, 1,
         'Task 16：吸回來之後一樣要恰好一顆熱轉態點。Got ' + JSON.stringify(snapped.hot));
 
@@ -16338,11 +16369,10 @@ async function main() {
       const spacerCell = (laneCount - 1) + ',0';
       assert.strictEqual(onSpacer.cursor, spacerCell,
         'Task 16 前提失敗：游標要停在最後一列（空白列）上。Got ' + onSpacer.cursor);
-      await ctx.page.keyboard.press('ArrowRight');
-      await new Promise((r) => setTimeout(r, 120));
+      await altPress('ArrowRight');
       const noTrans = await waveState();
       assert.strictEqual(noTrans.cursor, spacerCell,
-        'Task 16：沒有轉態點的 lane 上，武裝時的 → 不得移動游標。Got ' + noTrans.cursor);
+        'Task 16：沒有轉態點的 lane 上，武裝時的 Alt+→ 不得移動游標。Got ' + noTrans.cursor);
       assert.ok(noTrans.status.indexOf('轉態點') !== -1,
         'Task 16：沒有轉態點時要說得出為什麼。Got ' + JSON.stringify(noTrans.status));
 
