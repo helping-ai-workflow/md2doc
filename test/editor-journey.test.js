@@ -16018,6 +16018,237 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: 匯出 SVG/PNG 的 payload 本人與複製 WaveJSON — OK');
     }
+
+    // ── v3.6.0 Task 16: Alt+↑/↓ 搬 lane，與武裝時的轉態間跳躍 ─────────────
+    //
+    // Task 14 把 rail 每一列的 ▲/▼ 拿掉之後，調 lane 順序只剩把手拖曳這一條
+    // 純滑鼠的路；Alt+↑/↓ 把它補回鍵盤上。另一半是武裝時的 ← / →：要接的是
+    // 轉態，逐格走會讓使用者在一段平的區間裡按上好幾次。
+    //
+    // 兩個斷言原則，是這個 repo 已經付過帳的：
+    //   1. 排序不能只斷言「名字變了」——順序要逐個比對，而且【游標與選取
+    //      的落點】一起斷言。lane 搬走了游標卻留在舊列號，之後每一個按鍵
+    //      都落在錯的格子裡，那是表格拖曳踩過的同一個形狀。
+    //   2. 兩端與「沒有轉態點」是邊界，各自明確斷言拒絕的行為，而不是讓它
+    //      靜靜什麼都不做。
+    //
+    // 選字：`[data-focus-key="ed-wave-edge-arm"]`，沒有 `tool-` 前綴——理由
+    // 見上面 Task 11 那一段的註解。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      // 四個感知軸一次讀齊：螢幕上的名字順序、選取是哪幾條、游標在哪一格、
+      // 狀態列說了什麼、鍵盤在誰身上。每一步都 act → settle → 讀真值 →
+      // strictEqual，不用 waitForFunction 去等一個我們已經預測得出來的值：
+      // 猜錯時要看到真值，不是 `Timeout 30000ms exceeded`。
+      const waveState = () => ctx.page.evaluate(() => {
+        const o = document.querySelector('.ed-wave-overlay');
+        const cur = document.querySelector('.ed-wave-cursor');
+        const sel = document.querySelector('.ed-wave-selection');
+        const num = (el, a) => (el === null ? null : Number(el.getAttribute(a)));
+        const hot = [...document.querySelectorAll('.ed-wave-transition[data-hot]')]
+          .map((h) => ({ cx: Number(h.getAttribute('cx')), cy: Number(h.getAttribute('cy')) }));
+        return {
+          names: [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value),
+          range: o.getAttribute('data-wave-lane-range'),
+          cursor: o.getAttribute('data-wave-cursor'),
+          status: o.getAttribute('data-wave-status'),
+          mode: o.getAttribute('data-wave-edgemode'),
+          gestures: o.getAttribute('data-wave-gestures'),
+          focus: document.activeElement === null ? null
+            : document.activeElement.getAttribute('data-focus-key'),
+          curBox: { x: num(cur, 'x'), y: num(cur, 'y'),
+            w: num(cur, 'width'), h: num(cur, 'height') },
+          selBox: { x: num(sel, 'x'), w: num(sel, 'width') },
+          hot: hot,
+        };
+      });
+      const altPress = async (key) => {
+        await ctx.page.keyboard.down('Alt');
+        await ctx.page.keyboard.press(key);
+        await ctx.page.keyboard.up('Alt');
+        await new Promise((r) => setTimeout(r, 250));
+      };
+      const ORDER0 = ['clk', 'req', 'dat', 'ack', 'gap', ''];
+
+      const opened = await waveState();
+      assert.deepStrictEqual(opened.names, ORDER0,
+        'Task 16 前提失敗：fixture 的 lane 名字。Got ' + JSON.stringify(opened.names));
+
+      // ── 沒有選取時：不動文件，而且說得出為什麼 ──
+      // 一個什麼都不做又什麼都不說的鍵，跟一個根本沒綁的鍵在使用者那裡長得
+      // 一模一樣。
+      await altPress('ArrowDown');
+      const noSel = await waveState();
+      assert.deepStrictEqual(noSel.names, ORDER0,
+        'Task 16：沒有選取時 Alt+↓ 不得動到順序。Got ' + JSON.stringify(noSel.names));
+      assert.strictEqual(noSel.gestures, '0',
+        'Task 16：沒有選取時 Alt+↓ 不得記成一次 gesture。Got ' + noSel.gestures);
+      assert.ok(noSel.status.indexOf('先選一條 lane') !== -1,
+        'Task 16：沒有選取時 Alt+↓ 要說得出為什麼。Got ' + JSON.stringify(noSel.status));
+
+      // ── 選 lane 0，把鍵盤放在它自己的名字欄上 ──
+      // Task 14 把 rail 每一列的 ▲/▼ 拿掉之後，使用者調順序時人真的坐在
+      // 名字欄裡；而 `handleDrawingKey` 只認 canvas 與 dialog 兩個 target，
+      // 所以這條鍵必須在那道閘門之外被認領，否則在名字欄上完全沒有反應。
+      await selectLane(ctx.page, 0);
+      await ctx.page.evaluate(() => {
+        document.querySelector('[data-focus-key="lane-name-0"]').focus();
+      });
+      await altPress('ArrowDown');
+      const moved1 = await waveState();
+      assert.deepStrictEqual(moved1.names, ['req', 'clk', 'dat', 'ack', 'gap', ''],
+        'Task 16：Alt+↓ 要把選取的那一條往下搬一格。Got ' + JSON.stringify(moved1.names));
+      assert.strictEqual(moved1.range, '1,1',
+        'Task 16：搬完之後選取要跟著那一條走到新位置。Got ' + moved1.range);
+      assert.strictEqual(moved1.focus, 'lane-name-1',
+        'Task 16：鍵盤要跟著那一條 lane 到它的新名字欄。Got ' + moved1.focus);
+      assert.strictEqual(moved1.cursor, '',
+        'Task 16：鍵盤還沒進過波形，搬 lane 不得無中生有一個格游標。Got ' +
+        JSON.stringify(moved1.cursor));
+      assert.strictEqual(moved1.gestures, '1',
+        'Task 16：一次 Alt+↓ 是一次 gesture。Got ' + moved1.gestures);
+
+      // 再按一次：搬的必須是【同一條】lane，不是新落點上的那一條。這就是
+      // `focusOverride` 存在的理由，也是 rail 的 ▲ 當年踩過的坑。
+      await altPress('ArrowDown');
+      const moved2 = await waveState();
+      assert.deepStrictEqual(moved2.names, ['req', 'dat', 'clk', 'ack', 'gap', ''],
+        'Task 16：連按兩次 Alt+↓ 要把同一條 lane 搬兩格。Got ' + JSON.stringify(moved2.names));
+      assert.strictEqual(moved2.range, '2,2',
+        'Task 16：第二次搬完選取仍要在那一條上。Got ' + moved2.range);
+      assert.strictEqual(moved2.focus, 'lane-name-2',
+        'Task 16：第二次搬完鍵盤仍要在那一條上。Got ' + moved2.focus);
+
+      // ── 格游標也要跟著那一條走 ──
+      // 「lane 搬走了、游標留在原來的列號」正是這個 repo 在表格拖曳上付過
+      // 一次的帳：之後每一個按鍵都落在錯的格子裡。
+      // 把鍵盤交給畫布本身就已經是一次「進入」：canvas 的 focus listener 會
+      // 呼叫 `enterDrawing()`，游標因此直接生在 0,0，不需要（也不可以）再多
+      // 按一次方向鍵——多按的那一次會把游標往右推一格，實測 2,1。
+      await ctx.page.evaluate(() => { document.querySelector('.ed-wave-canvas').focus(); });
+      await new Promise((r) => setTimeout(r, 150));
+      const entered = await waveState();
+      assert.strictEqual(entered.cursor, '0,0',
+        'Task 16 前提失敗：鍵盤一進畫布游標就在 0,0。Got ' + entered.cursor);
+      await ctx.page.keyboard.press('ArrowDown');
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.keyboard.press('ArrowDown');
+      await new Promise((r) => setTimeout(r, 150));
+      const onClk = await waveState();
+      assert.strictEqual(onClk.cursor, '2,0',
+        'Task 16 前提失敗：游標要先站在被搬的那一條（clk，第 3 列）上。Got ' + onClk.cursor);
+      assert.strictEqual(onClk.range, '2,2',
+        'Task 16 前提失敗：方向鍵會把選取收攏到游標那一條。Got ' + onClk.range);
+
+      await altPress('ArrowUp');
+      const up1 = await waveState();
+      assert.deepStrictEqual(up1.names, ['req', 'clk', 'dat', 'ack', 'gap', ''],
+        'Task 16：Alt+↑ 要把選取的那一條往上搬一格。Got ' + JSON.stringify(up1.names));
+      assert.strictEqual(up1.cursor, '1,0',
+        'Task 16：格游標必須跟著那一條 lane 到新的列號，不能留在舊列號上。Got ' + up1.cursor);
+      assert.strictEqual(up1.range, '1,1',
+        'Task 16：選取同樣跟著走。Got ' + up1.range);
+
+      // ── 兩端：refuse，而且說得出為什麼 ──
+      await altPress('ArrowUp');
+      const atTop = await waveState();
+      assert.deepStrictEqual(atTop.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'Task 16：再一次 Alt+↑ 要搬到最上面。Got ' + JSON.stringify(atTop.names));
+      assert.strictEqual(atTop.range, '0,0',
+        'Task 16：搬到最上面之後選取在第 1 列。Got ' + atTop.range);
+      const gesturesAtTop = atTop.gestures;
+      await altPress('ArrowUp');
+      const topRefused = await waveState();
+      assert.deepStrictEqual(topRefused.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'Task 16：已經在最上面時 Alt+↑ 不得動到順序。Got ' + JSON.stringify(topRefused.names));
+      assert.strictEqual(topRefused.gestures, gesturesAtTop,
+        'Task 16：被拒絕的 Alt+↑ 不得記成一次 gesture。Got ' + topRefused.gestures);
+      assert.ok(topRefused.status.indexOf('第一條') !== -1,
+        'Task 16：在最上面被拒絕時要說得出為什麼。Got ' + JSON.stringify(topRefused.status));
+
+      await selectLane(ctx.page, 5);
+      const gesturesAtBottom = (await waveState()).gestures;
+      await altPress('ArrowDown');
+      const bottomRefused = await waveState();
+      assert.deepStrictEqual(bottomRefused.names, ['clk', 'req', 'dat', 'ack', 'gap', ''],
+        'Task 16：已經在最下面時 Alt+↓ 不得動到順序。Got ' + JSON.stringify(bottomRefused.names));
+      assert.strictEqual(bottomRefused.gestures, gesturesAtBottom,
+        'Task 16：被拒絕的 Alt+↓ 不得記成一次 gesture。Got ' + bottomRefused.gestures);
+      assert.ok(bottomRefused.status.indexOf('最後一條') !== -1,
+        'Task 16：在最下面被拒絕時要說得出為什麼。Got ' + JSON.stringify(bottomRefused.status));
+
+      // ── 武裝之後的 ← / →：只停在轉態點上 ──
+      // fixture 的 `clk`（`p....`）只有【一顆】轉態點，brief 自己的草稿正是
+      // 拿它連按四次再斷言「至少換過兩個轉態點」——那支斷言必然紅。這裡改站在
+      // `req`（`0.1.0`，轉態點 0/2/4）上，那才是這條鍵存在的理由：中間那段
+      // 平的格子要被跳過去。
+      // 上一段結束時游標跟著 clk 停在 0,0，rail 的點選只動 selection、不動
+      // 游標，所以往下一格就是 req。
+      await ctx.page.evaluate(() => { document.querySelector('.ed-wave-canvas').focus(); });
+      await new Promise((r) => setTimeout(r, 120));
+      await ctx.page.keyboard.press('ArrowDown');
+      await new Promise((r) => setTimeout(r, 150));
+      const parked = await waveState();
+      assert.strictEqual(parked.cursor, '1,0',
+        'Task 16 前提失敗：游標要先停在 req 的 cycle 1 上。Got ' + parked.cursor);
+
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-edge-arm"]');
+      await new Promise((r) => setTimeout(r, 150));
+      await ctx.page.evaluate(() => { document.querySelector('.ed-wave-canvas').focus(); });
+      const armed = await waveState();
+      assert.strictEqual(armed.mode, 'armed',
+        'Task 16 前提失敗：要處於武裝狀態。Got ' + armed.mode);
+
+      // req 的轉態點是 cycle 0 / 2 / 4。逐一斷言【確切】落點，不是「有換過」。
+      const walk = [
+        ['ArrowRight', '1,2'], ['ArrowRight', '1,4'], ['ArrowRight', '1,4'],
+        ['ArrowLeft', '1,2'], ['ArrowLeft', '1,0'], ['ArrowLeft', '1,0'],
+      ];
+      for (const [key, want] of walk) {
+        await ctx.page.keyboard.press(key);
+        await new Promise((r) => setTimeout(r, 120));
+        const s = await waveState();
+        assert.strictEqual(s.cursor, want,
+          'Task 16：武裝時按 ' + key + ' 要跳到 ' + want + '。Got ' + s.cursor);
+        assert.strictEqual(s.hot.length, 1,
+          'Task 16：每一步都要恰好一顆熱轉態點。Got ' + JSON.stringify(s.hot));
+        // 熱點必須落在游標【自己那一格】裡——由游標矩形推導，不是釘死的座標。
+        assert.ok(s.hot[0].cx >= s.curBox.x && s.hot[0].cx <= s.curBox.x + s.curBox.w,
+          'Task 16：熱轉態點要落在游標那一格內。Got ' + JSON.stringify(s));
+        assert.strictEqual(s.hot[0].cy, s.curBox.y + s.curBox.h / 2,
+          'Task 16：熱轉態點要落在游標那一列的垂直中線上。Got ' + JSON.stringify(s));
+        // 跳完之後 selection 要收攏在游標那一格上：否則下一個電位鍵會塗在
+        // 跳之前留下的那一段上。
+        assert.strictEqual(s.selBox.x, s.curBox.x,
+          'Task 16：跳完之後選取要收攏到游標那一格。Got ' + JSON.stringify(s));
+        assert.strictEqual(s.selBox.w, s.curBox.w,
+          'Task 16：跳完之後選取只剩一格寬。Got ' + JSON.stringify(s));
+      }
+
+      // 沒有轉態點的 lane（fixture 最後那個 `{}` 空白列）：說得出為什麼，
+      // 游標不動。
+      for (let k = 0; k < 4; k += 1) {
+        await ctx.page.keyboard.press('ArrowDown');
+        await new Promise((r) => setTimeout(r, 90));
+      }
+      const onSpacer = await waveState();
+      assert.strictEqual(onSpacer.cursor, '5,0',
+        'Task 16 前提失敗：游標要停在空白列上。Got ' + onSpacer.cursor);
+      await ctx.page.keyboard.press('ArrowRight');
+      await new Promise((r) => setTimeout(r, 120));
+      const noTrans = await waveState();
+      assert.strictEqual(noTrans.cursor, '5,0',
+        'Task 16：沒有轉態點的 lane 上，武裝時的 → 不得移動游標。Got ' + noTrans.cursor);
+      assert.ok(noTrans.status.indexOf('轉態點') !== -1,
+        'Task 16：沒有轉態點時要說得出為什麼。Got ' + JSON.stringify(noTrans.status));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'Task 16：不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: Alt+↑↓ 搬 lane 與武裝時的轉態間跳躍 — OK');
+    }
   }
 
   await browser.close();
