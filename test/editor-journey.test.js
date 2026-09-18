@@ -15696,6 +15696,281 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: Shift+點的多條選取，與吃它的六顆工具列按鈕 — OK');
     }
+
+    // ── v3.6.0 Task 15: 匯出 SVG / PNG / 複製 WaveJSON ────────────────────
+    //
+    // 這一列刻意不去問「按下去有沒有丟例外」。一個把空字串包成 Blob、
+    // 或把一張全白畫布轉成 PNG、或把空字串寫進剪貼簿的實作，在那種斷言
+    // 底下全部是綠的 —— 而那三種正是這個功能真正會壞掉的樣子。
+    //
+    // 所以觀測點放在「真正交出去的那份 payload」上：攔 `URL.createObjectURL`
+    // 拿到 Blob 本人、攔 `HTMLAnchorElement.prototype.click` 拿到檔名（順便
+    // 不要讓 headless 真的去下載一個檔案）、攔 `navigator.clipboard.writeText`
+    // 拿到字串本人。攔截不是為了方便，是因為瀏覽器把下載與剪貼簿都收進了
+    // 測試看不到的地方，這三個 hook 是那份 payload 在頁面裡最後一次是
+    // JavaScript 值的時刻。
+    {
+      const ctx = await newPage(WAVE_MD);
+      await openWave(ctx.page);
+
+      const armed = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('[data-focus-key^="ed-wave-export-"]')].map((b) => ({
+          key: b.getAttribute('data-focus-key'),
+          disabled: b.disabled,
+          title: b.title,
+        })));
+      assert.deepStrictEqual(armed.map((a) => a.key),
+        ['ed-wave-export-svg', 'ed-wave-export-png', 'ed-wave-export-wavejson'],
+        'T15: 匯出三顆按鈕的 focus key 與順序。Got ' + JSON.stringify(armed.map((a) => a.key)));
+      assert.deepStrictEqual(armed.map((a) => a.disabled), armed.map(() => false),
+        'T15: 三顆都必須是可用的。Got ' + JSON.stringify(armed));
+      assert.deepStrictEqual(armed.filter((a) => a.title.indexOf('尚未接上') !== -1), [],
+        'T15: 接上線之後就不該還掛著「尚未接上」的 title。Got ' + JSON.stringify(armed));
+
+      // 先做一次真的編輯，這樣「匯出的是現在這份文件」與「匯出的是開啟時
+      // 那份原始碼」就分得開 —— 複製 clk 之後文件裡有兩條 clk。
+      await selectLane(ctx.page, 0);
+      await pressClick(ctx.page, '.ed-wave-signal-copy');
+      await new Promise((r) => setTimeout(r, 400));
+      const laneNames = await ctx.page.evaluate(() =>
+        [...document.querySelectorAll('.ed-wave-lane-name')].map((i) => i.value));
+      assert.deepStrictEqual(laneNames, ['clk', 'clk', 'req', 'dat', 'ack', 'gap', ''],
+        'T15 前提失敗：要先把 clk 複製成兩條。Got ' + JSON.stringify(laneNames));
+
+      await ctx.page.evaluate(() => {
+        window.__exp = { downloads: [], clips: [], lastBlob: null };
+        const realCreate = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = function (blob) {
+          window.__exp.lastBlob = blob;
+          return realCreate(blob);
+        };
+        const realClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+          if (this.hasAttribute('download')) {
+            window.__exp.downloads.push({ name: this.download, blob: window.__exp.lastBlob });
+            return;   // 攔在這裡：headless 真的去下載會落到測試看不到的地方
+          }
+          return realClick.call(this);
+        };
+        navigator.clipboard.writeText = function (text) {
+          window.__exp.clips.push(text);
+          return Promise.resolve();
+        };
+      });
+
+      // 量測用的助手：把一份 SVG 文字畫在白底上，數「不是白色」的像素。
+      // 一張空圖跟一張真的圖的差別在這個數字上，不在 byte 數上。
+      const INK = `(function () {
+        window.__inkOf = async function (text, w, h) {
+          const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(text);
+          const img = await new Promise((ok, no) => {
+            const i = new Image();
+            i.onload = () => ok(i);
+            i.onerror = () => no(new Error('rasterise failed'));
+            i.src = url;
+          });
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          const cx = cv.getContext('2d');
+          cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, w, h);
+          cx.drawImage(img, 0, 0);
+          const d = cx.getImageData(0, 0, w, h).data;
+          let ink = 0;
+          for (let p = 0; p < d.length; p += 4) {
+            if (d[p] < 240 || d[p + 1] < 240 || d[p + 2] < 240) ink++;
+          }
+          return ink;
+        };
+      })()`;
+      await ctx.page.evaluate(INK);
+
+      // 預覽那棵 SVG 自己的尺寸 —— 底下每一個尺寸斷言都跟它比，不寫死
+      // 300×180：那是這個 fixture 的量測值，不是這個功能的契約。
+      const dims = await ctx.page.evaluate(() => {
+        const s = document.querySelector('.ed-wave-preview-host svg');
+        return s === null ? null : { w: s.getAttribute('width'), h: s.getAttribute('height') };
+      });
+      assert.ok(dims !== null && Number(dims.w) > 0 && Number(dims.h) > 0,
+        'T15 前提失敗：預覽必須已經畫出一棵有尺寸的 SVG。Got ' + JSON.stringify(dims));
+
+      // ── SVG ────────────────────────────────────────────────────────────
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-export-svg"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const svgDl = await ctx.page.evaluate(async () => {
+        const rec = window.__exp.downloads[window.__exp.downloads.length - 1];
+        if (!rec || !rec.blob) return null;
+        return { name: rec.name, type: rec.blob.type, size: rec.blob.size,
+                 text: await rec.blob.text(), count: window.__exp.downloads.length };
+      });
+      assert.ok(svgDl !== null,
+        'T15/SVG: 按下去必須真的把一個 Blob 交給下載。Got ' + JSON.stringify(svgDl));
+      assert.strictEqual(svgDl.count, 1, 'T15/SVG: 一次按壓只該交出一個檔案');
+      assert.strictEqual(svgDl.type, 'image/svg+xml',
+        'T15/SVG: Blob 的 MIME。Got ' + svgDl.type);
+      assert.strictEqual(svgDl.name.slice(-4), '.svg',
+        'T15/SVG: 檔名副檔名。Got ' + svgDl.name);
+      assert.ok(svgDl.text.slice(0, 4) === '<svg',
+        'T15/SVG: 交出去的必須是一份 svg 文件。Got ' + JSON.stringify(svgDl.text.slice(0, 60)));
+
+      // 這是這一列真正在守的東西：匯出的 SVG 必須【離開這一頁還畫得出來】。
+      // 預覽那棵 SVG 是跟頁面上第一張圖借 skin 畫的（`renderPreview` 的
+      // `notFirstSignal`）—— 它自己沒有 <defs> 也沒有 <style>，51 個 <use>
+      // 全部指向另一棵 SVG 裡的 id。直接 serialize 出去的檔案在瀏覽器裡
+      // 打開是半張圖，而「有沒有丟例外」跟「檔名對不對」兩種斷言都看不到
+      // 這件事。所以逐一比對：它用到的每一個 <use> 的 id 都要在它自己的
+      // <defs> 裡找得到。
+      const standalone = await ctx.page.evaluate((text) => {
+        const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+        if (doc.querySelector('parsererror') !== null) return { parseError: true };
+        const root = doc.documentElement;
+        const ids = new Set([...doc.querySelectorAll('defs [id]')].map((e) => e.id));
+        const wanted = [...doc.querySelectorAll('use')].map((u) =>
+          (u.getAttribute('xlink:href') || u.getAttribute('href') || '').replace(/^#/, ''));
+        return {
+          parseError: false,
+          tag: root.tagName,
+          w: root.getAttribute('width'), h: root.getAttribute('height'),
+          uses: wanted.length,
+          missing: [...new Set(wanted.filter((id) => !ids.has(id)))],
+          styles: doc.querySelectorAll('style').length,
+        };
+      }, svgDl.text);
+      assert.strictEqual(standalone.parseError, false,
+        'T15/SVG: 匯出的字串必須 parse 得回來');
+      assert.strictEqual(standalone.tag, 'svg',
+        'T15/SVG: 根節點。Got ' + standalone.tag);
+      assert.deepStrictEqual({ w: standalone.w, h: standalone.h }, dims,
+        'T15/SVG: 匯出的尺寸要跟預覽一致。Got ' + JSON.stringify(standalone));
+      assert.ok(standalone.uses > 0,
+        'T15/SVG 前提失敗：這個 fixture 的 clk 必須真的用到 <use>，' +
+        '否則底下那條 missing 斷言什麼都證明不了。Got ' + standalone.uses);
+      assert.deepStrictEqual(standalone.missing, [],
+        'T15/SVG: 匯出的檔案裡有解析不到的 <use>（skin 沒被帶上，離開這一頁' +
+        '就是半張圖）。Got ' + JSON.stringify(standalone.missing));
+      assert.ok(standalone.styles > 0,
+        'T15/SVG: skin 的 <style> 也要帶上，否則所有文字都是瀏覽器預設字體。' +
+        'Got ' + standalone.styles);
+
+      // 借來的 skin 是 clone 來的，不是搬走的：頁面上那張圖不能因為使用者
+      // 按了一次匯出就變成半張。
+      const pageSkin = await ctx.page.evaluate(() => ({
+        sockets: document.querySelectorAll('svg.WaveDrom defs #socket').length,
+        firstDefs: (document.querySelector('.wavedrom-diagram svg defs') || { children: [] })
+          .children.length,
+      }));
+      assert.strictEqual(pageSkin.sockets, 1,
+        'T15/SVG: 頁面上那份 skin 必須原封不動（clone，不是搬走）。Got ' +
+        JSON.stringify(pageSkin));
+      assert.ok(pageSkin.firstDefs > 0,
+        'T15/SVG: 頁面第一張圖的 <defs> 不得被掏空。Got ' + JSON.stringify(pageSkin));
+
+      // ── PNG ────────────────────────────────────────────────────────────
+      //
+      // 「是不是一張真的 PNG」拆成三件事量：magic bytes、解碼回來的尺寸、
+      // 以及「不是一片白」。前兩件擋不住第三件 —— MEASURED（本 fixture 同
+      // 尺寸的全白畫布）：`cv.toBlob` 對一張什麼都沒畫的 300×180 畫布照樣
+      // 交出 1871 bytes 合法 PNG，magic bytes 跟尺寸全對。
+      //
+      // 「不是一片白」用差分量，不用釘死的門檻：把同一份匯出文字的 <defs>
+      // 拿掉再畫一次 —— 那就是「skin 沒帶上」的壞掉版本長的樣子。真正的
+      // PNG 必須明顯比它多墨水。MEASURED（本 fixture，未複製 lane 前）：
+      // 帶 skin 5693 個非白像素 / 54000，不帶 1409，差 4.0 倍。
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-export-png"]');
+      await new Promise((r) => setTimeout(r, 1500));
+      const png = await ctx.page.evaluate(async (svgText) => {
+        const rec = window.__exp.downloads[window.__exp.downloads.length - 1];
+        if (!rec || !rec.blob) return { got: null, count: window.__exp.downloads.length };
+        const buf = new Uint8Array(await rec.blob.arrayBuffer());
+        const url = URL.createObjectURL(rec.blob);
+        const img = await new Promise((ok, no) => {
+          const i = new Image();
+          i.onload = () => ok(i);
+          i.onerror = () => no(new Error('png decode failed'));
+          i.src = url;
+        });
+        const cv = document.createElement('canvas');
+        cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+        const cx = cv.getContext('2d');
+        cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, cv.width, cv.height);
+        cx.drawImage(img, 0, 0);
+        const d = cx.getImageData(0, 0, cv.width, cv.height).data;
+        let ink = 0;
+        for (let p = 0; p < d.length; p += 4) {
+          if (d[p] < 240 || d[p + 1] < 240 || d[p + 2] < 240) ink++;
+        }
+        // 同尺寸的全白畫布：PNG 的「空殼」到底有多少 bytes，量出來而不是猜。
+        const blank = document.createElement('canvas');
+        blank.width = cv.width; blank.height = cv.height;
+        const bx = blank.getContext('2d');
+        bx.fillStyle = '#ffffff'; bx.fillRect(0, 0, blank.width, blank.height);
+        const blankBlob = await new Promise((ok) => blank.toBlob(ok, 'image/png'));
+        // 同一份匯出文字，但 <defs> 被拿掉 —— skin 沒帶上時會畫成的樣子。
+        const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+        const defs = doc.querySelector('defs');
+        if (defs !== null) defs.remove();
+        const strippedInk = await window.__inkOf(
+          new XMLSerializer().serializeToString(doc.documentElement), cv.width, cv.height);
+        return {
+          got: true,
+          name: rec.name, type: rec.blob.type, bytes: buf.length,
+          magic: [...buf.slice(0, 8)],
+          w: img.naturalWidth, h: img.naturalHeight,
+          ink: ink, pixels: cv.width * cv.height,
+          strippedInk: strippedInk, blankBytes: blankBlob.size,
+          count: window.__exp.downloads.length,
+        };
+      }, svgDl.text);
+      assert.strictEqual(png.got, true,
+        'T15/PNG: 按下去必須真的把一個 Blob 交給下載（img.onload → toBlob 兩段都是' +
+        '非同步，失敗時這裡是 null）。Got ' + JSON.stringify(png));
+      assert.strictEqual(png.count, 2, 'T15/PNG: 這是第二個檔案');
+      assert.strictEqual(png.type, 'image/png', 'T15/PNG: Blob 的 MIME。Got ' + png.type);
+      assert.strictEqual(png.name.slice(-4), '.png', 'T15/PNG: 檔名。Got ' + png.name);
+      assert.deepStrictEqual(png.magic, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+        'T15/PNG: PNG 的 magic bytes。Got ' + JSON.stringify(png.magic));
+      assert.deepStrictEqual({ w: String(png.w), h: String(png.h) }, dims,
+        'T15/PNG: 解碼回來的尺寸要跟預覽一致。Got ' + JSON.stringify(png));
+      assert.ok(png.bytes > png.blankBytes,
+        'T15/PNG: 檔案必須比同尺寸的全白 PNG 大。Got ' + png.bytes +
+        ' vs 全白 ' + png.blankBytes);
+      assert.ok(png.strippedInk > 0,
+        'T15/PNG 前提失敗：拿掉 <defs> 的那份也該畫得出東西（文字與 <use> 以外的' +
+        '線），否則這個差分比較沒有基準。Got ' + png.strippedInk);
+      assert.ok(png.ink > png.strippedInk * 2,
+        'T15/PNG: 匯出的 PNG 必須明顯比「skin 沒帶上」的版本多墨水 —— 一張空的' +
+        '或半張的圖在這裡就會停下來。Got ink=' + png.ink + ' stripped=' +
+        png.strippedInk + ' / ' + png.pixels + ' pixels');
+
+      // ── 複製 WaveJSON ──────────────────────────────────────────────────
+      await pressClick(ctx.page, '[data-focus-key="ed-wave-export-wavejson"]');
+      await new Promise((r) => setTimeout(r, 400));
+      const copied = await ctx.page.evaluate(() => ({
+        clips: window.__exp.clips,
+        probe: window.__edWaveSourceProbe(),
+        panel: (document.querySelector('.ed-wave-source') || {}).textContent,
+        status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+        downloads: window.__exp.downloads.length,
+      }));
+      assert.strictEqual(copied.clips.length, 1,
+        'T15/JSON: 按一次要寫一次剪貼簿。Got ' + copied.clips.length);
+      assert.strictEqual(copied.downloads, 2,
+        'T15/JSON: 複製 WaveJSON 不該順便下載一個檔案。Got ' + copied.downloads);
+      assert.strictEqual(copied.clips[0], copied.probe,
+        'T15/JSON: 複製的必須是 `actions.sourceText()` 本人，不是第二套序列化');
+      assert.strictEqual(copied.clips[0], copied.panel,
+        'T15/JSON: 也必須逐字等於右欄原始碼面板上寫的那份');
+      // 而且是【現在這份文件】：上面複製過一次 clk，所以剪貼簿裡要有兩條。
+      assert.strictEqual((copied.clips[0].match(/clk/g) || []).length, 2,
+        'T15/JSON: 剪貼簿裡要是編輯後的文件（兩條 clk），不是開啟時那份原始碼。Got ' +
+        JSON.stringify(copied.clips[0]));
+      assert.strictEqual(copied.status, 'WaveJSON 已複製到剪貼簿',
+        'T15/JSON: 要講出來。Got ' + JSON.stringify(copied.status));
+
+      assert.strictEqual(ctx.errs.length, 0,
+        'T15: 不得有 pageerror: ' + ctx.errs.join(' | '));
+      await ctx.page.close(); ctx.srv.close();
+      console.log('journey: 匯出 SVG/PNG 的 payload 本人與複製 WaveJSON — OK');
+    }
   }
 
   await browser.close();
