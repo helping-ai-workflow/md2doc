@@ -51,8 +51,16 @@ const WIDE_MD = [
 ].join('\n');
 
 // 12 cycles = 120 + 576 = 696px: NO overflow, so the `to` handle at cycle 11
-// is genuinely painted and genuinely sits under the expanded rail. This is
-// the case round 4 wrote the function for, and it must keep working.
+// is genuinely painted and genuinely sits under the expanded rail — i.e. the
+// input shape round 4 wrote the function for.
+//
+// It does NOT show the function succeeding, and the comment used to imply it
+// did. MEASURED at 1000x900: the handle is at 888.2–900.2, `bodyRight` is
+// 970, so `fits` is 65.8 and the rail clamps to its 160px floor with its left
+// edge at 810 — 90.2px of the handle still covered, and `elementFromPoint` at
+// the handle's centre returning a `<span>` inside `.ed-wave-side`. So this
+// fixture lands in `clearSelectedEdgeOfSide`'s own accepted-residual case:
+// the rail narrows, and the handle stays undraggable anyway.
 const MEDIUM_MD = [
   '# W', '',
   '```wavedrom',
@@ -216,8 +224,21 @@ async function railMetrics(page) {
 
     // ── 2. round 4's own behaviour, unchanged ───────────────────────────
     // A handle that IS painted, and DOES sit under the expanded rail, must
-    // still narrow it. Without this the "fix" for scenario 1 could simply be
-    // "never narrow", which would silently retire the function.
+    // still narrow it. That is the whole of what this scenario defends, and
+    // it is worth defending: without it the "fix" for scenario 1 could
+    // simply be "never narrow", which would silently retire the function.
+    //
+    // What it does NOT establish, said here so nobody reads more into a
+    // green: on this fixture the narrowing does not clear the handle (see
+    // MEDIUM_MD's own comment — 90.2px still covered at the 160px floor).
+    // And because the measured value IS 160, the assertion's lower bound
+    // sits exactly on it, so this cannot tell "narrowed effectively" apart
+    // from "narrowed to the floor and still covered". The assertion is left
+    // as it is deliberately: it is honest about the one property it pins
+    // (the function did not become a no-op), and tightening it to
+    // "the handle ends up clear" would pin a behaviour
+    // `clearSelectedEdgeOfSide` explicitly does not promise below 1100px,
+    // where `bodyRight === wrapRight` makes clearing impossible at any width.
     {
       const ctx = await boot(MEDIUM_MD);
       await openWave(ctx.page);

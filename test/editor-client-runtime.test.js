@@ -11423,8 +11423,8 @@ async function gutterGeometry(page, sel) {
     // file that no longer exists. RE-MEASURED at v3.6.0 with this scenario's
     // own `rate` computation, because the sentence used to be written in the
     // present tense and had been false for a long time (v3.5.0 `be5cea1`:
-    // 320 items / 292 hard-wrapped / 28 single-line — the CHANGELOG has grown
-    // by about 4.8x since the 72):
+    // 320 items / 292 hard-wrapped / 28 single-line — already about 4.4x the
+    // 72 back then, and 4.8x it today at 349):
     //
     //     be5cea1 (v3.5.0)  total 320  hardWrapped 292  single-line  28
     //     v3.6.0 HEAD       total 349  hardWrapped 317  single-line  32
