@@ -118,6 +118,46 @@ So: for any count or absence check in `client.js`, use `String.indexOf` in node
 reads as a clean guard — which is exactly the direction that lets a retired name
 ship.
 
+## Counting With Shell Tools — Three Ways The Number Lied
+
+The `grep -o` trap above is one instance of a wider problem: a shell tool
+answers the question it was asked, which is often not the question you meant.
+v3.6.0 lost review time to all three of these.
+
+**1. `git diff | grep` can return nothing, silently.** Observed twice on this
+branch — once by the controller, once independently by a reviewer — a piped
+`git diff` produced no output at all while the same diff redirected to a file
+produced the expected lines. The environment's RTK wrapper summarises large
+diffs, and a summary contains none of the `+`/`-` lines a filter is looking
+for. **The conditions were never pinned down**: the same command on other
+ranges reproduced fine, so this is recorded as observed-not-characterised
+rather than as a rule about which diffs are affected.
+
+What makes it expensive is the direction of the failure. A deletion audit —
+"did this change remove any assertion?" — reads an empty result as **no
+deletions**, which is the answer that lets a weakened test ship. Same shape as
+`grep -o` on `client.js`: the silent failure and the clean bill of health are
+the same output.
+
+So: when the answer matters, **redirect `git diff` to a file and read the
+file**, or go through `rtk proxy`. Never pipe it.
+
+**2. Counting lines that contain a word is not counting statements.** A fix
+round reported "6 assertions removed, 16 added" from
+`grep -c '^+.*assert'`. The real numbers were 5 and 10: seven of the extra
+hits were comment prose — `// So the assertions are:`, `// It is asserted
+present rather than`, and four more. The word appears in writing about the
+code as often as in the code.
+
+**3. Say which range and which method, or three people get three numbers.**
+The same deletion audit produced 50, 52 and 57 from three parties. All three
+were arrived at honestly: 50 was correct for `b915295..aec8c5d`, 57 is correct
+for `b915295..5d719b1`, and 52 does not reproduce at any commit on the branch.
+The same happened with the backtick count (352 vs 348, both correct, different
+definitions — see the template-literal section above). A number quoted without
+its range and its method is not a measurement; it is a rumour that outlives the
+commit it came from.
+
 ## The Two Long Puppeteer Suites — No Per-Scenario `try`/`catch`
 
 `test/editor-client-runtime.test.js` and `test/editor-journey.test.js` run every
