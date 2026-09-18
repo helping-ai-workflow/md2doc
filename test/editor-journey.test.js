@@ -15800,7 +15800,9 @@ async function main() {
         const rec = window.__exp.downloads[window.__exp.downloads.length - 1];
         if (!rec || !rec.blob) return null;
         return { name: rec.name, type: rec.blob.type, size: rec.blob.size,
-                 text: await rec.blob.text(), count: window.__exp.downloads.length };
+                 text: await rec.blob.text(), count: window.__exp.downloads.length,
+                 status: document.querySelector('.ed-wave-overlay')
+                   .getAttribute('data-wave-status') };
       });
       assert.ok(svgDl !== null,
         'T15/SVG: 按下去必須真的把一個 Blob 交給下載。Got ' + JSON.stringify(svgDl));
@@ -15809,6 +15811,30 @@ async function main() {
         'T15/SVG: Blob 的 MIME。Got ' + svgDl.type);
       assert.strictEqual(svgDl.name.slice(-4), '.svg',
         'T15/SVG: 檔名副檔名。Got ' + svgDl.name);
+      // 檔名不是裝飾：使用者按下匯出的那一刻，文件【已經是髒的】——上面那次
+      // 複製 lane 就寫回去了——而 client.js 的 dirty 記號是寫進 document.title
+      // 的（`document.title = (documentIsDirty() ? '● ' : '') + baseTitle`）。
+      // 一個拿 `document.title` 當檔名來源的匯出，會在使用者真的編輯過之後
+      // 交出 `●-doc-wave-1.svg`，而在還沒編輯過時交出乾淨的名字 —— 也就是
+      // 說，只有「開了就按」的測試看得到對的答案。所以這裡先斷言前提（標題
+      // 現在真的髒了），再拿【乾淨的】標題和這個 block 自己的 id 去對。
+      const naming = await ctx.page.evaluate(() => {
+        const block = document.querySelector('.wavedrom-diagram').closest('.ed-block');
+        return {
+          raw: document.title,
+          clean: document.title.replace(/^●\s*/, ''),
+          blockId: block === null ? null : block.getAttribute('data-block-id'),
+        };
+      });
+      assert.notStrictEqual(naming.raw, naming.clean,
+        'T15 前提失敗：編輯過之後 document.title 必須已經掛上 dirty 記號，' +
+        '否則這一條什麼都守不到。Got ' + JSON.stringify(naming.raw));
+      assert.strictEqual(svgDl.name, naming.clean + '-wave-' + naming.blockId + '.svg',
+        'T15/SVG: 檔名要是【乾淨的】markdown 檔名 + 這個 block 的 id，' +
+        'dirty 記號不得漏進去。Got ' + svgDl.name + ' / ' + JSON.stringify(naming));
+      assert.strictEqual(svgDl.status, '已匯出 ' + svgDl.name,
+        'T15/SVG: 下載這件事發生在視窗外面，狀態列是這個對話框唯一說得出' +
+        '「剛剛存了什麼」的地方。Got ' + JSON.stringify(svgDl.status));
       assert.ok(svgDl.text.slice(0, 4) === '<svg',
         'T15/SVG: 交出去的必須是一份 svg 文件。Got ' + JSON.stringify(svgDl.text.slice(0, 60)));
 
@@ -15872,9 +15898,21 @@ async function main() {
       // 交出 1871 bytes 合法 PNG，magic bytes 跟尺寸全對。
       //
       // 「不是一片白」用差分量，不用釘死的門檻：把同一份匯出文字的 <defs>
-      // 拿掉再畫一次 —— 那就是「skin 沒帶上」的壞掉版本長的樣子。真正的
+      // 拿掉再畫一次 —— 那就是「defs 沒帶上」的壞掉版本長的樣子。真正的
       // PNG 必須明顯比它多墨水。MEASURED（本 fixture，未複製 lane 前）：
-      // 帶 skin 5693 個非白像素 / 54000，不帶 1409，差 4.0 倍。
+      // 帶 defs 5693 個非白像素 / 54000，不帶 1409，差 4.0 倍。
+      //
+      // 這個差分守的是 skin 的【<defs> 那一半】，不是兩半。<style> 那一半
+      // 它看不見，而且方向還是反的：MEASURED —— 把【已經做好】的匯出文字裡
+      // 的 <style> 拿掉再光柵化，ink 是 6202，比帶 <style> 的 5693 還【高】
+      // （瀏覽器預設字體比 skin 的 Helvetica 11pt 更粗），所以 <style> 的
+      // clone 整個掉了也照樣過得了 `ink > strippedInk * 2`。
+      //
+      // <style> 那一半由上面那條 `standalone.styles > 0` 的存在性斷言守，
+      // 而存在性在這裡就等於效果：skin 的 CSS 沒有 scope（`text{...}`、
+      // `.s1{...}`，沒有 `#svgcontent_N` 前綴），只要那個節點在檔案裡，它
+      // 就作用在整份文件上。下一個人預設「差分兩半都涵蓋」是很自然的事，
+      // 這段話就是為了擋那個預設。
       await pressClick(ctx.page, '[data-focus-key="ed-wave-export-png"]');
       await new Promise((r) => setTimeout(r, 1500));
       const png = await ctx.page.evaluate(async (svgText) => {
@@ -15918,6 +15956,8 @@ async function main() {
           ink: ink, pixels: cv.width * cv.height,
           strippedInk: strippedInk, blankBytes: blankBlob.size,
           count: window.__exp.downloads.length,
+          status: document.querySelector('.ed-wave-overlay')
+            .getAttribute('data-wave-status'),
         };
       }, svgDl.text);
       assert.strictEqual(png.got, true,
@@ -15925,7 +15965,12 @@ async function main() {
         '非同步，失敗時這裡是 null）。Got ' + JSON.stringify(png));
       assert.strictEqual(png.count, 2, 'T15/PNG: 這是第二個檔案');
       assert.strictEqual(png.type, 'image/png', 'T15/PNG: Blob 的 MIME。Got ' + png.type);
-      assert.strictEqual(png.name.slice(-4), '.png', 'T15/PNG: 檔名。Got ' + png.name);
+      assert.strictEqual(png.name, naming.clean + '-wave-' + naming.blockId + '.png',
+        'T15/PNG: 檔名跟 SVG 同一條規則，dirty 記號一樣不得漏進去。Got ' +
+        png.name + ' / ' + JSON.stringify(naming));
+      assert.strictEqual(png.status, '已匯出 ' + png.name,
+        'T15/PNG: 狀態列要說出剛剛存了什麼（而且 PNG 這一條是在 toBlob 的' +
+        'callback 裡說的，比 SVG 那條多繞一層非同步）。Got ' + JSON.stringify(png.status));
       assert.deepStrictEqual(png.magic, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
         'T15/PNG: PNG 的 magic bytes。Got ' + JSON.stringify(png.magic));
       assert.deepStrictEqual({ w: String(png.w), h: String(png.h) }, dims,
