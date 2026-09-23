@@ -379,6 +379,27 @@ async function main() {
         assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nabove\n\nbelow\n');
       });
 
+    // Final review C1: a wavedrom block is a no-surface block too, but its
+    // Enter already means "open the wave editor" (journey T8e). The arrow
+    // walk's Enter-to-raw must not take that key from it.
+    await scenario('Enter on a walked-onto wavedrom block opens the wave editor, not MD 原始碼',
+      '# W\n\n```wavedrom\n{ "signal": [ { "name": "a", "wave": "01" } ] }\n```\n',
+      async (page) => {
+        await focusText(page, 'W', 1);
+        await press(page, 'ArrowDown');
+        assert.deepStrictEqual((await caret(page)).selected, [[3, 5]],
+          'precondition: the walk stopped on the wavedrom block');
+        await page.keyboard.press('Enter');
+        await new Promise((r) => setTimeout(r, 1200));
+        const got = await page.evaluate(() => ({
+          overlay: document.querySelectorAll('.ed-wave-overlay').length,
+          raw: document.querySelectorAll('textarea.ed-raw').length,
+        }));
+        assert.deepStrictEqual(got, { overlay: 1, raw: 0 });
+        await page.keyboard.press('Escape');
+        await new Promise((r) => setTimeout(r, 600));
+      });
+
     // ── Task 4: tables ───────────────────────────────────────────────────
     const TBL = '# Doc\n\nabove\n\n| Aa | Bb | Cc |\n|---|---|---|\n| a1 | b1 | c1 |\n| a2 | b2 | c2 |\n\nbelow\n';
 
