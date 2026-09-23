@@ -333,6 +333,52 @@ async function main() {
       assert.strictEqual((await caret(page)).text, 'abcdefghij klm');
     });
 
+    // ── Task 3: blocks with no typing surface ────────────────────────────
+    const CODE = '# Doc\n\nabove\n\n```js\nx = 1\n```\n\nbelow\n';
+
+    await scenario('↓ onto a fenced code block selects it', CODE, async (page) => {
+      await focusText(page, 'above', 2);
+      await press(page, 'ArrowDown');
+      const c = await caret(page);
+      assert.strictEqual(c.text, null, 'no typing surface holds focus');
+      assert.deepStrictEqual(c.selected, [[5, 7]], 'the code block (lines 5-7) is selected');
+    });
+
+    await scenario('from a selected code block, ↓ / ↑ continue the walk', CODE,
+      async (page) => {
+        await focusText(page, 'above', 2);
+        await press(page, 'ArrowDown');
+        await press(page, 'ArrowDown');
+        let c = await caret(page);
+        assert.strictEqual(c.text, 'below');
+        assert.strictEqual(c.selected, null, 'the selection is cleared on leaving');
+        await press(page, 'ArrowUp');
+        assert.deepStrictEqual((await caret(page)).selected, [[5, 7]]);
+        await press(page, 'ArrowUp');
+        c = await caret(page);
+        assert.strictEqual(c.text, 'above');
+        assert.strictEqual(c.offset, 2, 'x remembered across the selected block');
+      });
+
+    await scenario('Enter on a selected code block opens its MD 原始碼', CODE,
+      async (page) => {
+        await focusText(page, 'above', 2);
+        await press(page, 'ArrowDown');
+        await press(page, 'Enter');
+        await page.waitForSelector('textarea.ed-raw', { timeout: 5000 });
+        assert.strictEqual(await page.evaluate(() =>
+          document.querySelector('textarea.ed-raw').value), '```js\nx = 1\n```');
+      });
+
+    await scenario('Delete on a selected hr removes it', '# Doc\n\nabove\n\n---\n\nbelow\n',
+      async (page, mdPath) => {
+        await focusText(page, 'above', 0);
+        await press(page, 'ArrowDown');
+        assert.deepStrictEqual((await caret(page)).selected, [[5, 5]]);
+        await press(page, 'Delete');
+        assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nabove\n\nbelow\n');
+      });
+
     console.log('editor-arrow-nav.test.js OK');
   } finally {
     await browser.close();
