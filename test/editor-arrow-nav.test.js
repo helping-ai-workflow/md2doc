@@ -162,6 +162,177 @@ async function main() {
           [false, true], 'empty trailing line: last line, not first');
       });
 
+    // ── Task 2: walking between typing surfaces ──────────────────────────
+    const TWO = '# Doc\n\nabcdefghij klm\n\nabcdefghij xyz\n';
+
+    await scenario('↓ on the last line lands in the next block at the same x', TWO,
+      async (page) => {
+        await focusText(page, 'abcdefghij klm', 5);
+        await press(page, 'ArrowDown');
+        const c = await caret(page);
+        assert.strictEqual(c.text, 'abcdefghij xyz', 'landed in the next paragraph');
+        assert.strictEqual(c.offset, 5, 'x-aligned: identical text, so identical offset');
+      });
+
+    await scenario('↑ on the first line lands in the previous block at the same x', TWO,
+      async (page) => {
+        await focusText(page, 'abcdefghij xyz', 7);
+        await press(page, 'ArrowUp');
+        assert.deepStrictEqual(await caret(page),
+          { text: 'abcdefghij klm', offset: 7, selected: null });
+      });
+
+    await scenario('↑ from a paragraph lands on the heading above', TWO,
+      async (page) => {
+        await focusText(page, 'abcdefghij klm', 0);
+        await press(page, 'ArrowUp');
+        assert.strictEqual((await caret(page)).text, 'Doc');
+      });
+
+    await scenario('↓ walks list items one by one',
+      '# Doc\n\nlead\n\n- one\n- two\n', async (page) => {
+        await focusText(page, 'lead', 2);
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'one');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'two');
+      });
+
+    // Review Focus 2: a soft-wrapped paragraph's first visual line is not
+    // its last line, so ↓ there is the browser's own move.
+    const LONG = 'word '.repeat(80).trim();
+    await scenario('wrapped first line: ↓ stays in the same block (native)',
+      '# Doc\n\n' + LONG + '\n\nnext\n', async (page) => {
+        await focusText(page, LONG, 3);
+        await press(page, 'ArrowDown');
+        const c = await caret(page);
+        assert.strictEqual(c.text, LONG, 'still in the wrapped paragraph');
+        assert.ok(c.offset > 3, 'the caret moved down a visual line, got ' + c.offset);
+      });
+
+    await scenario('wrapped second line: ↑ stays in the same block (native)',
+      '# Doc\n\n' + LONG + '\n', async (page) => {
+        await focusText(page, LONG, 250);
+        await press(page, 'ArrowUp');
+        assert.strictEqual((await caret(page)).text, LONG);
+      });
+
+    await scenario('a non-collapsed selection on the last line never jumps', TWO,
+      async (page) => {
+        await focusText(page, 'abcdefghij klm', 2);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowRight');
+        await page.keyboard.up('Shift');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'abcdefghij klm');
+      });
+
+    await scenario('↓ in the last block is a no-op', TWO, async (page) => {
+      await focusText(page, 'abcdefghij xyz', 3);
+      await press(page, 'ArrowDown');
+      assert.strictEqual((await caret(page)).text, 'abcdefghij xyz');
+    });
+
+    await scenario('dirty block: ↓ commits once, and one Ctrl+Z undoes it', TWO,
+      async (page, mdPath) => {
+        const original = fs.readFileSync(mdPath, 'utf8');
+        await focusText(page, 'abcdefghij klm', 14);
+        await page.keyboard.type('Q');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'abcdefghij xyz', 'landed below');
+        assert.strictEqual(await saveAndRead(page, mdPath),
+          '# Doc\n\nabcdefghij klmQ\n\nabcdefghij xyz\n', 'the edit was committed');
+        await focusText(page, 'abcdefghij xyz', 0);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settle(page);
+        assert.strictEqual(await saveAndRead(page, mdPath), original,
+          'a pristine burst cascades Ctrl+Z to the document stack: ONE op undoes the edit');
+      });
+
+    // Review Focus 3: Shift+Enter mid-text leaves the caret at an ELEMENT
+    // offset just after the <br>, where a collapsed range has no rect at
+    // all. MEASURED before the fix: the caret stayed put, because the
+    // no-rect fallback saw ' klm' after it and answered "not the last line".
+    await scenario('Shift+Enter mid-text: ↓ from the new last line lands below', TWO,
+      async (page) => {
+        await focusText(page, 'abcdefghij klm', 10);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Enter');
+        await page.keyboard.up('Shift');
+        assert.strictEqual(await page.evaluate(() => window.__edTestCaretAtEdge('down')), true,
+          'the caret is on the last visual line');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'abcdefghij xyz');
+      });
+
+    await scenario('empty trailing line: ↓ lands below', TWO, async (page) => {
+      await focusText(page, 'abcdefghij klm', 14);
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('Enter');
+      await page.keyboard.up('Shift');
+      await press(page, 'ArrowDown');
+      assert.strictEqual((await caret(page)).text, 'abcdefghij xyz');
+    });
+
+    // Review Focus 4: caretPositionFromPoint() hit-tests, so a destination
+    // below the fold — or under the fixed .ed-toolbar — must be scrolled into
+    // reach before the x is resolved, or the landing falls back to the line
+    // start. Offset 4 (not 0) is what proves the x was honoured.
+    const TALL = '# Doc\n\n' + Array.from({ length: 30 }, (_, i) => 'filler ' + i).join('\n\n') +
+      '\n\nabcdefghij klm\n\nabcdefghij xyz\n\n' +
+      Array.from({ length: 30 }, (_, i) => 'tail ' + i).join('\n\n') + '\n';
+    await scenario('destination below the fold: ↓ still lands at the same x', TALL,
+      async (page) => {
+        await focusText(page, 'abcdefghij klm', 4);
+        await page.evaluate(() => {
+          const s = document.activeElement.getBoundingClientRect();
+          window.scrollBy(0, s.bottom - window.innerHeight + 2);
+        });
+        assert.ok(await page.evaluate(() => {
+          const d = [...document.querySelectorAll('.ed-wys-armed')]
+            .find((el) => el.textContent === 'abcdefghij xyz');
+          return d.getBoundingClientRect().top >= window.innerHeight;
+        }), 'precondition: the destination starts below the viewport');
+        await press(page, 'ArrowDown');
+        assert.deepStrictEqual(await caret(page),
+          { text: 'abcdefghij xyz', offset: 4, selected: null });
+      });
+
+    await scenario('destination under the fixed toolbar: ↑ still lands at the same x', TALL,
+      async (page) => {
+        await focusText(page, 'abcdefghij xyz', 4);
+        await page.evaluate(() => {
+          const bar = document.querySelector('.ed-toolbar').getBoundingClientRect();
+          const s = document.activeElement.getBoundingClientRect();
+          window.scrollBy(0, s.top - bar.bottom - 2);
+        });
+        assert.ok(await page.evaluate(() => {
+          const bar = document.querySelector('.ed-toolbar').getBoundingClientRect();
+          const d = [...document.querySelectorAll('.ed-wys-armed')]
+            .find((el) => el.textContent === 'abcdefghij klm');
+          return d.getBoundingClientRect().bottom <= bar.bottom;
+        }), 'precondition: the destination is hidden under the toolbar');
+        await press(page, 'ArrowUp');
+        assert.deepStrictEqual(await caret(page),
+          { text: 'abcdefghij klm', offset: 4, selected: null });
+      });
+
+    // Review Focus 5.
+    await scenario('an IME-composing ↓ is not intercepted', TWO, async (page) => {
+      await focusText(page, 'abcdefghij klm', 5);
+      const prevented = await page.evaluate(() => {
+        const ev = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true,
+          cancelable: true, isComposing: true });
+        document.activeElement.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      });
+      await settle(page);
+      assert.strictEqual(prevented, false);
+      assert.strictEqual((await caret(page)).text, 'abcdefghij klm');
+    });
+
     console.log('editor-arrow-nav.test.js OK');
   } finally {
     await browser.close();
