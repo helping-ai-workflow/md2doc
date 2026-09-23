@@ -347,6 +347,37 @@ async function main() {
           { text: 'abcdefghij klm', offset: 4, selected: null });
       });
 
+    // Final review I2: a destination TALLER than the viewport, entered from
+    // below. Scrolling its TOP into reach pushes its last line off-screen, and
+    // the hit test then falls back to the end of the text, losing the x.
+    const HUGE = 'word '.repeat(2000).trim();
+    await scenario('↑ into a block taller than the viewport lands on its last line at the same x',
+      '# Doc\n\n' + HUGE + '\n\nabcdefghij xyz\n', async (page) => {
+        await focusText(page, 'abcdefghij xyz', 4);
+        const srcX = await page.evaluate(() => {
+          const r = getSelection().getRangeAt(0).getClientRects()[0];
+          return r.left;
+        });
+        await page.evaluate(() => {
+          const bar = document.querySelector('.ed-toolbar').getBoundingClientRect();
+          const s = document.activeElement.getBoundingClientRect();
+          window.scrollBy(0, s.top - bar.bottom - 2);
+        });
+        await press(page, 'ArrowUp');
+        const got = await page.evaluate(() => {
+          const r = getSelection().getRangeAt(0).getClientRects()[0];
+          return { text: document.activeElement.textContent.length, x: r ? r.left : null,
+            top: r ? r.top : null, bottom: r ? r.bottom : null,
+            barBottom: document.querySelector('.ed-toolbar').getBoundingClientRect().bottom,
+            vh: window.innerHeight };
+        });
+        assert.strictEqual(got.text, HUGE.length, 'landed in the tall paragraph');
+        assert.ok(got.top >= got.barBottom && got.bottom <= got.vh,
+          'the landed caret is on screen, got ' + JSON.stringify(got));
+        assert.ok(Math.abs(got.x - srcX) < 12,
+          'x honoured: ' + got.x + ' vs source ' + srcX);
+      });
+
     // Review Focus 5.
     await scenario('an IME-composing ↓ is not intercepted', TWO, async (page) => {
       await focusText(page, 'abcdefghij klm', 5);
