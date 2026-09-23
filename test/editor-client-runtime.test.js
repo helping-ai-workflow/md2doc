@@ -23711,6 +23711,56 @@ async function gutterGeometry(page, sel) {
       }
     }
 
+    // ── A list item's MD 原始碼 textarea must span the document column, like
+    //    every other block's does. A li block is a flex row, and openRawEditor()
+    //    leaves .ed-editing as its only flex child; with no flex-grow that wrap
+    //    shrank to the textarea's intrinsic size, so .ed-raw's width:100%
+    //    resolved against it. MEASURED before the fix: 189px at BOTH a
+    //    1400px and a 1920px viewport (paragraph: 964 / 1484 = the column).
+    //    A nested item spans the full width too — its indent lives on the
+    //    marker's margin, and the marker is gone while the textarea is open;
+    //    the source line's own leading spaces carry the depth.
+    //    The paragraph row is the control: it was already right, so it proves
+    //    the ratio this scenario asserts is reachable at all. ─────────────────
+    {
+      const { srv, url } = await setupTableDoc(
+        ['# Doc', '', 'Control paragraph.', '', '- alpha', '  - bravo', '    - charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle2' });
+
+        const rows = [
+          ['paragraph', '.ed-block[data-block-type="paragraph"]'],
+          ['li depth 0', await liBlockSelByText(page, 'alpha')],
+          ['li depth 2', await liBlockSelByText(page, 'charlie')],
+        ];
+        for (const [label, sel] of rows) {
+          await clickGutterMenuItem(page, sel, 'MD 原始碼');
+          await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+          const m = await page.evaluate((s) => {
+            const c = document.querySelector('.content');
+            const cs = getComputedStyle(c);
+            return {
+              ta: document.querySelector(s + ' textarea.ed-raw').getBoundingClientRect().width,
+              column: c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+            };
+          }, sel);
+          assert.ok(m.ta >= m.column * 0.95,
+            label + ': MD 原始碼 textarea must span the document column, got ' +
+            Math.round(m.ta) + 'px of ' + Math.round(m.column) + 'px');
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(
+            (s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 5000 }, sel);
+        }
+
+        await page.close();
+        console.log('li MD 原始碼 textarea spans the document column (depth 0 and 2, paragraph control) — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
     // ── v3.1.0 追加 2: a clipboard carrying text/html is converted to
     //    MARKDOWN (paste-md.js -> turndown) instead of being flattened to the
     //    plain-text flavour. `<h2>x</h2>` becomes `## x`, which is real block
