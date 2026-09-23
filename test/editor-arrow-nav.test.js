@@ -379,6 +379,89 @@ async function main() {
         assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\nabove\n\nbelow\n');
       });
 
+    // ── Task 4: tables ───────────────────────────────────────────────────
+    const TBL = '# Doc\n\nabove\n\n| Aa | Bb | Cc |\n|---|---|---|\n| a1 | b1 | c1 |\n| a2 | b2 | c2 |\n\nbelow\n';
+
+    // The caret's x is MEASURED into column B, never assumed from a font:
+    // the offset is the first one in the long paragraph whose caret rect
+    // falls inside the Bb header cell's horizontal span.
+    const RULER = 'x'.repeat(80);
+    const TBL_ENTRY = '# Doc\n\n' + RULER + '\n\n| Aa | Bb | Cc |\n|---|---|---|\n| a1 | b1 | c1 |\n';
+    await scenario('↓ into a table lands in the header cell under x', TBL_ENTRY,
+      async (page) => {
+        const offset = await page.evaluate((t) => {
+          const th = [...document.querySelectorAll('.ed-wys-cell')].find((c) => c.textContent === 'Bb');
+          const col = th.getBoundingClientRect();
+          const p = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === t);
+          const node = p.firstChild;
+          for (let i = 0; i <= node.data.length; i++) {
+            const r = document.createRange();
+            r.setStart(node, i);
+            r.setEnd(node, i);
+            const x = r.getBoundingClientRect().left;
+            if (x > col.left + 2 && x < col.right - 2) return i;
+          }
+          return -1;
+        }, RULER);
+        assert.ok(offset >= 0, 'precondition: some caret offset in the ruler sits over column B');
+        await focusText(page, RULER, offset);
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'Bb');
+      });
+
+    await scenario('↑/↓ inside a table keep the column; the edges leave the table', TBL,
+      async (page) => {
+        await focusText(page, 'b1', 1);
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'b2');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'below', 'last row ↓ leaves the table');
+        await focusText(page, 'b1', 1);
+        await press(page, 'ArrowUp');
+        assert.strictEqual((await caret(page)).text, 'Bb');
+        await press(page, 'ArrowUp');
+        assert.strictEqual((await caret(page)).text, 'above', 'header ↑ leaves the table');
+      });
+
+    await scenario('←/→ move between cells only at the text boundary', TBL,
+      async (page) => {
+        await focusText(page, 'b1', 1);
+        await press(page, 'ArrowRight');
+        assert.deepStrictEqual(await caret(page), { text: 'b1', offset: 2, selected: null },
+          'mid-text → is native');
+        await press(page, 'ArrowRight');
+        assert.deepStrictEqual(await caret(page), { text: 'c1', offset: 0, selected: null },
+          'at the end → the next cell, caret at its start');
+        await press(page, 'ArrowLeft');
+        assert.deepStrictEqual(await caret(page), { text: 'b1', offset: 2, selected: null },
+          'at the start ← the previous cell, caret at its end');
+      });
+
+    await scenario('→ wraps to the next row; first/last cell stay put', TBL, async (page) => {
+      await focusText(page, 'Cc', 2);
+      await press(page, 'ArrowRight');
+      assert.strictEqual((await caret(page)).text, 'a1', 'row-major: header C → a1');
+      await focusText(page, 'Aa', 0);
+      await press(page, 'ArrowLeft');
+      assert.deepStrictEqual(await caret(page), { text: 'Aa', offset: 0, selected: null });
+      await focusText(page, 'c2', 2);
+      await press(page, 'ArrowRight');
+      assert.deepStrictEqual(await caret(page), { text: 'c2', offset: 2, selected: null });
+    });
+
+    await scenario('moving between cells commits nothing and keeps the edit', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 2);
+        await page.keyboard.type('Z');
+        const rendersBefore = await page.evaluate(() => window.__edRenderCount);
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'b2');
+        assert.strictEqual(await page.evaluate(() => window.__edRenderCount), rendersBefore,
+          'no /api/render: a cell move inside the table is not a commit');
+        assert.ok((await saveAndRead(page, mdPath)).includes('| a1 | b1Z | c1 |'),
+          'the typed Z survived the cell move');
+      });
+
     console.log('editor-arrow-nav.test.js OK');
   } finally {
     await browser.close();
