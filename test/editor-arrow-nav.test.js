@@ -217,6 +217,35 @@ async function main() {
         assert.strictEqual((await caret(page)).text, LONG);
       });
 
+    // Final review M3: at a soft-wrap boundary a collapsed caret has two
+    // candidate rects (end of the upper line, start of the lower one).
+    // Home on the 2nd visual line, then ↑, must stay in the block; End on
+    // the 1st visual line, then ↓, likewise.
+    await scenario('wrap boundary: Home on the 2nd visual line, ↑ stays in the block',
+      '# Doc\n\n' + LONG + '\n', async (page) => {
+        await focusText(page, LONG, 250);
+        await press(page, 'ArrowUp');
+        await press(page, 'Home');
+        const before = (await caret(page)).offset;
+        assert.ok(before > 0, 'precondition: Home landed at a wrap boundary, not offset 0');
+        await press(page, 'ArrowUp');
+        const c = await caret(page);
+        assert.strictEqual(c.text, LONG, 'stayed in the wrapped paragraph');
+        assert.ok(c.offset < before, 'moved up a visual line, got ' + c.offset);
+      });
+
+    await scenario('wrap boundary: End on the 1st visual line, ↓ stays in the block',
+      '# Doc\n\n' + LONG + '\n\nnext\n', async (page) => {
+        await focusText(page, LONG, 3);
+        await press(page, 'End');
+        const before = (await caret(page)).offset;
+        assert.ok(before < LONG.length, 'precondition: End stopped at the wrap, not the text end');
+        await press(page, 'ArrowDown');
+        const c = await caret(page);
+        assert.strictEqual(c.text, LONG, 'stayed in the wrapped paragraph');
+        assert.ok(c.offset > before, 'moved down a visual line, got ' + c.offset);
+      });
+
     await scenario('a non-collapsed selection on the last line never jumps', TWO,
       async (page) => {
         await focusText(page, 'abcdefghij klm', 2);
