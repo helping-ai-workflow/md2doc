@@ -276,6 +276,34 @@ async function main() {
       assert.strictEqual((await caret(page)).text, 'abcdefghij xyz');
     });
 
+    // Final review I1: inserting a table row inside the table's burst adds a
+    // SOURCE line when the burst commits on the way out, and the first commit
+    // after a page load is a full render that detaches the destination. The
+    // destination's identity still names its OLD start line; the walk must
+    // land anyway, not strand the caret on <body>.
+    await scenario('first commit adds a table row: ↓ out of the new last row still lands below',
+      '# Doc\n\n| A | B |\n|---|---|\n| a1 | b1 |\n\nbelow\n', async (page, mdPath) => {
+        await focusText(page, 'b1', 2);
+        const { x, y } = await page.evaluate(() => {
+          const t = document.querySelector('.ed-block table');
+          return { x: t.getBoundingClientRect().left, y: t.tBodies[0].rows[0].getBoundingClientRect().bottom };
+        });
+        await page.mouse.move(x, y);
+        await page.waitForSelector('.ed-tb-insert-row:not([hidden])', { timeout: 3000 });
+        await page.click('.ed-tb-insert-row');
+        await settle(page);
+        assert.strictEqual(await page.evaluate(() =>
+          document.querySelector('.ed-block table').tBodies[0].rows.length), 2,
+          'precondition: the row was inserted');
+        await focusText(page, '', 0);
+        assert.strictEqual(await page.evaluate(() => window.__edRenderCount), 0,
+          'precondition: nothing has committed yet, so the next commit is a full render');
+        await press(page, 'ArrowDown');
+        assert.strictEqual((await caret(page)).text, 'below');
+        assert.ok((await saveAndRead(page, mdPath)).split('\n').length >= 8,
+          'the inserted row reached the file');
+      });
+
     // Review Focus 4: caretPositionFromPoint() hit-tests, so a destination
     // below the fold — or under the fixed .ed-toolbar — must be scrolled into
     // reach before the x is resolved, or the landing falls back to the line
