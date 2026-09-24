@@ -183,6 +183,23 @@ async function drag(page, fromText, toText) {
   await settle(page);
 }
 
+// Dispatches a synthetic ClipboardEvent at the focused element and returns
+// what the page's handlers left in its DataTransfer. `text`/`html` seed a
+// paste; copy/cut start empty.
+async function clipboardEvent(page, type, text, html) {
+  const got = await page.evaluate((ty, t, h) => {
+    const dt = new DataTransfer();
+    if (t !== null) dt.setData('text/plain', t);
+    if (h !== null) dt.setData('text/html', h);
+    const ev = new ClipboardEvent(ty, { clipboardData: dt, bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(ev);
+    return { plain: dt.getData('text/plain'), html: dt.getData('text/html'),
+      prevented: ev.defaultPrevented };
+  }, type, text === undefined ? null : text, html === undefined ? null : html);
+  await settle(page);
+  return got;
+}
+
 async function main() {
   browser = await puppeteer.launch({ args: ['--no-sandbox'] });
   try {
@@ -318,6 +335,54 @@ async function main() {
         await settle(page);
         assert.deepStrictEqual(await rangeTexts(page), ['b1', 'b2']);
       });
+
+    // ── Task 5: Delete, typing, copy, cut ────────────────────────────────
+    await scenario('Delete clears the range; one Ctrl+Z restores it and keeps the paint', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'c2');
+        await press(page, 'Delete');
+        assert.deepStrictEqual(await rangeTexts(page), ['', '', '', ''], 'cleared, still painted');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), ['b1', 'c1', 'b2', 'c2'],
+          'Review Focus 1: undo swapped innerHTML, the range was re-painted');
+        await press(page, 'Delete');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C'], ['a1', '', ''], ['a2', '', '']]);
+      });
+
+    await scenario('typing clears the range and lands in the focus cell', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'c2');
+        await page.keyboard.type('Z');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), [], 'the range is gone');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C'], ['a1', '', ''], ['a2', '', 'Z']]);
+      });
+
+    await scenario('copy writes TSV and an HTML table of the range', TBL, async (page) => {
+      await focusText(page, 'b1', 0);
+      await shiftClick(page, 'c2');
+      const got = await clipboardEvent(page, 'copy');
+      assert.strictEqual(got.prevented, true);
+      assert.strictEqual(got.plain, 'b1\tc1\nb2\tc2');
+      assert.ok(/<table>[\s\S]*<td>b1<\/td><td>c1<\/td>[\s\S]*<td>b2<\/td><td>c2<\/td>/.test(got.html),
+        'html: ' + got.html);
+    });
+
+    await scenario('cut copies, then clears the range', TBL, async (page, mdPath) => {
+      await focusText(page, 'a1', 0);
+      await shiftClick(page, 'a2');
+      const got = await clipboardEvent(page, 'cut');
+      assert.strictEqual(got.plain, 'a1\na2');
+      assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+        [['A', 'B', 'C'], ['', 'b1', 'c1'], ['', 'b2', 'c2']]);
+    });
 
     console.log('editor-cell-range.test.js OK');
   } finally {
