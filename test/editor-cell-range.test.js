@@ -282,6 +282,43 @@ async function main() {
         assert.deepStrictEqual(await rangeTexts(page), [], 'and no cell range is left painted');
       });
 
+    // ── Task 4: Shift+Arrow ──────────────────────────────────────────────
+    await scenario('Shift+→ at a cell end starts a range with the next cell', TBL,
+      async (page) => {
+        await focusText(page, 'b1', 2);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowRight');
+        await page.keyboard.up('Shift');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), ['b1', 'c1']);
+      });
+
+    await scenario('Shift+→ mid-text stays a text selection', TBL, async (page) => {
+      await focusText(page, 'b1', 0);
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.up('Shift');
+      await settle(page);
+      assert.deepStrictEqual(await rangeTexts(page), []);
+    });
+
+    await scenario('Shift+Arrow grows and shrinks the range, clamped to the table', TBL,
+      async (page) => {
+        await focusText(page, 'b1', 2);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowRight');
+        await page.keyboard.press('ArrowDown');
+        await page.keyboard.up('Shift');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), ['b1', 'c1', 'b2', 'c2']);
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('ArrowDown');   // already the last row: clamped
+        await page.keyboard.press('ArrowLeft');
+        await page.keyboard.up('Shift');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), ['b1', 'b2']);
+      });
+
     console.log('editor-cell-range.test.js OK');
   } finally {
     await browser.close();
