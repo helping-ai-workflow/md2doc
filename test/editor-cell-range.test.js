@@ -172,6 +172,17 @@ function mdTable(md) {
     .map((l) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map((s) => s.trim()));
 }
 
+async function drag(page, fromText, toText) {
+  const a = await cellCenter(page, fromText);
+  const b = await cellCenter(page, toText);
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move((a.x + b.x) / 2, (a.y + b.y) / 2, { steps: 4 });
+  await page.mouse.move(b.x, b.y, { steps: 4 });
+  await page.mouse.up();
+  await settle(page);
+}
+
 async function main() {
   browser = await puppeteer.launch({ args: ['--no-sandbox'] });
   try {
@@ -230,6 +241,45 @@ async function main() {
         assert.deepStrictEqual(await rangeTexts(page), []);
         assert.strictEqual(await page.evaluate(() =>
           !!document.querySelector('.ed-cell-range-active')), false);
+      });
+
+    // ── Task 3: drag ─────────────────────────────────────────────────────
+    await scenario('dragging from one cell to another paints the rectangle', TBL,
+      async (page) => {
+        await focusText(page, 'a1', 0);
+        await drag(page, 'a1', 'b2');
+        assert.deepStrictEqual(await rangeTexts(page), ['a1', 'b1', 'a2', 'b2']);
+      });
+
+    await scenario('a drag inside one cell stays a text selection', TBL, async (page) => {
+      await focusText(page, 'b1', 0);
+      const c = await cellCenter(page, 'b1');
+      await page.mouse.move(c.x - 6, c.y);
+      await page.mouse.down();
+      await page.mouse.move(c.x + 6, c.y, { steps: 3 });
+      await page.mouse.up();
+      await settle(page);
+      assert.deepStrictEqual(await rangeTexts(page), []);
+    });
+
+    // Review Focus 4: out of the table is still a block selection.
+    await scenario('a drag out of the table still becomes a block selection', TBL,
+      async (page) => {
+        await focusText(page, 'a1', 0);
+        const a = await cellCenter(page, 'b2');
+        const out = await page.evaluate(() => {
+          const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === 'after');
+          const r = s.getBoundingClientRect();
+          return { x: r.left + 5, y: r.top + r.height / 2 };
+        });
+        await page.mouse.move(a.x, a.y);
+        await page.mouse.down();
+        await page.mouse.move(out.x, out.y, { steps: 6 });
+        await page.mouse.up();
+        await settle(page);
+        const sel = await page.evaluate(() => window.__edTestGetSelection());
+        assert.ok(sel && sel.memberLines.length >= 2, 'block selection stands, got ' + JSON.stringify(sel));
+        assert.deepStrictEqual(await rangeTexts(page), [], 'and no cell range is left painted');
       });
 
     console.log('editor-cell-range.test.js OK');
