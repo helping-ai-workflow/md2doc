@@ -446,6 +446,38 @@ async function main() {
         assert.strictEqual(await saveAndRead(page, mdPath), original);
       });
 
+    // ── Task 7: formatting ───────────────────────────────────────────────
+    // Review Focus 5: the toolbar press must not clear the range first.
+    await scenario('toolbar B bolds every cell, a second press unbolds them', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'c2');
+        await page.waitForSelector('.ed-seltb-b', { timeout: 3000 });
+        await page.click('.ed-seltb-b');
+        await settle(page);
+        assert.deepStrictEqual(await rangeTexts(page), ['b1', 'c1', 'b2', 'c2'], 'range kept');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)).slice(1),
+          [['a1', '**b1**', '**c1**'], ['a2', '**b2**', '**c2**']]);
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'c2');
+        await page.waitForSelector('.ed-seltb-b', { timeout: 3000 });
+        await page.click('.ed-seltb-b');
+        await settle(page);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)).slice(1),
+          [['a1', 'b1', 'c1'], ['a2', 'b2', 'c2']]);
+      });
+
+    await scenario('Ctrl+B with a range bolds every non-empty cell', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'a1', 0);
+        await shiftClick(page, 'b1');
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyB');
+        await page.keyboard.up('Control');
+        await settle(page);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath))[1], ['**a1**', '**b1**', 'c1']);
+      });
+
     console.log('editor-cell-range.test.js OK');
   } finally {
     await browser.close();
