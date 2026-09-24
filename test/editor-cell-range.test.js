@@ -384,6 +384,68 @@ async function main() {
         [['A', 'B', 'C'], ['', 'b1', 'c1'], ['', 'b2', 'c2']]);
     });
 
+    // ── Task 6: grid paste ───────────────────────────────────────────────
+    await scenario('TSV paste fills from the caret cell and selects the pasted block', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 0);
+        await clipboardEvent(page, 'paste', 'x\ty\nz\tw');
+        assert.deepStrictEqual(await rangeTexts(page), ['x', 'y', 'z', 'w']);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C'], ['a1', 'x', 'y'], ['a2', 'z', 'w']]);
+      });
+
+    await scenario('a paste larger than the table grows it (one undo)', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'c2', 0);
+        await clipboardEvent(page, 'paste', 'p\tq\nr\ts\n');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C', ''], ['a1', 'b1', 'c1', ''], ['a2', 'b2', 'p', 'q'], ['', '', 'r', 's']]);
+        await focusText(page, 'p', 0);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settle(page);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C'], ['a1', 'b1', 'c1'], ['a2', 'b2', 'c2']]);
+      });
+
+    await scenario('an HTML <table> paste uses its cells', TBL, async (page, mdPath) => {
+      await focusText(page, 'a1', 0);
+      await clipboardEvent(page, 'paste', 'ignored',
+        '<table><tr><td>h1</td><td><b>h2</b></td></tr></table>');
+      assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath))[1], ['h1', 'h2', 'c1']);
+    });
+
+    await scenario('multi-line text without a TAB keeps the single-cell paste', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'a1', 2);
+        await clipboardEvent(page, 'paste', 'L1\nL2');
+        assert.deepStrictEqual(await rangeTexts(page), []);
+        const row = mdTable(await saveAndRead(page, mdPath))[1];
+        assert.ok(/^a1L1.*L2$/.test(row[0]), 'one cell, got ' + JSON.stringify(row));
+      });
+
+    // Review Focus 3. The renderer emits an EMPTY <tbody> for a header-only
+    // table (measured), so growth appends into it; this pins that shape.
+    await scenario('grid paste into a header-only table creates its body rows',
+      '# Doc\n\n| A | B |\n|---|---|\n\nafter\n', async (page, mdPath) => {
+        await focusText(page, 'A', 0);
+        await clipboardEvent(page, 'paste', 'x\ty\n1\t2');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)), [['x', 'y'], ['1', '2']]);
+      });
+
+    await scenario('a paste over the size bound is refused with a banner', TBL,
+      async (page, mdPath) => {
+        const original = fs.readFileSync(mdPath, 'utf8');
+        await focusText(page, 'a1', 0);
+        await clipboardEvent(page, 'paste', Array.from({ length: 501 }, () => 'a\tb').join('\n'));
+        assert.strictEqual(await page.evaluate(() => {
+          const b = document.querySelector('.ed-conflict');
+          return b ? b.textContent.indexOf('貼上的表格太大') !== -1 : false;
+        }), true);
+        assert.strictEqual(await saveAndRead(page, mdPath), original);
+      });
+
     console.log('editor-cell-range.test.js OK');
   } finally {
     await browser.close();
