@@ -18279,8 +18279,9 @@ async function gutterGeometry(page, sel) {
           await settleEditor(page);
 
           assert.strictEqual(await t6Banner(page),
-            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
-            'the mixed span refuses with its own banner, distinct from the gap one');
+            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
+            'the mixed span covers only PART of the list (charlie is outside), so 刪除 '
+            + 'refuses with its partial-list banner, distinct from the gap one');
           assert.strictEqual(await saveAndRead(page, mdPath), original,
             'and not one byte moved');
         }, 'T6');
@@ -18788,7 +18789,12 @@ async function gutterGeometry(page, sel) {
 
       // The Delete key inherits the shared preamble's refusals because it goes
       // through the SAME entry point, not because it re-checks anything.
-      await s3Scenario('Delete over a mixed span refuses with Task 6\'s banner, byte-identical',
+      // Updated for the whole-list delete: a mixed span that covers only PART
+      // of a list still refuses, now with the delete-specific banner that says
+      // what to select instead. `charlie` is outside the set, so the run
+      // would need its survivor re-serialized in the same commit as the
+      // paragraph's removal — still out of scope.
+      await s3Scenario('Delete over a mixed span covering PART of a list refuses, byte-identical',
         '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           await t7Set(page, 3, 5);
@@ -18800,13 +18806,83 @@ async function gutterGeometry(page, sel) {
           await t7Press(page, 'Delete');
 
           assert.strictEqual(await t7Banner(page),
-            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
-            'the key routes through deleteBlockViaGutter(), so it inherits the mixed-span '
+            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
+            'the key routes through deleteBlockViaGutter(), so it inherits the partial-list '
             + 'refusal rather than carrying a copy of it');
           assert.strictEqual(await saveAndRead(page, mdPath), original,
             'and not one byte moved');
           assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'bravo', 'charlie'],
             'and nothing left the document');
+        }, 'T7');
+
+      // A mixed span whose every list is covered WHOLE is one contiguous line
+      // range with no list survivor to renumber or clamp, so it deletes like
+      // any non-list span: one commitRangeRemoval(), one undo op. Three
+      // shapes: a plain list between two paragraphs, a nested list (the
+      // child is part of its parent's run and must be covered too), and two
+      // lists of different types with a paragraph between them.
+      const wholeListDeletes = [
+        { name: 'a whole list between two paragraphs',
+          md: '# Doc\n\nalpha\n\n- bravo\n- charlie\n\ndelta\n',
+          set: [3, 8], members: [[3, 3], [5, 5], [6, 6], [8, 8]] },
+        { name: 'a whole nested list after a paragraph',
+          md: '# Doc\n\nalpha\n\n- bravo\n  - child\n- charlie\n',
+          set: [3, 7], members: [[3, 3], [5, 5], [6, 6], [7, 7]] },
+        { name: 'two whole lists with a paragraph between them',
+          md: '# Doc\n\n- a\n- b\n\nmid\n\n1. one\n2. two\n',
+          set: [3, 9], members: [[3, 3], [4, 4], [6, 6], [8, 8], [9, 9]] },
+      ];
+      for (const c of wholeListDeletes) {
+        for (const via of ['Delete', '⠿ 刪除']) {
+          await s3Scenario(via + ' over ' + c.name + ' deletes the whole span, one undo op',
+            c.md, async (page, mdPath) => {
+              const original = fs.readFileSync(mdPath, 'utf8');
+              await t7Set(page, c.set[0], c.set[1]);
+              const before = await t7Sel(page);
+              assert.deepStrictEqual(before.memberLines, c.members,
+                'precondition: the set covers every list it touches, whole. Got ' +
+                JSON.stringify(before));
+
+              if (via === 'Delete') {
+                await t7Press(page, 'Delete');
+              } else {
+                await clickGutterMenuItem(page,
+                  '.ed-block[data-block-id="' + before.focusHolderId + '"]', '刪除');
+                await settleEditor(page);
+              }
+
+              assert.strictEqual(await t7Banner(page), null,
+                'no refusal: every list in the span is covered whole');
+              assert.deepStrictEqual(await t7Texts(page), ['Doc'],
+                'every selected block left the document, the heading stayed');
+              assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n',
+                'and the file holds only the heading');
+
+              await t7Undo(page);
+              assert.strictEqual(await saveAndRead(page, mdPath), original,
+                'ONE Ctrl+Z brings the whole span back byte-identical');
+            }, 'T7');
+        }
+      }
+
+      // The nested child belongs to bravo's run, so a set that stops at bravo
+      // covers the list only in part — and refuses, rather than deleting the
+      // parent and orphaning the child at an indent nothing anchors.
+      await s3Scenario('Delete over a paragraph and a parent item WITHOUT its child refuses',
+        '# Doc\n\nalpha\n\n- bravo\n  - child\n', async (page, mdPath) => {
+          const original = fs.readFileSync(mdPath, 'utf8');
+          await t7Set(page, 3, 5);
+          const before = await t7Sel(page);
+          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
+            'precondition: the set stops at the parent item. Got ' + JSON.stringify(before));
+
+          await t7Press(page, 'Delete');
+
+          assert.strictEqual(await t7Banner(page),
+            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
+            'the uncovered child makes the list partial');
+          assert.strictEqual(await saveAndRead(page, mdPath), original,
+            'and not one byte moved');
         }, 'T7');
 
       // REGRESSION GUARD (green before the implementation, and named as such —
@@ -18924,6 +19000,7 @@ async function gutterGeometry(page, sel) {
       // a defect, `SILENT` above all.
       const RUN_GATE = '此清單含不支援的格式，無法調整結構';
       const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+      const PARTIAL_DELETE = '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目';
       const GAP = '選取範圍不連續，無法整批操作';
       // Stage-closure gaps 2 and 3 (2026-08-31). §3.7 / §7 withhold 轉換成
       // from THREE block types on a single block's ⠿ — a table because no
@@ -19039,7 +19116,11 @@ async function gutterGeometry(page, sel) {
           // the cell would be measuring the silence, not the refusal.
           moveTo: { at: 'append', why: 'past the last block — outside the set, so the '
             + 'refusal is the gate\'s and not a home position\'s silence' },
-          expect: allRefuse(MIXED) },
+          // 刪除 accepts a mixed span only when every list is covered whole;
+          // charlie is outside this one, so both delete routes refuse with the
+          // partial-list banner instead of MIXED.
+          expect: Object.assign(allRefuse(MIXED), {
+            'delete-menu': refused(PARTIAL_DELETE), 'delete-key': refused(PARTIAL_DELETE) }) },
         // §4.3's run-wide gate. The fixture is one LOOSE list, so
         // serializeBlocks() reports 'P' for every item and the gate refuses
         // ahead of the columnOnly bail — which is why Tab refuses here too.
@@ -20077,7 +20158,9 @@ async function gutterGeometry(page, sel) {
       // of the document.
       await s3Scenario('a refusal banner is cleared by the next gesture that succeeds',
         '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
-          const MIXED = '選取範圍同時含有清單項目與其他區塊，無法整批操作';
+          // 刪除 over this partial mixed span refuses with its partial-list
+          // banner (charlie is outside the set).
+          const MIXED = '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目';
           const original = fs.readFileSync(mdPath, 'utf8');
           assert.deepStrictEqual(await tXBlocks(page),
             [['heading', null, [1, 1]], ['paragraph', null, [3, 3]], ['li', '0', [5, 5]],
@@ -23706,6 +23789,56 @@ async function gutterGeometry(page, sel) {
 
         await page.close();
         console.log('v3.1.0 修正 4: a list item\'s MD 原始碼 actually OPENS a raw editor on its own line — OK');
+      } finally {
+        srv.close();
+      }
+    }
+
+    // ── A list item's MD 原始碼 textarea must span the document column, like
+    //    every other block's does. A li block is a flex row, and openRawEditor()
+    //    leaves .ed-editing as its only flex child; with no flex-grow that wrap
+    //    shrank to the textarea's intrinsic size, so .ed-raw's width:100%
+    //    resolved against it. MEASURED before the fix: 189px at BOTH a
+    //    1400px and a 1920px viewport (paragraph: 964 / 1484 = the column).
+    //    A nested item spans the full width too — its indent lives on the
+    //    marker's margin, and the marker is gone while the textarea is open;
+    //    the source line's own leading spaces carry the depth.
+    //    The paragraph row is the control: it was already right, so it proves
+    //    the ratio this scenario asserts is reachable at all. ─────────────────
+    {
+      const { srv, url } = await setupTableDoc(
+        ['# Doc', '', 'Control paragraph.', '', '- alpha', '  - bravo', '    - charlie', '']);
+      try {
+        const page = await newPage(browser);
+        await page.setViewport({ width: 1400, height: 900 });
+        await page.goto(url, { waitUntil: 'networkidle2' });
+
+        const rows = [
+          ['paragraph', '.ed-block[data-block-type="paragraph"]'],
+          ['li depth 0', await liBlockSelByText(page, 'alpha')],
+          ['li depth 2', await liBlockSelByText(page, 'charlie')],
+        ];
+        for (const [label, sel] of rows) {
+          await clickGutterMenuItem(page, sel, 'MD 原始碼');
+          await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+          const m = await page.evaluate((s) => {
+            const c = document.querySelector('.content');
+            const cs = getComputedStyle(c);
+            return {
+              ta: document.querySelector(s + ' textarea.ed-raw').getBoundingClientRect().width,
+              column: c.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+            };
+          }, sel);
+          assert.ok(m.ta >= m.column * 0.95,
+            label + ': MD 原始碼 textarea must span the document column, got ' +
+            Math.round(m.ta) + 'px of ' + Math.round(m.column) + 'px');
+          await page.keyboard.press('Escape');
+          await page.waitForFunction(
+            (s) => !document.querySelector(s + ' textarea.ed-raw'), { timeout: 5000 }, sel);
+        }
+
+        await page.close();
+        console.log('li MD 原始碼 textarea spans the document column (depth 0 and 2, paragraph control) — OK');
       } finally {
         srv.close();
       }
