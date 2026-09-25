@@ -2,9 +2,9 @@
 // Table cell-range selection.
 // Spec: docs/superpowers/specs/2026-09-24-editor-cell-range-design.md
 //
-// Every scenario asserts WHERE the caret landed (surface text + offset), not
-// merely that focus moved: "focus moved somewhere" is what a wrong landing
-// also satisfies.
+// Scenarios assert the painted cells (rangeTexts) and the SAVED markdown
+// (mdTable), not merely that a class was toggled: a range that paints but
+// acts on the wrong cells is exactly what a paint-only check would pass.
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
@@ -477,6 +477,132 @@ async function main() {
         await settle(page);
         assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath))[1], ['**a1**', '**b1**', 'c1']);
       });
+
+    // ── Final review ─────────────────────────────────────────────────────
+    // I1: Tab moves the caret to another cell; a range left standing would
+    // make the next keystroke clear the RANGE and land in its focus cell.
+    await scenario('Tab with a range clears it; typing lands in the Tab target only', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'b2');
+        await press(page, 'Tab');
+        assert.deepStrictEqual(await rangeTexts(page), [], 'Tab cleared the range');
+        await page.keyboard.type('x');
+        await settle(page);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)),
+          [['A', 'B', 'C'], ['a1', 'b1', 'c1'], ['a2', 'b2', 'x']]);
+      });
+
+    // Edge-menu structural op: the range's indices would point at shifted
+    // cells, and the next Delete would clear cells nobody selected.
+    await scenario('an edge-menu row delete clears a standing range', TBL, async (page) => {
+      await focusText(page, 'b1', 2);
+      const g = await page.evaluate(() => {
+        const t = document.querySelector('.ed-block table');
+        const r = t.tBodies[0].rows[0].cells[0].getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(g.x, g.y);
+      await page.waitForSelector('.ed-te-grip-row:not([hidden])', { timeout: 3000 });
+      const grip = await page.evaluate(() => {
+        const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await page.mouse.move(grip.x, grip.y);
+      await page.mouse.down();
+      await page.mouse.up();
+      await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
+      await page.keyboard.down('Shift');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.up('Shift');
+      await settle(page);
+      assert.deepStrictEqual(await rangeTexts(page), ['b1', 'b2'], 'precondition: range + menu');
+      await page.click('.ed-te-menu-delete');
+      await settle(page);
+      assert.deepStrictEqual(await rangeTexts(page), [], 'the structural op cleared the range');
+    });
+
+    // I2: a mark over a cell with trailing whitespace must not close after
+    // the space (`**a1 **` renders literal asterisks).
+    await scenario('bolding a range trims each cell to its text', TBL, async (page, mdPath) => {
+      await focusText(page, 'a1', 2);
+      await page.keyboard.type(' ');
+      await shiftClick(page, 'b1');
+      await page.waitForSelector('.ed-seltb-b', { timeout: 3000 });
+      await page.click('.ed-seltb-b');
+      await settle(page);
+      const row = mdTable(await saveAndRead(page, mdPath))[1];
+      assert.ok(/^\*\*a1\*\*/.test(row[0]) && !/[\s ]\*\*/.test(row[0]),
+        'a1 bold closes at the text, got ' + JSON.stringify(row[0]));
+      assert.strictEqual(row[1], '**b1**');
+    });
+
+    // I3: Excel puts TSV AND formatted HTML on the clipboard; the TSV wins.
+    await scenario('a TSV-bearing paste ignores the formatted HTML beside it', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'a1', 0);
+        await clipboardEvent(page, 'paste', 'x\ty',
+          '<table>\r\n <tr>\r\n  <td>x</td>\r\n  <td>long\r\n  junk</td>\r\n </tr>\r\n</table>');
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath))[1], ['x', 'y', 'c1']);
+      });
+
+    await scenario('an HTML-only table paste collapses whitespace and expands colspan', TBL,
+      async (page, mdPath) => {
+        await focusText(page, 'a1', 0);
+        await clipboardEvent(page, 'paste', 'wide c',
+          '<table><tr><td colspan="2">\n   wide\n  </td><td>c<br>d</td></tr></table>');
+        const row = mdTable(await saveAndRead(page, mdPath))[1];
+        assert.strictEqual(row[0], 'wide');
+        assert.strictEqual(row[1], '');
+        assert.ok(/^c(<br>|\\?\s*)d$|^c<br\s*\/?>d$/.test(row[2]) || row[2].replace(/<br\s*\/?>/, '|') === 'c|d',
+          'the <br> survives as a line break, got ' + JSON.stringify(row[2]));
+      });
+
+    // A grid paste that cannot land must fall back to the single-cell paste,
+    // never swallow the clipboard.
+    await scenario('a grid paste with no open burst falls back to the single-cell paste', TBL,
+      async (page) => {
+        await focusText(page, 'a1', 2);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyS');
+        await page.keyboard.up('Control');
+        await settle(page);
+        await clipboardEvent(page, 'paste', 'x\ty');
+        assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-cell')]
+          .some((c) => c.textContent.indexOf('x') !== -1)), 'the pasted text landed somewhere');
+      });
+
+    // Spec: every mutating range operation is ONE undo op.
+    for (const op of ['typing', 'cut', 'bold', 'paste']) {
+      await scenario('one Ctrl+Z undoes a range ' + op, TBL, async (page, mdPath) => {
+        const original = mdTable(fs.readFileSync(mdPath, 'utf8'));
+        // Read the DOM, not the file: a save would commit the burst, and a
+        // Ctrl+Z after that is the document-level undo (always one op),
+        // which is not the granularity under test. innerHTML, not text, so a
+        // format-only change counts.
+        const domTable = () => page.evaluate(() => [...document.querySelectorAll('.ed-block table tr')]
+          .map((tr) => [...tr.cells].map((td) => td.innerHTML)));
+        const pristine = await domTable();
+        await focusText(page, 'b1', 0);
+        await shiftClick(page, 'c2');
+        if (op === 'typing') await page.keyboard.type('Z');
+        if (op === 'cut') await clipboardEvent(page, 'cut');
+        if (op === 'bold') {
+          await page.waitForSelector('.ed-seltb-b', { timeout: 3000 });
+          await page.click('.ed-seltb-b');
+        }
+        if (op === 'paste') await clipboardEvent(page, 'paste', 'p\tq\nr\ts');
+        await settle(page);
+        assert.notDeepStrictEqual(await domTable(), pristine, 'precondition: the op changed the table');
+        await focusText(page, 'a1', 0);
+        await page.keyboard.down('Control');
+        await page.keyboard.press('KeyZ');
+        await page.keyboard.up('Control');
+        await settle(page);
+        assert.deepStrictEqual(mdTable(await saveAndRead(page, mdPath)), original,
+          'one Ctrl+Z restores after a range ' + op);
+      });
+    }
 
     console.log('editor-cell-range.test.js OK');
   } finally {
