@@ -378,6 +378,54 @@ check('toc: top-level rows are not bold until on the active path', async () => {
   assert.strictEqual(w, '400');
 });
 
+// ── Task 9: mobile ─────────────────────────────────────────────────────────
+const LONG_MD = ['# Doc', '', '## 1. Alpha', '', ...Array(40).fill('Filler paragraph for scrolling.\n'), '## 2. Beta', '', ...Array(40).fill('More filler text here.\n'), ''];
+check('mobile: 44px bar holds the menu button and the current section title', async () => {
+  const { htmlPath } = render(LONG_MD);
+  const page = await openPage(htmlPath, 390, 844);
+  const top = await page.evaluate(() => { const b = document.getElementById('mobile-bar'); const r = b.getBoundingClientRect(); return { h: r.height, y: r.top, pos: getComputedStyle(b).position, hasToggle: !!b.querySelector('#sidebar-toggle'), title: document.getElementById('mobile-bar-title').textContent }; });
+  await page.evaluate(() => window.scrollTo(0, document.getElementById('2-beta').getBoundingClientRect().top + scrollY - 50));
+  await new Promise((r) => setTimeout(r, 400));
+  const later = await page.$eval('#mobile-bar-title', (t) => t.textContent);
+  await page.close();
+  assert.deepStrictEqual({ h: top.h, y: top.y, pos: top.pos, hasToggle: top.hasToggle }, { h: 44, y: 0, pos: 'fixed', hasToggle: true });
+  assert.strictEqual(top.title, 'Doc');
+  assert.strictEqual(later, '2. Beta');
+});
+check('mobile: drawer opens below the bar and only casts a shadow while open', async () => {
+  const { htmlPath } = render(LONG_MD);
+  const page = await openPage(htmlPath, 390, 844);
+  const closed = await page.$eval('.reader-sidebar', (s) => getComputedStyle(s).boxShadow);
+  await page.click('#sidebar-toggle');
+  await new Promise((r) => setTimeout(r, 300));
+  const open = await page.$eval('.reader-sidebar', (s) => ({ top: s.getBoundingClientRect().top, shadow: getComputedStyle(s).boxShadow }));
+  await page.close();
+  assert.strictEqual(closed, 'none', 'no shadow strip at the left edge while closed');
+  assert.strictEqual(open.top, 44);
+  assert.notStrictEqual(open.shadow, 'none');
+});
+check('mobile: heading anchors are hidden and a TOC jump lands below the bar', async () => {
+  const { htmlPath } = render(LONG_MD);
+  const page = await openPage(htmlPath, 390, 844);
+  const opacity = await page.$eval('[id="2-beta"] .heading-anchor', (a) => getComputedStyle(a).opacity);
+  await page.evaluate(() => { location.hash = '#2-beta'; });
+  await new Promise((r) => setTimeout(r, 300));
+  const y = await page.$eval('[id="2-beta"]', (h) => h.getBoundingClientRect().top);
+  await page.close();
+  assert.strictEqual(opacity, '0');
+  assert.ok(y >= 44, 'heading below the 44px bar, top=' + y);
+});
+check('mobile: edit mode hides the reader bar', async () => {
+  // The base stylesheet carries one `.mobile-bar { display: none; }` for
+  // desktop; edit mode must add a second, unconditional one after the
+  // reader's mobile rule (the edit toolbar owns the top of the screen).
+  const count = (h) => (h.match(/\.mobile-bar \{ display: none; \}/g) || []).length;
+  const { html: edit } = await renderMarkdown(LONG_MD.join('\n'), path.join(tmpDir, 'mb.md'), { editMode: true });
+  const { html: read } = await renderMarkdown(LONG_MD.join('\n'), path.join(tmpDir, 'mb.md'), {});
+  assert.strictEqual(count(read), 1, 'reader: desktop rule only');
+  assert.strictEqual(count(edit), 2, 'edit: desktop rule + edit-mode rule');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
