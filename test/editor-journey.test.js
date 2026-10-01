@@ -6623,6 +6623,10 @@ async function main() {
   // `at` 圖案，三個寬度都還是「只右／兩側都亮／只左」，不是剛好卡在邊緣才過。
   // 這裡只釘 420（跟 1400 一樣是這條既有測試唯一驗的兩個寬度）；820/640 這條
   // 測試本來就沒有釘 max，這次也沒有新增。
+  //
+  // v3.8.0: 420px 的 max 522 → 519。重新量測（journey 實跑讀到的 max）：
+  // 中文字型堆疊改了之後按鈕文字寬度略變，scrollWidth 小了 3px。at 圖案不變
+  // （只右／兩側都亮／只左），中間取樣點 260 離 1 與 518 仍然很遠。
   for (const w of [1400, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     await ctx.page.setViewport({ width: w, height: 900 });
@@ -6649,7 +6653,7 @@ async function main() {
       ? { max: 0, at: [{ attr: '', left: false, right: false },
                        { attr: '', left: false, right: false },
                        { attr: '', left: false, right: false }] }
-      : { max: 522, at: [{ attr: 'right', left: false, right: true },
+      : { max: 519, at: [{ attr: 'right', left: false, right: true },
                          { attr: 'left right', left: true, right: true },
                          { attr: 'left', left: true, right: false }] };
     assert.deepStrictEqual(seen, want,
