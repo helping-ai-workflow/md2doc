@@ -380,6 +380,20 @@ console.log('Task 9 — inference guardrails OK');
         + 'maps entries to files by name, and an entry it cannot parse would drop out of '
         + 'both directions of the comparison below and take its file with it');
     const inScript = entries.map((e) => e.replace(/^node /, '')).sort();
+    // Suites that deliberately do not run under `npm test`: reader-click needs
+    // Playwright browsers, so it runs through `npm run test:browser` and
+    // .github/workflows/browser.yml. Each one must still be run by its named
+    // script, so exempting a file never lets it go unrun.
+    const OUT_OF_BAND = { 'test/reader-click.test.js': 'test:browser' };
+    Object.keys(OUT_OF_BAND).forEach((file) => {
+        const script = pkg.scripts[OUT_OF_BAND[file]];
+        const parts = String(script || '').split('&&').map((x) => x.trim());
+        assert.ok(script && parts.indexOf('node ' + file) !== -1,
+            'package.json script `' + OUT_OF_BAND[file] + '` must run `node ' + file
+            + '` (alone or as an && entry); the file is exempt from `npm test` only on that condition');
+        assert.strictEqual(inScript.indexOf(file), -1,
+            file + ' is both in the `test` script and in OUT_OF_BAND — the exemption is stale');
+    });
     const onDisk = fs.readdirSync(path.join(REPO, 'test'))
         .filter((f) => f.endsWith('.test.js')).map((f) => 'test/' + f).sort();
     // ANTI-VACUITY: two empty sets are trivially equal. Both sides must be
@@ -389,7 +403,7 @@ console.log('Task 9 — inference guardrails OK');
         'both sides must be non-trivial: ' + onDisk.length + ' file(s) on disk, '
         + inScript.length + ' entry/entries in the script');
     assert.deepStrictEqual(
-        onDisk.filter((f) => inScript.indexOf(f) === -1), [],
+        onDisk.filter((f) => inScript.indexOf(f) === -1 && !OUT_OF_BAND[f]), [],
         'a test file exists that `npm test` never runs — add it to package.json\'s `test` '
         + 'script. A new file that nothing invokes is a test suite that shrinks silently');
     assert.deepStrictEqual(
