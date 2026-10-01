@@ -12787,7 +12787,12 @@ async function gutterGeometry(page, sel) {
           const r = table.tHead.rows[0].cells[2].getBoundingClientRect();
           return { x: r.right, y: table.getBoundingClientRect().top };
         }, table0);
-        await page.mouse.move(boundary.x, boundary.y);
+        // v3.8.0 removed the tables' vertical borders, so the last header cell's
+        // right-edge pixel is now OUTSIDE the table box (elementFromPoint returns
+        // .page-layout there) and the bubble handler hid the bubble. Hover 1px
+        // inside the edge; the intent — hovering the column boundary shows the
+        // insert-col bubble — is unchanged.
+        await page.mouse.move(boundary.x - 1, boundary.y + 1);
         await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-tb-insert-col').dataset.colIndex),
@@ -13785,9 +13790,10 @@ async function gutterGeometry(page, sel) {
 
     // ── S3 (Important): the row highlight has to actually PAINT ────────────
     //
-    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` paints its own
-    // opaque `background: #f6f8fa` and the sticky first column paints
-    // `#ffffff` — both on the CELL, which sits above the row box, and
+    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` painted its own
+    // opaque `background: #f6f8fa` (v3.8.0 removed that; the first header
+    // cell is still sticky and paints `#ffffff`) and the sticky first column
+    // paints `#ffffff` — both on the CELL, which sits above the row box, and
     // `!important` does not let a rule on one element beat an opaque
     // background painted by a different element on top of it. The header
     // highlight rendered as ZERO pixels changed while the Esc gate still
@@ -15966,17 +15972,23 @@ async function gutterGeometry(page, sel) {
       // Two BODY rows, not one: with a single body row there is no
       // `tr:nth-child(even)` anywhere in the document, the zebra-stripe probe
       // below `continue`s past a null element and the whole check is vacuous.
-      // The even row's FIRST cell is where the two strongest opaque rules
-      // compound (zebra #fafbfc at (0,3,4) on top of the sticky column's
-      // #ffffff at z-index 1), so it gets its own probe.
+      // The even row's FIRST cell is where, until v3.8.0, the two strongest
+      // opaque rules compounded (zebra #fafbfc at (0,3,4) on top of the sticky
+      // column's #ffffff at z-index 1). The zebra is gone; the sticky white is
+      // not, so it keeps its own probe.
       '# Doc\n\n```\ncode\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n',
       async (page) => {
         await page.evaluate(() => window.__edTestSetSelection(1, 99));
         const measured = await page.evaluate(() => {
           // The sticky first column paints at z-index 1 over anything beneath
-          // it, and <pre>/<th>/zebra rows carry opaque backgrounds. If the tint
-          // loses to any of them the selection is invisible exactly where a
-          // user is most likely to be selecting.
+          // it, and <pre>, <th> and that column's own cells carry opaque
+          // backgrounds. If the tint loses to any of them the selection is
+          // invisible exactly where a user is most likely to be selecting.
+          // The zebra stripe no longer exists (removed in v3.8.0), but the th
+          // and tr:nth-child(even) probes below still assert the same thing as
+          // the rest: the tint inside a selection stays translucent. The
+          // .ed-selected tr:nth-child(even) rule keeps its !important so a
+          // later restyle cannot quietly reopen the hole.
           const out = [];
           for (const sel of ['pre', 'th', 'tbody td:first-child',
             'tr:nth-child(even)', 'tbody tr:nth-child(even) td:first-child']) {

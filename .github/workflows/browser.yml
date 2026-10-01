@@ -1,0 +1,49 @@
+name: browser
+
+# Reader click-through checks (test/reader-click.test.js) in Chromium and WebKit —
+# the engine of iPhone Safari / Files / LINE previews. Runs only when something
+# that shapes the reading page can change, like tripwork's browser.yml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lib/**"
+      - "vendor/**"
+      - "test/reader-click.test.js"
+      - "package.json"
+      - ".github/workflows/browser.yml"
+  pull_request:
+    paths:
+      - "lib/**"
+      - "vendor/**"
+      - "test/reader-click.test.js"
+      - "package.json"
+      - ".github/workflows/browser.yml"
+
+jobs:
+  click:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: npm ci || npm install
+      - name: Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-cw-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install Chromium and WebKit
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium webkit
+      - name: Install Chromium and WebKit system deps
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium webkit
+      - name: Click-through checks
+        run: npm run test:browser

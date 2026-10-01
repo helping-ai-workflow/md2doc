@@ -43,10 +43,17 @@ const html = fs.readFileSync(htmlPath, 'utf8');
 
 assert.match(html, /<nav class="toc"/, 'expected TOC markup');
 assert.match(html, /<ul class="toc-list toc-list-level-1">/, 'expected nested TOC root list');
+// v3.8.0 (design review item 7+8): this fixture's single H1 "Top" is the
+// document title, so its sections are the TOC's top level and "Top" has no row.
+assert.doesNotMatch(
+  html.slice(html.indexOf('<nav class="toc"'), html.indexOf('</nav>')),
+  /href="#top"/,
+  'single-H1 title is not a TOC row'
+);
 assert.match(
   html,
-  /<details>\s*<summary><a href="#top" title="Top">Top<\/a><\/summary>/,
-  'expected level-1 TOC section to be collapsed by default'
+  /<ul class="toc-list toc-list-level-1">\s*<li class="toc-item toc-level-1 toc-parent">\s*<details>\s*<summary><a href="#heading-ref-and-code"/,
+  'expected the first section to head the TOC, collapsed by default'
 );
 assert.match(
   html,
@@ -198,16 +205,15 @@ assert.match(
   /\.content table tbody td:first-child,\s*\.content table thead th:first-child \{\s*position: sticky;\s*left: 0;\s*z-index: 1;\s*background: #ffffff;\s*\}/,
   'expected sticky first-column rule'
 );
+// v3.8.0 (design review item 3): no grey header and no zebra rows. The sticky
+// first column still paints opaque white so scrolled cells don't show through.
 assert.match(
   tablesHtml,
-  /\.content table thead th:first-child \{\s*background: #f6f8fa;\s*\}/,
+  /\.content table thead th:first-child \{\s*background: #ffffff;\s*\}/,
   'expected sticky header first-column background override'
 );
-assert.match(
-  tablesHtml,
-  /\.content table tbody tr:nth-child\(even\) td:first-child \{\s*background: #fafbfc;\s*\}/,
-  'expected sticky zebra-stripe override'
-);
+assert.doesNotMatch(tablesHtml, /\n\s*tr:nth-child\(even\) \{ background: #fafbfc; \}/, 'zebra striping removed');
+assert.doesNotMatch(tablesHtml, /\.content table tbody tr:nth-child\(even\) td:first-child \{/, 'zebra sticky-column override removed');
 
 // Task 5 (layout) — A1: TOC adaptive width (default via CSS var fallback so the
 // drag-splitter can override it; see reader-panels.test.js for the drag runtime)
@@ -246,7 +252,9 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*word-break: break-word/, '.toc a shoul
 assert.match(html, /<a href="#deeper-section" title="Deeper Section">Deeper Section<\/a>/, 'expected title= on TOC link');
 // req-3: sticky breadcrumb replaces the static Contents header
 assert.match(html, /<div class="toc-breadcrumb" data-toc-breadcrumb/, 'expected breadcrumb container');
-assert.doesNotMatch(html, /class="toc-title"/, 'Contents span replaced by breadcrumb');
+// v3.8.0 (design review item 7+8): the "Contents" title row is back; the
+// breadcrumb stays in the DOM (hidden) and the TOC highlights the active path.
+assert.match(html, /<span class="toc-title">Contents<\/span>/, 'Contents title row');
 assert.match(html, /\.toc-breadcrumb \{/, 'expected breadcrumb CSS block');
 assert.match(html, /\.toc-breadcrumb a \{/, 'expected breadcrumb anchor CSS');
 // runtime population driven by scroll-sync
@@ -274,6 +282,12 @@ console.log('md2doc heading rendering test passed');
     '## C < D > E',
     '',
     'more',
+    '',
+    // v3.8.0: a lone H1 is the title and has no TOC row; a second H1 keeps
+    // "Alpha & Beta" as a row so its TOC label escaping is still exercised.
+    '# Second',
+    '',
+    'tail',
     '',
   ].join('\n'), 'utf8');
 
