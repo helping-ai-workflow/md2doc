@@ -91,6 +91,10 @@ async function focusRing(page) {
     const box = { l: r.left - extent, t: r.top - extent, r: r.right + extent, b: r.bottom + extent };
     const clippers = [];
     for (let a = el.parentElement; a; a = a.parentElement) {
+      // The root's border box is the whole scrolled document, not the viewport
+      // window that clips, so measuring it reports a false clip once the page
+      // has scrolled. The viewport edge is not what this helper is for.
+      if (a === document.documentElement) continue;
       const s = getComputedStyle(a);
       if ([s.overflowX, s.overflowY].some((v) => v !== 'visible')) {
         const ar = a.getBoundingClientRect();
@@ -299,6 +303,42 @@ check('phone: search from the drawer; picking a result closes it and shows the h
   assert.ok(!(await page.evaluate(() => document.body.hasAttribute('data-sidebar-open'))), 'drawer closed');
   const hit = await page.$eval('mark.search-hit.is-selected', (m) => { const r = m.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; });
   assert.ok(hit.top >= 44 && hit.bottom <= PHONE.height, 'hit visible below the bar: ' + JSON.stringify(hit));
+});
+
+// Tab (keyboard modality, so :focus-visible matches) until the focused element
+// satisfies `sel`; returns false when it is not reached within `max` presses.
+async function tabUntil(page, sel, max) {
+  for (let i = 0; i < max; i++) {
+    await page.keyboard.press('Tab');
+    if (await page.evaluate((q) => !!document.activeElement.closest(q), sel)) return true;
+  }
+  return false;
+}
+check('desktop: a focused search result shows its full ring (not clipped by the list)', DESKTOP, async (page) => {
+  await page.fill('#doc-search-input', 'zebrafinch');
+  await page.press('#doc-search-input', 'Enter');
+  await wait(300);
+  assert.ok(await tabUntil(page, '.search-result-item', 14), 'Tab reaches a search result');
+  const r = await focusRing(page);
+  assert.strictEqual(r.outline.split(' ').slice(0, 2).join(' '), 'solid 2px', 'result ring is drawn');
+  assert.deepStrictEqual(r.clippers, [], 'result ring clipped by ' + r.clippers.join(', '));
+});
+check('desktop: a focused TOC row lifts the edge fade so its ring is whole', DESKTOP, async (page) => {
+  const mask = () => page.$eval('.toc > .toc-list', (e) => { const c = getComputedStyle(e); return { m: c.maskImage, w: c.webkitMaskImage }; });
+  const rest = await mask();
+  assert.ok((rest.m || rest.w) !== 'none', 'guard: the fade exists while nothing is focused ' + JSON.stringify(rest));
+  await page.focus('#doc-search-input');
+  assert.ok(await tabUntil(page, '.toc-list', 14), 'Tab reaches a TOC row');
+  const on = await mask();
+  assert.ok(on.m === 'none' || on.m === undefined || on.m === '', 'mask-image lifted: ' + JSON.stringify(on));
+  assert.ok(on.w === 'none' || on.w === undefined || on.w === '', 'webkit mask lifted: ' + JSON.stringify(on));
+});
+check('desktop: the long 3.3 title overflows the TOC list so it can peek sideways', DESKTOP, async (page) => {
+  // The 3.3 row sits inside a collapsed section until the tree is expanded.
+  await page.click('#toc-expand-all');
+  await wait(200);
+  const d = await page.$eval('.toc > .toc-list', (e) => ({ sw: e.scrollWidth, cw: e.clientWidth }));
+  assert.ok(d.sw > d.cw, 'toc-list scrollWidth ' + d.sw + ' should exceed clientWidth ' + d.cw);
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
