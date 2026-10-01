@@ -437,6 +437,17 @@ check('focus: Tab from the search box goes straight to a blue-ringed button', as
   assert.strictEqual(s.id, 'toc-expand-all', 'hidden submit and the empty-state clear are skipped');
   assert.strictEqual(s.outline, 'solid 2px rgb(9, 105, 218)');
 });
+check('focus: TOC header button shows inset ring (no clipping)', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  await page.focus('#toc-collapse-all');
+  await page.keyboard.press('Tab');
+  const s = await page.evaluate(() => { const a = document.activeElement; const c = getComputedStyle(a); return { id: a.id, outline: c.outlineStyle + ' ' + c.outlineWidth + ' ' + c.outlineColor, outlineOffset: c.outlineOffset }; });
+  await page.close();
+  assert.strictEqual(s.id, 'toc-collapse-toggle');
+  assert.strictEqual(s.outline, 'solid 2px rgb(9, 105, 218)');
+  assert.strictEqual(s.outlineOffset, '-2px');
+});
 
 // ── run ──
 (async () => {
