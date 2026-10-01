@@ -39,11 +39,18 @@ assert.strictEqual(run.status, 0, 'long fixture renders: ' + run.stderr);
 
 // Tags the element sitting at the top of the reading column and reports its
 // viewport offset, so the same node can be re-measured after the resize.
+// Probing main.content itself measures the container, whose offset moves with
+// scrollY by definition, so it can never show a held reading position. v3.8.0's
+// larger heading margins (H2 2.2em top) put y=80 inside a margin at this
+// fixture's 55% scroll, so in that case probe the block at or just below the line.
 const PROBE = `(() => {
   const content = document.querySelector('main.content');
   const rect = content.getBoundingClientRect();
   const el = document.elementFromPoint(rect.left + rect.width / 2, 80);
-  const target = el && el.closest('main.content > *') ? el.closest('main.content > *') : el;
+  let target = el && el.closest('main.content > *') ? el.closest('main.content > *') : el;
+  if (target === content) {
+    target = Array.from(content.children).find((c) => c.getBoundingClientRect().bottom > 80) || target;
+  }
   if (!target) return null;
   target.setAttribute('data-probe', '1');
   return { top: target.getBoundingClientRect().top, y: window.scrollY };
