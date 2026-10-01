@@ -32,6 +32,7 @@ function printHelp() {
         '  --open              Launch the platform viewer after render (default when --out is absent).',
         '  --no-open           Skip the viewer launch.',
         '  --quiet             Suppress per-file progress messages.',
+        '  --lang <tag>        Set <html lang> (default: detected — zh-Hant for Chinese-heavy text, else en).',
         '  --bake-svg          Pre-render mermaid/wavedrom to inert SVG (HTML output only; needs Chromium).',
         '  --edit              Serve listed .md files in the browser editor (localhost).',
         '  --port <n>          Pin the editor server port (only with --edit).',
@@ -51,6 +52,7 @@ function parseArgs(argv) {
     let bakeSvg = false;
     let edit = false;
     let port = null;
+    let lang = null;
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -96,6 +98,19 @@ function parseArgs(argv) {
             out = argv[i];
             continue;
         }
+        if (a === '--lang') {
+            i++;
+            if (i >= argv.length) {
+                process.stderr.write('error: --lang requires a value\n');
+                process.exit(2);
+            }
+            if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(argv[i])) {
+                process.stderr.write('error: --lang must be a language tag such as en or zh-Hant\n');
+                process.exit(2);
+            }
+            lang = argv[i];
+            continue;
+        }
         if (a.startsWith('-')) {
             process.stderr.write('error: unknown flag ' + a + '\n');
             process.exit(2);
@@ -124,7 +139,7 @@ function parseArgs(argv) {
         open = (out === null);
     }
 
-    return { inputs, formats, formatsExplicit, out, open, quiet, bakeSvg, edit, port };
+    return { inputs, formats, formatsExplicit, out, open, quiet, bakeSvg, edit, port, lang };
 }
 
 function shortHash(absPath) {
@@ -232,8 +247,8 @@ function main() {
     }
 
     if (args.edit) {
-        if (args.formatsExplicit || args.out !== null || args.bakeSvg) {
-            process.stderr.write('error: --edit cannot be combined with --html/--pdf/--out/--bake-svg\n');
+        if (args.formatsExplicit || args.out !== null || args.bakeSvg || args.lang !== null) {
+            process.stderr.write('error: --edit cannot be combined with --html/--pdf/--out/--bake-svg/--lang\n');
             process.exit(2);
         }
         for (const input of args.inputs) {
@@ -262,6 +277,7 @@ function main() {
         const stdio = args.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit';
         const childArgs = [LIB, input, output];
         if (args.bakeSvg) childArgs.push('--bake-svg');
+        if (args.lang) childArgs.push('--lang=' + args.lang);
         const r = spawnSync(process.execPath, childArgs, { stdio });
         if (r.status !== 0) {
             process.stderr.write('error: render failed for ' + input + ' (exit ' + r.status + ')\n');
