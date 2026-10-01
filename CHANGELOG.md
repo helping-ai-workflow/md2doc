@@ -3,6 +3,16 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.8.1 — 未發布
+
+### Fixed — 游標跟著系統設定走
+
+- **拖曳與放大的游標在 Windows 上不再是白色小圖**：Edge／Chrome 在 Windows 上有 10 個 CSS 游標（`col-resize`、`row-resize`、`grab`、`grabbing`、`zoom-in`、`zoom-out`、`cell`、`alias`、`copy`、`vertical-text`）畫的是瀏覽器自帶的 32px 白色圖，不吃系統的游標大小與顏色設定——設了大號彩色協助工具游標的人，在白底上幾乎看不到。md2doc 用到其中三種，全部換成系統游標：
+  - 側欄寬度拖曳：`col-resize` → `ew-resize`
+  - 圖表（點開燈箱）：`zoom-in` → `pointer`
+  - 燈箱平移、編輯模式的區塊拖曳、表格列／欄把手、波形 lane 把手：`grab`／`grabbing` → `move`
+- 新增兩道測試：`reader-design` 靜態掃 `lib/md2doc.js` 與 `lib/editor/*.js` 不得出現這 10 個值（涵蓋拖曳中這種點擊測試難以到達的狀態）；`reader-click` 在 Chromium 與 WebKit 真的 hover 拖曳把手、圖表、燈箱並按住平移，讀滑鼠下方元素的 computed cursor。
+
 ## v3.8.0 — 2026-10-01
 
 閱讀版面審查（13 項，每項都有實際截圖比較與參考網站實測）的淺色部分。深色模式另外一批。

@@ -112,12 +112,12 @@ Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tb
 `test/editor-client.test.js` asserts `lib/editor/client.js` contains none of a list of bare substrings naming retired editor-bar internals (`ed-bar`, `attachGutters`, `dismissBar`, etc., matched with plain `includes`, not word boundaries) — ordinary prose can trip it (a comment mentioning "fixed-bar" once reddened the whole suite via `ed-bar`), so grep that guarded list before committing a new comment into `client.js`.
 
 **But do not count occurrences in `client.js` with `grep`.** The file carries a
-literal NUL byte — `const DRAWIO_FP_SEP = '\u0000';`, line 17607, offset 1010728 —
+literal NUL byte — `const DRAWIO_FP_SEP = '\u0000';`, line 17608, offset 1010799 —
 so GNU grep (3.11, measured) classifies it as binary and *prints
 `binary file matches` instead of the matches*. The failure is silent when you
 pipe: `grep -o waveEditBtn lib/editor/client.js | wc -l` reports **0**, the same
 answer as "not present"; `grep -ao …| wc -l` and node's `String.indexOf` both
-report **16**. A plain `grep -n` for a pattern that matches line 17607 prints
+report **16**. A plain `grep -n` for a pattern that matches line 17608 prints
 nothing either. `grep -c` happens to be unaffected (it counts *lines*, not
 occurrences), which is why this hides for so long.
 

@@ -346,6 +346,49 @@ check('desktop: the long 3.3 title overflows the TOC list so it can peek sideway
   assert.ok(link > d.cw, 'the 3.3 link is ' + link + 'px wide, which should exceed the list clientWidth ' + d.cw);
 });
 
+// Cursors: hover each drag / zoom target for real and read the cursor of the
+// element actually under the pointer. The banned set is the ten keywords that
+// Chromium on Windows draws from its own bitmaps, ignoring the user's pointer
+// size and colour (see the matching scan in reader-design.test.js).
+const BITMAP_CURSORS = ['col-resize', 'row-resize', 'grab', 'grabbing', 'zoom-in', 'zoom-out', 'cell', 'alias', 'copy', 'vertical-text'];
+async function cursorAt(page, x, y) {
+  return page.evaluate(([px, py]) => {
+    const el = document.elementFromPoint(px, py);
+    return el ? { cursor: getComputedStyle(el).cursor, el: el.className && el.className.baseVal !== undefined ? el.tagName : (el.id || el.className || el.tagName) } : null;
+  }, [x, y]);
+}
+async function centreOf(page, sel) {
+  return page.$eval(sel, (e) => { e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+}
+check('desktop: drag and zoom targets use cursors that follow the system pointer settings', DESKTOP, async (page) => {
+  const seen = {};
+  const split = await centreOf(page, '.sidebar-splitter');
+  await page.mouse.move(split.x, split.y);
+  seen.splitter = await cursorAt(page, split.x, split.y);
+  assert.strictEqual(seen.splitter.cursor, 'ew-resize', 'sidebar splitter ' + JSON.stringify(seen.splitter));
+  const fig = await centreOf(page, '.content .graphviz');
+  await page.mouse.move(fig.x, fig.y);
+  seen.diagram = await cursorAt(page, fig.x, fig.y);
+  assert.strictEqual(seen.diagram.cursor, 'pointer', 'diagram ' + JSON.stringify(seen.diagram));
+  await page.mouse.click(fig.x, fig.y);
+  await wait(400);
+  const stage = await page.$eval('.lightbox-stage', (s) => { const r = s.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  await page.mouse.move(stage.x, stage.y);
+  seen.stage = await cursorAt(page, stage.x, stage.y);
+  await page.mouse.down();
+  await page.mouse.move(stage.x + 30, stage.y + 20, { steps: 4 });
+  seen.panning = await cursorAt(page, stage.x + 30, stage.y + 20);
+  const panningAttr = await page.$eval('.lightbox-stage', (s) => s.hasAttribute('data-panning'));
+  await page.mouse.up();
+  assert.ok(panningAttr, 'guard: the press really started a pan');
+  for (const k of ['stage', 'panning']) {
+    assert.strictEqual(seen[k].cursor, 'move', 'lightbox ' + k + ' ' + JSON.stringify(seen[k]));
+  }
+  for (const k of Object.keys(seen)) {
+    assert.ok(BITMAP_CURSORS.indexOf(seen[k].cursor) === -1, k + ' uses a browser-bitmap cursor: ' + seen[k].cursor);
+  }
+});
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

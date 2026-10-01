@@ -567,6 +567,38 @@ check('mobile: a document with headings keeps the 60px band under the bar', asyn
   assert.strictEqual(pad, '60px');
 });
 
+// ── Cursors Windows actually draws (v3.8.1) ───────────────────────────────
+// Chromium-based browsers on Windows (Edge, Chrome) draw ten CSS cursors from
+// bitmaps bundled in the browser instead of asking Windows: col-resize,
+// row-resize, grab, grabbing, zoom-in, zoom-out, cell, alias, copy,
+// vertical-text (ui/base/cursor/cursor_loader_win.cc returns
+// MAKEINTRESOURCE(IDC_...) for exactly those). They ignore the user's pointer
+// size and colour settings, so a user with large coloured accessibility
+// cursors gets a small white one on a white page — exactly where md2doc asks
+// for a drag or a zoom. Every other keyword maps to a system cursor
+// (ew-resize → IDC_SIZEWE, move → IDC_SIZEALL, pointer → IDC_HAND) and follows
+// those settings. This scan covers states a click test cannot reach cheaply
+// (mid-drag classes, edit mode).
+const BITMAP_CURSORS = ['col-resize', 'row-resize', 'grab', 'grabbing', 'zoom-in', 'zoom-out', 'cell', 'alias', 'copy', 'vertical-text'];
+check('cursor: no source sets a cursor Windows draws from a browser bitmap', async () => {
+  const lib = path.join(__dirname, '..', 'lib');
+  const files = [path.join(lib, 'md2doc.js')].concat(
+    fs.readdirSync(path.join(lib, 'editor')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'editor', f)));
+  const re = new RegExp('cursor\\s*[:=]\\s*[\'"]?(' + BITMAP_CURSORS.join('|') + ')\\b', 'g');
+  const hits = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    const lines = src.split('\n');
+    for (let m; (m = re.exec(src));) {
+      const n = src.slice(0, m.index).split('\n').length;
+      // Prose in a comment may name these keywords; a declaration never starts a comment line.
+      if (/^\s*(\/\/|\*|\/\*)/.test(lines[n - 1])) continue;
+      hits.push(path.basename(f) + ':' + n + ' ' + m[1]);
+    }
+  }
+  assert.deepStrictEqual(hits, []);
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
