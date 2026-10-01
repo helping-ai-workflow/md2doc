@@ -2958,6 +2958,7 @@ async function main() {
     { sel: '.ed-toolbar',              after: 'live' },
     { sel: '.ed-toolbar-status',       after: 'live' },
     { sel: '.sidebar-toggle',          after: 'live-in-reader-gone-in-edit' },
+    { sel: '.mobile-bar',              after: 'live-in-reader-gone-in-edit' },
     { sel: '.lightbox',                after: 'live' },
     { sel: '.sidebar-scrim',           after: 'live' },
     { sel: '.reader-sidebar',          after: 'live' },

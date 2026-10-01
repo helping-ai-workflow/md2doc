@@ -12787,7 +12787,12 @@ async function gutterGeometry(page, sel) {
           const r = table.tHead.rows[0].cells[2].getBoundingClientRect();
           return { x: r.right, y: table.getBoundingClientRect().top };
         }, table0);
-        await page.mouse.move(boundary.x, boundary.y);
+        // v3.8.0 removed the tables' vertical borders, so the last header cell's
+        // right-edge pixel is now OUTSIDE the table box (elementFromPoint returns
+        // .page-layout there) and the bubble handler hid the bubble. Hover 1px
+        // inside the edge; the intent — hovering the column boundary shows the
+        // insert-col bubble — is unchanged.
+        await page.mouse.move(boundary.x - 1, boundary.y + 1);
         await page.waitForSelector('.ed-tb-insert-col:not([hidden])', { timeout: 3000 });
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-tb-insert-col').dataset.colIndex),
