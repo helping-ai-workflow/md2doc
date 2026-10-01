@@ -97,7 +97,7 @@ for the cursor-anchored zoom maths.
 
 `.content { min-width: 0; flex: 1 1 auto; }` is the flex base for the content column; **do not** add `overflow-wrap` / `word-break` here — those are prose-only and live on `.content p, .content li, .content blockquote`. There's a test guard asserting this; if you regress it the suite will fail.
 
-Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tbody td:first-child` + `thead th:first-child`. Zebra-stripe and header overrides are kept in source-order to win cascade. Don't reorder them.
+Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tbody td:first-child` + `thead th:first-child`. v3.8.0 removed zebra striping and the grey header (horizontal rules only); the first column keeps its opaque white so horizontally scrolled cells don't show through it.
 
 ## Editor Client — Guarded Retired-Name Substrings
 

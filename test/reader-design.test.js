@@ -102,6 +102,63 @@ check('font: code stack starts with Cascadia Mono and has a CJK fallback', async
   assert.match(code, /font-family: "Cascadia Mono", Consolas, "SFMono-Regular", "Liberation Mono", Menlo, "Microsoft JhengHei", monospace;/);
 });
 
+// ── Task 2: tables ─────────────────────────────────────────────────────────
+const TABLE_MD = [
+  '# T', '',
+  '| Signal | Dir | Width | Description |',
+  '|---|---|---|---|',
+  '| `rg_verify_status[2:0]` | Out | 3 | Cl.99.4.7 verify 6-enum state reported to the host after every handshake attempt, including retries and the final verdict |',
+  '| `rcv_v` | In | 1 | event indicator |',
+  '| `rcv_r` | In | 1 | event indicator |',
+  '',
+];
+check('table: cells align to the top and digits are tabular', async () => {
+  const { htmlPath } = render(TABLE_MD);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => {
+    const td = document.querySelector('.content table tbody td');
+    return { va: getComputedStyle(td).verticalAlign, num: getComputedStyle(document.querySelector('.content table')).fontVariantNumeric };
+  });
+  await page.close();
+  assert.strictEqual(s.va, 'top');
+  assert.strictEqual(s.num, 'tabular-nums');
+});
+check('table: horizontal rules only, no zebra, no grey header', async () => {
+  const { htmlPath } = render(TABLE_MD);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => {
+    const cs = (sel) => getComputedStyle(document.querySelector(sel));
+    return {
+      tdLeft: cs('.content tbody td:nth-child(2)').borderLeftWidth,
+      tdBottom: cs('.content tbody td:nth-child(2)').borderBottomWidth,
+      thBottom: cs('.content thead th:nth-child(2)').borderBottomWidth,
+      thBg: cs('.content thead th:nth-child(2)').backgroundColor,
+      evenBg: cs('.content tbody tr:nth-child(2)').backgroundColor,
+      evenFirstBg: cs('.content tbody tr:nth-child(2) td:first-child').backgroundColor,
+    };
+  });
+  await page.close();
+  assert.strictEqual(s.tdLeft, '0px', 'no vertical rules');
+  assert.strictEqual(s.tdBottom, '1px');
+  assert.strictEqual(s.thBottom, '2px');
+  assert.ok(['rgba(0, 0, 0, 0)', 'rgb(255, 255, 255)'].includes(s.thBg), 'header not grey: ' + s.thBg);
+  assert.ok(['rgba(0, 0, 0, 0)', 'rgb(255, 255, 255)'].includes(s.evenBg), 'no zebra row: ' + s.evenBg);
+  assert.strictEqual(s.evenFirstBg, 'rgb(255, 255, 255)', 'sticky first column stays opaque white');
+});
+check('table: on a phone the prose column keeps 15em and the table scrolls', async () => {
+  const { htmlPath } = render(TABLE_MD);
+  const page = await openPage(htmlPath, 390, 844);
+  const s = await page.evaluate(() => {
+    const t = document.querySelector('.content table');
+    const prose = t.querySelector('tbody td:last-child');
+    return { proseW: prose.getBoundingClientRect().width, scrolls: t.scrollWidth > t.clientWidth, rowH: t.querySelector('tbody tr').getBoundingClientRect().height };
+  });
+  await page.close();
+  assert.ok(s.proseW >= 15 * 13.5 - 1, 'prose column >= 15em of the 13.5px table font, got ' + s.proseW);
+  assert.ok(s.scrolls, 'table scrolls horizontally instead of squeezing');
+  assert.ok(s.rowH < 140, 'row is no longer a tall column of wrapped text, got ' + s.rowH);
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];

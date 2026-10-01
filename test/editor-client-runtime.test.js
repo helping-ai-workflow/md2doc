@@ -13785,9 +13785,10 @@ async function gutterGeometry(page, sel) {
 
     // ── S3 (Important): the row highlight has to actually PAINT ────────────
     //
-    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` paints its own
-    // opaque `background: #f6f8fa` and the sticky first column paints
-    // `#ffffff` — both on the CELL, which sits above the row box, and
+    // '.ed-te-hl' used to go on the `<tr>`. Every `<th>` painted its own
+    // opaque `background: #f6f8fa` (v3.8.0 removed that; the first header
+    // cell is still sticky and paints `#ffffff`) and the sticky first column
+    // paints `#ffffff` — both on the CELL, which sits above the row box, and
     // `!important` does not let a rule on one element beat an opaque
     // background painted by a different element on top of it. The header
     // highlight rendered as ZERO pixels changed while the Esc gate still
@@ -15966,9 +15967,10 @@ async function gutterGeometry(page, sel) {
       // Two BODY rows, not one: with a single body row there is no
       // `tr:nth-child(even)` anywhere in the document, the zebra-stripe probe
       // below `continue`s past a null element and the whole check is vacuous.
-      // The even row's FIRST cell is where the two strongest opaque rules
-      // compound (zebra #fafbfc at (0,3,4) on top of the sticky column's
-      // #ffffff at z-index 1), so it gets its own probe.
+      // The even row's FIRST cell is where, until v3.8.0, the two strongest
+      // opaque rules compounded (zebra #fafbfc at (0,3,4) on top of the sticky
+      // column's #ffffff at z-index 1). The zebra is gone; the sticky white is
+      // not, so it keeps its own probe.
       '# Doc\n\n```\ncode\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n',
       async (page) => {
         await page.evaluate(() => window.__edTestSetSelection(1, 99));

@@ -198,16 +198,15 @@ assert.match(
   /\.content table tbody td:first-child,\s*\.content table thead th:first-child \{\s*position: sticky;\s*left: 0;\s*z-index: 1;\s*background: #ffffff;\s*\}/,
   'expected sticky first-column rule'
 );
+// v3.8.0 (design review item 3): no grey header and no zebra rows. The sticky
+// first column still paints opaque white so scrolled cells don't show through.
 assert.match(
   tablesHtml,
-  /\.content table thead th:first-child \{\s*background: #f6f8fa;\s*\}/,
+  /\.content table thead th:first-child \{\s*background: #ffffff;\s*\}/,
   'expected sticky header first-column background override'
 );
-assert.match(
-  tablesHtml,
-  /\.content table tbody tr:nth-child\(even\) td:first-child \{\s*background: #fafbfc;\s*\}/,
-  'expected sticky zebra-stripe override'
-);
+assert.doesNotMatch(tablesHtml, /\n\s*tr:nth-child\(even\) \{ background: #fafbfc; \}/, 'zebra striping removed');
+assert.doesNotMatch(tablesHtml, /\.content table tbody tr:nth-child\(even\) td:first-child \{/, 'zebra sticky-column override removed');
 
 // Task 5 (layout) — A1: TOC adaptive width (default via CSS var fallback so the
 // drag-splitter can override it; see reader-panels.test.js for the drag runtime)
