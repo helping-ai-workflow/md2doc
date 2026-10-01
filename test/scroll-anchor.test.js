@@ -37,6 +37,24 @@ fs.writeFileSync(mdPath, lines.join('\n'), 'utf8');
 const run = spawnSync('node', [LIB, mdPath, htmlPath], { cwd: REPO, encoding: 'utf8' });
 assert.strictEqual(run.status, 0, 'long fixture renders: ' + run.stderr);
 
+// WaveDrom variant: every wavedrom fence leaves a <script type="WaveDrom">
+// child in main.content whose rect is all zeros. The gap fallback's binary
+// search over the column's children used to read that as "top 0 < line" and
+// walk off to the wrong block, so reading position jumped by thousands of px.
+const wdPath = path.join(tmpDir, 'wd.md');
+const wdHtml = path.join(tmpDir, 'wd.html');
+const wdLines = ['# Wave Document', ''];
+for (let s = 1; s <= 12; s++) {
+  wdLines.push('## Section ' + s, '');
+  for (let p = 0; p < 3; p++) {
+    wdLines.push(('Paragraph ' + p + ' of section ' + s + '. The quick brown fox jumps over the lazy dog and keeps running. ').repeat(6), '');
+  }
+  wdLines.push('```wavedrom', '{ signal: [ { name: "clk", wave: "p...." }, { name: "d", wave: "01.0." } ] }', '```', '');
+}
+fs.writeFileSync(wdPath, wdLines.join('\n'), 'utf8');
+const wdRun = spawnSync('node', [LIB, wdPath, wdHtml], { cwd: REPO, encoding: 'utf8' });
+assert.strictEqual(wdRun.status, 0, 'wavedrom fixture renders: ' + wdRun.stderr);
+
 // Tags the element sitting at the top of the reading column and reports its
 // viewport offset, so the same node can be re-measured after the resize.
 // Probing main.content itself measures the container, whose offset moves with
@@ -102,6 +120,46 @@ async function drift(page, from, to) {
     await new Promise((r) => setTimeout(r, 400));
     const yAfter = await page.evaluate(() => window.scrollY);
     assert.strictEqual(yAfter, yBefore, 'height-only resize leaves the scroll offset alone');
+
+    // WaveDrom document: park the reading line in a gap between blocks (the
+    // fallback path), well past several wavedrom fences, then resize.
+    const wd = await browser.newPage();
+    await wd.setViewport({ width: 1400, height: 900 });
+    await wd.goto('file://' + wdHtml, { waitUntil: 'load' });
+    await new Promise((r) => setTimeout(r, 1500));
+    const gapYs = await wd.evaluate(() => {
+      const content = document.querySelector('main.content');
+      const rect = content.getBoundingClientRect();
+      const out = [];
+      const scripts = Array.from(content.querySelectorAll(':scope > script[type="WaveDrom"]'));
+      const third = scripts[2];
+      // The script itself has an all-zero rect; measure its rendered neighbour.
+      let nb = third ? third.nextElementSibling : null;
+      while (nb && !nb.getClientRects().length) nb = nb.nextElementSibling;
+      const minY = nb ? nb.getBoundingClientRect().top + window.scrollY : 0;
+      for (let y = 0; y < document.documentElement.scrollHeight; y += 5) {
+        window.scrollTo(0, y);
+        if (y + 80 > minY && document.elementFromPoint(rect.left + rect.width / 2, 80) === content) out.push(y);
+      }
+      return { count: scripts.length, ys: out };
+    });
+    assert.ok(gapYs.count >= 3, 'wavedrom fixture has at least 3 WaveDrom script children, got ' + gapYs.count);
+    assert.ok(gapYs.ys.length >= 3, 'found gap positions past the third fence, got ' + gapYs.ys.length);
+    for (const y of [gapYs.ys[0], gapYs.ys[Math.floor(gapYs.ys.length / 2)], gapYs.ys[gapYs.ys.length - 1]]) {
+      await wd.setViewport({ width: 1400, height: 900 });
+      await wd.evaluate((yy) => window.scrollTo(0, yy), y);
+      await new Promise((r) => setTimeout(r, 250));
+      await wd.evaluate(() => document.querySelectorAll('[data-probe]').forEach((n) => n.removeAttribute('data-probe')));
+      const before = await wd.evaluate(PROBE);
+      assert.ok(before, 'wavedrom probe found before resize at y=' + y);
+      await wd.setViewport({ width: 1100, height: 900 });
+      await new Promise((r) => setTimeout(r, 400));
+      const after = await wd.evaluate(REMEASURE);
+      assert.ok(after, 'wavedrom probe present after resize');
+      const px = Math.round(after.top - before.top);
+      assert.ok(Math.abs(px) <= 4, 'wavedrom doc keeps the reading position from a gap at y=' + y + ' (drifted ' + px + 'px)');
+    }
+    await wd.close();
 
     console.log('md2doc scroll-anchor test passed');
   } finally {
