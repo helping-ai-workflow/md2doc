@@ -11,6 +11,7 @@ All notable changes to this project will be documented here. This project adhere
 
 - **中文字型固定**：字型堆疊補上 PingFang TC／微軟正黑體／Noto Sans TC，不再看機器運氣拿到簡中字形的微軟雅黑；行內與程式碼字型改以 Cascadia Mono 開頭。
 - **`<html lang>` 依內容偵測**：中文字占比 ≥ 10%（不計程式碼）標成 `zh-Hant`，否則 `en`；新旗標 `--lang <tag>` 可覆寫。
+  - 假名占（漢字＋假名）≥ 20% 標成 `ja`，諺文占（漢字＋諺文）≥ 20% 標成 `ko`（文件本身須以 CJK 為主）；`~~~` 圍欄也不計入。
 - **表格**：儲存格靠上對齊、只留橫線、拿掉斑馬紋與灰色表頭、數字等寬。手機上說明欄至少 15em，表格改為橫向捲動（第一欄 sticky，訊號名一直在左邊）。
 - **標題**：H3 1.3em／H4 1.1em，上方間距大於下方；開頭的章節號（`4.1`）獨立成 span，後面空隙加寬。
 - **行內 code**：不再是灰底小方塊，改成 `#b93a0c` 橘紅字、0.92em。

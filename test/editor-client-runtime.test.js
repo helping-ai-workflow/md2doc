@@ -15981,9 +15981,11 @@ async function gutterGeometry(page, sel) {
         await page.evaluate(() => window.__edTestSetSelection(1, 99));
         const measured = await page.evaluate(() => {
           // The sticky first column paints at z-index 1 over anything beneath
-          // it, and <pre>/<th>/zebra rows carry opaque backgrounds. If the tint
-          // loses to any of them the selection is invisible exactly where a
-          // user is most likely to be selecting.
+          // it, and <pre>, <th> and that column's own cells carry opaque
+          // backgrounds. If the tint loses to any of them the selection is
+          // invisible exactly where a user is most likely to be selecting.
+          // The zebra stripe no longer exists (removed in v3.8.0), so the two
+          // tr:nth-child(even) probes below only guard that it stays gone.
           const out = [];
           for (const sel of ['pre', 'th', 'tbody td:first-child',
             'tr:nth-child(even)', 'tbody tr:nth-child(even) td:first-child']) {

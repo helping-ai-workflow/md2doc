@@ -491,6 +491,33 @@ check('graphviz: node and edge labels stay inside their shapes', async () => {
   assert.ok(r.edgeRight <= r.svgRight + 0.5, 'edge label right ' + r.edgeRight + ' > svg right ' + r.svgRight);
 });
 
+// ── Final fix wave E: language detection ───────────────────────────────────
+check('lang: a Japanese paragraph is tagged ja', async () => {
+  const { html } = render(['# 仕様', '', 'このブロックの送信経路について詳しく説明します。データはクロックごとに転送されます。', '']);
+  assert.match(html, /<html lang="ja">/);
+});
+check('lang: a Korean paragraph is tagged ko', async () => {
+  const { html } = render(['# 사양', '', '이 블록의 전송 경로를 자세히 설명합니다. 데이터는 클록마다 전달됩니다.', '']);
+  assert.match(html, /<html lang="ko">/);
+});
+check('lang: one kana in a Chinese document stays zh-Hant', async () => {
+  assert.match(render(['# 規格', '', ZH[2] + ' 這個の符號只是個例外。', '']).html, /<html lang="zh-Hant">/);
+});
+check('lang: Han characters inside a tilde fence are not counted', async () => {
+  const { html } = render([...EN, '~~~', '中文中文中文中文中文中文中文中文中文中文中文中文中文中文', '~~~', '']);
+  assert.match(html, /<html lang="en">/);
+});
+
+// ── Final fix wave E: a heading-less document has no mobile bar ───────────
+check('mobile: a document with no headings has no bar and no sideways scroll', async () => {
+  const { html, htmlPath } = render(['Just a paragraph of prose with no heading at all.', '', 'Another one.', '']);
+  assert.ok(!/<div class="mobile-bar"/.test(html) && !/<header class="mobile-bar"/.test(html) && !/class="mobile-bar"/.test(html), 'bar element is emitted');
+  const page = await openPage(htmlPath, 390, 844);
+  const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  await page.close();
+  assert.ok(over <= 0, 'sideways overflow ' + over);
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];

@@ -56,7 +56,7 @@ Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image a
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
 asserts from DOM geometry, never screenshots. It is not part of `npm test`; CI runs it in
-`.github/workflows/browser.yml` when `lib/md2doc.js` changes. Any change to the reading
+`.github/workflows/browser.yml` when `lib/**`, `vendor/**`, the click test or `package.json` change. Any change to the reading
 view (sidebar, TOC, search, mobile bar, tables, focus, lightbox) adds or updates a click
 check in the same change and runs this suite before it is called done — the user should
 never be the one who finds a reader UI bug. One-time setup: `npx playwright install chromium webkit`.

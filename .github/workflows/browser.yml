@@ -7,17 +7,17 @@ on:
   push:
     branches: [main]
     paths:
-      - "lib/md2doc.js"
+      - "lib/**"
+      - "vendor/**"
       - "test/reader-click.test.js"
       - "package.json"
-      - "package-lock.json"
       - ".github/workflows/browser.yml"
   pull_request:
     paths:
-      - "lib/md2doc.js"
+      - "lib/**"
+      - "vendor/**"
       - "test/reader-click.test.js"
       - "package.json"
-      - "package-lock.json"
       - ".github/workflows/browser.yml"
 
 jobs:
