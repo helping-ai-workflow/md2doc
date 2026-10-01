@@ -6627,6 +6627,12 @@ async function main() {
   // v3.8.0: 420px 的 max 522 → 519。重新量測（journey 實跑讀到的 max）：
   // 中文字型堆疊改了之後按鈕文字寬度略變，scrollWidth 小了 3px。at 圖案不變
   // （只右／兩側都亮／只左），中間取樣點 260 離 1 與 518 仍然很遠。
+  //
+  // 上面那個 519 只在本機（WSL）成立：同一份 code 在 GitHub CI ubuntu-latest
+  // 讀到 522（PR #41 的 test job）。v3.8.0 的中文字型堆疊裡有一個字型本機有、
+  // runner 沒有，按鈕寬度跟著機器上裝的字型走，所以 420 不再釘 max 的精確值：
+  // 只釘 at 圖案，再加下限 max ≥ 200 —— 那才是 max 原本要守的東西，讓中間
+  // 取樣點 Math.round(max/2) 離 1 與 max - 1 都夠遠（不是薄冰）。1400 仍釘 0。
   for (const w of [1400, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     await ctx.page.setViewport({ width: w, height: 900 });
@@ -6653,9 +6659,13 @@ async function main() {
       ? { max: 0, at: [{ attr: '', left: false, right: false },
                        { attr: '', left: false, right: false },
                        { attr: '', left: false, right: false }] }
-      : { max: 519, at: [{ attr: 'right', left: false, right: true },
-                         { attr: 'left right', left: true, right: true },
-                         { attr: 'left', left: true, right: false }] };
+      : { max: seen.max, at: [{ attr: 'right', left: false, right: true },
+                              { attr: 'left right', left: true, right: true },
+                              { attr: 'left', left: true, right: false }] };
+    if (w === 420) {
+      assert.ok(seen.max >= 200,
+        '420×900：工具列要真的溢出夠多，中間取樣點才離兩端夠遠，got max ' + seen.max);
+    }
     assert.deepStrictEqual(seen, want,
       w + '×900：捲動提示必須只在那一側還有藏著的按鈕時亮，got ' + JSON.stringify(seen));
     assert.strictEqual(ctx.errs.length, 0,
