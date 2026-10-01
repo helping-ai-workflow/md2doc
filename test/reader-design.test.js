@@ -197,6 +197,24 @@ check('heading: H3/H4 scale and more space above than below', async () => {
   assert.ok(near(s.h4top, 1.8) && near(s.h4bot, 0.4), 'h4 margins ' + JSON.stringify(s));
 });
 
+// ── Task 4: inline code ────────────────────────────────────────────────────
+check('code: inline code has no chip, #b93a0c text, 0.92em; code blocks untouched', async () => {
+  const { htmlPath } = render(['# C', '', 'Signal `rcv_v` here.', '', '| A |', '|---|', '| `clk_tx` |', '', '\x60\x60\x60', 'block()', '\x60\x60\x60', '']);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => {
+    const st = (el) => { const c = getComputedStyle(el); return { bg: c.backgroundColor, color: c.color, size: parseFloat(c.fontSize), pad: c.paddingLeft }; };
+    const p = document.querySelector('.content p code');
+    return { p: st(p), pFont: parseFloat(getComputedStyle(p.parentElement).fontSize), td: st(document.querySelector('.content td code')), pre: st(document.querySelector('.content pre code')) };
+  });
+  await page.close();
+  assert.strictEqual(s.p.bg, 'rgba(0, 0, 0, 0)');
+  assert.strictEqual(s.p.color, 'rgb(185, 58, 12)');
+  assert.strictEqual(s.p.pad, '0px');
+  assert.ok(Math.abs(s.p.size / s.pFont - 0.92) < 0.01, 'ratio ' + s.p.size / s.pFont);
+  assert.strictEqual(s.td.color, 'rgb(185, 58, 12)', 'table cells too');
+  assert.notStrictEqual(s.pre.color, 'rgb(185, 58, 12)', 'code blocks keep their colour');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
