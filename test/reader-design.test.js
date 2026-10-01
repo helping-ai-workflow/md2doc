@@ -426,6 +426,18 @@ check('mobile: edit mode hides the reader bar', async () => {
   assert.strictEqual(count(edit), 2, 'edit: desktop rule + edit-mode rule');
 });
 
+// ── Task 10: focus ─────────────────────────────────────────────────────────
+check('focus: Tab from the search box goes straight to a blue-ringed button', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  await page.focus('#doc-search-input');
+  await page.keyboard.press('Tab');
+  const s = await page.evaluate(() => { const a = document.activeElement; const c = getComputedStyle(a); return { id: a.id, outline: c.outlineStyle + ' ' + c.outlineWidth + ' ' + c.outlineColor }; });
+  await page.close();
+  assert.strictEqual(s.id, 'toc-expand-all', 'hidden submit and the empty-state clear are skipped');
+  assert.strictEqual(s.outline, 'solid 2px rgb(9, 105, 218)');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
