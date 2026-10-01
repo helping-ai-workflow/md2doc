@@ -215,6 +215,29 @@ check('code: inline code has no chip, #b93a0c text, 0.92em; code blocks untouche
   assert.notStrictEqual(s.pre.color, 'rgb(185, 58, 12)', 'code blocks keep their colour');
 });
 
+// ── Task 5: diagrams ───────────────────────────────────────────────────────
+check('mermaid: base theme with md2doc link blue, in reader and edit mode', async () => {
+  // A flowchart, not a state diagram: flowchart nodes take primaryBorderColor
+  // directly as their stroke, so the computed colour is unambiguous.
+  const { html, htmlPath } = render(['# M', '', '\x60\x60\x60mermaid', 'graph TD', '  A[Start] --> B[End]', '\x60\x60\x60', '']);
+  assert.ok(!/theme: 'default'/.test(html), 'default theme gone');
+  assert.match(html, /mermaid\.initialize\(\{ startOnLoad: true, theme: 'base', themeVariables: \{[^}]*primaryBorderColor: '#0969da'/);
+  const page = await openPage(htmlPath);
+  await page.waitForFunction(() => document.querySelector('.mermaid svg .node rect, .mermaid svg rect.basic'), { timeout: 15000 });
+  const stroke = await page.evaluate(() => getComputedStyle(document.querySelector('.mermaid svg .node rect, .mermaid svg rect.basic')).stroke);
+  await page.close();
+  assert.strictEqual(stroke, 'rgb(9, 105, 218)');
+  const { html: edit } = await renderMarkdown('# M\n\n\x60\x60\x60mermaid\ngraph TD\nA-->B\n\x60\x60\x60\n', path.join(tmpDir, 'm.md'), { editMode: true });
+  assert.match(edit, /mermaid\.initialize\(\{ startOnLoad: false, theme: 'base'/);
+});
+check('graphviz: default Times is replaced, an author font is kept', async () => {
+  const plain = render(['# G', '', '\x60\x60\x60dot', 'digraph { a -> b [label="go"]; }', '\x60\x60\x60', '']).html;
+  assert.ok(!plain.includes('font-family="Times,serif"'), 'Times left in the SVG');
+  assert.match(plain, /font-family="Helvetica,sans-Serif"/);
+  const authored = render(['# G', '', '\x60\x60\x60dot', 'digraph { node [fontname="Courier"]; a -> b; }', '\x60\x60\x60', '']).html;
+  assert.match(authored, /font-family="Courier(,monospace)?"/); // graphviz appends its generic fallback
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
