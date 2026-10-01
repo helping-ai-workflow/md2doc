@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.8.0 — 未發布
+## v3.8.0 — 2026-10-01
 
 閱讀版面審查（13 項，每項都有實際截圖比較與參考網站實測）的淺色部分。深色模式另外一批。
 
