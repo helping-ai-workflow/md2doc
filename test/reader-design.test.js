@@ -329,6 +329,24 @@ check('sidebar: current location is blue and its whole path is bold', async () =
   assert.strictEqual(s.crumb, 'none', 'breadcrumb replaced by the path highlight');
 });
 
+check('sidebar: an active PARENT row keeps the active colour', async () => {
+  // Filler pads every section so scrolling to a parent heading makes IT the active row.
+  const fill = Array.from({ length: 30 }, (_, i) => 'Filler paragraph ' + i + '.\n');
+  const md = ['# Doc', '', '## 1. Alpha', '', ...fill, '### 1.1 Alpha child', '', ...fill, '## 2. Beta', '', ...fill].join('\n');
+  const { htmlPath } = render(md.split('\n'));
+  const page = await openPage(htmlPath);
+  await page.evaluate(() => document.getElementById('1-alpha').scrollIntoView());
+  await new Promise((r) => setTimeout(r, 500));
+  const s = await page.evaluate(() => {
+    const a = document.querySelector('.toc a.is-active');
+    return { inSummary: a.parentElement.tagName, text: a.textContent.trim(), color: getComputedStyle(a).color, bg: getComputedStyle(a).backgroundColor };
+  });
+  await page.close();
+  assert.strictEqual(s.inSummary, 'SUMMARY', 'active row is a parent row, got ' + JSON.stringify(s));
+  assert.strictEqual(s.color, 'rgb(5, 80, 174)');
+  assert.strictEqual(s.bg, 'rgb(219, 230, 243)');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
