@@ -238,6 +238,32 @@ check('graphviz: default Times is replaced, an author font is kept', async () =>
   assert.match(authored, /font-family="Courier(,monospace)?"/); // graphviz appends its generic fallback
 });
 
+// ── Task 6: metadata block ─────────────────────────────────────────────────
+const META = ['# Spec', '', '**Document Type:** Module spec (profile `ip-spec`)', '**Version:** 0.19', '**Owner:** Heping Li', '', '## 1. Overview', '', 'Body.', ''];
+check('meta: lines after the first H1 become a two-column list', async () => {
+  const { html } = render(META);
+  assert.match(html, /<dl class="doc-meta"><dt>Document Type<\/dt><dd>Module spec \(profile <code>ip-spec<\/code>\)<\/dd><dt>Version<\/dt><dd>0\.19<\/dd><dt>Owner<\/dt><dd>Heping Li<\/dd><\/dl>/);
+});
+check('meta: one non-matching line leaves the paragraph alone', async () => {
+  const { html } = render(['# Spec', '', '**Version:** 0.19', 'plain sentence', '']);
+  assert.ok(!html.includes('class="doc-meta"'));
+});
+check('meta: only the paragraph right after the FIRST H1', async () => {
+  const { html } = render(['# Spec', '', 'Intro first.', '', '# Second', '', '**Version:** 0.19', '**Owner:** X', '', '## A', '', '**Key:** v', '**Other:** w', '']);
+  assert.ok(!html.includes('class="doc-meta"'), 'a later H1 or an H2 never triggers it');
+});
+check('meta: edit mode keeps the paragraph', async () => {
+  const { bodyHtml } = await renderMarkdown(META.join('\n'), path.join(tmpDir, 'meta.md'), { editMode: true });
+  assert.ok(!bodyHtml.includes('class="doc-meta"'));
+});
+check('meta: two-column grid on the metadata panel grey', async () => {
+  const { htmlPath } = render(META);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => { const c = getComputedStyle(document.querySelector('.doc-meta')); return { d: c.display, cols: c.gridTemplateColumns.split(' ').length, bg: c.backgroundColor }; });
+  await page.close();
+  assert.deepStrictEqual(s, { d: 'grid', cols: 2, bg: 'rgb(246, 248, 250)' });
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
