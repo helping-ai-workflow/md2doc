@@ -159,6 +159,44 @@ check('table: on a phone the prose column keeps 15em and the table scrolls', asy
   assert.ok(s.rowH < 140, 'row is no longer a tall column of wrapped text, got ' + s.rowH);
 });
 
+// ── Task 3: headings ───────────────────────────────────────────────────────
+const HEAD_MD = ['# Doc', '', '## 4. Assumptions', '', 'Intro.', '', '### 4.1 Assumptions', '', '**Decision:** text.', '', '#### 3.4.2 AD-MMTX-002 — layout', '', 'Body.', '', '### IF-TX-04 — Dual slave', '', 'Body.', ''];
+check('heading: leading section number is wrapped, text unchanged', async () => {
+  const { html, htmlPath } = render(HEAD_MD);
+  assert.match(html, /<h3 id="4-1-assumptions"[^>]*><span class="sec">4\.1<\/span> Assumptions<a class="heading-anchor"/);
+  assert.match(html, /<h2 id="4-assumptions"[^>]*><span class="sec">4\.<\/span> Assumptions/);
+  assert.match(html, /<h3 id="if-tx-04-dual-slave"[^>]*>IF-TX-04 — Dual slave/, 'non-numbered heading untouched');
+  const page = await openPage(htmlPath);
+  const t = await page.evaluate(() => document.getElementById('4-1-assumptions').firstChild.textContent + document.getElementById('4-1-assumptions').childNodes[1].textContent);
+  await page.close();
+  assert.strictEqual(t, '4.1 Assumptions', 'number + original space survive in textContent');
+});
+check('heading: edit mode keeps the plain heading markup', async () => {
+  const { bodyHtml } = await renderMarkdown(HEAD_MD.join('\n'), path.join(tmpDir, 'edit.md'), { editMode: true });
+  assert.ok(!bodyHtml.includes('class="sec"'), 'no section span in edit mode');
+});
+check('heading: H3/H4 scale and more space above than below', async () => {
+  const { htmlPath } = render(HEAD_MD);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => {
+    const px = (el, p) => parseFloat(getComputedStyle(el)[p]);
+    const body = parseFloat(getComputedStyle(document.body).fontSize);
+    const h2 = document.getElementById('4-assumptions');
+    const h3 = document.getElementById('4-1-assumptions');
+    const h4 = document.querySelector('h4');
+    return { h3: px(h3, 'fontSize') / body, h4: px(h4, 'fontSize') / body,
+      h2top: px(h2, 'marginTop') / px(h2, 'fontSize'), h2bot: px(h2, 'marginBottom') / px(h2, 'fontSize'),
+      h3top: px(h3, 'marginTop') / px(h3, 'fontSize'), h3bot: px(h3, 'marginBottom') / px(h3, 'fontSize'),
+      h4top: px(h4, 'marginTop') / px(h4, 'fontSize'), h4bot: px(h4, 'marginBottom') / px(h4, 'fontSize') };
+  });
+  await page.close();
+  const near = (a, b) => Math.abs(a - b) < 0.02;
+  assert.ok(near(s.h3, 1.3) && near(s.h4, 1.1), 'sizes ' + JSON.stringify(s));
+  assert.ok(near(s.h2top, 2.2) && near(s.h2bot, 0.7), 'h2 margins ' + JSON.stringify(s));
+  assert.ok(near(s.h3top, 2.0) && near(s.h3bot, 0.5), 'h3 margins ' + JSON.stringify(s));
+  assert.ok(near(s.h4top, 1.8) && near(s.h4bot, 0.4), 'h4 margins ' + JSON.stringify(s));
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
