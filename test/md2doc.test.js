@@ -43,10 +43,17 @@ const html = fs.readFileSync(htmlPath, 'utf8');
 
 assert.match(html, /<nav class="toc"/, 'expected TOC markup');
 assert.match(html, /<ul class="toc-list toc-list-level-1">/, 'expected nested TOC root list');
+// v3.8.0 (design review item 7+8): this fixture's single H1 "Top" is the
+// document title, so its sections are the TOC's top level and "Top" has no row.
+assert.doesNotMatch(
+  html.slice(html.indexOf('<nav class="toc"'), html.indexOf('</nav>')),
+  /href="#top"/,
+  'single-H1 title is not a TOC row'
+);
 assert.match(
   html,
-  /<details>\s*<summary><a href="#top" title="Top">Top<\/a><\/summary>/,
-  'expected level-1 TOC section to be collapsed by default'
+  /<ul class="toc-list toc-list-level-1">\s*<li class="toc-item toc-level-1 toc-parent">\s*<details>\s*<summary><a href="#heading-ref-and-code"/,
+  'expected the first section to head the TOC, collapsed by default'
 );
 assert.match(
   html,
@@ -275,6 +282,12 @@ console.log('md2doc heading rendering test passed');
     '## C < D > E',
     '',
     'more',
+    '',
+    // v3.8.0: a lone H1 is the title and has no TOC row; a second H1 keeps
+    // "Alpha & Beta" as a row so its TOC label escaping is still exercised.
+    '# Second',
+    '',
+    'tail',
     '',
   ].join('\n'), 'utf8');
 

@@ -332,7 +332,9 @@ check('sidebar: current location is blue and its whole path is bold', async () =
 check('sidebar: an active PARENT row keeps the active colour', async () => {
   // Filler pads every section so scrolling to a parent heading makes IT the active row.
   const fill = Array.from({ length: 30 }, (_, i) => 'Filler paragraph ' + i + '.\n');
-  const md = ['# Doc', '', '## 1. Alpha', '', ...fill, '### 1.1 Alpha child', '', ...fill, '## 2. Beta', '', ...fill].join('\n');
+  // Padding after the title too (Task 8): the title has no TOC row any more, so
+  // "1. Alpha" must not already be on screen at load, or the observer never reports it.
+  const md = ['# Doc', '', ...fill, '## 1. Alpha', '', ...fill, '### 1.1 Alpha child', '', ...fill, '## 2. Beta', '', ...fill].join('\n');
   const { htmlPath } = render(md.split('\n'));
   const page = await openPage(htmlPath);
   await page.evaluate(() => document.getElementById('1-alpha').scrollIntoView());
@@ -345,6 +347,35 @@ check('sidebar: an active PARENT row keeps the active colour', async () => {
   assert.strictEqual(s.inSummary, 'SUMMARY', 'active row is a parent row, got ' + JSON.stringify(s));
   assert.strictEqual(s.color, 'rgb(5, 80, 174)');
   assert.strictEqual(s.bg, 'rgb(219, 230, 243)');
+});
+
+// ── Task 8: TOC root ───────────────────────────────────────────────────────
+check('toc: a single H1 title is not a TOC row; its sections are the top level', async () => {
+  const { html } = render(SIDE_MD);
+  const toc = html.slice(html.indexOf('<nav class="toc"'), html.indexOf('</nav>'));
+  assert.ok(!toc.includes('href="#doc"'), 'title row removed');
+  assert.match(toc, /<ul class="toc-list toc-list-level-1">\s*<li class="toc-item toc-level-1 toc-parent">\s*<details>\s*<summary><a href="#1-alpha"/);
+});
+check('toc: a document with several H1s keeps every H1 row', async () => {
+  const { html } = render(['# One', '', '## One A', '', 'x', '', '# Two', '', '## Two A', '', 'y', '']);
+  const toc = html.slice(html.indexOf('<nav class="toc"'), html.indexOf('</nav>'));
+  assert.ok(toc.includes('href="#one"') && toc.includes('href="#two"'), 'both chapters listed');
+});
+check('toc: Collapse all at the top of the page keeps the top level visible', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  await page.click('#toc-collapse-all');
+  await new Promise((r) => setTimeout(r, 150));
+  const visible = await page.$$eval('.toc > .toc-list > li > details > summary > a, .toc > .toc-list > li > a', (as) => as.filter((a) => a.getBoundingClientRect().height > 0).length);
+  await page.close();
+  assert.strictEqual(visible, 2, 'both top-level sections still visible');
+});
+check('toc: top-level rows are not bold until on the active path', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  const w = await page.$eval('.toc a[href="#2-beta"]', (a) => getComputedStyle(a).fontWeight);
+  await page.close();
+  assert.strictEqual(w, '400');
 });
 
 // ── run ──
