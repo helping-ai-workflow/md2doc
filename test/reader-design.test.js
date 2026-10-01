@@ -449,6 +449,24 @@ check('focus: TOC header button shows inset ring (no clipping)', async () => {
   assert.strictEqual(s.outlineOffset, '-2px');
 });
 
+// ── Final fix wave A: print must not clip table columns ────────────────────
+check('print: a wide prose table fits the page and its first column is not sticky', async () => {
+  const sent = 'This column carries a long sentence that wraps across several lines in a register description.';
+  const rows = ['| Reg | Offset | Access | Reset | Description | Notes |', '|---|---|---|---|---|---|'];
+  for (let i = 0; i < 4; i++) rows.push('| R' + i + ' | 0x0' + i + ' | RW | 0 | ' + sent + ' | ' + sent + ' |');
+  const { htmlPath } = render(['# Doc', '', ...rows, '']);
+  const page = await openPage(htmlPath, 680, 900);
+  await page.emulateMediaType('print');
+  await new Promise((r) => setTimeout(r, 200));
+  const s = await page.evaluate(() => {
+    const t = document.querySelector('.content table');
+    return { sw: t.scrollWidth, cw: t.clientWidth, pos: getComputedStyle(t.querySelector('tbody td:first-child')).position };
+  });
+  await page.close();
+  assert.ok(s.sw <= s.cw, 'table clips in print: scrollWidth ' + s.sw + ' > clientWidth ' + s.cw);
+  assert.strictEqual(s.pos, 'static');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
