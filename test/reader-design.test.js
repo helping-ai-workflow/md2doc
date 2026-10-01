@@ -518,6 +518,55 @@ check('mobile: a document with no headings has no bar and no sideways scroll', a
   assert.ok(over <= 0, 'sideways overflow ' + over);
 });
 
+// ── Residual fixes (Ruling 19) ─────────────────────────────────────────────
+check('graphviz: a quoted id containing a brace still renders to svg', async () => {
+  const { html } = render(['# Doc', '', '\x60\x60\x60dot', 'digraph "a{b" { a -> b }', '\x60\x60\x60', '']);
+  assert.ok(/<div class="graphviz"><svg/.test(html), 'no svg; got ' + (html.includes('language-dot') ? 'the <pre> fallback' : 'nothing'));
+});
+check('graphviz: a brace in a leading comment does not take the injection', async () => {
+  const { htmlPath } = render(['# Doc', '', '\x60\x60\x60dot',
+    '// note {', 'digraph G { a [shape=box, label="A rather long box node label for the decoder"]; }', '\x60\x60\x60', '']);
+  const page = await openPage(htmlPath);
+  const r = await page.evaluate(() => {
+    const g = document.querySelector('.graphviz svg g.node');
+    if (!g) return null;
+    const t = g.querySelector('text').getBoundingClientRect();
+    const p = g.querySelector('polygon').getBoundingClientRect();
+    return { tw: t.width, pw: p.width, inside: t.left >= p.left - 0.5 && t.right <= p.right + 0.5 };
+  });
+  await page.close();
+  assert.ok(r, 'graph rendered');
+  assert.ok(r.inside, 'text ' + r.tw + ' overflows polygon ' + r.pw);
+});
+const ZHLONG = '這一段是很長很長的中文說明文字，描述傳送路徑如何把每一個資料拍轉送出去並且保持旁帶訊號對齊。';
+const ENWORDS = 'Notes about the block and the transmit path of the design are kept in English here.';
+check('lang: an inline mention of the tilde fence is not a fence', async () => {
+  assert.match(render(['# Doc', '', ENWORDS + ' Use \x60~~~\x60 ' + ZHLONG + ZHLONG + ' to close with \x60~~~\x60 again.', '']).html, /<html lang="zh-Hant">/);
+});
+check('lang: a longer tilde fence is not closed by a shorter ~~~ line', async () => {
+  assert.match(render(['# Doc', '', ENWORDS, '', '~~~~', 'code', '~~~', 'more code', '~~~~', '', ZHLONG + ZHLONG, '', '~~~', 'plain code', '~~~', '']).html, /<html lang="zh-Hant">/);
+});
+check('lang: ~~~ in the middle of prose is not a fence', async () => {
+  assert.match(render(['# Doc', '', ENWORDS + ' The ~~~ marker ' + ZHLONG + ZHLONG + ' The ~~~ marker ends.', '']).html, /<html lang="zh-Hant">/);
+});
+check('mobile: a document with no headings has no top band reserved for the bar', async () => {
+  const { htmlPath } = render(['Just a paragraph of prose with no heading at all.', '', 'Another one.', '']);
+  const page = await openPage(htmlPath, 390, 844);
+  const top = await page.evaluate(() => document.querySelector('.content p').getBoundingClientRect().top + window.scrollY);
+  await page.close();
+  // 24px base page padding + the paragraph's own 15px margin = 39; with the
+  // bar's 60px band it was 75. (The brief's 24 is below what the base layout
+  // alone produces, so the bound is 40.)
+  assert.ok(top <= 40, 'first paragraph top ' + top + 'px');
+});
+check('mobile: a document with headings keeps the 60px band under the bar', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath, 390, 844);
+  const pad = await page.evaluate(() => getComputedStyle(document.querySelector('.page-layout')).paddingTop);
+  await page.close();
+  assert.strictEqual(pad, '60px');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];

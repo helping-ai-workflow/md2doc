@@ -339,6 +339,11 @@ check('desktop: the long 3.3 title overflows the TOC list so it can peek sideway
   await wait(200);
   const d = await page.$eval('.toc > .toc-list', (e) => ({ sw: e.scrollWidth, cw: e.clientWidth }));
   assert.ok(d.sw > d.cw, 'toc-list scrollWidth ' + d.sw + ' should exceed clientWidth ' + d.cw);
+  const link = await page.$$eval('.toc a', (as) => {
+    const a = as.find((x) => x.textContent.includes('3.3'));
+    return a ? a.getBoundingClientRect().width : 0;
+  });
+  assert.ok(link > d.cw, 'the 3.3 link is ' + link + 'px wide, which should exceed the list clientWidth ' + d.cw);
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────

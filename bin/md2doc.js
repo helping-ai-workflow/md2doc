@@ -32,7 +32,7 @@ function printHelp() {
         '  --open              Launch the platform viewer after render (default when --out is absent).',
         '  --no-open           Skip the viewer launch.',
         '  --quiet             Suppress per-file progress messages.',
-        '  --lang <tag>        Set <html lang> (default: detected — zh-Hant for Chinese-heavy text, else en).',
+        '  --lang <tag>        Set <html lang> (default: detected — zh-Hant for Chinese-heavy text, ja / ko for Japanese / Korean, else en).',
         '  --bake-svg          Pre-render mermaid/wavedrom to inert SVG (HTML output only; needs Chromium).',
         '  --edit              Serve listed .md files in the browser editor (localhost).',
         '  --port <n>          Pin the editor server port (only with --edit).',

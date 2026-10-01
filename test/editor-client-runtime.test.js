@@ -15984,8 +15984,11 @@ async function gutterGeometry(page, sel) {
           // it, and <pre>, <th> and that column's own cells carry opaque
           // backgrounds. If the tint loses to any of them the selection is
           // invisible exactly where a user is most likely to be selecting.
-          // The zebra stripe no longer exists (removed in v3.8.0), so the two
-          // tr:nth-child(even) probes below only guard that it stays gone.
+          // The zebra stripe no longer exists (removed in v3.8.0), but the th
+          // and tr:nth-child(even) probes below still assert the same thing as
+          // the rest: the tint inside a selection stays translucent. The
+          // .ed-selected tr:nth-child(even) rule keeps its !important so a
+          // later restyle cannot quietly reopen the hole.
           const out = [];
           for (const sel of ['pre', 'th', 'tbody td:first-child',
             'tr:nth-child(even)', 'tbody tr:nth-child(even) td:first-child']) {

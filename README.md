@@ -74,7 +74,7 @@ also pass `--open`.
 | `--no-open` | Skip the viewer launch. |
 | `--quiet` | Suppress per-file progress messages. |
 | `--bake-svg` | Pre-render Mermaid / WaveDrom to inert SVG at generation time (HTML output only; needs Chromium). The output then contains no diagram JavaScript. |
-| `--lang <tag>` | Set `<html lang>` (for example `en`, `zh-Hant`). Default: detected — `zh-Hant` when Chinese characters are at least 10% of the prose (code excluded), otherwise `en`. |
+| `--lang <tag>` | Set `<html lang>` (for example `en`, `zh-Hant`). Default: detected — `zh-Hant` when Chinese characters are at least 10% of the prose (code excluded), `ja` / `ko` when kana / Hangul make up at least 20% of the CJK characters, otherwise `en`. |
 | `--version`, `-v` | Print version. |
 | `--help`, `-h` | Print help. |
 

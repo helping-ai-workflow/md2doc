@@ -7,21 +7,21 @@ Single-file renderer. Everything lives in `lib/md2doc.js`:
 Every row carries an ANCHOR — a string you can `grep -n` for — because line
 numbers here go stale fast and silently. Five of the six rows were wrong by
 thousands of lines until v3.6.0 Task 18 re-measured them. **Re-derive from the
-anchor; do not trust the number.** Ranges below are measured at commit
-`e9ebb35` against a 6134-line file.
+anchor; do not trust the number.** Ranges below are measured against the lib
+in the commit that adds this sentence, a 6194-line file.
 
 | Region | Purpose | Range — anchor to `grep -n` |
 |---|---|---|
 | Top | `require`s, deferred-diagram placeholder constants, inline-script tag discovery (WaveDrom / Mermaid, `firstExistingPath` → `safeResolve` → `inlineScriptTag`), KaTeX CSS inlining | 1–175 — `function inlineScriptTag(` (106); ends at the `── marked setup` banner |
-| `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 176–435 — `marked.use({` (195) |
-| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 436–5873 — `async function renderMarkdown(` (436); `module.exports = { renderMarkdown };` (5874) |
-| ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 469–693 — `// ── Local image assets` (469); ends just above `let bodyHtml` (694) |
-| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 694–1258 — `const renderer = new Renderer();` (713), `function buildTocTree(` (752) |
-| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1259–5843 — `// ── HTML template` (1259), `const html = ` + backtick (2238), closing `</html>` + backtick (5843) |
-| ⤷ `<style>` block | Embedded CSS for HTML output | 2244–3923 — `<style>` (2244) to its `</style>` (3923) |
-| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3973–5841 — `<!-- Reader runtime -->` (3973) to its `</script>` (5841) |
-| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5876–6063 — `async function bakeGraphviz(` (5879) |
-| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6065–6134 (end) — `// ── CLI` (6065), `const [,, src, dst] = process.argv;` (6067) |
+| `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 176–441 — `marked.use({` (195) |
+| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 442–5884 — `async function renderMarkdown(` (442); `module.exports = { renderMarkdown };` (5885) |
+| ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 475–699 — `// ── Local image assets` (475); ends just above `let bodyHtml` (700) |
+| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 700–1264 — `const renderer = new Renderer();` (719), `function buildTocTree(` (758) |
+| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1265–5854 — `// ── HTML template` (1265), `const html = ` + backtick (2244), closing `</html>` + backtick (5854) |
+| ⤷ `<style>` block | Embedded CSS for HTML output | 2250–3934 — `<style>` (2250) to its `</style>` (3934) |
+| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3984–5852 — `<!-- Reader runtime -->` (3984) to its `</script>` (5852) |
+| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5887–6123 — `async function bakeGraphviz(` (5926) |
+| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6125–6194 (end) — `// ── CLI` (6125), `const [,, src, dst] = process.argv;` (6127) |
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
@@ -31,20 +31,20 @@ The two tags are NOT symmetric about WHERE the decoy sits, which is why they are
 spelled out separately rather than under one sentence.
 
 - `</script>` — `grep -n '</script>' lib/md2doc.js` prints **seven** lines today:
-  **111, 152, 1000, 1357, 3961, 3974, 5841**. First-hit readers land on **111**,
-  inside `inlineScriptTag`. **3974 is the sixth occurrence, not the first**: it is
+  **111, 152, 1006, 1363, 3972, 3985, 5852**. First-hit readers land on **111**,
+  inside `inlineScriptTag`. **3985 is the sixth occurrence, not the first**: it is
   `<script id="reader-section-data" …>…</script>`, a one-line JSON data tag that
   opens AND closes between the `<!-- Reader runtime -->` marker and the runtime's
-  own `<script>` at 3975 — i.e. the decoy that sits INSIDE the region you are
+  own `<script>` at 3986 — i.e. the decoy that sits INSIDE the region you are
   aiming at, which is a different hazard from the one grep hands you first. The
   runtime's own is the LAST `</script>` before `</body>`; or anchor on `})();` +
-  `</script>` at 5840–5841.
+  `</script>` at 5851–5852.
 - `</style>` — here the first hit IS the decoy, and that asymmetry is the point.
-  `grep -n '</style>'` prints exactly **two** lines, **173** and **3923**. Line
+  `grep -n '</style>'` prints exactly **two** lines, **173** and **3934**. Line
   173 is `` return `<style data-md2doc-math>${css}</style>`; `` inside the KaTeX
-  CSS inliner, **3750 lines** before the real one. The real one is the LAST
-  `</style>` before `</head>` (3925). `<style` (no slash) matches four lines, two
-  of which are prose in comments (4700, 5732).
+  CSS inliner, **3761 lines** before the real one. The real one is the LAST
+  `</style>` before `</head>` (3936). `<style` (no slash) matches four lines, two
+  of which are prose in comments (4711, 5743).
 
 Recipe for both: **last occurrence before the enclosing close tag**, never the
 first occurrence in the file.
@@ -308,8 +308,8 @@ both, this branch moved neither:
 
 - **352** — every backtick byte in the file.
 - **4** of those are `` \` `` escapes, all on ONE line (4474 when measured at v3.5.0 and v3.6.0, inside a nested template
-  literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``). At v3.8.0 (`e9ebb35`)
-  that line is 4704; the count is unchanged.
+  literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``). In the lib of the commit that adds this sentence
+  that line is 4715; the count is unchanged.
 - **348** — structural backticks, i.e. the ones that actually open or close a literal.
 
 Both totals are even, which is the property the check is really after; an odd one either
