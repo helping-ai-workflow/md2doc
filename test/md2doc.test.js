@@ -245,7 +245,9 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*word-break: break-word/, '.toc a shoul
 assert.match(html, /<a href="#deeper-section" title="Deeper Section">Deeper Section<\/a>/, 'expected title= on TOC link');
 // req-3: sticky breadcrumb replaces the static Contents header
 assert.match(html, /<div class="toc-breadcrumb" data-toc-breadcrumb/, 'expected breadcrumb container');
-assert.doesNotMatch(html, /class="toc-title"/, 'Contents span replaced by breadcrumb');
+// v3.8.0 (design review item 7+8): the "Contents" title row is back; the
+// breadcrumb stays in the DOM (hidden) and the TOC highlights the active path.
+assert.match(html, /<span class="toc-title">Contents<\/span>/, 'Contents title row');
 assert.match(html, /\.toc-breadcrumb \{/, 'expected breadcrumb CSS block');
 assert.match(html, /\.toc-breadcrumb a \{/, 'expected breadcrumb anchor CSS');
 // runtime population driven by scroll-sync

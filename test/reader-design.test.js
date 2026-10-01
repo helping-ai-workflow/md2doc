@@ -264,6 +264,71 @@ check('meta: two-column grid on the metadata panel grey', async () => {
   assert.deepStrictEqual(s, { d: 'grid', cols: 2, bg: 'rgb(246, 248, 250)' });
 });
 
+// ── Task 7: sidebar ────────────────────────────────────────────────────────
+const SIDE_MD = ['# Doc', '', '## 1. Alpha', '', 'zebrafinch alpha text.', '', '### 1.1 Alpha child', '', 'More zebrafinch.', '', '## 2. Beta', '', 'Beta text.', ''];
+check('sidebar: markup — Contents row, icon buttons, labelled clear, keyboard-only submit', async () => {
+  const { html } = render(SIDE_MD);
+  assert.match(html, /<span class="toc-title">Contents<\/span>/);
+  assert.match(html, /placeholder="Search this document"/);
+  assert.match(html, />Search<\/label>/, 'label text kept for screen readers');
+  assert.match(html, /<button id="doc-search-submit" type="button" tabindex="-1">Search<\/button>/);
+  assert.match(html, /<button id="doc-search-clear" type="button" aria-label="Clear search" title="Clear search"><svg/);
+  for (const id of ['toc-expand-all', 'toc-collapse-all', 'toc-collapse-toggle', 'search-prev', 'search-next']) {
+    assert.match(html, new RegExp('<button id="' + id + '"[^>]*><svg'), id + ' carries an icon');
+  }
+});
+check('sidebar: one grey panel, no inner cards, visually hidden label', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  const s = await page.evaluate(() => {
+    const c = (sel) => getComputedStyle(document.querySelector(sel));
+    return { panel: c('.reader-sidebar').backgroundColor, tocBorder: c('.toc').borderTopWidth, toolsBg: c('.reader-tools').backgroundColor,
+      labelW: document.querySelector('.reader-search-label').getBoundingClientRect().width, headerDir: c('.toc-header').flexDirection };
+  });
+  await page.close();
+  assert.strictEqual(s.panel, 'rgb(243, 245, 247)');
+  assert.strictEqual(s.tocBorder, '0px');
+  assert.strictEqual(s.toolsBg, 'rgba(0, 0, 0, 0)');
+  assert.ok(s.labelW <= 1, 'label visually hidden, width ' + s.labelW);
+  assert.strictEqual(s.headerDir, 'row');
+});
+check('sidebar: clear button appears only with text and clears the search', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  const hiddenWhenEmpty = await page.$eval('#doc-search-clear', (b) => getComputedStyle(b).display);
+  await page.type('#doc-search-input', 'zebrafinch');
+  await page.keyboard.press('Enter');
+  await new Promise((r) => setTimeout(r, 200));
+  const shown = await page.$eval('#doc-search-clear', (b) => getComputedStyle(b).display);
+  const resultsRow = await page.$eval('.search-results-header', (h) => getComputedStyle(h).flexDirection);
+  const match = await page.$eval('.toc a.is-match', (a) => getComputedStyle(a).backgroundColor);
+  await page.click('#doc-search-clear');
+  await new Promise((r) => setTimeout(r, 150));
+  const after = await page.evaluate(() => ({ value: document.getElementById('doc-search-input').value, results: document.getElementById('search-results').hidden }));
+  await page.close();
+  assert.strictEqual(hiddenWhenEmpty, 'none');
+  assert.notStrictEqual(shown, 'none');
+  assert.strictEqual(resultsRow, 'row', 'Results 1/N and the arrows share one row');
+  assert.strictEqual(match, 'rgb(255, 245, 194)', 'search hits are yellow');
+  assert.deepStrictEqual(after, { value: '', results: true });
+});
+check('sidebar: current location is blue and its whole path is bold', async () => {
+  const { htmlPath } = render(SIDE_MD);
+  const page = await openPage(htmlPath);
+  await page.evaluate(() => document.getElementById('1-1-alpha-child').scrollIntoView());
+  await new Promise((r) => setTimeout(r, 500));
+  const s = await page.evaluate(() => {
+    const active = document.querySelector('.toc a.is-active');
+    const parent = active.closest('li').parentElement.closest('li').querySelector(':scope > details > summary > a');
+    return { bg: getComputedStyle(active).backgroundColor, color: getComputedStyle(active).color, parentWeight: getComputedStyle(parent).fontWeight, crumb: getComputedStyle(document.querySelector('.toc-breadcrumb')).display };
+  });
+  await page.close();
+  assert.strictEqual(s.bg, 'rgb(219, 230, 243)');
+  assert.strictEqual(s.color, 'rgb(5, 80, 174)');
+  assert.strictEqual(s.parentWeight, '600', 'ancestor row bold');
+  assert.strictEqual(s.crumb, 'none', 'breadcrumb replaced by the path highlight');
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
