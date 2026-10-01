@@ -467,6 +467,30 @@ check('print: a wide prose table fits the page and its first column is not stick
   assert.strictEqual(s.pos, 'static');
 });
 
+// ── Final fix wave C: graphviz labels must fit the metrics they render in ──
+check('graphviz: node and edge labels stay inside their shapes', async () => {
+  const { htmlPath } = render(['# Doc', '', '\x60\x60\x60dot',
+    'digraph G { rankdir=LR; a [shape=box, label="A rather long box node label for the decoder"]; b [shape=box, label="Second long node label here"]; a -> b [label="frame header encoder"]; }',
+    '\x60\x60\x60', '']);
+  const page = await openPage(htmlPath);
+  const r = await page.evaluate(() => {
+    const svg = document.querySelector('.graphviz svg');
+    const sb = svg.getBoundingClientRect();
+    const bad = [];
+    svg.querySelectorAll('g.node').forEach((g) => {
+      const t = g.querySelector('text').getBoundingClientRect();
+      const p = g.querySelector('polygon').getBoundingClientRect();
+      if (t.left < p.left - 0.5 || t.right > p.right + 0.5) bad.push('node text ' + Math.round(t.width) + ' in polygon ' + Math.round(p.width));
+    });
+    let edgeRight = 0;
+    svg.querySelectorAll('g.edge text').forEach((t) => { edgeRight = Math.max(edgeRight, t.getBoundingClientRect().right); });
+    return { bad, edgeRight, svgRight: sb.right };
+  });
+  await page.close();
+  assert.deepStrictEqual(r.bad, [], 'node text overflows its box');
+  assert.ok(r.edgeRight <= r.svgRight + 0.5, 'edge label right ' + r.edgeRight + ' > svg right ' + r.svgRight);
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];
