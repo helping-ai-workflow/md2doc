@@ -676,6 +676,44 @@ check('desktop: a classDef light fill in a live mermaid keeps a readable label i
   assert.ok(r.fillLum <= 0.30, 'shape fill luminance ' + JSON.stringify(r));
 });
 
+// Live dark mermaid draws arrowheads, markers and start dots in its own theme colours; D10 must
+// leave them alone. Method (timing independent): undo D10 on the SAME elements by restoring each
+// one's saved original style, and require the computed fill/stroke to be identical either way, and
+// never transparent where the undone value was a colour.
+check('desktop: live dark mermaid markers and start dots keep mermaid own colours (D10 leaves them)', DESKTOP, async (page) => {
+  const url = fixtureUrl('mermaid-own', ['# Own', '', '## 1. A', '',
+    '\x60\x60\x60mermaid', 'graph LR', '  A --> B --> C', '\x60\x60\x60', '',
+    '\x60\x60\x60mermaid', 'stateDiagram-v2', '  [*] --> S1', '  S1 --> [*]', '\x60\x60\x60', '',
+    '\x60\x60\x60mermaid', 'sequenceDiagram', '  A->>B: sync', '  A-)B: async', '\x60\x60\x60', '']);
+  await gotoTheme(page, url); await wait(2500);
+  await page.click('#md2doc-theme-toggle');
+  await page.waitForFunction(() => document.querySelectorAll('.content .mermaid svg[id^="md2doc-mermaid-dark-"]').length === 3, null, { timeout: 20000 });
+  await wait(500);
+  const r = await page.evaluate(() => {
+    const out = { svgs: 0, checked: 0, changed: [], transparent: [], touched: 0 };
+    document.querySelectorAll('.content .mermaid svg[id^="md2doc-mermaid-dark-"]').forEach((svg) => {
+      out.svgs++;
+      const els = [].slice.call(svg.querySelectorAll('marker *, .state-start, .state-start *'));
+      const now = els.map((e) => { const c = getComputedStyle(e); return [c.fill, c.stroke]; });
+      els.forEach((e) => { if (e.hasAttribute('data-md2doc-style')) out.touched++; });
+      const saved = els.map((e) => e.getAttribute('style'));
+      els.forEach((e) => { if (e.hasAttribute('data-md2doc-style')) { const o = e.getAttribute('data-md2doc-style'); if (o) e.setAttribute('style', o); else e.removeAttribute('style'); } });
+      const undone = els.map((e) => { const c = getComputedStyle(e); return [c.fill, c.stroke]; });
+      els.forEach((e, i) => { if (saved[i] === null) e.removeAttribute('style'); else e.setAttribute('style', saved[i]); });
+      els.forEach((e, i) => {
+        out.checked++;
+        if (now[i][0] !== undone[i][0] || now[i][1] !== undone[i][1]) out.changed.push(e.tagName + ' ' + now[i] + ' vs ' + undone[i]);
+        const tr = (v) => v === 'transparent' || /rgba\([^)]*,\s*0\)/.test(v);
+        if (tr(now[i][0]) && !tr(undone[i][0])) out.transparent.push(e.tagName + ' ' + undone[i][0]);
+      });
+    });
+    return out;
+  });
+  assert.strictEqual(r.svgs, 3, JSON.stringify(r));
+  assert.ok(r.checked >= 6, 'marker elements found ' + JSON.stringify(r));
+  assert.deepStrictEqual([r.changed, r.transparent, r.touched], [[], [], 0], JSON.stringify(r));
+});
+
 check('desktop: heading anchors keep their own muted colour in dark, links keep the link colour', DESKTOP, async (page) => {
   await gotoTheme(page);
   await page.click('#md2doc-theme-toggle'); await wait(300);
