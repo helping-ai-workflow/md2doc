@@ -8,20 +8,20 @@ Every row carries an ANCHOR — a string you can `grep -n` for — because line
 numbers here go stale fast and silently. Five of the six rows were wrong by
 thousands of lines until v3.6.0 Task 18 re-measured them. **Re-derive from the
 anchor; do not trust the number.** Ranges below are measured against the lib
-in the commit that adds this sentence, a 6198-line file.
+in the commit that adds this sentence, a 6254-line file.
 
 | Region | Purpose | Range — anchor to `grep -n` |
 |---|---|---|
 | Top | `require`s, deferred-diagram placeholder constants, inline-script tag discovery (WaveDrom / Mermaid, `firstExistingPath` → `safeResolve` → `inlineScriptTag`), KaTeX CSS inlining | 1–176 — `function inlineScriptTag(` (107); ends at the `── marked setup` banner |
 | `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 177–442 — `marked.use({` (196) |
-| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 443–5888 — `async function renderMarkdown(` (443); `module.exports = { renderMarkdown };` (5889) |
+| `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 443–5944 — `async function renderMarkdown(` (443); `module.exports = { renderMarkdown };` (5945) |
 | ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 476–700 — `// ── Local image assets` (476); ends just above `let bodyHtml` (701) |
 | ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 701–1265 — `const renderer = new Renderer();` (720), `function buildTocTree(` (759) |
-| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1266–5855 — `// ── HTML template` (1266), `const html = ` + backtick (2245), closing `</html>` + backtick (5855) |
+| ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1266–5911 — `// ── HTML template` (1266), `const html = ` + backtick (2245), closing `</html>` + backtick (5911) |
 | ⤷ `<style>` block | Embedded CSS for HTML output | 2251–3935 — `<style>` (2251) to its `</style>` (3935) |
-| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3985–5853 — `<!-- Reader runtime -->` (3985) to its `</script>` (5853) |
-| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5891–6127 — `async function bakeGraphviz(` (5930) |
-| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6129–6198 (end) — `// ── CLI` (6129), `const [,, src, dst] = process.argv;` (6131) |
+| ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3985–5909 — `<!-- Reader runtime -->` (3985) to its `</script>` (5909) |
+| Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5947–6183 — `async function bakeGraphviz(` (5986) |
+| Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6185–6254 (end) — `// ── CLI` (6185), `const [,, src, dst] = process.argv;` (6187) |
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
@@ -31,20 +31,20 @@ The two tags are NOT symmetric about WHERE the decoy sits, which is why they are
 spelled out separately rather than under one sentence.
 
 - `</script>` — `grep -n '</script>' lib/md2doc.js` prints **seven** lines today:
-  **112, 153, 1007, 1364, 3973, 3986, 5853**. First-hit readers land on **112**,
+  **112, 153, 1007, 1364, 3973, 3986, 5909**. First-hit readers land on **112**,
   inside `inlineScriptTag`. **3986 is the sixth occurrence, not the first**: it is
   `<script id="reader-section-data" …>…</script>`, a one-line JSON data tag that
   opens AND closes between the `<!-- Reader runtime -->` marker and the runtime's
   own `<script>` at 3987 — i.e. the decoy that sits INSIDE the region you are
   aiming at, which is a different hazard from the one grep hands you first. The
   runtime's own is the LAST `</script>` before `</body>`; or anchor on `})();` +
-  `</script>` at 5852–5853.
+  `</script>` at 5908–5909.
 - `</style>` — here the first hit IS the decoy, and that asymmetry is the point.
   `grep -n '</style>'` prints exactly **two** lines, **174** and **3935**. Line
   174 is `` return `<style data-md2doc-math>${css}</style>`; `` inside the KaTeX
   CSS inliner, **3761 lines** before the real one. The real one is the LAST
   `</style>` before `</head>` (3937). `<style` (no slash) matches four lines, two
-  of which are prose in comments (4712, 5744).
+  of which are prose in comments (4768, 5800).
 
 Recipe for both: **last occurrence before the enclosing close tag**, never the
 first occurrence in the file.
@@ -335,7 +335,7 @@ both, this branch moved neither:
 - **352** — every backtick byte in the file.
 - **4** of those are `` \` `` escapes, all on ONE line (4474 when measured at v3.5.0 and v3.6.0, inside a nested template
   literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``). In the lib of the commit that adds this sentence
-  that line is 4716; the count is unchanged.
+  that line is 4772; the count is unchanged.
 - **348** — structural backticks, i.e. the ones that actually open or close a literal.
 
 Both totals are even, which is the property the check is really after; an odd one either

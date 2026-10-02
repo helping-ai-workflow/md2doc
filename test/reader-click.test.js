@@ -144,8 +144,9 @@ function check(name, viewport, fn, ctx) { checks.push({ name, viewport, fn, ctx 
 
 // ── Desktop ─────────────────────────────────────────────────────────────────
 check('desktop: TOC links jump and light exactly one blue row, path bold', DESKTOP, async (page) => {
-  await page.click('#toc-expand-all');
   for (const id of ['2-section-2', '3-3-a-deliberately-long-subsection-title-that-overflows-the-sidebar-width-by-a-wide-margin', '5-1-child-of-5', '8-section-8']) {
+    // The TOC keeps one path open, so every jump closes the sections expanded for the last one: expand again each time.
+    await page.click('#toc-expand-all');
     await page.click('.toc-list a[href="#' + id + '"]');
     await wait(400);
     const top = await topOf(page, id);
@@ -752,6 +753,67 @@ check('desktop: one broken mermaid block does not defeat the cache', DESKTOP, as
   await page.click('#md2doc-theme-toggle'); await wait(500);
   assert.strictEqual(await page.evaluate(() => window.__draws), 2, 'light and the second dark are pure swaps');
   assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+
+// ── TOC tracking (v3.9.0): reading line, one open path, centred row ─────────
+const TRACK_VIEW = { width: 1280, height: 650 };
+// 30 sections so the TOC overflows its box with one path open; otherwise the row cannot be centred and the check measures nothing.
+const trackMd = ['# TOC Track', ''];
+for (let s = 1; s <= 30; s++) {
+  trackMd.push('## ' + s + '. Section ' + s, '');
+  for (let m = 1; m <= 4; m++) trackMd.push('### ' + s + '.' + m + ' Sub ' + s + '.' + m, '', filler(s + '.' + m, 3), '');
+}
+const TRACK_URL = fixtureUrl('toctrack', trackMd);
+check('desktop: the TOC follows the reading line, keeps one path open and the row centred', TRACK_VIEW, async (page) => {
+  await page.goto(TRACK_URL, { waitUntil: 'load' }); await wait(500);
+  await page.evaluate(() => {
+    window.__f = [];
+    const sc = document.querySelector('.toc > .toc-list');
+    (function t() {
+      const a = document.querySelector('.toc-list a.is-active');
+      const br = sc.getBoundingClientRect();
+      const r = a && a.getBoundingClientRect();
+      window.__f.push({ has: !!a, inBox: !r || (r.top >= br.top - 1 && r.bottom <= br.bottom + 1), open: document.querySelectorAll('.toc-list details[open]').length });
+      requestAnimationFrame(t);
+    })();
+  });
+  await page.mouse.move(800, 300);
+  const atEnd = () => page.evaluate(() => window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 1);
+  let guard = 0;
+  while (!(await atEnd()) && guard++ < 600) { await page.mouse.wheel(0, 400); await wait(25); }
+  await wait(400);
+  const total = await page.evaluate(() => window.scrollY);
+  const stops = Array.from({ length: 8 }, (_, i) => Math.round(total * (7 - i) / 8) + 37);
+  const samples = [];
+  for (const stop of stops) {
+    while ((await page.evaluate(() => window.scrollY)) > stop + 200) { await page.mouse.wheel(0, -400); await wait(25); }
+    await wait(500);
+    // The reading line, the TOC-listed heading and the scroller geometry all come from the page.
+    samples.push(await page.evaluate(() => {
+      const a = document.querySelector('.toc-list a.is-active');
+      let want = null;
+      const heads = [].filter.call(document.querySelectorAll('[data-reader-heading]'), (h) => document.querySelector('.toc a[href="#' + h.id + '"]'));
+      heads.forEach((h) => { if (h.getBoundingClientRect().top <= window.innerHeight * 0.35) want = h; });
+      if (!want) want = heads[0];
+      const sc = document.querySelector('.toc > .toc-list');
+      const br = sc.getBoundingClientRect();
+      const r = a && a.getBoundingClientRect();
+      return { href: a && a.getAttribute('href'), want: '#' + want.id, y: window.scrollY,
+        mid: r ? ((r.top + r.bottom) / 2 - br.top) / sc.clientHeight : null,
+        atEdge: sc.scrollTop <= 1 || sc.scrollTop >= sc.scrollHeight - sc.clientHeight - 1 };
+    }));
+  }
+  const frames = await page.evaluate(() => window.__f);
+  assert.ok(frames.length > 100, 'recorder ran ' + frames.length);
+  const noRow = frames.filter((f) => !f.has).length;
+  assert.strictEqual(noRow, 0, 'frames without an active row: ' + noRow + ' of ' + frames.length);
+  const outBox = frames.filter((f) => !f.inBox).length;
+  assert.strictEqual(outBox, 0, 'frames with the active row outside the TOC box: ' + outBox);
+  const maxOpen = Math.max.apply(null, frames.map((f) => f.open));
+  assert.ok(maxOpen <= 1, 'max open details ' + maxOpen);
+  samples.forEach((s) => assert.strictEqual(s.href, s.want, 'upward active row ' + JSON.stringify(s)));
+  samples.forEach((s) => { if (!s.atEdge) assert.ok(s.mid >= 0.2 && s.mid <= 0.6, 'row centre at ' + s.mid + ' ' + JSON.stringify(s)); });
+  assert.ok(samples.some((s) => !s.atEdge), 'at least one settled sample could be centred ' + JSON.stringify(samples));
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────

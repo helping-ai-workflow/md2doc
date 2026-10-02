@@ -21,6 +21,10 @@ All notable changes to this project will be documented here. This project adhere
   - 燈箱平移、編輯模式的區塊拖曳、表格列／欄把手、波形 lane 把手：`grab`／`grabbing` → `move`
 - 新增兩道測試：`reader-design` 靜態掃 `lib/md2doc.js`、`lib/editor/*.js` 與 `lib/theme/*.js` 不得出現這 10 個值（涵蓋拖曳中這種點擊測試難以到達的狀態）；`reader-click` 在 Chromium 與 WebKit 真的 hover 拖曳把手、圖表、燈箱並按住平移，讀滑鼠下方元素的 computed cursor。
 
+### Fixed — 側欄目錄不再閃爍
+
+- **側欄目錄追蹤**：改成依畫面上方 35% 的閱讀線判斷目前章節（只看目錄有列出的標題）——文件只有一個 H1 時高亮不再消失，往上捲也不再慢半拍；只展開目前所在的那一路（其他自動收起），目前那一列保持在目錄框中段（實測兩引擎：每一格都有高亮、從不出框）。
+
 ## v3.8.0 — 2026-10-01
 
 閱讀版面審查（13 項，每項都有實際截圖比較與參考網站實測）的淺色部分。深色模式另外一批。
