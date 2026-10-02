@@ -558,9 +558,21 @@ check('desktop: graphviz follows dark and restores its own colours exactly', DES
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);
-  const r = await page.$eval('[id^="WaveDrom_Display_"] svg', (svg) => ({ flagged: svg.hasAttribute('data-md2doc-recoloured'),
-    text: getComputedStyle(svg.querySelector('text')).fill }));
-  assert.deepStrictEqual(r, { flagged: true, text: 'rgb(227, 227, 227)' });
+  const r = await page.$eval('[id^="WaveDrom_Display_"] svg', (svg) => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    const offenders = [];
+    svg.querySelectorAll('text').forEach((t) => {
+      const m = /rgba?\(([^)]+)\)/.exec(getComputedStyle(t).fill);
+      if (!m) return;
+      const c = m[1].split(',').map(parseFloat);
+      const L = 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+      if (L < 0.35) offenders.push(t.textContent + ' ' + getComputedStyle(t).fill);
+    });
+    return { flagged: svg.hasAttribute('data-md2doc-recoloured'), text: getComputedStyle(svg.querySelector('text')).fill, offenders };
+  });
+  // The first <text> is the lane name, WaveDrom blue #0041c4. Spec D10: a
+  // saturated colour (HSL s > 0.25) keeps its hue at L 0.78 -> rgb(160, 186, 238).
+  assert.deepStrictEqual(r, { flagged: true, text: 'rgb(160, 186, 238)', offenders: [] });
 });
 check('desktop: images sit on a white plate in dark only', DESKTOP, async (page) => {
   await gotoTheme(page);
