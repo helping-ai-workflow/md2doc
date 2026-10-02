@@ -58,6 +58,27 @@ const run = spawnSync(process.execPath, [LIB, mdPath, htmlPath], { cwd: REPO, en
 assert.strictEqual(run.status, 0, 'fixture renders: ' + run.stderr);
 const URL = 'file://' + htmlPath;
 
+// ── Theme fixture (v3.9.0): every diagram kind plus an image ───────────────
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+fs.writeFileSync(path.join(tmpDir, 'dot.png'), Buffer.from(PNG_1PX, 'base64'));
+const themeMd = ['# Theme Fixture', '', '## 1. Alpha', '', 'Prose with `inline_code`, a [link](https://example.com) and zebrafinch.', '',
+  '![dot](dot.png)', '',
+  '\x60\x60\x60mermaid', 'graph LR', '  A[Start] --> B[End]', '\x60\x60\x60', '',
+  '\x60\x60\x60dot', 'digraph { node [shape=box, style=filled, fillcolor="#90caf9"]; a -> b [label="go"]; }', '\x60\x60\x60', '',
+  '\x60\x60\x60wavedrom', '{ "signal": [ { "name": "clk", "wave": "p...." }, { "name": "d", "wave": "x3.4x", "data": ["A", "B"] } ] }', '\x60\x60\x60', '',
+  '## 2. Beta', '', filler(2, 6), ''];
+const themeMdPath = path.join(tmpDir, 'theme.md');
+const themeHtmlPath = path.join(tmpDir, 'theme.html');
+fs.writeFileSync(themeMdPath, themeMd.join('\n'), 'utf8');
+const themeRun = spawnSync(process.execPath, [LIB, themeMdPath, themeHtmlPath], { cwd: REPO, encoding: 'utf8' });
+assert.strictEqual(themeRun.status, 0, 'theme fixture renders: ' + themeRun.stderr);
+const THEME_URL = 'file://' + themeHtmlPath;
+const plainMdPath = path.join(tmpDir, 'plain.md');
+const plainHtmlPath = path.join(tmpDir, 'plain.html');
+fs.writeFileSync(plainMdPath, 'Just a paragraph with no heading and no diagram.\n', 'utf8');
+assert.strictEqual(spawnSync(process.execPath, [LIB, plainMdPath, plainHtmlPath], { cwd: REPO, encoding: 'utf8' }).status, 0);
+const PLAIN_URL = 'file://' + plainHtmlPath;
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -387,6 +408,89 @@ check('desktop: drag and zoom targets use cursors that follow the system pointer
   for (const k of Object.keys(seen)) {
     assert.ok(BITMAP_CURSORS.indexOf(seen[k].cursor) === -1, k + ' uses a browser-bitmap cursor: ' + seen[k].cursor);
   }
+});
+
+// ── Theme (v3.9.0) ──────────────────────────────────────────────────────────
+async function themeState(page) {
+  return page.evaluate(() => {
+    const b = document.getElementById('md2doc-theme-toggle');
+    return { attr: document.documentElement.getAttribute('data-md2doc-theme'), bg: getComputedStyle(document.body).backgroundColor,
+      icon: b.textContent, label: b.getAttribute('aria-label'), cursor: getComputedStyle(b).cursor };
+  });
+}
+async function gotoTheme(page, url) { await page.goto(url || THEME_URL, { waitUntil: 'load' }); await wait(800); }
+
+check('desktop: theme starts light even when the OS asks for dark', DESKTOP, async (page) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await gotoTheme(page);
+  const s = await themeState(page);
+  assert.deepStrictEqual([s.attr, s.bg, s.icon], [null, 'rgb(255, 255, 255)', '☀']);
+  assert.strictEqual(s.label, '淺色（點一下切換到深色）');
+  assert.strictEqual(s.cursor, 'pointer');
+});
+check('desktop: the bubble toggles dark and back, bottom-right', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  const r = await page.$eval('#md2doc-theme-toggle', (b) => { const x = b.getBoundingClientRect(); const d = document.documentElement; return { right: d.clientWidth - x.right, bottom: d.clientHeight - x.bottom, w: x.width }; });
+  assert.deepStrictEqual(r, { right: 20, bottom: 20, w: 40 });
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  let s = await themeState(page);
+  assert.deepStrictEqual([s.attr, s.bg, s.icon, s.label], ['dark', 'rgb(27, 27, 29)', '☾', '深色（點一下切換到淺色）']);
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  s = await themeState(page);
+  assert.deepStrictEqual([s.attr, s.bg, s.icon], [null, 'rgb(255, 255, 255)', '☀']);
+});
+check('desktop: the dark choice survives a reload and is set before first paint', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  await page.click('#md2doc-theme-toggle'); await wait(200);
+  await page.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => { window.__attrAtDcl = document.documentElement.getAttribute('data-md2doc-theme'); });
+  });
+  await page.reload({ waitUntil: 'load' }); await wait(500);
+  const s = await themeState(page);
+  assert.strictEqual(s.attr, 'dark');
+  assert.strictEqual(await page.evaluate(() => window.__attrAtDcl), 'dark', 'attribute already set at DOMContentLoaded');
+});
+check('desktop: blocked storage keeps the page light and the toggle still works', DESKTOP, async (page) => {
+  const errs = []; page.on('pageerror', (e) => errs.push(e.message));
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'localStorage', { get() { throw new Error('blocked'); } });
+  });
+  await gotoTheme(page);
+  assert.strictEqual((await themeState(page)).attr, null);
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  assert.strictEqual((await themeState(page)).attr, 'dark');
+  assert.deepStrictEqual(errs, []);
+});
+check('phone: the toggle sits at the right end of the top bar, not floating', PHONE, async (page) => {
+  await gotoTheme(page);
+  const r = await page.evaluate(() => {
+    const b = document.getElementById('md2doc-theme-toggle'); const bar = document.getElementById('mobile-bar');
+    const x = b.getBoundingClientRect(); const y = bar.getBoundingClientRect();
+    const cx = x.left + x.width / 2; const cy = x.top + x.height / 2;
+    return { inBar: b.parentNode === bar, centreInBar: cx > y.left && cx < y.right && cy > y.top && cy < y.bottom,
+      hit: document.elementFromPoint(cx, cy) === b, rightGap: Math.round(y.right - x.right), count: document.querySelectorAll('.md2doc-theme-toggle').length };
+  });
+  assert.deepStrictEqual(r, { inBar: true, centreInBar: true, hit: true, rightGap: 12, count: 1 });
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+check('desktop: resizing across 1080px moves the toggle between bubble and bar', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  const where = () => page.evaluate(() => document.getElementById('md2doc-theme-toggle').parentNode.id || document.getElementById('md2doc-theme-toggle').parentNode.tagName);
+  assert.strictEqual(await where(), 'BODY');
+  await page.setViewportSize({ width: 900, height: 900 }); await wait(300);
+  assert.strictEqual(await where(), 'mobile-bar');
+  await page.setViewportSize({ width: 1440, height: 900 }); await wait(300);
+  assert.strictEqual(await where(), 'BODY');
+});
+check('phone: a heading-less document keeps the toggle floating and raises no error', PHONE, async (page) => {
+  const errs = []; page.on('pageerror', (e) => errs.push(e.message));
+  await gotoTheme(page, PLAIN_URL);
+  const r = await page.$eval('#md2doc-theme-toggle', (b) => { const x = b.getBoundingClientRect(); const d = document.documentElement; return { pos: getComputedStyle(b).position, right: d.clientWidth - x.right, bottom: d.clientHeight - x.bottom }; });
+  assert.deepStrictEqual(r, { pos: 'fixed', right: 20, bottom: 20 });
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  assert.strictEqual((await themeState(page)).attr, 'dark');
+  assert.deepStrictEqual(errs, []);
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────

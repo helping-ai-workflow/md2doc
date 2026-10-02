@@ -202,14 +202,14 @@ assert.match(
 // Task 4 (layout) — B4: sticky first column
 assert.match(
   tablesHtml,
-  /\.content table tbody td:first-child,\s*\.content table thead th:first-child \{\s*position: sticky;\s*left: 0;\s*z-index: 1;\s*background: #ffffff;\s*\}/,
+  /\.content table tbody td:first-child,\s*\.content table thead th:first-child \{\s*position: sticky;\s*left: 0;\s*z-index: 1;\s*background: var\(--md-bg\);\s*\}/,
   'expected sticky first-column rule'
 );
 // v3.8.0 (design review item 3): no grey header and no zebra rows. The sticky
 // first column still paints opaque white so scrolled cells don't show through.
 assert.match(
   tablesHtml,
-  /\.content table thead th:first-child \{\s*background: #ffffff;\s*\}/,
+  /\.content table thead th:first-child \{\s*background: var\(--md-bg\);\s*\}/,
   'expected sticky header first-column background override'
 );
 assert.doesNotMatch(tablesHtml, /\n\s*tr:nth-child\(even\) \{ background: #fafbfc; \}/, 'zebra striping removed');
