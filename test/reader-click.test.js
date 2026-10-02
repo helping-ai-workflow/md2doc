@@ -533,6 +533,63 @@ check('desktop: printing while dark shows the light mermaid render, then restore
   assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)', 'dark again after print');
 });
 
+async function gvState(page) {
+  return page.$eval('.content .graphviz svg', (svg) => {
+    const node = svg.querySelector('g.node polygon'); const text = svg.querySelector('g.node text'); const edge = svg.querySelector('g.edge path');
+    return { node: getComputedStyle(node).fill, text: getComputedStyle(text).fill, edge: getComputedStyle(edge).stroke, flagged: svg.hasAttribute('data-md2doc-recoloured') };
+  });
+}
+check('desktop: graphviz follows dark and restores its own colours exactly', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(800);
+  const light = await gvState(page);
+  assert.deepStrictEqual(light, { node: 'rgb(144, 202, 249)', text: 'rgb(0, 0, 0)', edge: 'rgb(0, 0, 0)', flagged: false });
+  const before = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  const dark = await gvState(page);
+  assert.strictEqual(dark.text, 'rgb(227, 227, 227)', 'black label text becomes #e3e3e3');
+  assert.strictEqual(dark.edge, 'rgb(196, 199, 204)', 'black edge becomes ink #c4c7cc');
+  assert.notStrictEqual(dark.node, light.node, 'light blue fill is darkened');
+  assert.ok(dark.flagged);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.deepStrictEqual(await gvState(page), light);
+  const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+  assert.deepStrictEqual(after, before, 'every style attribute restored');
+});
+check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
+  await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
+  await gotoTheme(page); await wait(2000);
+  const r = await page.$eval('[id^="WaveDrom_Display_"] svg', (svg) => ({ flagged: svg.hasAttribute('data-md2doc-recoloured'),
+    text: getComputedStyle(svg.querySelector('text')).fill }));
+  assert.deepStrictEqual(r, { flagged: true, text: 'rgb(227, 227, 227)' });
+});
+check('desktop: images sit on a white plate in dark only', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  const bg = () => page.$eval('.content img', (i) => getComputedStyle(i).backgroundColor);
+  assert.strictEqual(await bg(), 'rgba(0, 0, 0, 0)');
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  assert.strictEqual(await bg(), 'rgb(255, 255, 255)');
+});
+check('desktop: the lightbox shows a recoloured diagram on the dark ground and an image on white', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  await page.click('.content .graphviz'); await wait(400);
+  const svgBg = await page.$eval('.lightbox-canvas > svg', (s) => getComputedStyle(s).backgroundColor);
+  await page.keyboard.press('Escape'); await wait(300);
+  await page.click('.content img'); await wait(400);
+  const imgBg = await page.$eval('.lightbox-canvas > img', (s) => getComputedStyle(s).backgroundColor);
+  assert.deepStrictEqual({ svgBg, imgBg }, { svgBg: 'rgb(27, 27, 29)', imgBg: 'rgb(255, 255, 255)' });
+});
+check('desktop: --bake-svg output recolours its baked mermaid in dark', DESKTOP, async (page) => {
+  const baked = path.join(tmpDir, 'theme-baked.html');
+  const r = spawnSync(process.execPath, [LIB, themeMdPath, baked, '--bake-svg'], { cwd: REPO, encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, 'bake: ' + r.stderr);
+  await gotoTheme(page, 'file://' + baked);
+  assert.strictEqual(await page.evaluate(() => typeof window.mermaid), 'undefined', 'guard: no mermaid library in baked output');
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  const flagged = await page.$eval('.content .mermaid svg', (s) => s.hasAttribute('data-md2doc-recoloured'));
+  assert.strictEqual(flagged, true);
+});
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
