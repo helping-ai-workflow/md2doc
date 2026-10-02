@@ -125,6 +125,8 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
       if (!el) return null;
       const LIGHTBOX_TARGETS = 'img, .mermaid, .graphviz, [id^="WaveDrom_Display_"], .wavedrom-diagram';
       const matchesTarget = el.matches(LIGHTBOX_TARGETS);
+      // A parent cursor would be inherited, so a lost class must show as 'text', not as an inherited 'pointer'.
+      el.parentElement.style.cursor = 'text';
       const cursor = getComputedStyle(el).cursor;
       return { matchesTarget, cursor, hasClass: el.classList.contains('wavedrom-diagram') };
     });
@@ -143,6 +145,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
       const divs = document.querySelectorAll('div[id^="WaveDrom_Display_"]');
       const newDiv = divs.length ? divs[divs.length - 1] : null;
       if (!newDiv) return null;
+      newDiv.parentElement.style.cursor = 'text';
       const LIGHTBOX_TARGETS = 'img, .mermaid, .graphviz, [id^="WaveDrom_Display_"], .wavedrom-diagram';
       return {
         matchesTarget: newDiv.matches(LIGHTBOX_TARGETS),

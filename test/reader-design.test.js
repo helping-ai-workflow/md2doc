@@ -648,6 +648,11 @@ check('theme: the early script runs before any stylesheet and only sets dark', a
   const early = html.indexOf("localStorage.getItem('md2doc-theme')");
   assert.ok(early > -1 && early < html.indexOf('<style'), 'early script precedes the first <style>');
   assert.ok(early > html.indexOf('<head>'), 'inside <head>');
+  const script = html.slice(html.lastIndexOf('<script>', early), html.indexOf('</script>', early));
+  assert.ok(/==='dark'/.test(script), 'compares the stored value to dark');
+  const sets = script.match(/setAttribute\([^)]*\)/g) || [];
+  assert.deepStrictEqual(sets, ["setAttribute('data-md2doc-theme','dark')"], 'only ever sets the dark attribute');
+  assert.ok(!/removeAttribute|classList|\.style/.test(script), 'does nothing else to the page');
 });
 check('theme: every reader colour literal is either a token or on the keep list', async () => {
   const { html } = render(THEME_MD);

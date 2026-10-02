@@ -82,6 +82,14 @@ check('mermaid dark variables are the spec values and keep the light fontFamily'
   }));
 });
 
+check('applyReaderTheme throws a clear error when the page has no <head> or no </body>', () => {
+  assert.throws(() => T.applyReaderTheme('<html>no head</html>'), /applyReaderTheme/);
+  const noHead = '<html><head><title>t</title><style>a{}</style></head><body>x</body></html>';
+  assert.throws(() => T.applyReaderTheme(noHead), /applyReaderTheme: <head> not found/);
+  const noBody = '<html><head>\n<title>t</title><style>a{}</style></head>x</html>';
+  assert.throws(() => T.applyReaderTheme(noBody), /applyReaderTheme: <\/body> not found/);
+});
+
 (async () => {
   const only = process.argv[2];
   let failed = 0; let ran = 0;
