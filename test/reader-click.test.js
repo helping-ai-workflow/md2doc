@@ -854,6 +854,73 @@ check('desktop: the TOC follows the reading line, keeps one path open and the ro
   assert.ok(samples.some((s) => !s.atEdge), 'at least one settled sample could be centred ' + JSON.stringify(samples));
 });
 
+// ── Final fix wave 2: live dark gate, subgraph / linkStyle, baked arrowheads, reduced motion ──
+const F3 = '\x60\x60\x60';
+async function darkLive(page, name, lines) {
+  const url = fixtureUrl(name, ['# ' + name, '', '## 1. A', ''].concat(lines, ['']));
+  await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
+  await gotoTheme(page, url); await wait(3500);
+}
+// Contrast helpers shared by the checks below (evaluated in the page).
+const CONTRAST_JS = 'function f(v){v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);}' +
+  'function parse(s){var n=(s.match(/[\\d.]+/g)||[]).map(Number);return n.length<3?null:{r:n[0],g:n[1],b:n[2],a:n.length>3?n[3]:1};}' +
+  'function lumC(c){return 0.2126*f(c.r)+0.7152*f(c.g)+0.0722*f(c.b);}' +
+  'var GROUND={r:27,g:27,b:29,a:1};' +
+  'function over(c,bg){var a=c.a;return {r:c.r*a+bg.r*(1-a),g:c.g*a+bg.g*(1-a),b:c.b*a+bg.b*(1-a),a:1};}' +
+  'function ratio(a,b){var x=lumC(a),y=lumC(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);}';
+check('desktop: live dark mermaid restyles only author-styled shapes, subgraphs, linkStyle edges and text', DESKTOP, async (page) => {
+  await darkLive(page, 'allowlist', [
+    F3 + 'mermaid', 'graph LR', '  A[Hot] --> B[Cold]', '  classDef warm fill:#ffd6a5,stroke:#000', '  class A warm',
+    '  subgraph S1[Group]', '    C', '  end', '  style S1 fill:#eeeeee', '  linkStyle 0 stroke:#000', F3, '',
+    F3 + 'mermaid', 'stateDiagram-v2', '  [*] --> S1', '  S1 --> S2', '  classDef hot fill:#ffd6a5', '  class S2 hot', F3, '',
+    F3 + 'mermaid', 'sequenceDiagram', '  autonumber', '  A->>B: sync', '  B-->>A: reply', '  Note over A,B: note', F3, '',
+    F3 + 'mermaid', 'classDiagram', '  Animal <|-- Duck', '  style Duck fill:#ffffff', F3]);
+  const r = await page.evaluate(() => {
+    const live = [].slice.call(document.querySelectorAll('.content .mermaid svg[data-md2doc-live]'));
+    const stamped = [];
+    const bad = [];
+    live.forEach((svg) => {
+      [].slice.call(svg.querySelectorAll('[data-md2doc-style]')).forEach((e) => {
+        if (e.namespaceURI === 'http://www.w3.org/1999/xhtml') return;
+        stamped.push(e.tagName);
+        const own = e.getAttribute('data-md2doc-style') || '';
+        const ok = !e.closest('marker') && /(^|;)\s*(fill|stroke)\s*:/.test(own) &&
+          (e.closest('g.node, g.cluster') || e.matches('.flowchart-link') || /^(text|tspan)$/i.test(e.tagName));
+        if (!ok) bad.push(e.tagName + '.' + (e.getAttribute('class') || '') + ' [' + own + ']');
+      });
+    });
+    return { live: live.length, stamped: stamped.length, bad };
+  });
+  assert.strictEqual(r.live, 4, 'guard: four live dark svgs ' + JSON.stringify(r));
+  assert.ok(r.stamped > 0, 'guard: some author-styled element was touched ' + JSON.stringify(r));
+  assert.deepStrictEqual(r.bad, [], 'elements outside the allow-list were restyled');
+});
+check('desktop: a styled subgraph title stays readable in live dark', DESKTOP, async (page) => {
+  await darkLive(page, 'subgraph', [F3 + 'mermaid', 'graph LR', '  subgraph S1[Group]', '    A --> B', '  end', '  style S1 fill:#eeeeee', F3]);
+  const r = await page.evaluate((js) => {
+    eval(js);
+    const svg = document.querySelector('.content .mermaid svg');
+    const lab = [].find.call(svg.querySelectorAll('.cluster foreignObject *, .cluster text, .cluster-label *'), (e) => e.textContent.trim() === 'Group' && !e.children.length);
+    const rect = svg.querySelector('.cluster rect');
+    const xh = lab.namespaceURI === 'http://www.w3.org/1999/xhtml';
+    const col = parse(xh ? getComputedStyle(lab).color : getComputedStyle(lab).fill);
+    const fillS = getComputedStyle(rect).fill;
+    const fc = fillS === 'none' ? null : parse(fillS);
+    const bg = fc && fc.a > 0 ? over(fc, GROUND) : GROUND;
+    return { ratio: ratio(over(col, bg), bg), fill: fillS, col: getComputedStyle(lab).color };
+  }, CONTRAST_JS);
+  assert.ok(r.ratio >= 4.5, 'subgraph title contrast ' + JSON.stringify(r));
+});
+check('desktop: a linkStyle stroke stays visible in live dark', DESKTOP, async (page) => {
+  await darkLive(page, 'linkstyle', [F3 + 'mermaid', 'graph LR', '  A --> B', '  B --> C', '  linkStyle 1 stroke:#000', F3]);
+  const r = await page.evaluate((js) => {
+    eval(js);
+    const p = document.querySelectorAll('.content .mermaid svg path.flowchart-link')[1];
+    const s = getComputedStyle(p).stroke;
+    return { ratio: ratio(over(parse(s), GROUND), GROUND), stroke: s };
+  }, CONTRAST_JS);
+  assert.ok(r.ratio >= 3, 'linkStyle edge contrast ' + JSON.stringify(r));
+});
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
