@@ -943,6 +943,30 @@ check('desktop: baked sequence arrowheads stay visible in dark', DESKTOP, async 
   assert.ok(r.seen > 0, 'guard: filled marker shapes were found ' + JSON.stringify(r));
   assert.deepStrictEqual(r.bad, [], 'invisible baked arrowheads');
 });
+check('desktop: with reduced motion the TOC centres its row at once', TRACK_VIEW, async (page) => {
+  await page.goto(TRACK_URL, { waitUntil: 'load' }); await wait(500);
+  const head = (n) => page.evaluate((i) => { window.scrollTo(0, document.getElementById(i).getBoundingClientRect().top + window.scrollY - 40); }, n);
+  const ids = await page.evaluate(() => [].map.call(document.querySelectorAll('.content h2[id]'), (h) => h.id));
+  await head(ids[11]); await wait(1500);
+  const before = await page.evaluate(() => document.querySelector('.toc > .toc-list').scrollTop);
+  const r = await page.evaluate(async (id) => {
+    const sc = document.querySelector('.toc > .toc-list');
+    const frame = () => new Promise((res) => requestAnimationFrame(() => res()));
+    const start = sc.querySelector('a.is-active').getAttribute('href');
+    window.scrollTo(0, document.getElementById(id).getBoundingClientRect().top + window.scrollY - 40);
+    let n = 0;
+    while (n < 60 && sc.querySelector('a.is-active').getAttribute('href') === start) { await frame(); n++; }
+    await frame();
+    const a = sc.querySelector('a.is-active');
+    const br = sc.getBoundingClientRect(); const lr = a.getBoundingClientRect();
+    const target = sc.scrollTop + (lr.top - br.top) - sc.clientHeight * 0.4;
+    return { start, now: a.getAttribute('href'), frames: n, off: Math.abs(target - sc.scrollTop), top: sc.scrollTop };
+  }, ids[12]);
+  assert.notStrictEqual(r.now, r.start, 'guard: the active row changed ' + JSON.stringify(r));
+  assert.notStrictEqual(r.top, before, 'guard: the TOC box scrolled ' + JSON.stringify({ r, before }));
+  assert.ok(r.off <= 3, 'TOC row is ' + r.off + 'px from its centre target one frame after the change ' + JSON.stringify(r));
+}, { reducedMotion: 'reduce' });
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
