@@ -530,7 +530,7 @@ check('desktop: mermaid redraws dark and swaps back to the same light render', D
   await gotoTheme(page); await wait(1200);
   const light = await mermaidFill(page);
   assert.strictEqual(light, 'rgb(234, 242, 253)', 'light primaryColor');
-  await page.evaluate(() => { window.__runs = 0; const run = mermaid.run.bind(mermaid); mermaid.run = (o) => { window.__runs++; return run(o); }; });
+  await page.evaluate(() => { window.__runs = 0; const render = mermaid.render.bind(mermaid); mermaid.render = (a, b) => { window.__runs++; return render(a, b); }; });
   await page.click('#md2doc-theme-toggle'); await wait(1500);
   assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)', 'dark primaryColor');
   assert.strictEqual(await page.$eval('.content .mermaid svg', (s) => s.hasAttribute('data-md2doc-recoloured')), true);
@@ -547,7 +547,7 @@ check('desktop: a saved dark choice draws mermaid dark on load', DESKTOP, async 
 });
 check('desktop: two quick toggles while dark is still drawing end light', DESKTOP, async (page) => {
   await gotoTheme(page); await wait(1200);
-  await page.evaluate(() => { window.__runs = 0; const run = mermaid.run.bind(mermaid); mermaid.run = (o) => { window.__runs++; return new Promise((r) => setTimeout(r, 600)).then(() => run(o)); }; });
+  await page.evaluate(() => { window.__runs = 0; const render = mermaid.render.bind(mermaid); mermaid.render = (a, b) => { window.__runs++; return new Promise((r) => setTimeout(r, 600)).then(() => render(a, b)); }; });
   await page.click('#md2doc-theme-toggle'); await page.click('#md2doc-theme-toggle');
   await wait(2500);
   assert.strictEqual((await themeState(page)).attr, null);
@@ -673,6 +673,42 @@ check('desktop: a classDef light fill in a live mermaid keeps a readable label i
   });
   assert.ok(r.labelLum >= 0.35, 'label luminance ' + JSON.stringify(r));
   assert.ok(r.fillLum <= 0.30, 'shape fill luminance ' + JSON.stringify(r));
+});
+
+check('desktop: toggling dark does not move the reading position (mermaid-heavy page)', DESKTOP, async (page) => {
+  const lines = ['# Long Mermaid', ''];
+  for (let k = 1; k <= 6; k++) {
+    lines.push('## ' + k + '. Part ' + k, '', filler(k, 1), '',
+      '\x60\x60\x60mermaid', 'graph TD', '  A' + k + '[Start] --> B' + k + '[One]', '  B' + k + ' --> C' + k + '[Two]', '  C' + k + ' --> D' + k + '[Three]',
+      '  D' + k + ' --> E' + k + '[Four]', '  E' + k + ' --> F' + k + '[Five]', '  F' + k + ' --> G' + k + '[End]', '\x60\x60\x60', '', filler(k + '.b', 2), '');
+  }
+  await gotoTheme(page, fixtureUrl('mermaid-long', lines));
+  await page.waitForFunction(() => document.querySelectorAll('.content .mermaid svg').length === 6, null, { timeout: 15000 });
+  await wait(500);
+  await page.evaluate(() => document.getElementById('5-part-5').scrollIntoView({ block: 'start' }));
+  await wait(400);
+  const before = await topOf(page, '5-part-5');
+  await page.click('#md2doc-theme-toggle'); await wait(1500);
+  const after = await topOf(page, '5-part-5');
+  assert.ok(Math.abs(after - before) <= 2, 'reading position moved: before ' + before + ' after ' + after);
+  assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+check('desktop: one broken mermaid block does not defeat the cache', DESKTOP, async (page) => {
+  const url = fixtureUrl('mermaid-broken', ['# Broken', '', '## 1. A', '',
+    '\x60\x60\x60mermaid', 'graph LR', '  A[ok] --> B[fine]', '\x60\x60\x60', '',
+    '\x60\x60\x60mermaid', 'graph LR; A -->', '\x60\x60\x60', '']);
+  await gotoTheme(page, url); await wait(1500);
+  await page.evaluate(() => {
+    window.__draws = 0;
+    const run = mermaid.run.bind(mermaid); mermaid.run = (o) => { window.__draws++; return run(o); };
+    const render = mermaid.render.bind(mermaid); mermaid.render = (a, b) => { window.__draws++; return render(a, b); };
+  });
+  await page.click('#md2doc-theme-toggle'); await wait(2000);
+  assert.strictEqual(await page.evaluate(() => window.__draws), 2, 'dark pass: one render per host (2 hosts)');
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.strictEqual(await page.evaluate(() => window.__draws), 2, 'light and the second dark are pure swaps');
+  assert.strictEqual((await themeState(page)).attr, 'dark');
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
