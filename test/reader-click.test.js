@@ -517,10 +517,12 @@ check('desktop: a saved dark choice draws mermaid dark on load', DESKTOP, async 
 });
 check('desktop: two quick toggles while dark is still drawing end light', DESKTOP, async (page) => {
   await gotoTheme(page); await wait(1200);
+  await page.evaluate(() => { window.__runs = 0; const run = mermaid.run.bind(mermaid); mermaid.run = (o) => { window.__runs++; return new Promise((r) => setTimeout(r, 600)).then(() => run(o)); }; });
   await page.click('#md2doc-theme-toggle'); await page.click('#md2doc-theme-toggle');
-  await wait(2000);
+  await wait(2500);
   assert.strictEqual((await themeState(page)).attr, null);
   assert.strictEqual(await mermaidFill(page), 'rgb(234, 242, 253)');
+  assert.strictEqual(await page.evaluate(() => window.__runs), 1, 'one dark draw, then light from cache');
 });
 check('desktop: printing while dark shows the light mermaid render, then restores dark', DESKTOP, async (page) => {
   await gotoTheme(page); await wait(1200);
