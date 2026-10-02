@@ -7,9 +7,10 @@ All notable changes to this project will be documented here. This project adhere
 
 ### Added — 深色模式
 
-- **深淺切換**：預設淺色（不跟隨系統）。桌面右下角的泡泡、手機頂列右側的按鈕在 ☀ 淺色／☾ 深色之間切換；選擇記在瀏覽器（所有 md2doc 文件共用），開頁前就套用，不會先閃白。`--edit`、PDF 與列印一律淺色。
+- **深淺切換**：預設淺色（不跟隨系統）。桌面右下角的泡泡、手機頂列右側的按鈕在 ☀ 淺色／☾ 深色之間切換；選擇記在瀏覽器（同一個瀏覽器開啟的本機 md2doc 文件共用；Chromium、Safari 實測），開頁前就套用，不會先閃白。`--edit`、PDF 與列印一律淺色。
 - **深色配色**：中性深灰底 `#1b1b1d`、內文 `#e3e3e3`（取自 Docusaurus 實測）；藍＝目前位置、黃＝搜尋命中、橘＝訊號名在深底上各自調亮，所有文字對比 ≥ 4.5（WCAG AA）。
 - **圖表跟著變深**：mermaid 用深色重畫（淺／深各畫一次、之後只換畫面）；graphviz、WaveDrom 與 `--bake-svg` 烘焙的圖依計算後的顏色改色——黑線黑字變淺、淺色填色保留色相壓暗，切回淺色完全還原。draw.io 與一般圖片放白底板。
+- mermaid 流程圖的節點標籤（含 `--bake-svg` 烘焙版、作者自訂 classDef 填色）也照同一套規則改色。
 - 實作在 `lib/theme/`：輸出 HTML 後套一道處理，把閱讀頁的顏色換成 CSS 變數（淺色值不變，有測試逐元素比對鎖住），HTML template literal 一字未改。
 
 ### Fixed — 游標跟著系統設定走
