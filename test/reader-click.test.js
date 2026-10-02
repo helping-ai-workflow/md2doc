@@ -493,6 +493,44 @@ check('phone: a heading-less document keeps the toggle floating and raises no er
   assert.deepStrictEqual(errs, []);
 });
 
+async function mermaidFill(page) {
+  return page.$eval('.content .mermaid svg .node rect, .content .mermaid svg .node polygon', (r) => getComputedStyle(r).fill);
+}
+check('desktop: mermaid redraws dark and swaps back to the same light render', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(1200);
+  const light = await mermaidFill(page);
+  assert.strictEqual(light, 'rgb(234, 242, 253)', 'light primaryColor');
+  await page.evaluate(() => { window.__runs = 0; const run = mermaid.run.bind(mermaid); mermaid.run = (o) => { window.__runs++; return run(o); }; });
+  await page.click('#md2doc-theme-toggle'); await wait(1500);
+  assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)', 'dark primaryColor');
+  assert.strictEqual(await page.$eval('.content .mermaid svg', (s) => s.hasAttribute('data-md2doc-recoloured')), true);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.strictEqual(await mermaidFill(page), light);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)');
+  assert.strictEqual(await page.evaluate(() => window.__runs), 1, 'dark drawn once, then cached');
+});
+check('desktop: a saved dark choice draws mermaid dark on load', DESKTOP, async (page) => {
+  await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
+  await gotoTheme(page); await wait(1500);
+  assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)');
+});
+check('desktop: two quick toggles while dark is still drawing end light', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(1200);
+  await page.click('#md2doc-theme-toggle'); await page.click('#md2doc-theme-toggle');
+  await wait(2000);
+  assert.strictEqual((await themeState(page)).attr, null);
+  assert.strictEqual(await mermaidFill(page), 'rgb(234, 242, 253)');
+});
+check('desktop: printing while dark shows the light mermaid render, then restores dark', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(1200);
+  await page.click('#md2doc-theme-toggle'); await wait(1500);
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  assert.strictEqual(await mermaidFill(page), 'rgb(234, 242, 253)', 'light while printing');
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  assert.strictEqual(await mermaidFill(page), 'rgb(36, 54, 79)', 'dark again after print');
+});
+
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
