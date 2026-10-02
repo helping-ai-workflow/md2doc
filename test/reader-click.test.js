@@ -684,6 +684,32 @@ check('desktop: heading anchors keep their own muted colour in dark, links keep 
   }));
   assert.deepStrictEqual(r, { anchor: 'rgb(163, 166, 171)', link: 'rgb(121, 176, 246)' });
 });
+// Images: the dark white plate must not change layout (a ring painted outside the box).
+fs.writeFileSync(path.join(tmpDir, 'wide.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="60"><rect width="3000" height="60" fill="#09f"/></svg>');
+const IMAGES_URL = fixtureUrl('images', ['# Images', '', '## 1. Pictures', '',
+  '![a](dot.png)', '', '![b](dot.png)', '', '![c](dot.png)', '', '![d](wide.svg)', '', '![e](dot.png)', '', '![f](wide.svg)', '',
+  '## 2. Target', '', filler(2, 3), '', '## 3. After', '', filler(3, 14), '']);
+check('desktop: toggling dark does not move the reading position (images above)', DESKTOP, async (page) => {
+  await gotoTheme(page, IMAGES_URL);
+  await page.evaluate(() => document.getElementById('2-target').scrollIntoView({ block: 'start' }));
+  await wait(400);
+  const before = await topOf(page, '2-target');
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  const after = await topOf(page, '2-target');
+  assert.ok(Math.abs(after - before) <= 2, 'reading position moved: before ' + before + ' after ' + after);
+  assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': dark image plate leaves every image border box unchanged', vp, async (page) => {
+    await gotoTheme(page, IMAGES_URL);
+    const boxes = () => page.$$eval('.content img', (is) => is.map((i) => { const r = i.getBoundingClientRect(); return [r.left, r.top + scrollY, r.width, r.height].map((v) => Math.round(v * 100) / 100); }));
+    const light = await boxes();
+    assert.strictEqual(light.length, 6, 'guard: six images');
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    assert.strictEqual(await page.$eval('.content img', (i) => getComputedStyle(i).backgroundColor), 'rgb(255, 255, 255)', 'guard: the plate is on');
+    assert.deepStrictEqual(await boxes(), light);
+  });
+}
 check('desktop: toggling dark does not move the reading position (mermaid-heavy page)', DESKTOP, async (page) => {
   const lines = ['# Long Mermaid', ''];
   for (let k = 1; k <= 6; k++) {
