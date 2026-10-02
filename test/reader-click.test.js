@@ -434,7 +434,7 @@ check('desktop: theme starts light even when the OS asks for dark', DESKTOP, asy
   await gotoTheme(page);
   const s = await themeState(page);
   assert.deepStrictEqual([s.attr, s.bg, s.icon], [null, 'rgb(255, 255, 255)', '☀']);
-  assert.strictEqual(s.label, '淺色（點一下切換到深色）');
+  assert.strictEqual(s.label, 'Light theme (click for dark)');
   assert.strictEqual(s.cursor, 'pointer');
 });
 check('desktop: the bubble toggles dark and back, bottom-right', DESKTOP, async (page) => {
@@ -443,7 +443,7 @@ check('desktop: the bubble toggles dark and back, bottom-right', DESKTOP, async 
   assert.deepStrictEqual(r, { right: 20, bottom: 20, w: 40 });
   await page.click('#md2doc-theme-toggle'); await wait(300);
   let s = await themeState(page);
-  assert.deepStrictEqual([s.attr, s.bg, s.icon, s.label], ['dark', 'rgb(27, 27, 29)', '☾', '深色（點一下切換到淺色）']);
+  assert.deepStrictEqual([s.attr, s.bg, s.icon, s.label], ['dark', 'rgb(27, 27, 29)', '☾', 'Dark theme (click for light)']);
   await page.click('#md2doc-theme-toggle'); await wait(300);
   s = await themeState(page);
   assert.deepStrictEqual([s.attr, s.bg, s.icon], [null, 'rgb(255, 255, 255)', '☀']);
