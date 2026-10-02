@@ -675,6 +675,15 @@ check('desktop: a classDef light fill in a live mermaid keeps a readable label i
   assert.ok(r.fillLum <= 0.30, 'shape fill luminance ' + JSON.stringify(r));
 });
 
+check('desktop: heading anchors keep their own muted colour in dark, links keep the link colour', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  await page.click('#md2doc-theme-toggle'); await wait(300);
+  const r = await page.evaluate(() => ({
+    anchor: getComputedStyle(document.querySelector('.heading-anchor')).color,
+    link: getComputedStyle(document.querySelector('.content p a')).color,
+  }));
+  assert.deepStrictEqual(r, { anchor: 'rgb(163, 166, 171)', link: 'rgb(121, 176, 246)' });
+});
 check('desktop: toggling dark does not move the reading position (mermaid-heavy page)', DESKTOP, async (page) => {
   const lines = ['# Long Mermaid', ''];
   for (let k = 1; k <= 6; k++) {
