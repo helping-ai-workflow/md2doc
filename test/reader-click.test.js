@@ -921,6 +921,28 @@ check('desktop: a linkStyle stroke stays visible in live dark', DESKTOP, async (
   }, CONTRAST_JS);
   assert.ok(r.ratio >= 3, 'linkStyle edge contrast ' + JSON.stringify(r));
 });
+check('desktop: baked sequence arrowheads stay visible in dark', DESKTOP, async (page) => {
+  const md = path.join(tmpDir, 'seqbake.md'); const out = path.join(tmpDir, 'seqbake.html');
+  fs.writeFileSync(md, ['# Seq', '', '## 1. A', '', F3 + 'mermaid', 'sequenceDiagram', '  autonumber', '  A->>B: sync', '  A-)B: async', '  B-->>A: reply', '  A-xB: cross', F3, ''].join('\n'));
+  const b = spawnSync(process.execPath, [LIB, md, out, '--bake-svg'], { cwd: REPO, encoding: 'utf8' });
+  assert.strictEqual(b.status, 0, 'bake: ' + b.stderr);
+  await gotoTheme(page, 'file://' + out);
+  await page.click('#md2doc-theme-toggle'); await wait(600);
+  const r = await page.evaluate((js) => {
+    eval(js);
+    const shapes = [].slice.call(document.querySelectorAll('.content .mermaid svg marker *'));
+    const seen = []; const bad = [];
+    shapes.forEach((e) => {
+      const fs_ = getComputedStyle(e).fill;
+      if (fs_ === 'none') return;
+      const c = parse(fs_); seen.push(fs_);
+      if (!c || c.a === 0 || ratio(over(c, GROUND), GROUND) < 3) bad.push((e.closest('marker').id) + ' ' + e.tagName + ' ' + fs_);
+    });
+    return { seen: seen.length, bad };
+  }, CONTRAST_JS);
+  assert.ok(r.seen > 0, 'guard: filled marker shapes were found ' + JSON.stringify(r));
+  assert.deepStrictEqual(r.bad, [], 'invisible baked arrowheads');
+});
 // ── Run ─────────────────────────────────────────────────────────────────────
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
