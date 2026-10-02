@@ -78,6 +78,15 @@ const plainHtmlPath = path.join(tmpDir, 'plain.html');
 fs.writeFileSync(plainMdPath, 'Just a paragraph with no heading and no diagram.\n', 'utf8');
 assert.strictEqual(spawnSync(process.execPath, [LIB, plainMdPath, plainHtmlPath], { cwd: REPO, encoding: 'utf8' }).status, 0);
 const PLAIN_URL = 'file://' + plainHtmlPath;
+// Per-check fixtures live in their own files so the shared theme fixture stays unchanged.
+function fixtureUrl(name, mdLines) {
+  const mdFile = path.join(tmpDir, name + '.md');
+  const htmlFile = path.join(tmpDir, name + '.html');
+  fs.writeFileSync(mdFile, mdLines.join('\n'), 'utf8');
+  const r = spawnSync(process.execPath, [LIB, mdFile, htmlFile], { cwd: REPO, encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, name + ' renders: ' + r.stderr);
+  return 'file://' + htmlFile;
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -131,7 +140,7 @@ async function focusRing(page) {
 }
 
 const checks = [];
-function check(name, viewport, fn) { checks.push({ name, viewport, fn }); }
+function check(name, viewport, fn, ctx) { checks.push({ name, viewport, fn, ctx }); }
 
 // ── Desktop ─────────────────────────────────────────────────────────────────
 check('desktop: TOC links jump and light exactly one blue row, path bold', DESKTOP, async (page) => {
@@ -621,6 +630,49 @@ check('desktop: --bake-svg output recolours its baked mermaid in dark', DESKTOP,
   await page.click('#md2doc-theme-toggle'); await wait(500);
   const flagged = await page.$eval('.content .mermaid svg', (s) => s.hasAttribute('data-md2doc-recoloured'));
   assert.strictEqual(flagged, true);
+  const m = await mermaidLabelState(page);
+  assert.ok(m.labels > 0 && m.shapes > 0, 'guard: labels and shapes were found ' + JSON.stringify(m));
+  assert.deepStrictEqual([m.darkLabels, m.lightShapes], [[], []], 'baked mermaid labels readable on dark: ' + JSON.stringify(m));
+});
+
+// Mermaid flowchart labels are HTML inside foreignObject (coloured by CSS color),
+// not svg text; measure those, plus the node shape fills.
+async function mermaidLabelState(page, nodeSel) {
+  return page.evaluate((sel) => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function lum(s) { const c = (s.match(/[\d.]+/g) || []).slice(0, 3).map(Number); return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const out = { labels: 0, shapes: 0, darkLabels: [], lightShapes: [] };
+    document.querySelectorAll('.content .mermaid svg foreignObject *').forEach((e) => {
+      if (![].some.call(e.childNodes, (n) => n.nodeType === 3 && n.textContent.trim())) return;
+      out.labels++;
+      const col = getComputedStyle(e).color;
+      if (lum(col) < 0.35) out.darkLabels.push(e.textContent.trim() + ' ' + col);
+    });
+    document.querySelectorAll('.content .mermaid svg ' + (sel || '.node rect, .node polygon, .node circle, .node path')).forEach((e) => {
+      out.shapes++;
+      const fill = getComputedStyle(e).fill;
+      if (fill === 'none' || fill === 'transparent' || /rgba\([^)]*,\s*0\)/.test(fill)) return;
+      if (lum(fill) > 0.30) out.lightShapes.push(fill);
+    });
+    return out;
+  }, nodeSel);
+}
+check('desktop: a classDef light fill in a live mermaid keeps a readable label in dark', DESKTOP, async (page) => {
+  const url = fixtureUrl('classdef', ['# ClassDef', '', '## 1. A', '',
+    '\x60\x60\x60mermaid', 'graph LR', '  A[Hot] --> B[Cold]', '  classDef warm fill:#ffd6a5', '  class A warm', '\x60\x60\x60', '']);
+  await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
+  await gotoTheme(page, url); await wait(2500);
+  const r = await page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function lum(s) { const c = s.match(/[\d.]+/g).slice(0, 3).map(Number); return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const node = [].find.call(document.querySelectorAll('.content .mermaid svg .node'), (n) => /Hot/.test(n.textContent));
+    const label = [].find.call(node.querySelectorAll('foreignObject *'), (e) => [].some.call(e.childNodes, (n) => n.nodeType === 3 && /Hot/.test(n.textContent)));
+    const shape = node.querySelector('rect, polygon, circle, path');
+    const fill = getComputedStyle(shape).fill;
+    return { labelLum: lum(getComputedStyle(label).color), fill, fillLum: /^rgba?\(/.test(fill) && !/,\s*0\)$/.test(fill) ? lum(fill) : 0 };
+  });
+  assert.ok(r.labelLum >= 0.35, 'label luminance ' + JSON.stringify(r));
+  assert.ok(r.fillLum <= 0.30, 'shape fill luminance ' + JSON.stringify(r));
 });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
@@ -635,7 +687,7 @@ check('desktop: --bake-svg output recolours its baked mermaid in dark', DESKTOP,
       for (const c of checks) {
         if (only && !c.name.includes(only)) continue;
         ran++;
-        const context = await browser.newContext({ viewport: c.viewport });
+        const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.ctx));
         const page = await context.newPage();
         try {
           await page.goto(URL, { waitUntil: 'load' });
