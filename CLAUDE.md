@@ -112,14 +112,18 @@ Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tb
 The reader's colours are themed by a post-pass (`applyReaderTheme`, called at the
 end of `renderMarkdown`), not by editing the HTML template literal. Every colour
 literal in the reader `<style>` block that has a role in `THEME_TOKENS` is
-rewritten to `var(--md-<name>)`, and `:root` defines it as the same literal — so a
-light change is still made by editing the literal in `lib/md2doc.js`.
+rewritten to `var(--md-<name>)`, and `:root` defines it from
+`THEME_TOKENS[].light[0]` in `lib/theme/tokens.js`. To change a light colour, change
+the literal in `lib/md2doc.js` AND its `light` entry in `THEME_TOKENS` (and set its
+`dark` value); an edited literal that is no longer in the table is neither rewritten
+nor themed, and the allow-list check fails if the two disagree.
 
 **Adding a new colour literal to reader CSS:** give it a role in `THEME_TOKENS`
 (light literal + dark value) or, if it must stay fixed, add it to `KEEP_LITERALS`
 with the reason. `test/reader-design.test.js` fails on any literal that is in
-neither — that is the allow-list doing its job. Rules whose selector starts with
-`.ed-`, `html.ed-` or `.lightbox` are skipped on purpose (edit mode is light-only;
+neither — that is the allow-list doing its job. Rules whose selector text (before `{`) contains
+`.ed-`, `html.ed-` or `.lightbox` as a compound anywhere — after whitespace, `,`, `>`,
+`+`, `~` or `(` — are skipped on purpose (edit mode is light-only;
 the lightbox is already dark).
 
 The browser side is `lib/theme/runtime.js`, plain JS inlined into the page — it is

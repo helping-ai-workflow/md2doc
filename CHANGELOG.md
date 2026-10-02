@@ -18,7 +18,7 @@ All notable changes to this project will be documented here. This project adhere
   - 側欄寬度拖曳：`col-resize` → `ew-resize`
   - 圖表（點開燈箱）：`zoom-in` → `pointer`
   - 燈箱平移、編輯模式的區塊拖曳、表格列／欄把手、波形 lane 把手：`grab`／`grabbing` → `move`
-- 新增兩道測試：`reader-design` 靜態掃 `lib/md2doc.js` 與 `lib/editor/*.js` 不得出現這 10 個值（涵蓋拖曳中這種點擊測試難以到達的狀態）；`reader-click` 在 Chromium 與 WebKit 真的 hover 拖曳把手、圖表、燈箱並按住平移，讀滑鼠下方元素的 computed cursor。
+- 新增兩道測試：`reader-design` 靜態掃 `lib/md2doc.js`、`lib/editor/*.js` 與 `lib/theme/*.js` 不得出現這 10 個值（涵蓋拖曳中這種點擊測試難以到達的狀態）；`reader-click` 在 Chromium 與 WebKit 真的 hover 拖曳把手、圖表、燈箱並按住平移，讀滑鼠下方元素的 computed cursor。
 
 ## v3.8.0 — 2026-10-01
 
