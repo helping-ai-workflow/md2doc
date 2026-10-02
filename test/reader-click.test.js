@@ -689,6 +689,14 @@ fs.writeFileSync(path.join(tmpDir, 'wide.svg'), '<svg xmlns="http://www.w3.org/2
 const IMAGES_URL = fixtureUrl('images', ['# Images', '', '## 1. Pictures', '',
   '![a](dot.png)', '', '![b](dot.png)', '', '![c](dot.png)', '', '![d](wide.svg)', '', '![e](dot.png)', '', '![f](wide.svg)', '',
   '## 2. Target', '', filler(2, 3), '', '## 3. After', '', filler(3, 14), '']);
+check('desktop: without JavaScript the toggle is not shown (no dead button)', DESKTOP, async (page) => {
+  await page.goto(THEME_URL, { waitUntil: 'load' }); await wait(300);
+  assert.strictEqual(await page.$eval('#md2doc-theme-toggle', (b) => getComputedStyle(b).display), 'none');
+}, { javaScriptEnabled: false });
+check('desktop: with JavaScript the toggle is shown', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  assert.deepStrictEqual(await page.$eval('#md2doc-theme-toggle', (b) => [b.hidden, getComputedStyle(b).display]), [false, 'grid']);
+});
 check('desktop: toggling dark does not move the reading position (images above)', DESKTOP, async (page) => {
   await gotoTheme(page, IMAGES_URL);
   await page.evaluate(() => document.getElementById('2-target').scrollIntoView({ block: 'start' }));
