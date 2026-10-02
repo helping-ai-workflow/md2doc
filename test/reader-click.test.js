@@ -461,6 +461,22 @@ check('desktop: blocked storage keeps the page light and the toggle still works'
   assert.strictEqual((await themeState(page)).attr, 'dark');
   assert.deepStrictEqual(errs, []);
 });
+check('desktop: dark text meets WCAG AA where it is actually drawn', DESKTOP, async (page) => {
+  await gotoTheme(page);
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  await page.fill('#doc-search-input', 'zebrafinch'); await page.press('#doc-search-input', 'Enter'); await wait(400);
+  const pairs = await page.evaluate(() => {
+    function rgb(s) { return s.match(/[\d.]+/g).slice(0, 3).map(Number); }
+    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); } }
+    function ratio(a, b) { const x = lum(rgb(a)), y = lum(rgb(b)); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+    function bgOf(e) { for (; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; if (!/rgba\(0, 0, 0, 0\)|transparent/.test(c)) return c; } return 'rgb(255, 255, 255)'; }
+    const sel = { body: '.content p', code: '.content :not(pre) > code', link: '.content a', toc: '.toc-list a', active: '.toc a.is-active', mark: 'mark.search-hit.is-selected', snippet: '.search-result-snippet' };
+    const out = {};
+    for (const k in sel) { const e = document.querySelector(sel[k]); if (e) out[k] = +ratio(getComputedStyle(e).color, bgOf(e)).toFixed(2); }
+    return out;
+  });
+  for (const k of ['body', 'code', 'link', 'toc', 'mark']) assert.ok(pairs[k] >= 4.5, k + ' ' + pairs[k] + ' ' + JSON.stringify(pairs));
+});
 check('phone: the toggle sits at the right end of the top bar, not floating', PHONE, async (page) => {
   await gotoTheme(page);
   const r = await page.evaluate(() => {

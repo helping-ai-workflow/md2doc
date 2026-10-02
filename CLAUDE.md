@@ -107,6 +107,28 @@ for the cursor-anchored zoom maths.
 
 Sticky first column uses `position: sticky; left: 0; background: #ffffff` on `tbody td:first-child` + `thead th:first-child`. v3.8.0 removed zebra striping and the grey header (horizontal rules only); the first column keeps its opaque white so horizontally scrolled cells don't show through it.
 
+## Dark Mode — Colours Go Through `lib/theme/tokens.js`
+
+The reader's colours are themed by a post-pass (`applyReaderTheme`, called at the
+end of `renderMarkdown`), not by editing the HTML template literal. Every colour
+literal in the reader `<style>` block that has a role in `THEME_TOKENS` is
+rewritten to `var(--md-<name>)`, and `:root` defines it as the same literal — so a
+light change is still made by editing the literal in `lib/md2doc.js`.
+
+**Adding a new colour literal to reader CSS:** give it a role in `THEME_TOKENS`
+(light literal + dark value) or, if it must stay fixed, add it to `KEEP_LITERALS`
+with the reason. `test/reader-design.test.js` fails on any literal that is in
+neither — that is the allow-list doing its job. Rules whose selector starts with
+`.ed-`, `html.ed-` or `.lightbox` are skipped on purpose (edit mode is light-only;
+the lightbox is already dark).
+
+The browser side is `lib/theme/runtime.js`, plain JS inlined into the page — it is
+NOT inside the template literal, so backslashes and regexes are fine there, but it
+must never contain a closing script tag (a test guards that). The theme attribute
+is `data-md2doc-theme`, never `data-theme` (hosts such as the artifact viewer write
+their own `data-theme`). `renderMarkdown(…, { noTheme: true })` skips the post-pass;
+only the light-lock test uses it.
+
 ## Editor Client — Guarded Retired-Name Substrings
 
 `test/editor-client.test.js` asserts `lib/editor/client.js` contains none of a list of bare substrings naming retired editor-bar internals (`ed-bar`, `attachGutters`, `dismissBar`, etc., matched with plain `includes`, not word boundaries) — ordinary prose can trip it (a comment mentioning "fixed-bar" once reddened the whole suite via `ed-bar`), so grep that guarded list before committing a new comment into `client.js`.

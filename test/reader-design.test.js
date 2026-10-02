@@ -583,7 +583,8 @@ const BITMAP_CURSORS = ['col-resize', 'row-resize', 'grab', 'grabbing', 'zoom-in
 check('cursor: no source sets a cursor Windows draws from a browser bitmap', async () => {
   const lib = path.join(__dirname, '..', 'lib');
   const files = [path.join(lib, 'md2doc.js')].concat(
-    fs.readdirSync(path.join(lib, 'editor')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'editor', f)));
+    fs.readdirSync(path.join(lib, 'editor')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'editor', f)),
+    fs.readdirSync(path.join(lib, 'theme')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'theme', f)));
   const re = new RegExp('cursor\\s*[:=]\\s*[\'"]?(' + BITMAP_CURSORS.join('|') + ')\\b', 'g');
   const hits = [];
   for (const f of files) {
@@ -597,6 +598,7 @@ check('cursor: no source sets a cursor Windows draws from a browser bitmap', asy
     }
   }
   assert.deepStrictEqual(hits, []);
+  assert.ok(files.some((f) => f.endsWith(path.join('theme', 'runtime.js'))), 'guard: the scan covers lib/theme');
 });
 
 // ── v3.9.0 dark mode ───────────────────────────────────────────────────────
