@@ -125,6 +125,8 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
       if (!el) return null;
       const LIGHTBOX_TARGETS = 'img, .mermaid, .graphviz, [id^="WaveDrom_Display_"], .wavedrom-diagram';
       const matchesTarget = el.matches(LIGHTBOX_TARGETS);
+      // A parent cursor would be inherited, so a lost class must show as 'text', not as an inherited 'pointer'.
+      el.parentElement.style.cursor = 'text';
       const cursor = getComputedStyle(el).cursor;
       return { matchesTarget, cursor, hasClass: el.classList.contains('wavedrom-diagram') };
     });
@@ -133,8 +135,8 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
       'original diagram div carries the stable wavedrom-diagram class');
     assert.strictEqual(originalStillTarget.matchesTarget, true,
       'original diagram still matches the lightbox click-target selector after id reclaim');
-    assert.strictEqual(originalStillTarget.cursor, 'zoom-in',
-      'original diagram keeps its zoom-in cursor affordance after id reclaim, got "' +
+    assert.strictEqual(originalStillTarget.cursor, 'pointer',
+      'original diagram keeps its click cursor affordance after id reclaim, got "' +
       originalStillTarget.cursor + '"');
 
     // The new diagram (still carrying its fresh WaveDrom_Display_ id, not
@@ -143,6 +145,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
       const divs = document.querySelectorAll('div[id^="WaveDrom_Display_"]');
       const newDiv = divs.length ? divs[divs.length - 1] : null;
       if (!newDiv) return null;
+      newDiv.parentElement.style.cursor = 'text';
       const LIGHTBOX_TARGETS = 'img, .mermaid, .graphviz, [id^="WaveDrom_Display_"], .wavedrom-diagram';
       return {
         matchesTarget: newDiv.matches(LIGHTBOX_TARGETS),
@@ -151,7 +154,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-editmode-wavedrom-'
     });
     assert.ok(newDivMatches, 'new diagram div present');
     assert.strictEqual(newDivMatches.matchesTarget, true, 'new diagram matches the lightbox click-target selector');
-    assert.strictEqual(newDivMatches.cursor, 'zoom-in', 'new diagram has the zoom-in cursor affordance');
+    assert.strictEqual(newDivMatches.cursor, 'pointer', 'new diagram has the click cursor affordance');
 
     // One more repeat call after the new node was processed must stay flat.
     await page.evaluate(() => window.__md2docInitDiagrams(document));

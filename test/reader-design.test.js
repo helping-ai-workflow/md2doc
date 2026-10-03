@@ -567,6 +567,136 @@ check('mobile: a document with headings keeps the 60px band under the bar', asyn
   assert.strictEqual(pad, '60px');
 });
 
+// ── Cursors Windows actually draws (v3.8.1) ───────────────────────────────
+// Chromium-based browsers on Windows (Edge, Chrome) draw ten CSS cursors from
+// bitmaps bundled in the browser instead of asking Windows: col-resize,
+// row-resize, grab, grabbing, zoom-in, zoom-out, cell, alias, copy,
+// vertical-text (ui/base/cursor/cursor_loader_win.cc returns
+// MAKEINTRESOURCE(IDC_...) for exactly those). They ignore the user's pointer
+// size and colour settings, so a user with large coloured accessibility
+// cursors gets a small white one on a white page — exactly where md2doc asks
+// for a drag or a zoom. Every other keyword maps to a system cursor
+// (ew-resize → IDC_SIZEWE, move → IDC_SIZEALL, pointer → IDC_HAND) and follows
+// those settings. This scan covers states a click test cannot reach cheaply
+// (mid-drag classes, edit mode).
+const BITMAP_CURSORS = ['col-resize', 'row-resize', 'grab', 'grabbing', 'zoom-in', 'zoom-out', 'cell', 'alias', 'copy', 'vertical-text'];
+check('cursor: no source sets a cursor Windows draws from a browser bitmap', async () => {
+  const lib = path.join(__dirname, '..', 'lib');
+  const files = [path.join(lib, 'md2doc.js')].concat(
+    fs.readdirSync(path.join(lib, 'editor')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'editor', f)),
+    fs.readdirSync(path.join(lib, 'theme')).filter((f) => f.endsWith('.js')).map((f) => path.join(lib, 'theme', f)));
+  const re = new RegExp('cursor\\s*[:=]\\s*[\'"]?(' + BITMAP_CURSORS.join('|') + ')\\b', 'g');
+  const hits = [];
+  for (const f of files) {
+    const src = fs.readFileSync(f, 'utf8');
+    const lines = src.split('\n');
+    for (let m; (m = re.exec(src));) {
+      const n = src.slice(0, m.index).split('\n').length;
+      // Prose in a comment may name these keywords; a declaration never starts a comment line.
+      if (/^\s*(\/\/|\*|\/\*)/.test(lines[n - 1])) continue;
+      hits.push(path.basename(f) + ':' + n + ' ' + m[1]);
+    }
+  }
+  assert.deepStrictEqual(hits, []);
+  assert.ok(files.some((f) => f.endsWith(path.join('theme', 'runtime.js'))), 'guard: the scan covers lib/theme');
+});
+
+// ── v3.9.0 dark mode ───────────────────────────────────────────────────────
+// Spec: docs/superpowers/specs/2026-10-02-dark-mode-design.md
+const THEME = require('../lib/theme/tokens.js');
+const THEME_MD = ['# Theme', '', '**Owner:** QA', '**Version:** 1', '', '## 1. Alpha', '',
+  'Prose with `inline_code` and a [link](https://example.com) and zebrafinch.', '',
+  '| Signal | Dir | Description |', '|---|---|---|', '| `rcv_v` | In | Verify indicator after every handshake attempt |', '',
+  '> A quote.', '', '\x60\x60\x60mermaid', 'graph LR', '  A[Start] --> B[End]', '\x60\x60\x60', '',
+  '\x60\x60\x60dot', 'digraph { node [shape=box, style=filled, fillcolor="#90caf9"]; a -> b [label="go"]; }', '\x60\x60\x60', '',
+  '## 2. Beta', '', 'More zebrafinch text.', ''];
+
+async function computedColours(htmlPath) {
+  const page = await openPage(htmlPath);
+  await new Promise((r) => setTimeout(r, 2500));
+  const out = await page.evaluate(() => {
+    const props = ['color', 'backgroundColor', 'borderTopColor', 'borderBottomColor', 'borderLeftColor', 'outlineColor', 'fill', 'stroke'];
+    return [...document.querySelectorAll('body *')]
+      .filter((e) => !e.closest('#md2doc-theme-toggle') && !/^(SCRIPT|STYLE)$/.test(e.tagName))
+      .map((e) => { const c = getComputedStyle(e); return e.tagName + ' ' + props.map((p) => c[p]).join('|'); });
+  });
+  await page.close();
+  return out;
+}
+
+check('theme: light rendering is identical with and without the theme post-pass', async () => {
+  const src = path.join(tmpDir, 'lock.md');
+  const md = THEME_MD.join('\n');
+  const themed = await renderMarkdown(md, src, {});
+  const plain = await renderMarkdown(md, src, { noTheme: true });
+  assert.notStrictEqual(themed.html, plain.html, 'guard: the post-pass changed the HTML');
+  assert.match(themed.html, /var\(--md-bg\)/, 'guard: literals were rewritten');
+  const a = path.join(tmpDir, 'lock-themed.html'); fs.writeFileSync(a, themed.html);
+  const b = path.join(tmpDir, 'lock-plain.html'); fs.writeFileSync(b, plain.html);
+  const [ca, cb] = [await computedColours(a), await computedColours(b)];
+  assert.strictEqual(ca.length, cb.length, 'same element count');
+  const diff = ca.map((v, i) => (v === cb[i] ? null : i + ': ' + cb[i] + '  ->  ' + v)).filter(Boolean);
+  assert.deepStrictEqual(diff.slice(0, 5), [], diff.length + ' element(s) changed colour in light');
+});
+check('theme: edit mode output carries no theme at all', async () => {
+  const src = path.join(tmpDir, 'edit-theme.md');
+  const { html } = await renderMarkdown(THEME_MD.join('\n'), src, { editMode: true });
+  for (const s of ['md2doc-theme', 'var(--md-', '--md-bg']) assert.ok(!html.includes(s), 'edit HTML contains ' + s);
+});
+check('theme: the early script runs before any stylesheet and only sets dark', async () => {
+  const { html } = render(THEME_MD);
+  const early = html.indexOf("localStorage.getItem('md2doc-theme')");
+  assert.ok(early > -1 && early < html.indexOf('<style'), 'early script precedes the first <style>');
+  assert.ok(early > html.indexOf('<head>'), 'inside <head>');
+  const script = html.slice(html.lastIndexOf('<script>', early), html.indexOf('</script>', early));
+  assert.ok(/==='dark'/.test(script), 'compares the stored value to dark');
+  const sets = script.match(/setAttribute\([^)]*\)/g) || [];
+  assert.deepStrictEqual(sets, ["setAttribute('data-md2doc-theme','dark')"], 'only ever sets the dark attribute');
+  assert.ok(!/removeAttribute|classList|\.style/.test(script), 'does nothing else to the page');
+});
+check('theme: every reader colour literal is either a token or on the keep list', async () => {
+  const { html } = render(THEME_MD);
+  const s = html.indexOf('<style>', html.indexOf('</title>'));
+  // The theme block (themeCss) is appended inside this <style>; its literals ARE the
+  // token table, so the scan stops at its marker comment and covers only the rewritten reader CSS.
+  const marker = html.indexOf('/* v3.9.0 dark mode', s);
+  assert.ok(marker > s, 'theme block marker present');
+  const css = html.slice(s, marker);
+  let sel = ''; const left = new Set();
+  for (const line of css.split('\n')) {
+    const b = line.indexOf('{'); if (b !== -1) sel = line.slice(0, b);
+    if (/^\s*(\/\*|\*)/.test(line) || /(^|[\s,>+~(])(html\.ed-|\.ed-|\.lightbox)/.test(sel)) continue;
+    for (const m of line.match(/#[0-9a-fA-F]{3,6}\b/g) || []) left.add(m.toLowerCase());
+  }
+  const extra = [...left].filter((l) => !THEME.KEEP_LITERALS.includes(l));
+  assert.deepStrictEqual(extra, [], 'add these to THEME_TOKENS or KEEP_LITERALS in lib/theme/tokens.js');
+  assert.ok(left.has('#000'), 'guard: the scan sees the TOC mask literal');
+});
+check('theme: print is light even with the dark attribute set', async () => {
+  const { htmlPath } = render(THEME_MD);
+  const page = await openPage(htmlPath);
+  await page.evaluate(() => document.documentElement.setAttribute('data-md2doc-theme', 'dark'));
+  const screenBg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  await page.emulateMediaType('print');
+  const r = await page.evaluate(() => ({ bg: getComputedStyle(document.body).backgroundColor, toggle: getComputedStyle(document.getElementById('md2doc-theme-toggle')).display }));
+  await page.close();
+  assert.strictEqual(screenBg, 'rgb(27, 27, 29)', 'guard: dark on screen');
+  assert.deepStrictEqual(r, { bg: 'rgb(255, 255, 255)', toggle: 'none' });
+});
+check('theme: mermaid light variables match the init md2doc ships', async () => {
+  const { html } = render(THEME_MD);
+  const m = html.match(/themeVariables: (\{[^}]*\})/);
+  assert.ok(m, 'mermaid init present');
+  const shipped = Function('return ' + m[1])();
+  assert.deepStrictEqual(shipped, THEME.MERMAID_LIGHT_VARS);
+  const data = JSON.parse(html.match(/<script id="md2doc-theme-data" type="application\/json">([^<]*)<\/script>/)[1]);
+  assert.deepStrictEqual(data, { mermaidLight: THEME.MERMAID_LIGHT_VARS, mermaidDark: THEME.MERMAID_DARK_VARS });
+});
+check('theme: the inlined runtime cannot close its own script tag', async () => {
+  const src = fs.readFileSync(path.join(REPO, 'lib', 'theme', 'runtime.js'), 'utf8');
+  assert.ok(!/<\/script/i.test(src));
+});
+
 // ── run ──
 (async () => {
   const only = process.argv[2];

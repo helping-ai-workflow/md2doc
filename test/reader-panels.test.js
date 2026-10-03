@@ -91,7 +91,7 @@ assert.doesNotMatch(html, /\.toc a \{[^}]*text-overflow: ellipsis;[^}]*\}/, 'TOC
       const r = el.getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + Math.min(300, r.height / 2), cursor: getComputedStyle(el).cursor };
     });
-    assert.strictEqual(splitterBox.cursor, 'col-resize', 'splitter shows a col-resize cursor');
+    assert.strictEqual(splitterBox.cursor, 'ew-resize', 'splitter shows the system resize cursor (col-resize is a browser bitmap on Windows)');
 
     const widthBefore = await page.$eval('.reader-sidebar', (el) => el.offsetWidth);
     await page.mouse.move(splitterBox.x, splitterBox.y);

@@ -3,6 +3,28 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.9.0 — 2026-10-03
+
+### Added — 深色模式
+
+- **深淺切換**：預設淺色（不跟隨系統）。桌面右下角的泡泡、手機頂列右側的按鈕在 ☀ 淺色／☾ 深色之間切換；選擇記在瀏覽器（同一個瀏覽器開啟的本機 md2doc 文件共用；Chromium、Safari 實測），開頁前就套用，不會先閃白。`--edit`、PDF 與列印一律淺色。
+- **深色配色**：中性深灰底 `#1b1b1d`、內文 `#e3e3e3`（取自 Docusaurus 實測）；藍＝目前位置、黃＝搜尋命中、橘＝訊號名在深底上各自調亮，所有文字對比 ≥ 4.5（WCAG AA）。
+- **圖表跟著變深**：mermaid 用深色重畫（淺／深各畫一次、之後只換畫面）；graphviz、WaveDrom 與 `--bake-svg` 烘焙的圖依計算後的顏色改色——黑線黑字變淺、淺色填色保留色相壓暗，切回淺色完全還原。draw.io 與一般圖片放白底板。
+- mermaid 流程圖的節點標籤（含 `--bake-svg` 烘焙版、作者自訂 classDef 填色）也照同一套規則改色。
+- 實作在 `lib/theme/`：輸出 HTML 後套一道處理，把閱讀頁的顏色換成 CSS 變數（淺色值不變，有測試逐元素比對鎖住），HTML template literal 一字未改。
+
+### Fixed — 游標跟著系統設定走
+
+- **拖曳與放大的游標在 Windows 上不再是白色小圖**：Edge／Chrome 在 Windows 上有 10 個 CSS 游標（`col-resize`、`row-resize`、`grab`、`grabbing`、`zoom-in`、`zoom-out`、`cell`、`alias`、`copy`、`vertical-text`）畫的是瀏覽器自帶的 32px 白色圖，不吃系統的游標大小與顏色設定——設了大號彩色協助工具游標的人，在白底上幾乎看不到。md2doc 用到其中三種，全部換成系統游標：
+  - 側欄寬度拖曳：`col-resize` → `ew-resize`
+  - 圖表（點開燈箱）：`zoom-in` → `pointer`
+  - 燈箱平移、編輯模式的區塊拖曳、表格列／欄把手、波形 lane 把手：`grab`／`grabbing` → `move`
+- 新增兩道測試：`reader-design` 靜態掃 `lib/md2doc.js`、`lib/editor/*.js` 與 `lib/theme/*.js` 不得出現這 10 個值（涵蓋拖曳中這種點擊測試難以到達的狀態）；`reader-click` 在 Chromium 與 WebKit 真的 hover 拖曳把手、圖表、燈箱並按住平移，讀滑鼠下方元素的 computed cursor。
+
+### Fixed — 側欄目錄不再閃爍
+
+- **側欄目錄追蹤**：改成依畫面上方 35% 的閱讀線判斷目前章節（只看目錄有列出的標題）——文件只有一個 H1 時高亮不再消失，往上捲也不再慢半拍；只展開目前所在的那一路（其他自動收起），目前那一列保持在目錄框中段（實測兩引擎：每一格都有高亮、從不出框）。
+
 ## v3.8.0 — 2026-10-01
 
 閱讀版面審查（13 項，每項都有實際截圖比較與參考網站實測）的淺色部分。深色模式另外一批。

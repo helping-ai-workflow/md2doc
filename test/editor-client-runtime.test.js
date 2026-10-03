@@ -20715,6 +20715,11 @@ async function gutterGeometry(page, sel) {
     // moment the pointer leaves the block there is nothing under the cursor
     // but the indicator line.
     //
+    // v3.8.1: the drag cursor is now `move`, not `grabbing` — Edge / Chrome on
+    // Windows draw `grabbing` from a browser bitmap that ignores the user's
+    // pointer size and colour (see reader-design.test.js, "Cursors Windows
+    // actually draws"). The ruling below is unchanged apart from the keyword.
+    //
     // The RULING (2026-09-01) is `cursor: grabbing`, applied as a class on
     // `document.documentElement` — OUTSIDE `contentEl`, so "nothing in the
     // content DOM is mutated during a drag" still holds. That invariant is
@@ -20747,7 +20752,7 @@ async function gutterGeometry(page, sel) {
       };
     });
 
-    await s4Scenario('a live ⠿ drag puts the grabbing cursor on <html>, and each of '
+    await s4Scenario('a live ⠿ drag puts the drag cursor on <html>, and each of '
       + 'pointerup / Escape / pointercancel / window blur takes it off again',
       S4_DOC, async (page, mdPath) => {
       const g = await s4Geometry(page);
@@ -20769,8 +20774,8 @@ async function gutterGeometry(page, sel) {
       assert.strictEqual(idle.htmlHasClass, false,
         'ANTI-VACUITY: `ed-block-dragging` must be ABSENT before any gesture — "it was '
         + 'removed" is trivially true of a class that is never added. Got ' + JSON.stringify(idle));
-      assert.notStrictEqual(idle.bodyCursor, 'grabbing',
-        'ANTI-VACUITY: the resting cursor must NOT already be grabbing. Got ' + JSON.stringify(idle));
+      assert.notStrictEqual(idle.bodyCursor, 'move',
+        'ANTI-VACUITY: the resting cursor must NOT already be the drag cursor. Got ' + JSON.stringify(idle));
       assert.strictEqual(idle.handleCursor, 'pointer',
         'FIXTURE SANITY: `.ed-handle` carries `cursor: pointer` at rest — that is what '
         + 'makes it the element that proves the drag override wins the cascade. Got '
@@ -20821,11 +20826,11 @@ async function gutterGeometry(page, sel) {
           + 'block itself cannot show the drag (nothing in the content DOM may be mutated '
           + 'during one) and `.ed-handle` is opacity:0 the moment the pointer leaves the '
           + 'block, so this class IS the feedback. Got ' + JSON.stringify(during));
-        assert.strictEqual(during.bodyCursor, 'grabbing',
+        assert.strictEqual(during.bodyCursor, 'move',
           label + ': the class must actually PAINT — a class with no CSS behind it is not '
           + 'feedback. Got ' + JSON.stringify(during));
-        assert.strictEqual(during.handleCursor, 'grabbing',
-          label + ': the grabbing cursor must win over `.ed-handle`\'s own '
+        assert.strictEqual(during.handleCursor, 'move',
+          label + ': the drag cursor must win over `.ed-handle`\'s own '
           + '`cursor: pointer`, or the one element the pointer started on keeps showing a '
           + 'click affordance for the whole drag. Got ' + JSON.stringify(during));
         assert.strictEqual(await s4Content(page), before,
@@ -20848,7 +20853,7 @@ async function gutterGeometry(page, sel) {
           label + ' must take `ed-block-dragging` back off <html> — teardownBlockDrag() is '
           + 'the single funnel both endBlockDrag() and cancelBlockDrag() go through, so '
           + 'every abort path inherits the removal. Got ' + JSON.stringify(post));
-        assert.notStrictEqual(post.bodyCursor, 'grabbing',
+        assert.notStrictEqual(post.bodyCursor, 'move',
           label + ' must leave the cursor back to normal. Got ' + JSON.stringify(post));
         if (!homeFirst) await page.mouse.up(); // already torn down — an inert no-op
         await settleEditor(page);

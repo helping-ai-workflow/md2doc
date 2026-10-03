@@ -78,6 +78,10 @@ also pass `--open`.
 | `--version`, `-v` | Print version. |
 | `--help`, `-h` | Print help. |
 
+### Reading view
+
+- **Dark mode** — a ☀/☾ toggle (bottom-right on desktop, top bar on phone). Light by default; the choice is remembered in the browser. PDF and print stay light.
+
 ### Images
 
 Local images referenced from the markdown are resolved against the **markdown file's own
