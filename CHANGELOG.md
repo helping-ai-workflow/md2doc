@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.9.0 — 未發布
+## v3.9.0 — 2026-10-03
 
 ### Added — 深色模式
 
