@@ -118,6 +118,24 @@ check('chrome: focus ring and selection tint use the reader accent', DESKTOP, as
   assert.strictEqual(ring, 'rgb(9, 105, 218)');
 });
 
+check('wave: the waveform editor panel follows dark', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  const d = page.locator('.wavedrom-diagram').first();
+  await d.scrollIntoViewIfNeeded(); await wait(300);
+  const box = await d.boundingBox();
+  await page.mouse.move(box.x + 10, box.y + box.height / 2);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+  await wait(300);
+  await page.locator('.ed-wave-edit-btn').click(); await wait(800);
+  const s = await page.evaluate(() => {
+    const p = document.querySelector('.ed-wave-panel');
+    const label = document.querySelector('.ed-wave-lane-label, .ed-wave-section-title');
+    return { bg: getComputedStyle(p).backgroundColor, fg: getComputedStyle(label).color };
+  });
+  assert.notStrictEqual(s.bg, 'rgb(255, 255, 255)', 'panel is not white in dark');
+  assert.ok(contrast(s.fg, s.bg) >= 4.5, 'wave label contrast ' + JSON.stringify(s));
+}, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

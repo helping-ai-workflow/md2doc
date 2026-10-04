@@ -54,9 +54,11 @@ check('applyThemeTokens rewrites a role literal and leaves an unknown one alone'
   assert.match(out, /background: var\(--md-bg\);/);
   assert.match(out, /border-color: #123456;/);
 });
-check('applyThemeTokens leaves editor and lightbox rules literal', () => {
-  const css = '  .ed-tb-insert { background: #fff; }\n  html.ed-block-dragging { color: #24292e; }\n  .lightbox-canvas > * {\n    background: #ffffff;\n  }';
-  assert.strictEqual(T.applyThemeTokens(css), css);
+check('applyThemeTokens rewrites editor rules and leaves lightbox rules literal', () => {
+  const ed = T.applyThemeTokens('  .ed-wave-panel { background: #fff; color: #111; }');
+  assert.strictEqual(ed, '  .ed-wave-panel { background: var(--md-bg); color: var(--md-wave-ink); }');
+  const lb = '  .lightbox-canvas > * {\n    background: #ffffff;\n  }';
+  assert.strictEqual(T.applyThemeTokens(lb), lb);
 });
 check('applyThemeTokens does not touch comment prose', () => {
   const css = '  /* the old #24292e grey */\n   * #ffffff in a wrapped comment line\n';
