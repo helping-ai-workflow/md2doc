@@ -23,6 +23,7 @@ metadata:
 - 分批（使用者核可）：批1 外觀與深色 v3.10.0 → 批2 打字與插入 v3.11.0 → 批3 程式碼圖表圖片手機 v3.12.0。三份規格＋總覽索引已寫在 docs/superpowers/specs/2026-10-04-editor-{overhaul-index,batch1-design,batch2-design,batch3-design}.md（gitignored、本機限定，永不 stage）。2026-10-04 狀態：三份皆待使用者審；審過批 1 才寫計畫。
 - 設計要點：批2 用「暫時空段落」模型（Markdown 不能有空區塊，空著離開不產生 op）；批3 圖表預覽新開 /api/preview（/api/render 有 trackDrawioRefs 副作用不可借用）。
 - 2026-10-04：使用者「OK 寫 plan」→ 批 1 計畫 docs/superpowers/plans/2026-10-04-editor-batch1.md（14 任務，gitignored）。寫計畫時查到並修回規格：showBanner 實為 47 處（非 62）；token 不可叫 ed-bar（editor-client.test 子字串禁用）→ ed-chrome；/api/ping 的 204 無主體有 25 處測試綁定 → mtime 改走 X-Md2doc-Mtime 標頭；.ed-conflict 保留為兩級共同 class（測試 139 處）。待使用者審計畫並選執行方式。
+- 2026-10-04 換機交接：原電腦送修，使用者要求把進度丟上 PR → draft PR #44（分支 feat/editor-batch1）：d9f318c Task 1 完成、d630b03 Task 2 WIP 未驗證、c9c6217 交接資料（specs/plan/SDD ledger/原型腳本/memory，force-add 進 docs/superpowers/，合併前必須移除）。repo 維持 public（使用者需要 Actions 分鐘數）。新機接續步驟見 docs/superpowers/handoff/HANDOFF.md。
 
 **Why:** 使用者要求每項逐一確認；設計選項必須考慮深淺兩種模式（v3.9.0 起閱讀頁已有深色）。
 **How to apply:** 之後每個 E 項的原型都要同時截淺色與深色；不要再只做淺色。
