@@ -3,6 +3,19 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.9.1 — 2026-10-04
+
+### Fixed — 調整欄寬不再讓閱讀位置跑掉
+
+- **拖側欄分隔線、雙擊重設寬度、收合／展開目錄，正在讀的段落都留在原位。** 閱讀位置錨定原本只聽
+  `window` 的 `resize`，而這三個動作只改 `--md2doc-sidebar-w`／`data-toc-collapsed`，視窗寬度沒動、
+  事件不會發——內文欄重排了，捲動位置卻沒校正，實測一次拖曳最多跑掉 6534px。改成在內文欄上掛
+  `ResizeObserver`（只看寬度，載入圖片造成的高度變化不觸發），欄寬一變就走同一套錨定。
+- 拖曳途中下一個 pointermove 會比上一步的延遲 capture 先到，capture 因而記下已重排的節點、之後的
+  restore 算出位移 0；欄寬與 observer 最後看到的不同時，現在不 capture。
+- `test/scroll-anchor.test.js` 新增五個情境（往寬拖、往窄拖、雙擊重設、目錄收合、展開），每個都先
+  斷言文件高度真的變了，避免寬度變了卻沒重排而白過。
+
 ## v3.9.0 — 2026-10-03
 
 ### Added — 深色模式
