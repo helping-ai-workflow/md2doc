@@ -13808,7 +13808,8 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(s3Url, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
-        const HL = 'rgba(59, 130, 246, 0.15)';
+        // v3.10.0 B 外觀: the selection tint is the --md-ed-sel role (was rgba(59, 130, 246, 0.15)).
+        const HL = 'rgba(9, 105, 218, 0.1)';
         const bgOf = (sel) => page.evaluate((s) =>
           getComputedStyle(document.querySelector(s)).backgroundColor, sel);
 

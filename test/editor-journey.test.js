@@ -6648,8 +6648,10 @@ async function main() {
         const bgi = getComputedStyle(bar).backgroundImage;
         out.push({
           attr: bar.getAttribute('data-ed-tb-overflow'),
-          left: bgi.indexOf('linear-gradient(to right, rgba(0, 0, 0, 0.55)') !== -1,
-          right: bgi.indexOf('linear-gradient(to left, rgba(0, 0, 0, 0.55)') !== -1,
+          // v3.10.0 B 外觀: the edge shade is the --md-ed-shadow role (light:
+          // rgba(31, 35, 40, 0.1); was a fixed rgba(0, 0, 0, 0.55) on the dark pill).
+          left: bgi.indexOf('linear-gradient(to right, rgba(31, 35, 40, 0.1)') !== -1,
+          right: bgi.indexOf('linear-gradient(to left, rgba(31, 35, 40, 0.1)') !== -1,
         });
       }
       bar.scrollLeft = 0;

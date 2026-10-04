@@ -71,6 +71,53 @@ check('theme: on a phone the toggle stays visible in edit mode', PHONE, async (p
   assert.ok(box && box.width > 0 && box.y + box.height <= 844, 'toggle on screen: ' + JSON.stringify(box));
 });
 
+check('chrome: light toolbar is paper white with no dark pill', DESKTOP, async (page) => {
+  const s = await page.evaluate(() => {
+    const bar = getComputedStyle(document.querySelector('.ed-toolbar'));
+    const btn = getComputedStyle(document.querySelector('.ed-toolbar-btn'));
+    return { bg: bar.backgroundColor, btnBorder: btn.borderTopWidth, btnBg: btn.backgroundColor };
+  });
+  assert.strictEqual(s.bg, 'rgb(255, 255, 255)');
+  assert.strictEqual(s.btnBorder, '0px');
+  assert.strictEqual(s.btnBg, 'rgba(0, 0, 0, 0)');
+});
+check('chrome: block hover draws no dashed outline', DESKTOP, async (page) => {
+  const p = page.locator('.ed-block[data-block-type="paragraph"]').first();
+  await p.hover(); await wait(200);
+  const o = await p.evaluate((e) => getComputedStyle(e).outlineStyle);
+  assert.notStrictEqual(o, 'dashed');
+});
+check('chrome: dark menus and selection toolbar are readable', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  const para = page.locator('.ed-block[data-block-type="paragraph"]').first();
+  await para.hover(); await wait(200);
+  await para.locator('.ed-handle').click(); await wait(300);
+  const menu = await page.evaluate(() => {
+    const m = document.querySelector('.ed-handle-menu');
+    const b = m.querySelector('.ed-handle-menu-btn');
+    return { bg: getComputedStyle(m).backgroundColor, fg: getComputedStyle(b).color };
+  });
+  assert.strictEqual(menu.bg, 'rgb(42, 42, 45)');
+  assert.ok(contrast(menu.fg, menu.bg) >= 4.5, 'menu text contrast ' + JSON.stringify(menu));
+  await page.keyboard.press('Escape');
+  // dblclick on the first word, not the element centre: the paragraph is a
+  // full-width block, so its centre is usually empty space that selects nothing.
+  const box = await para.locator('.ed-wys-armed').boundingBox();
+  await page.mouse.dblclick(box.x + 12, box.y + box.height / 2); await wait(400);
+  const tb = await page.evaluate(() => {
+    const t = document.querySelector('.ed-seltb');
+    return { bg: getComputedStyle(t).backgroundColor, fg: getComputedStyle(t.querySelector('.ed-seltb-btn')).color };
+  });
+  assert.strictEqual(tb.bg, 'rgb(42, 42, 45)');
+  assert.ok(contrast(tb.fg, tb.bg) >= 4.5, 'seltb contrast ' + JSON.stringify(tb));
+});
+check('chrome: focus ring and selection tint use the reader accent', DESKTOP, async (page) => {
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').first();
+  await ed.click(); await wait(200);
+  const ring = await ed.evaluate((e) => getComputedStyle(e).outlineColor);
+  assert.strictEqual(ring, 'rgb(9, 105, 218)');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
