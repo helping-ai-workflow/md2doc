@@ -161,6 +161,72 @@ async function drift(page, from, to) {
     }
     await wd.close();
 
+    // Column-width changes WITHOUT a window resize: dragging the sidebar
+    // splitter, collapsing the TOC and double-click-resetting the splitter all
+    // reflow the reading column while window.innerWidth stays put, so no
+    // 'resize' event ever fires. Each must still hold the reading position.
+    const col = await browser.newPage();
+    await col.setViewport({ width: 1440, height: 900 });
+    await col.goto('file://' + htmlPath, { waitUntil: 'load' });
+    async function holdAcross(label, act) {
+      await col.evaluate(() => window.scrollTo(0, Math.round(document.documentElement.scrollHeight * 0.55)));
+      await new Promise((r) => setTimeout(r, 250));
+      await col.evaluate(() => document.querySelectorAll('[data-probe]').forEach((n) => n.removeAttribute('data-probe')));
+      const w0 = await col.$eval('main.content', (c) => c.clientWidth);
+      const h0 = await col.evaluate(() => document.documentElement.scrollHeight);
+      const before = await col.evaluate(PROBE);
+      assert.ok(before, label + ': probe element found before');
+      await act();
+      await new Promise((r) => setTimeout(r, 400));
+      const w1 = await col.$eval('main.content', (c) => c.clientWidth);
+      const h1 = await col.evaluate(() => document.documentElement.scrollHeight);
+      // Precondition: a width change that does not change any paragraph's line
+      // count reflows nothing and would pass vacuously. Every paragraph in this
+      // fixture has the same length, so line counts only step at discrete
+      // widths -- require the document height to have actually moved.
+      assert.ok(Math.abs(h1 - h0) >= 200, label + ': column reflowed (width ' + w0 + ' -> ' + w1 + ', height ' + h0 + ' -> ' + h1 + ')');
+      const after = await col.evaluate(REMEASURE);
+      assert.ok(after, label + ': probe element still present');
+      const px = Math.round(after.top - before.top);
+      assert.ok(Math.abs(px) <= 4, label + ' keeps the reading position (drifted ' + px + 'px, scrollY ' + before.y + ' -> ' + after.y + ')');
+    }
+    async function splitterCentre() {
+      // The splitter runs the full document height, so its geometric centre is
+      // usually off-screen: press it at a visible y instead.
+      return col.$eval('.sidebar-splitter', (e) => { const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: 400 }; });
+    }
+    // Many small pointermoves, the way a real drag arrives: a per-step
+    // rounding error that re-anchors each frame would accumulate here.
+    await holdAcross('splitter drag wider', async () => {
+      const s = await splitterCentre();
+      await col.mouse.move(s.x, s.y);
+      await col.mouse.down();
+      await col.mouse.move(s.x + 260, s.y, { steps: 26 });
+      await col.mouse.up();
+    });
+    await holdAcross('splitter drag narrower', async () => {
+      const s = await splitterCentre();
+      await col.mouse.move(s.x, s.y);
+      await col.mouse.down();
+      await col.mouse.move(s.x - 200, s.y, { steps: 20 });
+      await col.mouse.up();
+    });
+    await holdAcross('splitter double-click reset', async () => {
+      const s = await splitterCentre();
+      await col.mouse.click(s.x, s.y, { clickCount: 2 });
+    });
+    // At 1440 the column only widens from 1060px on collapse, which crosses no
+    // line-count step for this fixture; at 1200 it starts narrower and does.
+    await col.setViewport({ width: 1200, height: 900 });
+    await holdAcross('TOC collapse', async () => {
+      await col.click('#toc-collapse-toggle');
+    });
+    await holdAcross('TOC expand', async () => {
+      await col.click('#toc-collapse-toggle');
+    });
+    await col.evaluate(() => { try { localStorage.clear(); } catch (e) { /* file:// */ } });
+    await col.close();
+
     console.log('md2doc scroll-anchor test passed');
   } finally {
     await browser.close();
