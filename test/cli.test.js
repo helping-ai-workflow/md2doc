@@ -384,7 +384,7 @@ console.log('Task 9 — inference guardrails OK');
     // Playwright browsers, so it runs through `npm run test:browser` and
     // .github/workflows/browser.yml. Each one must still be run by its named
     // script, so exempting a file never lets it go unrun.
-    const OUT_OF_BAND = { 'test/reader-click.test.js': 'test:browser' };
+    const OUT_OF_BAND = { 'test/reader-click.test.js': 'test:browser', 'test/editor-click.test.js': 'test:browser' };
     Object.keys(OUT_OF_BAND).forEach((file) => {
         const script = pkg.scripts[OUT_OF_BAND[file]];
         const parts = String(script || '').split('&&').map((x) => x.trim());

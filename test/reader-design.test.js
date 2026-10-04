@@ -638,10 +638,12 @@ check('theme: light rendering is identical with and without the theme post-pass'
   const diff = ca.map((v, i) => (v === cb[i] ? null : i + ': ' + cb[i] + '  ->  ' + v)).filter(Boolean);
   assert.deepStrictEqual(diff.slice(0, 5), [], diff.length + ' element(s) changed colour in light');
 });
-check('theme: edit mode output carries no theme at all', async () => {
+check('theme: edit mode output carries the theme (v3.10.0)', async () => {
   const src = path.join(tmpDir, 'edit-theme.md');
   const { html } = await renderMarkdown(THEME_MD.join('\n'), src, { editMode: true });
-  for (const s of ['md2doc-theme', 'var(--md-', '--md-bg']) assert.ok(!html.includes(s), 'edit HTML contains ' + s);
+  for (const s of ['md2doc-theme-toggle', '--md-bg', '--md-ed-chrome', 'md2doc-theme-data']) {
+    assert.ok(html.includes(s), 'edit HTML lacks ' + s);
+  }
 });
 check('theme: the early script runs before any stylesheet and only sets dark', async () => {
   const { html } = render(THEME_MD);
