@@ -6700,39 +6700,15 @@ async function main() {
   }
   console.log('journey: widening the window puts the scroll hint out — OK');
 
-  // 按鈕自己的字變寬也會生出新的捲動空間 —— H 鍵在段落上寫 H、在標題上寫 H1。
-  // 這一段既不捲也不 resize，游標從段落移到標題而已，所以只有
-  // updateToolbar() 收尾那一發重畫能把右側提示點回來。
-  {
-    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
-    await ctx.page.setViewport({ width: 420, height: 900 });
-    await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
-    await new Promise((r) => setTimeout(r, 200));
-    await ctx.page.evaluate(() => {
-      const bar = document.querySelector('.ed-toolbar');
-      bar.scrollLeft = bar.scrollWidth - bar.clientWidth;
-    });
-    await new Promise((r) => setTimeout(r, 150));
-    const snap = () => ctx.page.evaluate(() => {
-      const bar = document.querySelector('.ed-toolbar');
-      return { attr: bar.getAttribute('data-ed-tb-overflow'),
-               label: bar.querySelector('[data-ed-tb="headings"]').textContent,
-               room: bar.scrollWidth - bar.clientWidth - bar.scrollLeft };
-    });
-    const onPara = await snap();
-    await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
-    await new Promise((r) => setTimeout(r, 300));
-    const onHeading = await snap();
-    assert.deepStrictEqual(onPara, { attr: 'left', label: 'H', room: 0 },
-      '前提失敗：段落上捲到底時右側必須是熄的，got ' + JSON.stringify(onPara));
-    assert.deepStrictEqual(onHeading, { attr: 'left right', label: 'H1', room: 7 },
-      '標題把 H 撐成 H1、右邊多出捲動空間，提示就必須跟著亮回來，got ' +
-      JSON.stringify(onHeading));
-    assert.strictEqual(ctx.errs.length, 0,
-      '捲動提示 label：不得有 pageerror: ' + ctx.errs.join(' | '));
-    await ctx.page.close(); ctx.srv.close();
-  }
-  console.log('journey: a wider button label lights the scroll hint back up — OK');
+  // v3.10.0 B 外觀: the "a wider button label lights the scroll hint back up"
+  // scenario is retired. It needed the H key's label growing H -> H1 to open
+  // new scroll room with no scroll and no resize; the B toolbar buttons are
+  // min-width 32px with no padding, so H and H1 both render 32px wide and the
+  // growth never reaches the bar (measured even with an interim 0 8px padding:
+  // room 1, not past paintToolbarOverflow's sl < max - 1). Task 4 then drops
+  // the label write in updateToolbar()
+  // entirely (every button draws a fixed Lucide icon), so no state change can
+  // widen a button any more and the path this scenario guarded is gone.
 
   // ══ F12：工具列的鍵盤入口 ═══════════════════════════════════════
   //
