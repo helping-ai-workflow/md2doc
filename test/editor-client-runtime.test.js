@@ -7152,6 +7152,8 @@ async function gutterGeometry(page, sel) {
           const box = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right }; };
           return {
             table: box(tbl), grip: box(grip), handle: box(handle), insert: box(insert),
+            gutterGap: parseFloat(getComputedStyle(document.documentElement)
+              .getPropertyValue('--ed-gutter-gap')),
           };
         });
 
@@ -7162,11 +7164,18 @@ async function gutterGeometry(page, sel) {
           'the row grip must be centred on the table left border; centre=' +
           gripCentre + ' border=' + geom.table.l);
 
-        // 2. It shares NO pixel with the ⠿, and keeps the 4px gutter gap.
+        // 2. It shares NO pixel with the ⠿, and the clearance is exactly
+        //    --ed-gutter-gap. v3.10.0 B 外觀: the token went 4px -> 0px with the
+        //    24px buttons (the pair now abuts the grip), so the expected gap is
+        //    read from the token rather than written as 4; re-measured at
+        //    v3.10.0: gap=0, token=0.
         const gap = geom.grip.l - geom.handle.r;
-        assert.ok(gap >= 3.5,
-          'the ⠿ right edge and the grip left edge must keep the 4px gutter ' +
-          'gap; gap=' + gap);
+        assert.ok(Number.isFinite(geom.gutterGap), 'guard: --ed-gutter-gap is readable');
+        assert.ok(gap >= -0.5,
+          'the ⠿ and the row grip must not share a pixel; gap=' + gap);
+        assert.ok(Math.abs(gap - geom.gutterGap) <= 0.5,
+          'the ⠿ right edge and the grip left edge must sit --ed-gutter-gap (' +
+          geom.gutterGap + 'px) apart; gap=' + gap);
 
         // 3. The ＋ is still on screen.
         assert.ok(geom.insert.l > 0,
@@ -17349,8 +17358,9 @@ async function gutterGeometry(page, sel) {
         // repair created was never entered and the suite was green both
         // before and after the fix. -48 is the correct geometric bound: -50
         // is the zone's own edge (subpixel) and -51 is already outside it
-        // (.content's padding-left is 56px), where a walk would go red
-        // against CORRECT code. The loop steps by 4 from blockLeft+6, so
+        // (.content's padding-left was 56px), where a walk would go red
+        // against CORRECT code. (v3.10.0: 24px buttons with no gap put the
+        // zone's edge at -58 and the padding at 60px; -48 is still inside.) The loop steps by 4 from blockLeft+6, so
         // -48 itself is never a sampled offset — -46 is the deepest point
         // actually sampled, 4px inside the -50 edge and 6px inside the
         // repaired band's -40 boundary. -48 stays the right endpoint anyway,
