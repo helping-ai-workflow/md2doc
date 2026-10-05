@@ -23,6 +23,13 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
+Two helpers outside `lib/md2doc.js` since v3.10.0:
+
+| File | Purpose | Anchor |
+|---|---|---|
+| `lib/highlight.js` | Fenced-code syntax colour at render time (highlight.js core + the registered languages); `renderer.code` calls it | `function highlightCode(` |
+| `lib/editor/icons.js` | The Lucide icons the editor draws (UMD: `window.md2docIcons`, injected by `lib/editor/server.js`) | `function svg(name, size)` |
+
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
 `</style>`" and "to its `</script>`" are descriptions, not recipes — grep for
@@ -51,7 +58,7 @@ first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`; mostly regex assertions against rendered HTML. Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
@@ -121,10 +128,11 @@ nor themed, and the allow-list check fails if the two disagree.
 **Adding a new colour literal to reader CSS:** give it a role in `THEME_TOKENS`
 (light literal + dark value) or, if it must stay fixed, add it to `KEEP_LITERALS`
 with the reason. `test/reader-design.test.js` fails on any literal that is in
-neither — that is the allow-list doing its job. Rules whose selector text (before `{`) contains
-`.ed-`, `html.ed-` or `.lightbox` as a compound anywhere — after whitespace, `,`, `>`,
-`+`, `~` or `(` — are skipped on purpose (edit mode is light-only;
-the lightbox is already dark).
+neither — that is the allow-list doing its job. Rules whose selector contains `.lightbox`
+are skipped (already dark). Since v3.10.0 the editor is themed: its chrome uses `direct`
+roles (`ed-*`, `syn-*`) written as `var(--md-…)` in the CSS — a direct role's light value
+never claims a reader literal — and the waveform editor keeps literals mapped by `wave-*`
+roles. In `.ed-` rules every `rgba()` must be a role or listed in `KEEP_RGBA`.
 
 The browser side is `lib/theme/runtime.js`, plain JS inlined into the page — it is
 NOT inside the template literal, so backslashes and regexes are fine there, but it
@@ -337,6 +345,10 @@ both, this branch moved neither:
   literal: ``// refresh re-bakes a \`.drawio\`/\`.xml\` source that changed on disk``). In the lib of the commit that adds this sentence
   that line is 4760; the count is unchanged.
 - **348** — structural backticks, i.e. the ones that actually open or close a literal.
+
+**Measured at v3.10.0** (`9d19f50`, after `renderer.code` gained one template literal for
+syntax colour): **354** every backtick byte, **4** `` \` `` escapes (still all on one line, 4856
+in that lib), **350** structural. The 352 / 348 above stay as the v3.5.0–v3.9 record.
 
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader
