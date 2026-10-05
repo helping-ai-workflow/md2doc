@@ -981,6 +981,12 @@ check('desktop: task items have no bullet; a checked one is struck but its child
   assert.strictEqual(r.done, 'line-through'); assert.strictEqual(r.child, 'none');
 });
 
+check('desktop: an ordered task item keeps its number', DESKTOP, async (page) => {
+  await page.goto(fixtureUrl('otasks', ['# T', '', '1. a', '2. [x] b', '3. c', '']), { waitUntil: 'load' }); await wait(300);
+  const r = await page.evaluate(() => [...document.querySelectorAll('.content ol > li')].map((x) => getComputedStyle(x).listStyleType));
+  assert.deepStrictEqual(r, ['decimal', 'decimal', 'decimal']);
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

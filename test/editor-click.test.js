@@ -165,9 +165,10 @@ check('icons: gutter handle and plus are svg', DESKTOP, async (page) => {
 });
 
 check('gutter: handle and plus are 24px and centred on the first text line', DESKTOP, async (page) => {
-  const kinds = ['h2', 'paragraph', 'li'];
+  // spec §9.2-3: a paragraph, an H1, an H2 and a list item.
+  const kinds = ['h1', 'h2', 'paragraph', 'li'];
   for (const k of kinds) {
-    const sel = k === 'h2' ? '.ed-block[data-block-type="heading"]' : '.ed-block[data-block-type="' + k + '"]';
+    const sel = /^h\d$/.test(k) ? '.ed-block[data-block-type="heading"]:has(> ' + k + ')' : '.ed-block[data-block-type="' + k + '"]';
     const blk = page.locator(sel).first();
     await blk.scrollIntoViewIfNeeded(); await blk.hover(); await wait(200);
     const r = await blk.evaluate((b) => {
@@ -319,6 +320,52 @@ check('mermaid: stays dark after an unrelated block is edited', DESKTOP, async (
   await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' z');
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(1500);
   assert.strictEqual(await fill(), before, 'mermaid kept its dark fill after a re-render');
+});
+
+check('lists: clicking a checkbox checks the item and strikes its text', DESKTOP, async (page) => {
+  const item = page.locator('.ed-block[data-task="1"]', { hasText: 'open item' });
+  const before = await item.evaluate((b) => b.querySelector('.ed-li-check').getAttribute('data-checked'));
+  assert.strictEqual(before, '0', 'guard: the item starts unchecked');
+  await item.locator('.ed-li-check').click(); await wait(800);
+  const r = await page.locator('.ed-block[data-task="1"]', { hasText: 'open item' }).evaluate((b) => ({
+    checked: b.querySelector('.ed-li-check').getAttribute('data-checked'),
+    deco: getComputedStyle(b.querySelector('.ed-li-text')).textDecorationLine,
+  }));
+  assert.deepStrictEqual(r, { checked: '1', deco: 'line-through' });
+  // Its own document: FIXTURE's two lists are separated by a blank line, which
+  // marked reads as ONE loose list, and a loose run refuses structural edits
+  // (batch 2 opens them) — a checkbox click there answers with that refusal.
+}, { md: '# Tasks\n\n- [ ] open item\n- [ ] other item\n' });
+check('external edit: not while the waveform editor is open, then right after it closes', DESKTOP, async (page, boot) => {
+  const d = page.locator('.wavedrom-diagram').first();
+  await d.scrollIntoViewIfNeeded(); await wait(300);
+  const box = await d.boundingBox();
+  await page.mouse.move(box.x + 10, box.y + box.height / 2);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+  await wait(300);
+  await page.locator('.ed-wave-edit-btn').click(); await wait(800);
+  assert.ok(await page.$('.ed-wave-panel'), 'guard: the waveform editor is open');
+  fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8').replace('Second paragraph.', 'Second paragraph, edited outside.'));
+  await wait(12500);   // more than one 10s ping
+  const during = await page.evaluate(() => ({ open: !!document.querySelector('.ed-wave-panel'), seen: document.body.textContent.includes('edited outside') }));
+  assert.deepStrictEqual(during, { open: true, seen: false }, 'no reload while the waveform editor is open');
+  await page.locator('.ed-wave-close').click();
+  const t0 = Date.now();
+  await page.waitForFunction(() => document.body.textContent.includes('edited outside'), null, { timeout: 15000 });
+  assert.ok(Date.now() - t0 <= 13000, 'picked up by the first ping after closing');
+}, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
+
+check('external edit: typing in an open MD 原始碼 box counts as unsaved work', DESKTOP, async (page, boot) => {
+  const para = page.locator('.ed-block[data-block-type="paragraph"]').last();
+  await para.hover(); await wait(200);
+  await para.locator('.ed-handle').click(); await wait(300);
+  await page.evaluate(() => [...document.querySelectorAll('.ed-handle-menu-btn')].find((b) => b.textContent.trim() === 'MD 原始碼').click());
+  await page.waitForSelector('textarea.ed-raw');
+  await page.locator('textarea.ed-raw').press('End'); await page.keyboard.type(' RAWTYPED');
+  fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8') + '\nAppended outside.\n');
+  await page.waitForSelector('.ed-conflict[data-level="error"]', { timeout: 15000 });
+  const r = await page.evaluate(() => ({ ta: (document.querySelector('textarea.ed-raw') || {}).value || '' }));
+  assert.ok(r.ta.includes('RAWTYPED'), 'the typed text is still in the box, not reloaded away: ' + JSON.stringify(r));
 });
 
 (async () => {

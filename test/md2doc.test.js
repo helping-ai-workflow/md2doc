@@ -553,5 +553,9 @@ console.log('md2doc dot WASM test passed');
   assert.ok(/<li>plain<\/li>/.test(html), 'plain items untouched');
   const loose = await render('- [x] a\n\n- [ ] b\n');
   assert.ok(loose.includes('<span class="task-text">a</span></p>'), 'loose task item: ' + loose);
+  // A block child ends the item's own text too (review finding: the span used
+  // to run on into a nested blockquote and strike it).
+  const bq = await render('- [x] a\n  > q\n');
+  assert.ok(/<span class="task-text">a<\/span><blockquote>/.test(bq), 'span stops before a block child: ' + bq);
   console.log('md2doc task-item rendering test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

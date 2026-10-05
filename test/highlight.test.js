@@ -25,5 +25,8 @@ assert.ok(highlightCode('a < b && c', 'python').includes('&lt;'), 'escaped');
   assert.ok(!/<script[^>]*>[^<]*hljs/.test(html), 'no highlighting script in the page');
   const edit = (await renderMarkdown(md, src, { editMode: true })).html;
   assert.ok(edit.includes('hljs-keyword'), 'edit mode blocks coloured too');
+  // The info string lands in an attribute and must stay text there.
+  const evil = (await renderMarkdown('\x60\x60\x60x" onmouseover="alert(1)\ny\n\x60\x60\x60\n', src, {})).html;
+  assert.ok(!/<code[^>]*\sonmouseover="/.test(evil) && evil.includes('language-x&quot; onmouseover=&quot;alert(1)'), 'info string escaped in class');
   console.log('highlight: ok');
 })().catch((e) => { console.error(e); process.exit(1); });
