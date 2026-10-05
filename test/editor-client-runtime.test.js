@@ -7165,10 +7165,9 @@ async function gutterGeometry(page, sel) {
           gripCentre + ' border=' + geom.table.l);
 
         // 2. It shares NO pixel with the ⠿, and the clearance is exactly
-        //    --ed-gutter-gap. v3.10.0 B 外觀: the token went 4px -> 0px with the
-        //    24px buttons (the pair now abuts the grip), so the expected gap is
-        //    read from the token rather than written as 4; re-measured at
-        //    v3.10.0: gap=0, token=0.
+        //    --ed-gutter-gap. v3.10.0 B 外觀: the token went 4px -> 2px with the
+        //    24px buttons, so the expected gap is read from the token rather
+        //    than written as a number; re-measured at v3.10.0: gap=2, token=2.
         const gap = geom.grip.l - geom.handle.r;
         assert.ok(Number.isFinite(geom.gutterGap), 'guard: --ed-gutter-gap is readable');
         assert.ok(gap >= -0.5,
@@ -17359,8 +17358,9 @@ async function gutterGeometry(page, sel) {
         // before and after the fix. -48 is the correct geometric bound: -50
         // is the zone's own edge (subpixel) and -51 is already outside it
         // (.content's padding-left was 56px), where a walk would go red
-        // against CORRECT code. (v3.10.0: 24px buttons with no gap put the
-        // zone's edge at -58 and the padding at 60px; -48 is still inside.) The loop steps by 4 from blockLeft+6, so
+        // against CORRECT code. (v3.10.0: 24px buttons and a 2px gap put the
+        // zone's edge at -60 and the padding at 62px; -48 is still inside.)
+        // The loop steps by 4 from blockLeft+6, so
         // -48 itself is never a sampled offset — -46 is the deepest point
         // actually sampled, 4px inside the -50 edge and 6px inside the
         // repaired band's -40 boundary. -48 stays the right endpoint anyway,
