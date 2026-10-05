@@ -9481,7 +9481,14 @@ async function main() {
       // an open burst: the drawio refresh deliberately waits while the DOM
       // differs from the last render (domMatchesLastRender()), and this row
       // also pins that the re-bake still lands underneath the card.
-      await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+      // The TAIL paragraph: the first paragraph block is the one that holds
+      // the diagram image itself.
+      const tailSel = await ctx.page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
+          .find((x) => (x.textContent || '').indexOf('Tail para two.') !== -1);
+        return '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"] .ed-wys-armed';
+      });
+      await ctx.page.click(tailSel);
       await ctx.page.keyboard.press('End');
       await ctx.page.keyboard.type(' local');
       await ctx.page.click('.ed-block[data-block-type="heading"] .ed-wys-armed');
