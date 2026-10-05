@@ -902,7 +902,7 @@ async function main() {
         .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(b.active, 'BODY', 'B 態轉換後焦點不得掉到 BODY');
-    assert.ok(b.enabled > 4, 'B 態轉換後工具列不得塌成 4 顆，got ' + b.enabled);
+    assert.ok(b.enabled > 4, 'B 態轉換後工具列不得塌成沒有區塊時的 3 顆，got ' + b.enabled);
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: conversion without a selection restores the caret — OK');
   }
@@ -955,7 +955,7 @@ async function main() {
         .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
     }));
     assert.notStrictEqual(h.active, 'BODY', 'H▾ 改既有標題層級後焦點不得掉到 BODY');
-    assert.ok(h.enabled > 4, 'H▾ 改既有標題層級後工具列不得塌成 4 顆，got ' + h.enabled);
+    assert.ok(h.enabled > 4, 'H▾ 改既有標題層級後工具列不得塌成沒有區塊時的 3 顆，got ' + h.enabled);
     const disk = await saveAndRead(ctx);
     assert.notStrictEqual(disk.indexOf('#### Alpha heading'), -1,
       'H▾ 標題 4 必須真的改寫層級，got:\n' + disk);
@@ -1732,7 +1732,7 @@ async function main() {
   //             而是 activeElement 的 class 必須含 ed-wys-armed（段落／標題／
   //             清單項）、ed-wys-cell（表格儲存格）或 ed-raw（MD 原始碼
   //             textarea）三者之一；而且工具列沒有塌回「沒有瞄準任何 block」
-  //             的 4 顆。
+  //             的 3 顆（v3.10.0 之前是 4 顆，第 4 顆是已移除的原始碼模式鈕）。
   //   bar-only  目標沒有可聚焦的編輯面、也沒有 raw editor 可以退回去 —— BODY
   //             是合法答案，但工具列必須還瞄著那個 block。這裡不只數按鈕數，
   //             還真的再按一次「在下方插入區塊」並確認游標落在新段落上，
@@ -1744,7 +1744,7 @@ async function main() {
   //             接著開的 raw editor 把落點升級成 caret（見 TB_ROWS / GUTTER_ROWS
   //             各自的 review M4 註解）。目前唯一還在用這個答案的是 V2d
   //             的「🔗 in a table cell」。
-  //   BROKEN    今天實測就是壞的：把【當下的壞值】（BODY + 工具列 4 顆）釘住，
+  //   BROKEN    今天實測就是壞的：把【當下的壞值】（BODY + 工具列 3 顆）釘住，
   //             修好的那天這一列會變紅，逼人把它搬回 caret / bar-only。
   //             ⚠ v3.2.1 Task 11b 之後【沒有任何一列】用這個答案 —— Task 11
   //             量到的三個壞掉的入口（🔗 link / ⠿ 建立副本 / ⠿ 刪除）都修好
@@ -1910,8 +1910,9 @@ async function main() {
     // Nothing below this line may be reached by accident.
     if (answer !== 'BROKEN') throw new Error('unknown 必需答案: ' + JSON.stringify(answer));
     // BROKEN —— 釘住今天量到的壞值。
-    if (st.active !== 'BODY' || st.enabled !== 4) {
-      return shown + '（這一列被釘成「今天已知是壞的」：BODY + 工具列 4 顆。' +
+    // v3.10.0：沒有區塊時開著的是 undo / redo / outline 三顆（原始碼模式鈕移除前是 4）。
+    if (st.active !== 'BODY' || st.enabled !== 3) {
+      return shown + '（這一列被釘成「今天已知是壞的」：BODY + 工具列 3 顆。' +
         '現在量到的不是那個值 —— 如果是修好了，把它從 BROKEN 搬到 caret / bar-only；' +
         '如果是壞成別的樣子，那是新缺陷）';
     }
@@ -2344,7 +2345,8 @@ async function main() {
       // this count keeps meaning exactly what it always meant here
       // ("clicking a DISABLED button changes nothing"), independent of
       // whether typing 'XY' above also lit the save button itself.
-      assert.strictEqual(st.enabled, 15,
+      // v3.10.0：15 → 14，第 15 顆是已移除的原始碼模式鈕（preview）。
+      assert.strictEqual(st.enabled, 14,
         'V2c(dirty=' + dirty + '): 工具列不得改變 —— 沒有 commit、沒有 render，' +
         'got ' + JSON.stringify(st));
       assert.strictEqual(ctx.errs.length, 0, 'V2c: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
@@ -2565,8 +2567,9 @@ async function main() {
       // review I2: stays 15 — readLeverage()'s `enabled` deliberately
       // excludes `save` (see its own comment), so typing 'X' lighting it up
       // does not move this count.
-      assert.strictEqual(before.enabled, 15,
-        'V2g(' + name + ') 前提：打字後工具列應是 15 顆，got ' + JSON.stringify(before));
+      // v3.10.0：15 → 14，第 15 顆是已移除的原始碼模式鈕（preview）。
+      assert.strictEqual(before.enabled, 14,
+        'V2g(' + name + ') 前提：打字後工具列應是 14 顆，got ' + JSON.stringify(before));
       if (shift) await ctx.page.keyboard.down('Shift');
       await ctx.page.keyboard.press('Tab');
       if (shift) await ctx.page.keyboard.up('Shift');
@@ -2577,8 +2580,8 @@ async function main() {
         'V2g(' + name + ')：游標必須留在（或落到）' + wantTag + '，got ' + JSON.stringify(st));
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2g(' + name + ')：而且必須是一個真的編輯面，got ' + JSON.stringify(st));
-      assert.strictEqual(st.enabled, 15,
-        'V2g(' + name + ')：工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
+      assert.strictEqual(st.enabled, 14,
+        'V2g(' + name + ')：工具列不得塌成 3 顆 —— primed 變體上這一條是 C1，' +
         '游標還在但整條工具列已經被 applyPatch() 的 resetToolbarBlock() 收掉了，got ' +
         JSON.stringify(st));
       // 夾住的那兩列必須是真的 no-op：磁碟上的 # 數量不能變。
@@ -2725,7 +2728,7 @@ async function main() {
       assert.ok(/\bed-wys-armed\b/.test(st.activeClass),
         'V2h(' + name + ')：被拒絕之後游標必須留在原來那個編輯面上，got ' + JSON.stringify(st));
       assert.ok(st.enabled > 4,
-        'V2h(' + name + ')：被拒絕之後工具列不得塌成 4 顆 —— primed 變體上這一條是 C1，' +
+        'V2h(' + name + ')：被拒絕之後工具列不得塌成 3 顆 —— primed 變體上這一條是 C1，' +
         '游標還在（上一條是綠的）但整條工具列已經被 applyPatch() 的 ' +
         'resetToolbarBlock() 收掉了，got ' + JSON.stringify(st));
       // 拒絕 ＝ 檔案只該帶著剛剛那次打字，不該有任何結構改動。
