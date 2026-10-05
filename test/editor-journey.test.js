@@ -4551,8 +4551,9 @@ async function main() {
         'N4：被拒絕的手勢必須讓檔案逐位元組不變');
       // 血濺範圍：降級停在子樹，兄弟項照常可編輯。
       await ctx.page.evaluate(() => {
-        const d = document.querySelector('.ed-conflict button');
-        if (d) d.click();
+        // v3.10.0: a notice has no button; take any banner down the way its
+        // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+        if (window.__edTestDismissBanner) window.__edTestDismissBanner();
       });
       await new Promise((r) => setTimeout(r, 200));
       const gsel = await ctx.page.evaluate(() => {
@@ -8742,8 +8743,9 @@ async function main() {
       await ctx.page.keyboard.press('Escape');
       await new Promise((r) => setTimeout(r, 150));
       await ctx.page.evaluate(() => {
-        const b = document.querySelector('.ed-conflict button');
-        if (b) b.click();
+        // v3.10.0: a notice has no button; take any banner down the way its
+        // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+        if (window.__edTestDismissBanner) window.__edTestDismissBanner();
       });
       await new Promise((r) => setTimeout(r, 150));
       await enterKeynav();
@@ -8762,8 +8764,9 @@ async function main() {
     await ctx.page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 150));
     await ctx.page.evaluate(() => {
-      const b = document.querySelector('.ed-conflict button');
-      if (b) b.click();
+      // v3.10.0: a notice has no button; take any banner down the way its
+      // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+      if (window.__edTestDismissBanner) window.__edTestDismissBanner();
     });
     await new Promise((r) => setTimeout(r, 150));
     await enterKeynav();
@@ -8944,8 +8947,9 @@ async function main() {
     // Dismiss and switch to trigger 2: the real save-conflict banner
     // (showConflictBanner(), via a closed server under an in-flight commit).
     await ctx.page.evaluate(() => {
-      const b = document.querySelector('.ed-conflict button');
-      if (b) b.click();
+      // v3.10.0: a notice has no button; take any banner down the way its
+      // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+      if (window.__edTestDismissBanner) window.__edTestDismissBanner();
     });
     await new Promise((r) => setTimeout(r, 200));
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');

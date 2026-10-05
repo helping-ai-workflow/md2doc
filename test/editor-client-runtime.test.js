@@ -14149,8 +14149,9 @@ async function gutterGeometry(page, sel) {
           '刪除 on a block that owns no line must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
-          const d = document.querySelector('.ed-conflict button');
-          if (d) d.click();
+          // v3.10.0: a notice has no button; take any banner down the way its
+          // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+          if (window.__edTestDismissBanner) window.__edTestDismissBanner();
         });
         assert.strictEqual(
           await page.evaluate(() => document.querySelectorAll('.ed-block').length), blocksBefore,
@@ -14177,8 +14178,9 @@ async function gutterGeometry(page, sel) {
           'the refused body click must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
-          const d = document.querySelector('.ed-conflict button');
-          if (d) d.click();
+          // v3.10.0: a notice has no button; take any banner down the way its
+          // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+          if (window.__edTestDismissBanner) window.__edTestDismissBanner();
         });
         assert.strictEqual(await saveAndRead(page, zmdPath), zorig,
           'the file must still be byte-identical after the refused body click');
