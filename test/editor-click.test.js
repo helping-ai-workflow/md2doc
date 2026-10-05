@@ -307,6 +307,20 @@ check('lists: bullets change by depth, checked items are struck, children are no
   assert.strictEqual(Math.round(r.boxW), 16); assert.ok(r.boxBg.includes('svg'), 'check mark drawn');
 });
 
+check('mermaid: stays dark after an unrelated block is edited', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(1200);
+  const fill = () => page.evaluate(() => {
+    const r = document.querySelector('.mermaid svg .node rect, .mermaid svg .node polygon');
+    return r ? getComputedStyle(r).fill : null;
+  });
+  const before = await fill();
+  assert.ok(before && before !== 'rgb(234, 242, 253)', 'guard: mermaid drawn dark ' + before);
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').last();
+  await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' z');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(1500);
+  assert.strictEqual(await fill(), before, 'mermaid kept its dark fill after a re-render');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
