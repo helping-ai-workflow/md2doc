@@ -10,6 +10,7 @@ on:
       - "lib/**"
       - "vendor/**"
       - "test/reader-click.test.js"
+      - "test/editor-click.test.js"
       - "package.json"
       - ".github/workflows/browser.yml"
   pull_request:
@@ -17,6 +18,7 @@ on:
       - "lib/**"
       - "vendor/**"
       - "test/reader-click.test.js"
+      - "test/editor-click.test.js"
       - "package.json"
       - ".github/workflows/browser.yml"
 

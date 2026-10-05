@@ -1616,6 +1616,16 @@ async function gutterOpacityWalk(page, sel, xFrom, xTo, y, step) {
 }
 
 // Box of a block and of its two gutter buttons, in viewport coordinates.
+// v3.10.0: an error card carries a ✕ (.ed-msg-x); a notice has none and
+// fades by itself after 4 seconds. Rows that only need the banner gone before
+// their next gesture press the ✕ when there is one, and otherwise take the
+// notice down through the same dismissBannerEl() its own timer calls.
+async function dismissBanner(page) {
+  const x = await page.$('.ed-conflict .ed-msg-x');
+  if (x) { await x.click(); return; }
+  await page.evaluate(() => window.__edTestDismissBanner());
+}
+
 async function gutterGeometry(page, sel) {
   return page.evaluate((s) => {
     const b = document.querySelector(s);
@@ -1712,7 +1722,7 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'FIX 2: banner must explain the render failure, got: ' + bannerText);
 
       const contentHtml = await page.evaluate(() => document.querySelector('.content').innerHTML);
@@ -1732,7 +1742,7 @@ async function gutterGeometry(page, sel) {
         'FIX 2 (Phase-2): a failed commit must keep the editor open with the unsaved text, not discard it'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       assert.ok(
         await page.evaluate(() => !document.querySelector('.ed-conflict')),
         'FIX 2: the render-failure banner must be dismissible'
@@ -1801,9 +1811,9 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/save failed/i.test(bannerText),
+      assert.ok(/無法儲存/.test(bannerText),
         'FIX 3: banner must explain the save failure, got: ' + bannerText);
-      assert.ok(/not saved/i.test(bannerText),
+      assert.ok(/變更還在這個分頁裡/.test(bannerText),
         'FIX 3: banner must make clear changes were NOT saved, got: ' + bannerText);
 
       const titleAfterFailedSave = await page.title();
@@ -2012,7 +2022,7 @@ async function gutterGeometry(page, sel) {
       await page.click(selB);
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'switch-commit-failure: banner must explain the render failure, got: ' + bannerText);
 
       assert.strictEqual(
@@ -2029,7 +2039,7 @@ async function gutterGeometry(page, sel) {
         'switch-commit-failure: B must NOT open when A\'s auto-commit failed'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       // Cleanup: cancel A's still-open editor via its ✕ button (same reason
       // as above — focus is on the banner's Dismiss button, not the
       // textarea, so Esc's per-textarea handler wouldn't fire).
@@ -2731,7 +2741,7 @@ async function gutterGeometry(page, sel) {
         const before = fs.readFileSync(s3eMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
           const b = document.querySelector('.ed-conflict');
-          return b ? b.querySelector('span').textContent : null;
+          return b ? b.querySelector('.ed-msg-text').textContent : null;
         });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
@@ -2771,7 +2781,7 @@ async function gutterGeometry(page, sel) {
         // The banner is dismiss-only (it does not time out, and rerenderAll()
         // leaves it alone), so it is cleared by hand first or the next read
         // would just see this same one.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null,
           'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
@@ -2859,7 +2869,7 @@ async function gutterGeometry(page, sel) {
 
         const bannerNow = () => page.evaluate(() => {
           const b = document.querySelector('.ed-conflict');
-          return b ? b.querySelector('span').textContent : null;
+          return b ? b.querySelector('.ed-msg-text').textContent : null;
         });
         const before = fs.readFileSync(s3gMdPath, 'utf8');
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
@@ -2871,7 +2881,7 @@ async function gutterGeometry(page, sel) {
 
         // The control gesture. Dismiss first: the banner is dismiss-only, so
         // a stale one would answer the read below.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null,
           'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'healthy'), '文字');
@@ -3080,7 +3090,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }),
           null, 'a multi-line BYSTANDER must not veto the gesture (§4.1)');
         assert.strictEqual(await saveAndRead(page, s4gMdPath),
@@ -3431,7 +3441,7 @@ async function gutterGeometry(page, sel) {
         // the fix this refused with §4.1's banner every time.
         const bannerNow = () => page.evaluate(() => {
           const bn = document.querySelector('.ed-conflict');
-          return bn ? bn.querySelector('span').textContent : null;
+          return bn ? bn.querySelector('.ed-msg-text').textContent : null;
         });
         assert.strictEqual(await bannerNow(), null, 'the conversion itself must not banner');
         await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
@@ -3464,7 +3474,7 @@ async function gutterGeometry(page, sel) {
         const before = fs.readFileSync(s5hMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
           const bn = document.querySelector('.ed-conflict');
-          return bn ? bn.querySelector('span').textContent : null;
+          return bn ? bn.querySelector('.ed-msg-text').textContent : null;
         });
 
         // FIXTURE SANITY, asked of the serializer rather than assumed from
@@ -3491,7 +3501,7 @@ async function gutterGeometry(page, sel) {
         // is dismiss-only (it does not time out and rerenderAll() leaves it
         // alone — it lives on document.body, outside .content), so it has to
         // be cleared by hand or the next read would just see this same one.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null, 'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
         assert.strictEqual(await bannerNow(), null, 'a NON-merging target still works');
@@ -3793,7 +3803,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }),
           '此清單含不支援的格式，無法調整結構',
           '§4.1: a duplicate rewrites line COUNT, so a multi-line li refuses as a target');
@@ -3864,7 +3874,7 @@ async function gutterGeometry(page, sel) {
       }
       const bannerNow = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
 
       {
@@ -3939,7 +3949,7 @@ async function gutterGeometry(page, sel) {
     {
       const bannerNow = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Banners hang on document.body, never time out and survive
       // rerenderAll() — a leftover one makes the NEXT scenario's read a lie.
@@ -4337,7 +4347,7 @@ async function gutterGeometry(page, sel) {
 
       const bannerNow = (p) => p.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Banners hang on document.body, never time out and survive
       // rerenderAll() — a leftover one makes the NEXT cell's read a lie, and
@@ -5225,7 +5235,7 @@ async function gutterGeometry(page, sel) {
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
       assert.ok(bannerText.includes('不支援'), 'unsupported commit must show the fallback banner');
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.click(sel + ' .ed-cancel');
       await page.close();
       console.log('wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK');
@@ -5358,7 +5368,7 @@ async function gutterGeometry(page, sel) {
         'A\'s degraded raw-edit content must stay exactly as degraded — unaffected by C\'s independent burst'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.click(selA + ' .ed-cancel');
       await page.keyboard.press('Escape'); // end C's burst too
       await page.close();
@@ -5608,7 +5618,7 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'burst commit-failure: banner must explain the render failure, got: ' + bannerText);
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).textContent.includes('UNSAVED-BURST-TEXT'), editEl),
@@ -5621,7 +5631,7 @@ async function gutterGeometry(page, sel) {
         'burst commit-failure: the burst must stay open — focus returns to the surface after the failed blur-commit'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.keyboard.press('Escape'); // discard the still-open burst
       await page.close();
       console.log('burst commit-failure: stays open with typed text intact, banner dismissible — OK');
@@ -6958,7 +6968,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
           'refusing to delete the last body row must leave it in place');
-        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+        await dismissBanner(page);
 
         await page.close();
         console.log('table edge menus: row menu highlights/deletes; last-body-row refuses — OK');
@@ -7152,6 +7162,8 @@ async function gutterGeometry(page, sel) {
           const box = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, r: b.right }; };
           return {
             table: box(tbl), grip: box(grip), handle: box(handle), insert: box(insert),
+            gutterGap: parseFloat(getComputedStyle(document.documentElement)
+              .getPropertyValue('--ed-gutter-gap')),
           };
         });
 
@@ -7162,11 +7174,17 @@ async function gutterGeometry(page, sel) {
           'the row grip must be centred on the table left border; centre=' +
           gripCentre + ' border=' + geom.table.l);
 
-        // 2. It shares NO pixel with the ⠿, and keeps the 4px gutter gap.
+        // 2. It shares NO pixel with the ⠿, and the clearance is exactly
+        //    --ed-gutter-gap. v3.10.0 B 外觀: the token went 4px -> 2px with the
+        //    24px buttons, so the expected gap is read from the token rather
+        //    than written as a number; re-measured at v3.10.0: gap=2, token=2.
         const gap = geom.grip.l - geom.handle.r;
-        assert.ok(gap >= 3.5,
-          'the ⠿ right edge and the grip left edge must keep the 4px gutter ' +
-          'gap; gap=' + gap);
+        assert.ok(Number.isFinite(geom.gutterGap), 'guard: --ed-gutter-gap is readable');
+        assert.ok(gap >= -0.5,
+          'the ⠿ and the row grip must not share a pixel; gap=' + gap);
+        assert.ok(Math.abs(gap - geom.gutterGap) <= 0.5,
+          'the ⠿ right edge and the grip left edge must sit --ed-gutter-gap (' +
+          geom.gutterGap + 'px) apart; gap=' + gap);
 
         // 3. The ＋ is still on screen.
         assert.ok(geom.insert.l > 0,
@@ -12705,7 +12723,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the row insert'
         );
 
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f7MdPath, 'utf8');
@@ -12830,7 +12848,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the col insert'
         );
 
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f8MdPath, 'utf8');
@@ -13770,7 +13788,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
           'sanity: the refusal must leave the row in place');
-        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+        await dismissBanner(page);
 
         // Click a DIFFERENT block — this is what strips the highlight and,
         // pre-fix, turned the burst into a "changed" one.
@@ -13808,7 +13826,8 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(s3Url, { waitUntil: 'networkidle2' });
         const table0 = await tableBlockSel(page, 0);
-        const HL = 'rgba(59, 130, 246, 0.15)';
+        // v3.10.0 B 外觀: the selection tint is the --md-ed-sel role (was rgba(59, 130, 246, 0.15)).
+        const HL = 'rgba(9, 105, 218, 0.1)';
         const bgOf = (sel) => page.evaluate((s) =>
           getComputedStyle(document.querySelector(s)).backgroundColor, sel);
 
@@ -14126,12 +14145,13 @@ async function gutterGeometry(page, sel) {
         // Assert the text itself so a future shadowing cannot pass silently.
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。',
           '刪除 on a block that owns no line must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
-          const d = document.querySelector('.ed-conflict button');
-          if (d) d.click();
+          // v3.10.0: a notice has no button; take any banner down the way its
+          // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+          if (window.__edTestDismissBanner) window.__edTestDismissBanner();
         });
         assert.strictEqual(
           await page.evaluate(() => document.querySelectorAll('.ed-block').length), blocksBefore,
@@ -14154,12 +14174,13 @@ async function gutterGeometry(page, sel) {
           'the refused body click must REFUSE VISIBLY (banner), not fail silently');
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。',
           'the refused body click must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
-          const d = document.querySelector('.ed-conflict button');
-          if (d) d.click();
+          // v3.10.0: a notice has no button; take any banner down the way its
+          // own fade does (an error card's ✕ runs the same dismissBannerEl()).
+          if (window.__edTestDismissBanner) window.__edTestDismissBanner();
         });
         assert.strictEqual(await saveAndRead(page, zmdPath), zorig,
           'the file must still be byte-identical after the refused body click');
@@ -14942,7 +14963,7 @@ async function gutterGeometry(page, sel) {
           const el = document.querySelector('.ed-conflict');
           return el ? el.textContent : null;
         });
-        assert.ok(banner && banner.indexOf('無法在其後插入區塊') !== -1,
+        assert.ok(banner && banner.indexOf('無法在其後插入。') !== -1,
           'the refusal must reach the user as a banner, not be silent; got: ' +
           JSON.stringify(banner));
         const types = await page.evaluate(() =>
@@ -17273,7 +17294,7 @@ async function gutterGeometry(page, sel) {
           assert.strictEqual(t.after, t.before, 'a refused Tab must not move focus');
           assert.strictEqual(await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }), '此清單含不支援的格式，無法調整結構',
             'the run-wide refusal banner must still be the one shown');
           assert.strictEqual(await saveAndRead(page, tnrMdPath), before,
@@ -17308,12 +17329,16 @@ async function gutterGeometry(page, sel) {
         // the --ed-gutter-shift comment in lib/md2doc.js) — it now occupies
         // [contentLeft-50, contentLeft-14], one Y, no gap between them, 4px
         // of breathing room on the right.
-        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -32,
-          'spec §4.2 + v3.0.1 shift: ⠿ must start 32px left of the block, got ' + (geo.handle.l - geo.block.l));
-        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -14,
-          'spec §4.2 + v3.0.1 shift: ⠿ must end 14px left of the block, got ' + (geo.handle.r - geo.block.l));
-        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -50,
-          'spec §4.2 + v3.0.1 shift: ＋ must start 50px left of the block, got ' + (geo.insert.l - geo.block.l));
+        // v3.10.0 B 外觀, MIGRATED again: 24px buttons and --ed-gutter-gap 2px
+        // (see the --ed-gutter-shift comment in lib/md2doc.js for why not the
+        // spec's 0) put the pair at [contentLeft-60, contentLeft-12] —
+        // re-measured here at v3.10.0: ⠿ -36 / -12, ＋ -60.
+        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -36,
+          'v3.10.0: ⠿ must start 36px left of the block, got ' + (geo.handle.l - geo.block.l));
+        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -12,
+          'v3.10.0: ⠿ must end 12px left of the block, got ' + (geo.handle.r - geo.block.l));
+        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -60,
+          'v3.10.0: ＋ must start 60px left of the block, got ' + (geo.insert.l - geo.block.l));
         assert.strictEqual(Math.round(geo.insert.r - geo.handle.l), 0,
           'spec §4.2: ＋ and ⠿ sit flush, no gap');
         // A REAL pointer walk from inside the text out past the ＋. Jumping
@@ -17348,8 +17373,10 @@ async function gutterGeometry(page, sel) {
         // repair created was never entered and the suite was green both
         // before and after the fix. -48 is the correct geometric bound: -50
         // is the zone's own edge (subpixel) and -51 is already outside it
-        // (.content's padding-left is 56px), where a walk would go red
-        // against CORRECT code. The loop steps by 4 from blockLeft+6, so
+        // (.content's padding-left was 56px), where a walk would go red
+        // against CORRECT code. (v3.10.0: 24px buttons and a 2px gap put the
+        // zone's edge at -60 and the padding at 62px; -48 is still inside.)
+        // The loop steps by 4 from blockLeft+6, so
         // -48 itself is never a sampled offset — -46 is the deepest point
         // actually sampled, 4px inside the -50 edge and 6px inside the
         // repaired band's -40 boundary. -48 stays the right endpoint anyway,
@@ -17360,16 +17387,21 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(lowDead.length, 0,
           'the gutter must stay live along the BOTTOM of a row, below the 20px buttons — ' +
           JSON.stringify(lowDead));
-        // A heading is 61.5px tall; its vertical centre is 20px below the
-        // bottom of its own ⠿.
+        // A heading is 61.5px tall, much taller than its ⠿.
         const hSel = await blockSelByType(page, 'heading');
         const hGeo = await gutterGeometry(page, hSel);
         assert.ok(hGeo.block.h > hGeo.handle.h + 10,
           'fixture sanity: the heading must be taller than its 20px handle, got ' + hGeo.block.h);
-        const hMidY = hGeo.block.t + hGeo.block.h / 2;
-        assert.ok(hMidY > hGeo.handle.b,
-          'fixture sanity: the heading\'s vertical centre must sit BELOW its ⠿ — that is the ' +
-          'gap being closed');
+        // v3.10.0: the ⠿ is centred on the heading's first text line now
+        // (alignGutterTops), so the heading's vertical centre is ON the ⠿ and
+        // no longer the gap. The gap this walk exists for is any row of the
+        // block the button does not cover; walk the one farthest from it.
+        const hAbove = hGeo.handle.t - (hGeo.block.t + 2);
+        const hBelow = (hGeo.block.b - 2) - hGeo.handle.b;
+        const hMidY = hBelow >= hAbove ? hGeo.block.b - 2 : hGeo.block.t + 2;
+        assert.ok(hMidY > hGeo.handle.b || hMidY < hGeo.handle.t,
+          'fixture sanity: the walked row must lie OUTSIDE the ⠿\'s own band — that is the ' +
+          'gap being closed; row=' + hMidY + ' handle=[' + hGeo.handle.t + ', ' + hGeo.handle.b + ']');
         // v3.0.2: -48, same reasoning as the row-bottom walk above — the
         // loop's step of 4 from blockLeft+6 makes -46 the deepest point
         // actually sampled here too.
@@ -17377,7 +17409,7 @@ async function gutterGeometry(page, sel) {
           hGeo.block.l + 6, hGeo.block.l - 48, hMidY, 4);
         const hDead = hWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(hDead.length, 0,
-          'moving left from the MIDDLE of a heading must reveal and keep its ⠿ — ' +
+          'moving left along a heading row the ⠿ does not cover must reveal and keep it — ' +
           JSON.stringify(hDead));
         // Hit-test conflict 1 (spec §4.2): the gutter must still leave the
         // sidebar splitter's own drag zone alone.
@@ -17955,7 +17987,7 @@ async function gutterGeometry(page, sel) {
       const t6Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t6Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Every block's identity as the batch machinery sees it: the id the DOM
       // addresses it by, its type, its indent, and the source line range off
@@ -18337,7 +18369,7 @@ async function gutterGeometry(page, sel) {
       const t7Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t7Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const t7Blocks = (page) => page.evaluate(() =>
         window.__edTestBlocks().map((b, i) => {
@@ -19397,7 +19429,7 @@ async function gutterGeometry(page, sel) {
 
       const t8Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const t8Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t8Blocks = (page) => page.evaluate(() => window.__edTestBlocks());
@@ -19991,7 +20023,7 @@ async function gutterGeometry(page, sel) {
       const tXSel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const tXBanner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const tXBlocks = (page) => page.evaluate(() =>
         window.__edTestBlocks().map((b) => {
@@ -23634,7 +23666,8 @@ async function gutterGeometry(page, sel) {
     // survives a rerender at all, and that a button on it actually edits),
     // the list item's restored MD 原始碼 escape hatch, HTML paste, and
     // image drop. Everything else this version added is covered by the
-    // pure-function suites (toolbar-model / paste-md / asset / docsource).
+    // pure-function suites (toolbar-model / paste-md / asset; docsource until
+    // v3.10.0 removed it with source mode).
     // ════════════════════════════════════════════════════════════════════
 
     // ── v3.1.0 §4 (the blocker this case exists for): the toolbar is mounted
@@ -23645,11 +23678,12 @@ async function gutterGeometry(page, sel) {
     //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
     //    client.js's own comment on that seam), which is the only way to reach
     //    that swap without going through a commit first. The bar must still be
-    //    there, still be the ONLY one, still carry the whole 23-button roster
+    //    there, still be the ONLY one, still carry the whole 22-button roster
     //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
     //    the tracked block on every rerender, so what a post-rerender click
     //    meets is the model's documented no-block state (undo / redo /
-    //    outline / preview stay enabled, everything else greys out). ────────
+    //    outline stay enabled, everything else greys out; v3.10.0 removed
+    //    the source-mode button that used to be the fourth). ──────────────
     {
       const { srv, url } = await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
       try {
@@ -23665,8 +23699,8 @@ async function gutterGeometry(page, sel) {
             bars: document.querySelectorAll('.ed-toolbar').length,
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
           })),
-          { bars: 1, btns: 23 },
-          'sanity: exactly one toolbar carrying the 23-button roster before any rerender');
+          { bars: 1, btns: 22 },
+          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
 
         await page.evaluate(() => window.__edTestForceRerender());
         await settleEditor(page);
@@ -23677,14 +23711,14 @@ async function gutterGeometry(page, sel) {
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
             attached: document.body.contains(document.querySelector('.ed-toolbar')),
           })),
-          { bars: 1, btns: 23, attached: true },
-          'the toolbar must survive a full rerenderAll() — one bar, all 23 buttons, still on document.body');
+          { bars: 1, btns: 22, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
 
         assert.strictEqual(
           await page.evaluate(() =>
             document.querySelector('.ed-toolbar [data-ed-tb="outline"]').disabled),
           false,
-          'outline is one of the four buttons the model keeps live in the no-block state rerenderAll() leaves behind');
+          'outline is one of the three buttons the model keeps live in the no-block state rerenderAll() leaves behind');
         const outlineHiddenBefore = await page.evaluate(() =>
           document.body.hasAttribute('data-ed-outline-hidden'));
         await page.click('.ed-toolbar [data-ed-tb="outline"]');

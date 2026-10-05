@@ -16,7 +16,8 @@ function ok(cond, msg) {
 // --- BUTTONS roster ----------------------------------------------------------
 
 ok(Array.isArray(tm.BUTTONS), 'BUTTONS is an array');
-eq(tm.BUTTONS.length, 23, '23 顆按鈕齊全（v3.4.0 §3 多了 save）');
+eq(tm.BUTTONS.length, 22, '22 顆（v3.10.0 移除原始碼模式）');
+ok(!tm.BUTTONS.some((b) => b.id === 'preview'), 'the source-mode button is gone');
 
 const ids = tm.BUTTONS.map((b) => b.id);
 eq(new Set(ids).size, ids.length, 'button ids have no duplicates');
@@ -61,7 +62,7 @@ const expectedByGroup = {
   inline: ['bold', 'italic', 'strike', 'inline-code', 'link'],
   indent: ['outdent', 'indent'],
   insert: ['table', 'insert-before', 'insert-after', 'line', 'image'],
-  view: ['outline', 'preview'],
+  view: ['outline'],
 };
 for (const g of tm.GROUPS) {
   eq(tm.BUTTONS.filter((b) => b.group === g).map((b) => b.id), expectedByGroup[g],
@@ -69,7 +70,7 @@ for (const g of tm.GROUPS) {
 }
 
 // `export▾` was pulled out of scope (no browser-reachable export path).
-ok(!ids.includes('export'), 'export is not part of the 23 (moved out of scope)');
+ok(!ids.includes('export'), 'export is not part of the 22 (moved out of scope)');
 
 // --- deriveState: every button gets an entry --------------------------------
 
@@ -124,64 +125,11 @@ function baseCtx(overrides) {
   eq(state['ordered-list'].active, false, 'unordered list: ordered-list not active');
 }
 
-// --- mode: source ------------------------------------------------------------
-
+// v3.10.0: the whole-document source mode and its button are gone; the
+// state object has no entry for it either.
 {
-  const state = tm.deriveState(baseCtx({ mode: 'source', blockType: 'heading', headingDepth: 3 }));
-  for (const id of ids) {
-    if (id === 'preview') {
-      eq(state.preview.disabled, false,
-        'the mode button (id preview) stays enabled in source mode — it is the only way out');
-    } else if (id === 'outline') {
-      // T11-2: outline (☰) stays enabled in source mode too, because it is
-      // what opens the sidebar drawer (toggleOutlineSidebar() in
-      // lib/editor/client.js) — the fixed .sidebar-toggle button that used
-      // to reach the drawer another way is hidden in edit mode entirely.
-      eq(state.outline.disabled, false,
-        'outline (☰) stays enabled in source mode — T11-2\'s route to the sidebar drawer');
-    } else {
-      eq(state[id].disabled, true, id + ' is disabled in source mode');
-    }
-  }
-}
-
-// --- the mode button names the NEXT state (two-state edit <-> source) -------
-// v3.2.1 migration. This block used to pin `preview.active === (mode !==
-// 'edit')` across the three modes. That flag was the DEFECT: with three
-// states it made one aria-pressed=true stand for two different modes, and
-// the button's own text never moved at all. The guarantee those assertions
-// were reaching for — "the module, not the integration, answers which mode
-// is current for this button" — is now carried by the derived label/title,
-// which is a strictly stronger claim because it is what the user reads.
-// The module threads `mode` into ctx for exactly this, same as before.
-
-{
-  const state = tm.deriveState(baseCtx({ mode: 'edit' }));
-  eq(state.preview.label, 'M↓', "mode 'edit': the button points at source");
-  eq(state.preview.title, '切換到原始碼模式', "mode 'edit': title names the NEXT state");
-  eq(state.preview.active, false, "mode 'edit': the mode button is never 'pressed' any more");
-}
-{
-  const state = tm.deriveState(baseCtx({ mode: 'source' }));
-  eq(state.preview.label, '✎', "mode 'source': the button points back at edit");
-  eq(state.preview.title, '切換到編輯模式', "mode 'source': title names the NEXT state");
-  eq(state.preview.active, false, "mode 'source': the mode button is never 'pressed' any more");
-  // The pre-existing source-mode rule must not regress: the mode button
-  // stays enabled while every other button is blanket-disabled.
-  eq(state.preview.disabled, false, "mode 'source': the mode button still stays enabled");
-}
-// The two states must not read the same — a button whose text does not move
-// is precisely the interface that made a user think the editor was stuck.
-{
-  const e = tm.deriveState(baseCtx({ mode: 'edit' })).preview;
-  const src = tm.deriveState(baseCtx({ mode: 'source' })).preview;
-  ok(e.label !== src.label, 'the mode button label differs between the two modes');
-  ok(e.title !== src.title, 'the mode button title differs between the two modes');
-}
-// The removed state deserves an assertion as much as its presence did.
-{
-  const ds = require('../lib/editor/docsource.js');
-  eq(ds.MODES.indexOf('preview'), -1, "'preview' is not a mode any more");
+  const st = tm.deriveState(baseCtx({}));
+  ok(!('preview' in st), 'deriveState has no preview entry');
 }
 
 // --- fix round 1, Minor: bold/italic tooltips must not promise keybindings --
@@ -245,7 +193,7 @@ function baseCtx(overrides) {
 
 {
   const state = tm.deriveState(baseCtx({ blockType: null }));
-  const allowed = new Set(['undo', 'redo', 'outline', 'preview']);
+  const allowed = new Set(['undo', 'redo', 'outline']);
   for (const id of ids) {
     if (allowed.has(id)) {
       eq(state[id].disabled, false, id + ' stays enabled with no block');
@@ -335,10 +283,8 @@ function baseCtx(overrides) {
 // 測試照樣綠。改成掃一組 ctx 矩陣、把**實際**出現過 active: true 的 id 收集
 // 起來，再跟 BUTTONS 上的 toggle 旗標比對；兩邊一漂就紅。
 {
-  // v3.2.1: two modes, not three. The sweep must enumerate the REAL mode
-  // roster — pulling it from docsource.js rather than re-typing it is what
-  // keeps this from silently sweeping a state the app cannot enter.
-  const MODES = require('../lib/editor/docsource.js').MODES;
+  // v3.10.0: no mode dimension any more — the whole-document source mode
+  // (and docsource.js, which owned the mode roster) was removed.
   const BLOCK_TYPES = [null, undefined, 'paragraph', 'heading', 'blockquote',
     'code', 'li', 'table', 'image', 'html', 'hr'];
   // v3.3.0 (F2): `marks` is the dimension that makes the five inline buttons
@@ -361,7 +307,6 @@ function baseCtx(overrides) {
   const observedActive = new Set();
   let combos = 0;
   for (const marks of MARK_CTXS) {
-  for (const mode of MODES) {
     for (const blockType of BLOCK_TYPES) {
       for (const inList of [false, true]) {
         for (const listOrdered of [false, true]) {
@@ -370,7 +315,7 @@ function baseCtx(overrides) {
               for (const hasSelection of [false, true]) {
                 combos++;
                 const st = tm.deriveState({ blockType, indent, headingDepth,
-                  inList, listOrdered, hasSelection, mode, marks });
+                  inList, listOrdered, hasSelection, marks });
                 // 不在這裡逐鈕 ok()：那會把 checks 灌到十萬級而毫無資訊量，
                 // 型別本身上面「deriveState entry exists」那段已經釘住了。
                 for (const id of ids) if (st[id].active || st[id].mixed) observedActive.add(id);
@@ -380,7 +325,6 @@ function baseCtx(overrides) {
         }
       }
     }
-  }
   }
   ok(combos > 1000, 'the ctx sweep is actually broad (' + combos + ' combinations)');
   const declaredToggles = tm.BUTTONS.filter((b) => b.toggle).map((b) => b.id).sort();
@@ -417,34 +361,19 @@ function baseCtx(overrides) {
   const noBlock = tm.deriveState({ mode: 'edit', blockType: null, dirty: true });
   assert.strictEqual(noBlock.save.disabled, false,
     'save 不得因為沒有作用中 block 就變灰 —— 未存檔的變更跟游標在哪無關');
+}
 
-  // 原始碼模式：save 是第三個豁免
-  const src = tm.deriveState({ mode: 'source', blockType: null, dirty: true });
-  assert.strictEqual(src.save.disabled, false,
-    '原始碼模式照樣可以有未存檔變更，儲存按鈕必須留著');
-  const srcClean = tm.deriveState({ mode: 'source', blockType: null, dirty: false });
-  assert.strictEqual(srcClean.save.disabled, true,
-    '原始碼模式下沒有變更時仍然是灰的 —— 豁免的是「不被模式強制變灰」，' +
-    '不是「永遠亮著」');
-
-  // 其餘按鈕在原始碼模式下仍然全灰（不得被這次改動放寬）
+{
+  const icons = require('../lib/editor/icons.js');
   for (const b of tm.BUTTONS) {
-    if (b.id === 'preview' || b.id === 'outline' || b.id === 'save') continue;
-    assert.strictEqual(src[b.id].disabled, true,
-      '原始碼模式下 ' + b.id + ' 仍必須是灰的');
+    ok(icons.NAMES.includes(b.icon), 'toolbar icon is a known Lucide name: ' + b.id + ' -> ' + b.icon);
   }
-
-  // deriveState() 尾端的 source 模式覆寫從 `!==` 條件式改寫成逐一 `continue`
-  // 之後，preview / outline 必須仍然被明確設成 disabled === false —— 不是
-  // 「保留主迴圈算出來、剛好也是 false 的值」。這裡刻意換一個跟上面 `src`
-  // 不同的 ctx（有 block、非 null blockType），確保這條斷言測的是 source
-  // 覆寫本身的賦值，而不是「這顆按鈕從頭到尾沒有人動過」的巧合。
-  const srcWithBlock = tm.deriveState({ mode: 'source', blockType: 'heading',
-    headingDepth: 2, dirty: false });
-  assert.strictEqual(srcWithBlock.preview.disabled, false,
-    'source 模式下 preview 必須明確是 disabled === false（覆寫改寫後不得退化）');
-  assert.strictEqual(srcWithBlock.outline.disabled, false,
-    'source 模式下 outline 必須明確是 disabled === false（覆寫改寫後不得退化）');
+  const s = icons.svg('bold', 16);
+  ok(/^<svg class="ed-ico"/.test(s) && s.includes('aria-hidden="true"') && s.includes('width="16"'), 'svg() shape');
+  // No whitespace between tags: it would become text nodes inside every ⠿ / ＋
+  // and leak into the block's textContent (measured: 6 spaces per block).
+  ok(icons.NAMES.every((n) => !/>\s+</.test(icons.svg(n, 16))), 'icon markup has no whitespace text nodes');
+  ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
 }
 
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');

@@ -638,10 +638,12 @@ check('theme: light rendering is identical with and without the theme post-pass'
   const diff = ca.map((v, i) => (v === cb[i] ? null : i + ': ' + cb[i] + '  ->  ' + v)).filter(Boolean);
   assert.deepStrictEqual(diff.slice(0, 5), [], diff.length + ' element(s) changed colour in light');
 });
-check('theme: edit mode output carries no theme at all', async () => {
+check('theme: edit mode output carries the theme (v3.10.0)', async () => {
   const src = path.join(tmpDir, 'edit-theme.md');
   const { html } = await renderMarkdown(THEME_MD.join('\n'), src, { editMode: true });
-  for (const s of ['md2doc-theme', 'var(--md-', '--md-bg']) assert.ok(!html.includes(s), 'edit HTML contains ' + s);
+  for (const s of ['md2doc-theme-toggle', '--md-bg', '--md-ed-chrome', 'md2doc-theme-data']) {
+    assert.ok(html.includes(s), 'edit HTML lacks ' + s);
+  }
 });
 check('theme: the early script runs before any stylesheet and only sets dark', async () => {
   const { html } = render(THEME_MD);
@@ -654,23 +656,36 @@ check('theme: the early script runs before any stylesheet and only sets dark', a
   assert.deepStrictEqual(sets, ["setAttribute('data-md2doc-theme','dark')"], 'only ever sets the dark attribute');
   assert.ok(!/removeAttribute|classList|\.style/.test(script), 'does nothing else to the page');
 });
-check('theme: every reader colour literal is either a token or on the keep list', async () => {
-  const { html } = render(THEME_MD);
-  const s = html.indexOf('<style>', html.indexOf('</title>'));
+check('theme: every reader and editor colour literal is either a token or on the keep list', async () => {
   // The theme block (themeCss) is appended inside this <style>; its literals ARE the
-  // token table, so the scan stops at its marker comment and covers only the rewritten reader CSS.
-  const marker = html.indexOf('/* v3.9.0 dark mode', s);
-  assert.ok(marker > s, 'theme block marker present');
-  const css = html.slice(s, marker);
-  let sel = ''; const left = new Set();
-  for (const line of css.split('\n')) {
-    const b = line.indexOf('{'); if (b !== -1) sel = line.slice(0, b);
-    if (/^\s*(\/\*|\*)/.test(line) || /(^|[\s,>+~(])(html\.ed-|\.ed-|\.lightbox)/.test(sel)) continue;
-    for (const m of line.match(/#[0-9a-fA-F]{3,6}\b/g) || []) left.add(m.toLowerCase());
-  }
-  const extra = [...left].filter((l) => !THEME.KEEP_LITERALS.includes(l));
-  assert.deepStrictEqual(extra, [], 'add these to THEME_TOKENS or KEEP_LITERALS in lib/theme/tokens.js');
-  assert.ok(left.has('#000'), 'guard: the scan sees the TOC mask literal');
+  // token table, so the scan stops at its marker comment and covers only the rewritten CSS.
+  // v3.10.0: edit mode is themed too, so the edit page is scanned as well, and in
+  // .ed- rules every rgba() must be a var() role or on KEEP_RGBA.
+  const scan = (html) => {
+    const s = html.indexOf('<style>', html.indexOf('</title>'));
+    const marker = html.indexOf('/* v3.9.0 dark mode', s);
+    assert.ok(marker > s, 'theme block marker present');
+    const css = html.slice(s, marker);
+    let sel = ''; const hex = new Set(); const rgba = new Set();
+    for (const line of css.split('\n')) {
+      const b = line.indexOf('{'); if (b !== -1) sel = line.slice(0, b);
+      if (/^\s*(\/\*|\*)/.test(line) || /(^|[\s,>+~(])\.lightbox/.test(sel)) continue;
+      for (const m of line.match(/#[0-9a-fA-F]{3,6}\b/g) || []) hex.add(m.toLowerCase());
+      if (/(^|[\s,>+~(])(html\.ed-|\.ed-)/.test(sel)) {
+        for (const m of line.match(/rgba?\([^)]*\)/g) || []) rgba.add(m.replace(/\s+/g, ''));
+      }
+    }
+    return { hex, rgba };
+  };
+  const reader = scan(render(THEME_MD).html);
+  const src = path.join(tmpDir, 'edit-allow.md');
+  const edit = scan((await renderMarkdown(THEME_MD.join('\n'), src, { editMode: true })).html);
+  const extraHex = [...new Set([...reader.hex, ...edit.hex])].filter((l) => !THEME.KEEP_LITERALS.includes(l));
+  assert.deepStrictEqual(extraHex, [], 'add these to THEME_TOKENS or KEEP_LITERALS in lib/theme/tokens.js');
+  const extraRgba = [...edit.rgba].filter((l) => !THEME.KEEP_RGBA.includes(l));
+  assert.deepStrictEqual(extraRgba, [], 'editor rgba must be a var() role or listed in KEEP_RGBA');
+  assert.ok(reader.hex.has('#000'), 'guard: the scan sees the TOC mask literal');
+  assert.ok(edit.hex.size > 0 || edit.rgba.size > 0, 'guard: the edit scan saw editor CSS');
 });
 check('theme: print is light even with the dark attribute set', async () => {
   const { htmlPath } = render(THEME_MD);

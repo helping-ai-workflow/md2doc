@@ -84,10 +84,9 @@ const CENSUS = [
     why: '(b) lexical —— 在 mutateListRun() 的 callback 內；T20 測到 sup=[false,true]' },
   { fn: "handleLiKeydown() 空項目 Enter 的 outdent 分支（不是 removeListItem()）", needle: "textEl.innerHTML = '';", disposition: 'b+d',
     why: "(b) lexical —— 寫在同一個 mutateListRun(() => { ... }) callback 內（outdentListItem(li) 成功之後那一行），整段 suppressLiFocusout 為 true。同時也是 (d)：目標 textEl 就是聚焦的 .ed-li-text 本身，probe 驅動真實手勢（巢狀項目按到空、再按 Enter）實測【這一次賦值本身】零 focusout —— 該次按鍵唯一的 blur/focusout 出現在賦值【之後】，且緊接著一組 focus/focusin 把焦點放回同一顆 .ed-li-text。旁邊原始碼那句「an innerHTML assignment on the focused node triggers the very same Chromium unfocus quirk」與這次量測不符（對照組：直接對聚焦的 contenteditable 寫 innerHTML = '' 也沒有任何 focus 事件）；本列保留 (b) 不是因為那句話成立，而是因為這一行【確實】落在 span 內，而 span 對同 callback 內 outdentListItem() 的 DOM 搬移是必要的" },
-  { fn: 'leaveSourceMode()', needle: 'ta.remove();', disposition: 'none',
-    why: '`ta` 本身就是聚焦的 .ed-source；T33 測到 focusout，但 handler 沒有 `.ed-source` 分支可以匹配，目前無害純屬巧合' },
-  { fn: 'enterSourceMode()', needle: 'contentEl.hidden = true;', disposition: 'none',
-    why: 'T33：對聚焦的 .ed-wys-armed 造成的 focusout 沒有任何處置' },
+  // v3.10.0：leaveSourceMode()（ta.remove()，'none'，T33）與 enterSourceMode()
+  // （contentEl.hidden = true，'none'，T33）兩列已刪除 —— 整份原始碼模式連同
+  // 這兩個函式一併移除，站點不存在了，不是漏掉。
   // v3.2.1 Task 8：applyPreviewEditability() 那一列（disposition 'none'，T34）
   // 已刪除 —— preview 模式連同該函式一併移除，站點不存在了，不是漏掉。
   // ── (c) 先移開焦點 ─────────────────────────────────────────────────────
@@ -181,8 +180,10 @@ assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).lengt
   'innerHTML 寫入 / handleLiKeydown 空項目 Enter 的 textEl 清空 / extractRangeInto / ' +
   'dropEmptied / restoreDiscardedBurst 的非表格分支）');
 
-assert.strictEqual(CENSUS.length, 29,
-  'census: 站點總數應為 29。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
+// v3.10.0：29 → 27，刪掉的兩個站點是 leaveSourceMode() 的 ta.remove() 與
+// enterSourceMode() 的 contentEl.hidden = true（整份原始碼模式移除）。
+assert.strictEqual(CENSUS.length, 27,
+  'census: 站點總數應為 27。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
   'commit message 說明是哪一個站點 —— 這條斷言存在的唯一理由是讓「表悄悄變短或 ' +
   '變長」變成紅燈。');
 

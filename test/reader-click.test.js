@@ -968,6 +968,25 @@ check('desktop: with reduced motion the TOC centres its row at once', TRACK_VIEW
 }, { reducedMotion: 'reduce' });
 
 // ── Run ─────────────────────────────────────────────────────────────────────
+check('desktop: task items have no bullet; a checked one is struck but its child is not', DESKTOP, async (page) => {
+  await page.goto(fixtureUrl('tasks', ['# T', '', '- [x] done', '  - [ ] child', '- [ ] open', '']), { waitUntil: 'load' }); await wait(300);
+  const r = await page.evaluate(() => {
+    const li = [...document.querySelectorAll('.content li.task-item')];
+    return { n: li.length, styles: li.map((x) => getComputedStyle(x).listStyleType),
+      done: getComputedStyle(li[0].querySelector('.task-text')).textDecorationLine,
+      child: getComputedStyle(li[1].querySelector('.task-text')).textDecorationLine };
+  });
+  assert.strictEqual(r.n, 3);
+  assert.deepStrictEqual(r.styles, ['none', 'none', 'none']);
+  assert.strictEqual(r.done, 'line-through'); assert.strictEqual(r.child, 'none');
+});
+
+check('desktop: an ordered task item keeps its number', DESKTOP, async (page) => {
+  await page.goto(fixtureUrl('otasks', ['# T', '', '1. a', '2. [x] b', '3. c', '']), { waitUntil: 'load' }); await wait(300);
+  const r = await page.evaluate(() => [...document.querySelectorAll('.content ol > li')].map((x) => getComputedStyle(x).listStyleType));
+  assert.deepStrictEqual(r, ['decimal', 'decimal', 'decimal']);
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
