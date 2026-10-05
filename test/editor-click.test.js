@@ -234,38 +234,46 @@ check('messages: a failed save is a sticky error card under the toolbar', DESKTO
   assert.ok(err.text.includes('無法儲存'), err.text);
   assert.strictEqual(err.role, 'alert'); assert.ok(err.belowBar && err.centred, JSON.stringify(err));
   await wait(4500);
-  assert.ok(await page.$('.ed-conflict[data-level="error"]'), 'error card does not fade');
+  assert.ok(!!(await page.$('.ed-conflict[data-level="error"]')), 'error card does not fade');
 });
-const deleteTwoBodyRows = async (page) => {
+// Table edge menus, driven the way a person does: hover the row (or the
+// header cell), press the grip that appears, press the menu entry.
+const tableMenu = async (page, kind, target, label) => {
   await page.evaluate(() => document.querySelector('.ed-block[data-block-type="table"]').scrollIntoView({ block: 'center' }));
-  // two body rows: delete one (ok), then try to delete the last body row -> "無法刪除最後一列"
+  const box = await target.boundingBox();
+  await page.mouse.move(box.x + 12, box.y + box.height / 2); await wait(300);
+  const g = await page.evaluate((k) => { const e = document.querySelector('.ed-te-grip-' + k); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, kind);
+  assert.ok(g, 'guard: the ' + kind + ' grip is showing');
+  await page.mouse.click(g.x, g.y); await wait(300);
+  await page.locator('.ed-te-menu button', { hasText: label }).click(); await wait(800);
+};
+// v3.11: deleting the LAST column is the one table delete that still refuses
+// (a table needs a column; the table itself goes through ⠿ → 刪除), so it is
+// the notice these message checks raise.
+const refuseLastColumn = async (page) => {
   for (let i = 0; i < 2; i++) {
-    const tr = await page.locator('.ed-block[data-block-type="table"] tbody tr').first().boundingBox();
-    await page.mouse.move(tr.x + 20, tr.y + tr.height / 2); await wait(300);
-    const g = await page.evaluate(() => { const e = document.querySelector('.ed-te-grip-row'); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
-    await page.mouse.click(g.x, g.y); await wait(300);
-    await page.locator('.ed-te-menu button', { hasText: '刪除列' }).click(); await wait(800);
+    await tableMenu(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').first(), '刪除欄');
   }
 };
 check('messages: a notice sits at the bottom and goes away by itself', DESKTOP, async (page) => {
-  await deleteTwoBodyRows(page);
+  await refuseLastColumn(page);
   const n = await page.evaluate(() => {
     const e = document.querySelector('.ed-conflict[data-level="notice"]');
     if (!e) return null; const r = e.getBoundingClientRect();
     return { text: e.textContent, role: e.getAttribute('role'), bottom: innerHeight - r.bottom };
   });
-  assert.ok(n, 'notice present'); assert.ok(n.text.includes('無法刪除最後一列'), n.text);
+  assert.ok(n, 'notice present'); assert.ok(n.text.includes('最後一欄'), n.text);
   assert.strictEqual(n.role, 'status'); assert.ok(n.bottom >= 16 && n.bottom <= 48, 'near the bottom ' + JSON.stringify(n));
   await wait(4600);
-  assert.strictEqual(await page.$('.ed-conflict[data-level="notice"]'), null, 'notice faded');
+  assert.strictEqual(!!(await page.$('.ed-conflict[data-level="notice"]')), false, 'notice faded');
   await page.keyboard.press('Escape');
 });
 check('messages: after a notice fades, Esc still clears a block selection', DESKTOP, async (page) => {
-  await deleteTwoBodyRows(page);
-  assert.ok(await page.$('.ed-conflict[data-level="notice"]'), 'guard: the refusal notice appeared');
+  await refuseLastColumn(page);
+  assert.ok(!!(await page.$('.ed-conflict[data-level="notice"]')), 'guard: the refusal notice appeared');
   await page.keyboard.press('Escape'); await wait(200);   // closes the table menu if still open
   await wait(4600);
-  assert.strictEqual(await page.$('.ed-conflict'), null, 'notice gone');
+  assert.strictEqual(!!(await page.$('.ed-conflict')), false, 'notice gone');
   const paras = page.locator('.ed-block[data-block-type="paragraph"]');
   await paras.nth(0).click({ modifiers: ['Shift'] }); await paras.nth(1).click({ modifiers: ['Shift'] }); await wait(300);
   const before = await page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
@@ -344,7 +352,7 @@ check('external edit: not while the waveform editor is open, then right after it
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
   await wait(300);
   await page.locator('.ed-wave-edit-btn').click(); await wait(800);
-  assert.ok(await page.$('.ed-wave-panel'), 'guard: the waveform editor is open');
+  assert.ok(!!(await page.$('.ed-wave-panel')), 'guard: the waveform editor is open');
   fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8').replace('Second paragraph.', 'Second paragraph, edited outside.'));
   await wait(12500);   // more than one 10s ping
   const during = await page.evaluate(() => ({ open: !!document.querySelector('.ed-wave-panel'), seen: document.body.textContent.includes('edited outside') }));
@@ -384,6 +392,280 @@ check('messages: a long error card uses the full 760px before it wraps', { width
   assert.strictEqual(r.w, 760, 'card width ' + JSON.stringify(r));
   assert.ok(Math.abs(r.mid - 400) <= 2, 'card centred ' + JSON.stringify(r));
 });
+
+const saveAndRead = async (page, boot) => { await page.keyboard.press('Control+s'); await wait(900); return fs.readFileSync(boot.mdPath, 'utf8'); };
+check('tables: deleting every body row leaves a header-only table', DESKTOP, async (page, boot) => {
+  for (let i = 0; i < 2; i++) await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] tbody tr').first(), '刪除列');
+  const r = await page.evaluate(() => ({ rows: document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length, notice: !!document.querySelector('.ed-conflict') }));
+  assert.deepStrictEqual(r, { rows: 0, notice: false });
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(500);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *Signal *\| *Width *\|\n\|[-: |]+\|\n\n/.test(disk) && disk.indexOf('clk_tx') === -1, 'header-only table on disk: ' + disk);
+});
+check('tables: deleting the header row promotes the first body row', DESKTOP, async (page, boot) => {
+  await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] thead tr'), '刪除列');
+  const r = await page.evaluate(() => ({ head: [...document.querySelectorAll('.ed-block[data-block-type="table"] thead th')].map((c) => c.textContent.trim()), rows: document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length, notice: !!document.querySelector('.ed-conflict') }));
+  assert.deepStrictEqual(r, { head: ['clk_tx', '1'], rows: 1, notice: false });
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(500);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *`clk_tx` *\| *1 *\|\n\|[-: |]+\|\n\| *`rst_n` *\| *1 *\|/.test(disk) && disk.indexOf('Signal') === -1, 'promoted header on disk: ' + disk);
+});
+check('tables: deleting the header of a header-only table removes the table', DESKTOP, async (page, boot) => {
+  await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] thead tr'), '刪除列');
+  await wait(500);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-block[data-block-type="table"]').length), 0, 'table gone');
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '# T\n\nBefore.\n\nAfter.\n');
+}, { md: '# T\n\nBefore.\n\n| a | b |\n|---|---|\n\nAfter.\n' });
+check('tables: the last column still refuses, and says how to remove the table', DESKTOP, async (page) => {
+  await tableMenu(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').first(), '刪除欄');
+  const t = await page.evaluate(() => (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || '');
+  assert.ok(t.includes('最後一欄') && t.includes('⠿'), t);
+}, { md: '# T\n\n| a |\n|---|\n| 1 |\n' });
+
+// ⠿ menu, the way a person drives it. `path` is the menu entry, or
+// ['轉換成', '<target>'] for the convert submenu.
+const blockByText = (page, text) => page.evaluate((t) => {
+  const b = [...document.querySelectorAll('.ed-block')].find((x) => (x.textContent || '').includes(t));
+  return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+}, text);
+const gutterMenu = async (page, sel, path) => {
+  await page.hover(sel); await wait(150);
+  await page.click(sel + ' > .ed-handle'); await wait(300);
+  const steps = Array.isArray(path) ? path : [path];
+  for (const label of steps) {
+    await page.evaluate((l) => [...document.querySelectorAll('.ed-handle-menu-btn')].find((b) => b.textContent.trim() === l || b.textContent.trim().startsWith(l + ' ')).click(), label);
+    await wait(500);
+  }
+};
+const noticeText = (page) => page.evaluate(() => (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null);
+const WRAP_MD = '# D\n\n- alpha is a long item\n  that wraps onto a second line\n- bravo\n';
+check('wrapped items: ⠿ 刪除 removes a hard-wrapped item', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: ⠿ 建立副本 copies a hard-wrapped item byte for byte', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), '建立副本');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot),
+    '# D\n\n- alpha is a long item\n  that wraps onto a second line\n- alpha is a long item\n  that wraps onto a second line\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: 轉換成 文字 keeps both lines', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '文字']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nalpha is a long item\nthat wraps onto a second line\n\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: 轉換成 編號列表 re-indents the continuation', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '編號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. alpha is a long item\n   that wraps onto a second line\n- bravo\n');
+}, { md: WRAP_MD });
+
+// Shift-click two blocks: everything between them becomes the block selection.
+const selectBlocks = async (page, fromText, toText) => {
+  for (const t of [fromText, toText]) {
+    const sel = await blockByText(page, t);
+    const r = await page.evaluate((q) => { const e = document.querySelector(q); e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.left + Math.min(40, b.width / 2), y: b.top + b.height / 2 }; }, sel);
+    await page.keyboard.down('Shift'); await page.mouse.click(r.x, r.y); await page.keyboard.up('Shift');
+    await wait(200);
+  }
+  return page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
+};
+const MIX_MD = '# D\n\nIntro.\n\n- alpha\n- bravo\n- charlie\n\nOutro.\n';
+check('mixed delete: a paragraph plus the top of a list', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed delete: the bottom of a list plus a paragraph', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'bravo', 'Outro'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Outro'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nIntro.\n\n- alpha\n');
+}, { md: MIX_MD });
+check('mixed delete: across two lists, the survivors join', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Mid'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- b2\n');
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n', 'one undo step restores it all');
+}, { md: '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n' });
+check('mixed delete: items of two adjacent lists', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 2, 'guard: two items selected');
+  await gutterMenu(page, await blockByText(page, 'a2'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n1. b2\n');
+}, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
+
+check('mixed duplicate: a paragraph plus the top of a list', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), '建立副本');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot),
+    '# D\n\nIntro.\n\n- alpha\n- bravo\n\nIntro.\n\n- alpha\n- bravo\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed duplicate: the bottom of a list plus a paragraph', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'bravo', 'Outro'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Outro'), '建立副本');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot),
+    '# D\n\nIntro.\n\n- alpha\n- bravo\n- charlie\n\nOutro.\n\n- bravo\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed duplicate: items of two adjacent lists', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 2, 'guard: two items selected');
+  await gutterMenu(page, await blockByText(page, 'a2'), '建立副本');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n1. b1\n- a2\n1. b1\n2. b2\n');
+}, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
+
+check('mixed convert: a paragraph plus list items to 文字', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '文字']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nIntro.\n\nalpha\n\nbravo\n\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed convert: a paragraph plus list items to 編號列表', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '編號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. Intro.\n2. alpha\n3. bravo\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed convert: a table in the selection is skipped, the rest converts', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'alpha', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '引用']);
+  const n = await noticeText(page);
+  assert.ok(n && n.includes('略過') && n.includes('表格'), 'a notice says the table was skipped: ' + n);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> alpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n> bravo\n');
+}, { md: '# D\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nbravo\n' });
+check('mixed convert: items of two adjacent lists', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 2, 'guard: two items selected');
+  await gutterMenu(page, await blockByText(page, 'a2'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n- b1\n1. b2\n');
+}, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
+
+check('mixed convert: nested items keep their nesting in a list target', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'a1'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- Intro.\n- a\n  - a1\n- b\n');
+}, { md: '# D\n\nIntro.\n\n- a\n  - a1\n- b\n' });
+
+check('mixed Tab: list items indent and the heading goes one level deeper, one undo step', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'Sec'), 2, 'guard: two blocks selected');
+  await page.keyboard.press('Tab'); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n\n### Sec\n');
+  await page.keyboard.press('Escape'); await wait(200);
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n\n## Sec\n', 'one undo step');
+}, { md: '# D\n\n- a\n- b\n\n## Sec\n' });
+check('mixed Tab: items of two adjacent lists indent together', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two items selected');
+  await page.keyboard.press('Tab'); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  // c's `*` comes out as `-`: its indent changed, so it is re-serialized
+  // rather than replayed, and both items are now one nested bullet list.
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n  - c\n');
+}, { md: '# D\n\n- a\n- b\n* c\n' });
+
+// Press a block's ⠿ and drop it before the block holding `destText`, or
+// below the last block when `destText` is null.
+const dragBlock = async (page, srcText, destText) => {
+  const src = await blockByText(page, srcText);
+  await page.hover(src); await wait(150);
+  const h = await page.evaluate((q) => { const b = document.querySelector(q + ' > .ed-handle').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; }, src);
+  let y;
+  if (destText === null) {
+    y = await page.evaluate(() => { const all = document.querySelectorAll('.content .ed-block'); return all[all.length - 1].getBoundingClientRect().bottom - 2; });
+  } else {
+    const dst = await blockByText(page, destText);
+    y = await page.evaluate((q) => document.querySelector(q).getBoundingClientRect().top + 3, dst);
+  }
+  await page.mouse.move(h.x, h.y); await page.mouse.down();
+  await page.mouse.move(h.x, (h.y + y) / 2, { steps: 6 });
+  await page.mouse.move(h.x, y, { steps: 6 }); await wait(150);
+  await page.mouse.up(); await wait(700);
+};
+check('drag: a paragraph dropped into the middle of a list splits it', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'Para', 'b');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n\nPara.\n\n- b\n- c\n');
+}, { md: '# D\n\nPara.\n\n- a\n- b\n- c\n' });
+check('drag: a list item dragged out of its list', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- b\n\nEnd.\n\n- a\n');
+}, { md: '# D\n\n- a\n- b\n\nEnd.\n' });
+check('drag: moving the paragraph between two lists joins them', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'Mid', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n\nEnd.\n\nMid.\n');
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n\nMid.\n\n- b\n\nEnd.\n', 'one undo step');
+}, { md: '# D\n\n- a\n\nMid.\n\n- b\n\nEnd.\n' });
+check('drag: a list item dropped into another list joins it', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a1', 'b2');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a2\n\nMid.\n\n- b1\n- a1\n- b2\n');
+}, { md: '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n' });
+check('drag: a paragraph plus a list item move together', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Para', 'alpha'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'Para', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- bravo\n\nEnd.\n\nPara.\n\n- alpha\n');
+}, { md: '# D\n\nPara.\n\n- alpha\n- bravo\n\nEnd.\n' });
+check('drag: a parent item takes its children along', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'p', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- q\n\nEnd.\n\n- p\n  - c\n');
+}, { md: '# D\n\n- p\n  - c\n- q\n\nEnd.\n' });
+
+// A loose list: a blank line between every item.
+const LOOSE_MD = '# D\n\n- alpha\n\n- bravo\n\n- charlie\n';
+const liText = (page, t) => page.locator('.ed-block[data-block-type="li"]', { hasText: t }).locator('.ed-li-text');
+check('loose lists: an item is typed into in place, the blank lines stay', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  // A boolean, never the handle itself: a failing assert inspects `actual`,
+  // and inspecting a Playwright ElementHandle walked its whole object graph
+  // until node ran the machine out of memory (measured: 20 GB, global OOM).
+  assert.strictEqual(!!(await page.$('textarea.ed-raw')), false, 'no source box');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravoX\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: a checkbox toggles', DESKTOP, async (page, boot) => {
+  await page.locator('.ed-block[data-task="1"]', { hasText: 'bravo' }).locator('.ed-li-check').click(); await wait(800);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- [ ] alpha\n\n- [x] bravo\n\n- [ ] charlie\n');
+}, { md: '# D\n\n- [ ] alpha\n\n- [ ] bravo\n\n- [ ] charlie\n' });
+check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'bravo'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: Enter starts a new item that keeps the spacing', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  // Wait for the caret to land in the new, empty item. Keys typed while
+  // Enter's commit re-renders are lost — on a tight list too (measured), a
+  // pre-existing race this check is not about.
+  await page.waitForFunction(() => { const li = document.activeElement && document.activeElement.closest('.ed-block[data-block-type="li"]'); return !!li && li.textContent.trim() === ''; }, null, { timeout: 3000 });
+  await page.keyboard.type('new'); await wait(200);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
+  await liText(page, 'charlie').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Tab'); await wait(400);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n  - charlie\n');
+}, { md: LOOSE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

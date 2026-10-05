@@ -159,14 +159,19 @@ eq(cm.stripMarker(['```', 'a'], 'code').content, ['a'],
 eq(cm.stripMarker(['```js', 'a', '````'], 'code').content, ['a'],
   'a longer run of the same char DOES close');
 
-// --- finding 2: a multi-line li refuses instead of guessing -----------------
-// The li branch flattened continuation lines with replace(/^\s+/, ''), which
-// is exactly the guess the code branch refuses to make for indented code, and
-// it destroys any structure the continuation carried.
-eq(cm.stripMarker(['- a', '  cont'], 'li').ok, false, 'a multi-line li is not strippable');
-eq(cm.stripMarker(['- a', '      indented cont'], 'li').ok, false,
-  'flattening the continuation destroyed structure; refuse, like indented code does');
-eq(cm.stripMarker(['- a', '  cont'], 'li').content, [], 'a refusal carries no content');
+// --- finding 2, revised in v3.11: a multi-line li strips its CONTENT column -----
+// Finding 2 refused a multi-line li because the old code flattened every
+// continuation with replace(/^\s+/, ''), destroying structure. v3.11 converts
+// it without that guess: each continuation loses exactly the marker's width
+// (deeper indentation keeps its relative columns), and only a lazy line
+// indented LESS than that loses all of its leading whitespace.
+eq(cm.stripMarker(['- a', '  cont'], 'li'), { content: ['a', 'cont'], ok: true },
+  'a hard-wrapped li strips the content column off its continuation');
+eq(cm.stripMarker(['- a', '      indented cont'], 'li').content, ['a', '    indented cont'],
+  'only the content column goes; the extra indentation stays relative, not flattened');
+eq(cm.stripMarker(['1. a', 'lazy cont'], 'li').content, ['a', 'lazy cont'],
+  'a lazy continuation (less indent than the content column) loses its leading space');
+eq(cm.stripMarker(['- [x] a', '  cont'], 'li').content, ['a', 'cont'], 'the checkbox comes off the first line only');
 eq(cm.stripMarker(['- a'], 'li').ok, true, 'a single-line li is unaffected');
 
 // --- finding 4: an empty ATX heading is a heading --------------------------

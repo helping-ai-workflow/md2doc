@@ -2632,10 +2632,12 @@ async function main() {
   // 修之後 activeElement 回到那個 .ed-li-text、工具列 16 顆，橫幅照舊。
   //
   // 三個 wrapper 各測一條：轉換成（convertBlockViaMenu）、建立副本
-  // （duplicateBlockViaMenu）、刪除（deleteBlockViaGutter）。硬換行的 li 是
-  // §4.1 對這三者共同的拒絕條件，所以同一個 fixture 能同時打到三條路。
+  // （duplicateBlockViaMenu）、刪除（deleteBlockViaGutter）。v3.11 起硬換行的
+  // li 這三者都照做了，所以拒絕條件改成 §4.3 的整串閘門：bravo 有第二個段落
+  // （仍不支援），alpha 本身是單一 <p> 的鬆散項目、可就地編輯 —— 對 alpha 的
+  // 這三個操作都會被拒絕，同一個 fixture 仍能同時打到三條路。
   {
-    const HARD_WRAPPED = '# H\n\n- alpha item that is\n  hard wrapped here\n- bravo item\n\nTail para two.\n';
+    const HARD_WRAPPED = '# H\n\n- alpha item\n- bravo item\n\n  second para\n\nTail para two.\n';
     const ROWS = [
       ['轉換成 → 引用', '引用', true],
       ['建立副本',      '建立副本', false],
@@ -2754,7 +2756,7 @@ async function main() {
       const disk = await saveAndRead(ctx);
       // 拒絕之後磁碟與原檔的唯一差別，必須是剛剛打進去的那些 X（primed 時再加上
       // 那次無關提交寫的 ' PRIMED'）—— 兩者都拿掉之後必須逐位元組相同。這比
-      // 「行數沒變」強：它連硬換行的第二行、清單標記、項目數都一起釘住了。
+      // 「行數沒變」強：它連 bravo 的第二個段落、清單標記、項目數都一起釘住了。
       assert.strictEqual(disk.replace(/X/g, '').replace(/ PRIMED/g, ''), before0,
         'V2h(' + name + ')：拒絕不得改動結構，去掉剛打的 X / PRIMED 之後必須與原檔相同，got:\n' + disk);
       assert.strictEqual(ctx.errs.length, 0,
@@ -2774,8 +2776,8 @@ async function main() {
   // block —— 實測在那個形狀上把那兩行換成 reaimToolbarBlockAtLine(anchorLine)，
   // V2h 讀的那些量（activeElement 的 class、工具列 enabled、橫幅）逐項不變。
   //
-  // 這一列把兩者分開：髒 burst 留在【段落 A】，⠿ 按在另一個 hard-wrapped 的
-  // li B 上（§4.1 的拒絕條件長在 B 身上）。實測（primed、1000×700）：
+  // 這一列把兩者分開：髒 burst 留在【段落 A】，⠿ 按在另一個（所在清單不支援結構操作的）
+  // li B 上（§4.3 的拒絕條件長在 B 所在的清單上）。實測（primed、1000×700）：
   //   原碼    工具列的「清單」aria-pressed=false、「縮排」是 disabled
   //   mutant  「清單」aria-pressed=true、「縮排」是 enabled
   // 兩邊的游標都留在 A 的 .ed-wys-armed 上，橫幅也都是 §4.1 那一條 —— 使用者
@@ -2790,8 +2792,10 @@ async function main() {
   // mutant 都是 activeElement 掉回 BODY、磁碟逐位元組不變（實測按「在下方插入
   // 區塊」與按「引用」各一次），所以那條路上沒有可鑑別的效果可以量。
   {
-    const NF3_MD = '# H\n\nAlpha paragraph.\n\n- alpha item that is\n  hard wrapped here\n' +
-      '- bravo item\n\nTail para two.\n';
+    // v3.11: the refusal grows on B's RUN (bravo holds a second paragraph,
+    // still unsupported) — a hard-wrapped B converts now.
+    const NF3_MD = '# H\n\nAlpha paragraph.\n\n- alpha item\n' +
+      '- bravo item\n\n  second para\n\nTail para two.\n';
     const ctx = await newPage(NF3_MD);
     await ctx.page.setViewport({ width: 1000, height: 700 });
     await primeOneCommit(ctx);
