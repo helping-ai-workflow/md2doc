@@ -9477,10 +9477,17 @@ async function main() {
       // v3.10.0: unsaved work first. The outside-edit check (task 9) reloads a
       // CLEAN page on its next ping — the conflict card would be gone with the
       // old page, and rightly so — so the card this row guards only stands
-      // while there is something to lose.
+      // while there is something to lose. Committed (click away), not left as
+      // an open burst: the drawio refresh deliberately waits while the DOM
+      // differs from the last render (domMatchesLastRender()), and this row
+      // also pins that the re-bake still lands underneath the card.
       await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
       await ctx.page.keyboard.press('End');
       await ctx.page.keyboard.type(' local');
+      await ctx.page.click('.ed-block[data-block-type="heading"] .ed-wys-armed');
+      await new Promise((r) => setTimeout(r, 700));
+      assert.strictEqual(await ctx.page.evaluate(() => document.title.indexOf('●') === 0), true,
+        'F5 前提失敗：提交之後文件必須仍是「有未儲存的變更」');
       // An external write to the MARKDOWN moves its mtime, so the next save
       // fails the mtime guard and raises the conflict banner for real.
       fs.writeFileSync(ctx.mdPath, DRAWIO_MD + '\nAppended outside the editor.\n', 'utf8');
