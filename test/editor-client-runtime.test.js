@@ -18606,41 +18606,40 @@ async function gutterGeometry(page, sel) {
           assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
         }, 'T7');
 
-      // §3.6's 2026-08-31 ruling, inherited from Task 6 rather than re-invented:
-      // a span holding BOTH list items and non-list blocks is refused with a
-      // banner. It CONTRADICTS this plan's Task 7 text ("a batch containing both
-      // kinds applies each rule to its own kind") — see the carry.
-      await s3Scenario('a batch Tab over a mixed span refuses with Task 6\'s banner',
-        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
+      // v3.11: a span holding BOTH list items and non-list blocks applies each
+      // rule to its own kind (this plan's Task 7 text) in ONE commit — the item
+      // indents, the heading goes one level deeper. It used to refuse with
+      // Task 6's banner (§3.6's 2026-08-31 ruling, which stood only because the
+      // combined commit did not exist).
+      await s3Scenario('a batch Tab over a mixed span applies each kind\'s rule, one undo op',
+        '# Doc\n\n- zero\n- one\n\n## alpha\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           assert.deepStrictEqual((await t7Blocks(page)).map((b) => [b.type, b.lines]),
-            [['heading', [1, 1]], ['paragraph', [3, 3]], ['li', [5, 5]], ['li', [6, 6]]],
-            'fixture shape: a paragraph adjacent in `blocks` to a two-item run, so the '
-            + 'span is contiguous and the refusal is about the KINDS, not about a gap');
+            [['heading', [1, 1]], ['li', [3, 3]], ['li', [4, 4]], ['heading', [6, 6]]],
+            'fixture shape: a two-item run, then a heading');
 
-          await t7Set(page, 3, 5);
+          await t7Set(page, 4, 6);
           const before = await t7Sel(page);
-          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
-            'precondition: the set really holds a non-list block AND a list item. Got ' +
+          assert.deepStrictEqual(before.memberLines, [[4, 4], [6, 6]],
+            'precondition: the set really holds a list item AND a non-list block. Got ' +
             JSON.stringify(before));
 
           await t7Tab(page, false);
 
-          assert.strictEqual(await t7Banner(page),
-            '選取範圍同時含有清單項目與其他區塊，無法整批操作',
-            '§3.6 (2026-08-31): a mixed span is refused with a BANNER — silently doing '
-            + 'nothing is a defect. This is Task 6\'s existing refusal, not a second one');
-          assert.strictEqual(await saveAndRead(page, mdPath), original,
-            'and a refusal must not touch one byte');
-          assert.deepStrictEqual(await t7Indents(page),
-            [['heading', null], ['paragraph', null], ['li', '0'], ['li', '0']],
-            'nor leave a half-applied indent in the DOM for the next commit to pick up');
+          assert.strictEqual(await t7Banner(page), null, 'no refusal');
+          assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- zero\n  - one\n\n### alpha\n',
+            'the item nests under zero and the heading goes one level deeper');
+          await t7Undo(page);
+          assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
         }, 'T7');
 
       // Contiguity in `blocks` does not imply ONE run: two adjacent list tokens
-      // are adjacent blocks with no phantom between them, and a batch Tab that
-      // re-serialized "the run" would rewrite a range that does not cover both.
-      await s3Scenario('a batch Tab spanning two runs refuses, byte-identical',
+      // are adjacent blocks with no phantom between them. v3.11: a batch Tab
+      // over both re-serializes the two runs as one group (tabSpanAcrossLists())
+      // instead of refusing. Here `a` is the document's first item, so the
+      // set has no headroom — the same silent no-op a single list gives when
+      // its first item is in the set.
+      await s3Scenario('a batch Tab spanning two runs, first item included, is a no-op',
         '# Doc\n\n- a\n* b\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           const shape = await t7Blocks(page);
@@ -18661,10 +18660,9 @@ async function gutterGeometry(page, sel) {
 
           await t7Tab(page, false);
 
-          assert.strictEqual(await t7Banner(page), '選取範圍跨越兩個清單，無法整批操作',
-            'the two-run span refuses with its own banner');
+          assert.strictEqual(await t7Banner(page), null, 'no refusal');
           assert.strictEqual(await saveAndRead(page, mdPath), original,
-            'and not one byte moved');
+            'and not one byte moved: the first item cannot indent');
         }, 'T7');
 
       // ── §3.6 「Delete 整批刪」 ───────────────────────────────────────────

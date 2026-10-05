@@ -521,6 +521,57 @@ check('mixed duplicate: items of two adjacent lists', DESKTOP, async (page, boot
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n1. b1\n- a2\n1. b1\n2. b2\n');
 }, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
 
+check('mixed convert: a paragraph plus list items to 文字', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '文字']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nIntro.\n\nalpha\n\nbravo\n\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed convert: a paragraph plus list items to 編號列表', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '編號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. Intro.\n2. alpha\n3. bravo\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed convert: a table in the selection is skipped, the rest converts', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'alpha', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '引用']);
+  const n = await noticeText(page);
+  assert.ok(n && n.includes('略過') && n.includes('表格'), 'a notice says the table was skipped: ' + n);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> alpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n> bravo\n');
+}, { md: '# D\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nbravo\n' });
+check('mixed convert: items of two adjacent lists', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 2, 'guard: two items selected');
+  await gutterMenu(page, await blockByText(page, 'a2'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n- b1\n1. b2\n');
+}, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
+
+check('mixed convert: nested items keep their nesting in a list target', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'a1'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- Intro.\n- a\n  - a1\n- b\n');
+}, { md: '# D\n\nIntro.\n\n- a\n  - a1\n- b\n' });
+
+check('mixed Tab: list items indent and the heading goes one level deeper, one undo step', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'Sec'), 2, 'guard: two blocks selected');
+  await page.keyboard.press('Tab'); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n\n### Sec\n');
+  await page.keyboard.press('Escape'); await wait(200);
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n\n## Sec\n', 'one undo step');
+}, { md: '# D\n\n- a\n- b\n\n## Sec\n' });
+check('mixed Tab: items of two adjacent lists indent together', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two items selected');
+  await page.keyboard.press('Tab'); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  // c's `*` comes out as `-`: its indent changed, so it is re-serialized
+  // rather than replayed, and both items are now one nested bullet list.
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n  - c\n');
+}, { md: '# D\n\n- a\n- b\n* c\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
