@@ -324,6 +324,65 @@ async function saveAndRead(ctx) {
 const SWALLOW_MSG = '這道 ``` 圍欄沒有閉合，它後面的內容全部被吃進' +
   '同一個程式碼區塊裡了。把收尾的圍欄補回去就會復原。';
 
+// v3.10.0 removed the whole-document source mode (M↓). The rows that used it
+// as a VEHICLE — to make an arbitrary whole-document text edit and then watch
+// what the shared commit -> rerenderAll() pipeline does with it, the swallow
+// discriminant above all — make the same edit through the block raw editor
+// over a span of EVERY block instead: Shift+Click the first and the last
+// block, ⠿ -> MD 原始碼, commit with Ctrl+Enter. That is one commitRangeEdit()
+// and one rerenderAll(), exactly what leaveSourceMode() did. `mutate` gets the
+// text the old source textarea held — the span plus the file's own tail after
+// the last block (its final newline) — and returns the new text; a tail it
+// keeps is not written into the span. MEASURED against the rows it replaces
+// (S1, C3, C10 silent with the same disk bytes, TP3 raising the swallow
+// banner). The one edit it cannot make is removing that final newline.
+async function editWholeDocRaw(ctx, mutate) {
+  const page = ctx.page;
+  const ids = await page.evaluate(() => Array.from(
+    document.querySelectorAll('.content > .ed-block')).map((b) => b.getAttribute('data-block-id')));
+  const first = '.ed-block[data-block-id="' + ids[0] + '"]';
+  const last = '.ed-block[data-block-id="' + ids[ids.length - 1] + '"]';
+  await page.keyboard.down('Shift');
+  await page.click(first);
+  await page.click(last);
+  await page.keyboard.up('Shift');
+  await new Promise((r) => setTimeout(r, 250));
+  const selected = await page.evaluate(() => document.querySelectorAll('.ed-selected').length);
+  assert.strictEqual(selected, ids.length,
+    'editWholeDocRaw 前提失敗：Shift+Click 首尾區塊必須框住全部 ' + ids.length +
+    ' 個區塊，got ' + selected);
+  await page.hover(first);
+  await new Promise((r) => setTimeout(r, 150));
+  await pressClick(page, first + ' .ed-handle', 80);
+  await page.waitForSelector('.ed-handle-menu-btn', { timeout: 5000 });
+  await page.evaluate(() => {
+    const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+      .find((e) => e.textContent.trim() === 'MD 原始碼');
+    if (!it) throw new Error('editWholeDocRaw：⠿ 選單裡沒有 MD 原始碼');
+    it.setAttribute('data-journey-target', '1');
+  });
+  await pressClick(page, '[data-journey-target="1"]', 0);
+  await page.waitForSelector('textarea.ed-raw', { timeout: 5000 });
+  const value = await page.evaluate(() => document.querySelector('textarea.ed-raw').value);
+  const disk = fs.readFileSync(ctx.mdPath, 'utf8');
+  assert.ok(disk.startsWith(value),
+    'editWholeDocRaw 前提失敗：raw 編輯器的範圍必須是從檔頭開始的整份文件，got ' +
+    JSON.stringify(value));
+  const tail = disk.slice(value.length);
+  const next = mutate(value + tail);
+  const body = next.endsWith(tail) ? next.slice(0, next.length - tail.length) : next;
+  await page.evaluate((v) => {
+    const ta = document.querySelector('textarea.ed-raw');
+    ta.value = v;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.focus();
+  }, body);
+  await page.keyboard.down('Control');
+  await page.keyboard.press('Enter');
+  await page.keyboard.up('Control');
+  await new Promise((r) => setTimeout(r, 900));
+}
+
 async function visibleBannerText(page) {
   return page.evaluate(() => {
     const b = document.querySelector('.ed-conflict');
@@ -960,47 +1019,6 @@ async function main() {
       ' alpha@' + alphaIdx + ' bravo@' + bravoIdx + ':\n' + disk);
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: an image lands after the current block — OK');
-  }
-
-  // ── 模式：兩態循環，preview 不可達，按鈕講下一個狀態 ────────────────
-  {
-    const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
-    const read = () => ctx.page.evaluate(() => ({
-      mode: document.body.getAttribute('data-ed-mode'),
-      status: (document.querySelector('.ed-toolbar-status') || {}).textContent || '',
-      label: (document.querySelector('[data-ed-tb="preview"]') || {}).title || '',
-    }));
-    const s0 = await read();
-    assert.strictEqual(s0.mode, 'edit', '初始必須是 edit');
-    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-    await new Promise((r) => setTimeout(r, 300));
-    const s1 = await read();
-    assert.strictEqual(s1.mode, 'source', '第一次按進 source');
-    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-    await new Promise((r) => setTimeout(r, 300));
-    const s2 = await read();
-    assert.strictEqual(s2.mode, 'edit', '第二次按【必須】回到 edit，preview 已移除');
-    assert.ok(s1.status.length > 0 && s2.status.length > 0,
-      '狀態槽位必須顯示當前模式');
-    // v3.2.1 final wave, M6: `length > 0` alone passes for a bug that always
-    // prints 「編輯」. 兩態的字必須【不同】才算真的在講當前模式。
-    // （這一條讀的是 .textContent；上面那條 notStrictEqual 讀的是按鈕的 .title，
-    //   兩者是不同的槽位。）
-    assert.notStrictEqual(s1.status, s2.status,
-      '狀態槽位必須隨模式改變 —— 兩態印一樣的字等於沒有在講當前模式，got ' +
-      JSON.stringify([s1.status, s2.status]));
-    // s0 是 mountToolbar() 之後、任何 setDocMode() 之前的值。這是
-    // paintModeStatus() 掛載時那一發唯一會被測到的地方 —— 少了它，掛載時漏叫
-    // paintModeStatus() 只會讓槽位空到第一次切換為止，沒有任何斷言會紅。
-    assert.strictEqual(s0.status, s2.status,
-      '掛載時的狀態槽位必須已經是 edit 模式的字（＝再切回 edit 時的同一個字），got ' +
-      JSON.stringify([s0.status, s2.status]));
-    assert.ok(s0.status.length > 0,
-      '掛載時狀態槽位不得是空的 —— mountToolbar() 之後必須已經 paintModeStatus() 過');
-    assert.notStrictEqual(s1.label, s2.label,
-      '按鈕標示必須講【下一個】狀態，兩態下不應相同');
-    await ctx.page.close(); ctx.srv.close();
-    console.log('journey: the mode button is a truthful two-state toggle — OK');
   }
 
   // ── 捲動：滯留的浮動選取列不得還能改到文件 ──────────────────────────
@@ -1705,7 +1723,7 @@ async function main() {
 
   // ══ V2: 工具列 + ⠿ 選單全矩陣 ═════════════════════════════════════════
   // 族群級的網：Task 3 只修了 convertBlockViaMenu() 一條路徑，這一段逐一
-  // 真實點擊 23 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
+  // 真實點擊 22 顆工具列按鈕與 ⠿ 選單的 15 個葉節點，對每一項斷言「使用者
   // 按完之後還有著力點」。
   //
   // 每一列的「必需答案」是量測出來的，不是猜的（量測腳本見 task-11 報告）：
@@ -1726,9 +1744,6 @@ async function main() {
   //             接著開的 raw editor 把落點升級成 caret（見 TB_ROWS / GUTTER_ROWS
   //             各自的 review M4 註解）。目前唯一還在用這個答案的是 V2d
   //             的「🔗 in a table cell」。
-  //   source    離開 edit 模式；游標必須在 .ed-source textarea 裡，工具列
-  //             此時合法地只剩模式切換一顆，所以改為斷言再按一次能回到
-  //             edit 且工具列復原。
   //   BROKEN    今天實測就是壞的：把【當下的壞值】（BODY + 工具列 4 顆）釘住，
   //             修好的那天這一列會變紅，逼人把它搬回 caret / bar-only。
   //             ⚠ v3.2.1 Task 11b 之後【沒有任何一列】用這個答案 —— Task 11
@@ -1793,7 +1808,6 @@ async function main() {
     // function feeds — TB_ROWS' checkLeverage() among them).
     enabled: Array.from(document.querySelectorAll('.ed-toolbar-btn'))
       .filter((x) => !x.disabled && x.getAttribute('data-ed-tb') !== 'save').length,
-    mode: document.body.getAttribute('data-ed-mode'),
   }));
 
   // v3.3.0 Task 19（Ruling T19-4）：這張表原本的 oracle 只讀「游標在哪／工具列
@@ -1827,9 +1841,7 @@ async function main() {
       text: blocks.map((b) => clean(b.textContent)).join(' | '),
       marks: blocks.map((b) => Array.from(b.querySelectorAll('strong, em, del, a, code'))
         .map((e) => e.tagName + '(' + clean(e.textContent) + ')').join('+')).join(' | '),
-      mode: document.body.getAttribute('data-ed-mode'),
       toolbarMenu: !!document.querySelector('.ed-toolbar-menu'),
-      source: !!document.querySelector('.ed-source'),
       filePickers: document.querySelectorAll('input[type="file"]').length,
       sidebarOpen: document.body.hasAttribute('data-sidebar-open'),
       toggleExpanded: tg ? tg.getAttribute('aria-expanded') : null,
@@ -1867,12 +1879,10 @@ async function main() {
           '（ed-wys-armed / ed-wys-cell / ed-raw），不是只要不是 BODY 就好）';
       }
       if (st.enabled <= 4) return shown + '（必需答案 caret：工具列塌成 ' + st.enabled + ' 顆）';
-      if (st.mode !== 'edit') return shown + '（必需答案 caret：不該離開 edit 模式）';
       return null;
     }
     if (answer === 'bar-only') {
       if (st.enabled <= 4) return shown + '（必需答案 bar-only：工具列塌成 ' + st.enabled + ' 顆）';
-      if (st.mode !== 'edit') return shown + '（必需答案 bar-only：不該離開 edit 模式）';
       // 證明「工具列還瞄著」不是計數好看而已：再按一次「在下方插入區塊」，
       // 游標必須真的落在新段落上。
       //
@@ -1891,20 +1901,6 @@ async function main() {
       if (after.active === 'BODY') {
         return shown + '（必需答案 bar-only：工具列數字說還瞄著，但「在下方插入區塊」' +
           '按下去游標仍落在 BODY —— 那個「還瞄著」是假的，got ' + JSON.stringify(after) + '）';
-      }
-      return null;
-    }
-    if (answer === 'source') {
-      if (st.mode !== 'source') return shown + '（必需答案 source：必須進入 source 模式）';
-      if (st.activeClass.indexOf('ed-source') === -1) {
-        return shown + '（必需答案 source：游標必須在 .ed-source textarea 裡）';
-      }
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 400));
-      const back = await readLeverage(ctx.page);
-      if (back.mode !== 'edit' || back.enabled <= 4) {
-        return shown + '（必需答案 source：再按一次必須回到 edit 且工具列復原，got ' +
-          JSON.stringify(back) + '）';
       }
       return null;
     }
@@ -1931,7 +1927,7 @@ async function main() {
       await ctx.page.close(); ctx.srv.close();
       return r;
     })();
-    assert.strictEqual(ids.length, 23, '工具列應為 23 顆，got ' + ids.length);
+    assert.strictEqual(ids.length, 22, '工具列應為 22 顆，got ' + ids.length);
 
     const TB_ROWS = [
       // v3.4.0 §3: `ctx.dirty` is wired now (lib/editor/client.js's
@@ -2123,9 +2119,6 @@ async function main() {
           : (a.sidebarOpen && a.toggleExpanded === 'true' ? null
             : '必須把抽屜打開、並且讓 .sidebar-toggle 說自己 expanded，got ' +
               a.sidebarOpen + ' / ' + a.toggleExpanded) },
-      { id: 'preview',      state: 'sel',  answer: 'source',
-        effect: (b, a) => a.mode === 'source' && a.source ? null
-          : '必須切到 source 模式並且開出 .ed-source，got ' + a.mode + ' / ' + a.source },
     ];
     assert.deepStrictEqual(TB_ROWS.map((r) => r.id).slice().sort(), ids.slice().sort(),
       'V2 表必須恰好覆蓋工具列上的每一顆按鈕 —— 新增按鈕時必須同時決定它的必需答案');
@@ -3234,59 +3227,6 @@ async function main() {
   }
   console.log('journey: the sidebar toggle is never visible-but-unclickable in edit mode, ' +
     'and the toolbar outline button is its working replacement at both widths — OK');
-
-  // ── T11-2 step 5: source mode 隱藏抽屜的 TOC 與 search-results，只留 reader-tools ──
-  // 量測基礎（brief）：enterSourceMode() 讓 contentEl.hidden = true；在那個
-  // 狀態下點 TOC 最後一個連結 scrollBefore/scrollAfter 都是 0、textarea 的
-  // scrollTop 前後不變（3924 → 3924），search 同理（找的是一個
-  // display:none 的 .content）。這裡驗證 lib/md2doc.js 那條
-  // `body[data-ed-mode="source"] .toc, body[data-ed-mode="source"]
-  // .search-results { display: none !important; }` 規則真的擋住了兩者，
-  // 而 .reader-tools（搜尋輸入列）維持原樣 —— 先真的跑一次搜尋讓
-  // #search-results 的 `hidden` 屬性變成 false，免得這一列在規則被拿掉時
-  // 也是空跑的綠燈（`hidden` 屬性本身就會讓 computed display 是 none）。
-  {
-    const ctx = await newPage('# Doc\n\n## Sub\n\nAlpha.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
-    await new Promise((r) => setTimeout(r, 250));
-    await ctx.page.evaluate(() => {
-      document.getElementById('doc-search-input').value = 'Sub';
-      document.getElementById('doc-search-submit').click();
-    });
-    await new Promise((r) => setTimeout(r, 250));
-    const readState = () => ctx.page.evaluate(() => {
-      const g = (sel) => {
-        const el = document.querySelector(sel);
-        return el ? { display: getComputedStyle(el).display, hidden: !!el.hidden } : null;
-      };
-      return { toc: g('.toc'), search: g('.search-results'), tools: g('.reader-tools') };
-    });
-    const before = await readState();
-    assert.strictEqual(before.search.hidden, false,
-      'T11-2 step5 前提失敗：送出搜尋後 #search-results 的 hidden 屬性應為 false，got ' +
-      JSON.stringify(before));
-    assert.notStrictEqual(before.toc.display, 'none', 'T11-2 step5 前提失敗：edit 模式下 .toc 一開始就是 none');
-    assert.notStrictEqual(before.tools.display, 'none', 'T11-2 step5 前提失敗：edit 模式下 .reader-tools 一開始就是 none');
-    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="preview"]').click());
-    await new Promise((r) => setTimeout(r, 300));
-    const mode = await ctx.page.evaluate(() => document.body.getAttribute('data-ed-mode'));
-    assert.strictEqual(mode, 'source', 'T11-2 step5 前提失敗：按下 preview 沒有真的切到 source 模式');
-    const inSource = await readState();
-    assert.strictEqual(inSource.toc.display, 'none',
-      'source 模式下 .toc 必須是 display:none，got ' + JSON.stringify(inSource));
-    assert.strictEqual(inSource.search.display, 'none',
-      'source 模式下 .search-results 必須是 display:none（即使 hidden 屬性仍是 false），got ' +
-      JSON.stringify(inSource));
-    assert.notStrictEqual(inSource.tools.display, 'none',
-      'source 模式下 .reader-tools 必須留著（裁定：只留 reader-tools），got ' + JSON.stringify(inSource));
-    // 切回 edit：兩區必須恢復。
-    await ctx.page.evaluate(() => document.querySelector('[data-ed-tb="preview"]').click());
-    await new Promise((r) => setTimeout(r, 300));
-    const after = await readState();
-    assert.notStrictEqual(after.toc.display, 'none', '切回 edit 模式後 .toc 必須恢復，got ' + JSON.stringify(after));
-    await ctx.page.close(); ctx.srv.close();
-    console.log('journey: T11-2 step5 source mode hides the drawer TOC and search-results, keeps reader-tools — OK');
-  }
 
   // ── live × 2：.sidebar-scrim / .reader-sidebar（抽屜打開時仍可見）──────
   // window.scrollBy() cannot stand in for a real gesture under
@@ -4597,7 +4537,7 @@ async function main() {
         return d ? d.textContent.trim() : null;
       });
       // 這是本列的內容：降級子樹拿到的是【它自己那句】，不是同行巢狀那句。
-      assert.strictEqual(banner, '這段巢狀清單對不到自己的來源行，無法刪除或直接編輯' + '✕',
+      assert.strictEqual(banner, '這段巢狀清單對不到自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
         'N4：點進一個降級的清單項，必須出現降級專用的那句話 —— 不是 ' +
         '「此項目沒有自己的來源行…」（那句屬於 - - a 那種同行巢狀，它真的沒有來源行），' +
         'got ' + JSON.stringify(banner));
@@ -4909,17 +4849,10 @@ async function main() {
   // banner 不出現），
   // 差別只在它們各自能抓到哪一版的退步。
   //
-  // 誤報住在全文原始碼（M↓／`[data-ed-tb="preview"]`）
-  // 與逐區塊的 raw 編輯器（⠿ →「MD 原始碼」）。
+  // 誤報住在全文原始碼（M↓）與逐區塊的 raw 編輯器（⠿ →「MD 原始碼」）。v3.10.0
+  // 移除了全文原始碼模式，原本走它的列改走 editWholeDocRaw()（見它的註解）——
+  // 同一次整份文件的 commitRangeEdit、同一個 rerenderAll()。
   {
-    const enterSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-    };
-    const leaveSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
-    };
     const openRawViaGutter = async (ctx, sel) => {
       await ctx.page.hover(sel);
       await new Promise((r) => setTimeout(r, 150));
@@ -4941,13 +4874,11 @@ async function main() {
       ['S2 最後那一段', 'Charlie.', '# Doc\n\nAlpha.\n\nBravo.\n\n\n'],
     ]) {
       const ctx = await newPage(DOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate((f) => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace(f, '');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
-      }, from);
-      await leaveSource(ctx);
+      await editWholeDocRaw(ctx, (v) => {
+        const f = from;
+        v = v.replace(f, '');
+        return v;
+      });
       const disk = await saveAndRead(ctx);
       assert.strictEqual(disk, expected,
         'F10 控制列 ' + label + ' 前提失敗：這次編輯必須真的落到磁碟上（區塊少了' +
@@ -4962,13 +4893,10 @@ async function main() {
     // S3：全文原始碼裡把兩段之間的空行填掉 —— 兩段併成一段。
     {
       const ctx = await newPage(DOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('Alpha.\n\nBravo.', 'Alpha.\nBravo.');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('Alpha.\n\nBravo.', 'Alpha.\nBravo.');
+        return v;
       });
-      await leaveSource(ctx);
       const disk = await saveAndRead(ctx);
       assert.strictEqual(disk, '# Doc\n\nAlpha.\nBravo.\n\nCharlie.\n',
         'F10 控制列 S3 前提失敗：兩段必須真的併起來，got:\n' + JSON.stringify(disk));
@@ -5012,13 +4940,10 @@ async function main() {
     // 沒有東西可以吃。這一列守的是判別式的另一半（效果）。
     {
       const ctx = await newPage(DOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value + '```\n';
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v + '```\n';
+        return v;
       });
-      await leaveSource(ctx);
       const disk = await saveAndRead(ctx);
       assert.strictEqual(disk, '# Doc\n\nAlpha.\n\nBravo.\n\nCharlie.\n```\n',
         'F10 控制列 C3 前提失敗：那道圍欄必須真的寫進去，got:\n' + JSON.stringify(disk));
@@ -5032,13 +4957,10 @@ async function main() {
     // C10：一份【開檔時就已經沒閉合】的文件，之後做一次不相干的刪除。
     {
       const ctx = await newPage('# Doc\n\nAlpha.\n\nBravo.\n\n```js\ncode\n');
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('Bravo.\n\n', '');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('Bravo.\n\n', '');
+        return v;
       });
-      await leaveSource(ctx);
       const disk = await saveAndRead(ctx);
       assert.strictEqual(disk, '# Doc\n\nAlpha.\n\n```js\ncode\n',
         'F10 控制列 C10 前提失敗：那一段必須真的被刪掉，got:\n' + JSON.stringify(disk));
@@ -5190,25 +5112,14 @@ async function main() {
   {
     const FDOC = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\nBravo.\n';
     const CODE = '.ed-block[data-block-type="code"]';
-    const enterSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-    };
-    const leaveSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
-    };
     // X4 / P1 / P2：全文原始碼裡往檔尾 trim。
     // X4：從收尾圍欄一路刪到檔尾。
     {
       const ctx = await newPage(FDOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.slice(0, ta.value.indexOf('```\n\n## Next'));
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.slice(0, v.indexOf('```\n\n## Next'));
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n',
         'K2 控制列 X4 前提失敗：這次刪除必須真的落到磁碟上');
       assert.strictEqual(await visibleBannerText(ctx.page), null,
@@ -5221,14 +5132,15 @@ async function main() {
     // P1：從 code 本文中間一路刪到檔尾。
     {
       const ctx = await newPage(FDOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.slice(0, ta.value.indexOf('const a = 1;')) + 'const a';
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.slice(0, v.indexOf('const a = 1;')) + 'const a';
+        return v;
       });
-      await leaveSource(ctx);
-      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a',
+      // v3.10.0：原本在全文原始碼裡連檔尾換行一起刪（磁碟以 'const a' 收尾）；
+      // editWholeDocRaw() 碰不到最後一個區塊之後的那個換行，所以磁碟多一個
+      // '\n'。區塊形狀相同（一樣以沒閉合的圍欄、本文 'const a' 收尾），這一列
+      // 守的「往檔尾 trim 不是吞噬」不受影響。
+      assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a\n',
         'K2 控制列 P1 前提失敗：這次刪除必須真的落到磁碟上');
       assert.strictEqual(await visibleBannerText(ctx.page), null,
         'K2 控制列 P1：圍欄後面本來就沒東西了，是使用者自己刪的 —— ' +
@@ -5241,13 +5153,10 @@ async function main() {
     {
       const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n';
       const ctx = await newPage(MD);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace(/```\n$/, '');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace(/```\n$/, '');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n',
         'K2 控制列 P2 前提失敗：收尾圍欄必須真的被刪掉');
       assert.strictEqual(await visibleBannerText(ctx.page), null,
@@ -5305,13 +5214,10 @@ async function main() {
     const SW = SWALLOW_MSG + '✕';
     {
       const ctx = await newPage(FDOC);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('```\n\n## Next', '## Next');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('```\n\n## Next', '## Next');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n## Next\n\nBravo.\n',
         'TP3 前提失敗：只刪掉收尾圍欄那一行');
@@ -5322,13 +5228,10 @@ async function main() {
     }
     {
       const ctx = await newPage('# Doc\n\nAlpha.\n\nBravo.\n\nCharlie.\n');
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('Charlie.', '```\nCharlie.');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('Charlie.', '```\nCharlie.');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx), '# Doc\n\nAlpha.\n\nBravo.\n\n```\nCharlie.\n',
         'TP5 前提失敗：那道圍欄必須真的插進去');
       assert.strictEqual(
@@ -5353,13 +5256,10 @@ async function main() {
     {
       const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\n~~~\ntilde\n~~~\n';
       const ctx = await newPage(MD);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('```\n\n## Next', '``` MID\n\n## Next');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('```\n\n## Next', '``` MID\n\n## Next');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n``` MID\n\n## Next\n\n~~~\ntilde\n~~~\n',
         'FN1 前提失敗：收尾圍欄必須真的被打壞');
@@ -5379,19 +5279,16 @@ async function main() {
           window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
         ['heading[1,1]', 'paragraph[3,3]', 'paragraph[5,5]', 'code[7,9]'],
         'G7 前提失敗：fixture 的那道 ```js 圍欄必須是【沒閉合】的，尾巴那行 ~~~ 是本文');
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
+      await editWholeDocRaw(ctx, (v) => {
         // 把 Bravo. 搬到圍欄後面：它從 code block 外面跑進了裡面，所以【歸屬】
         // 那一項會說「被吃掉了」。讓這一列靜默的是「這道圍欄不是這次編輯打
         // 開的」，而那個判斷在開檔時就要靠 closesFence() 認出尾巴那行光禿禿的
         // ~~~ 收不掉一道 ``` 圍欄。單獨拿掉「上一次 render 之後不是這個形狀」
         // 那一項，這一列就叫；單獨拿掉 closesFence() 的字元檢查【不會】讓它叫
         // （那一項是別的列在守），所以這裡不寫成「少了任一半都會叫」。
-        ta.value = ta.value.replace('Bravo.\n\n', '').replace('~~~\n', '~~~\nBravo.\n');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        v = v.replace('Bravo.\n\n', '').replace('~~~\n', '~~~\nBravo.\n');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\nAlpha.\n\n```js\ncode\n~~~\nBravo.\n',
         'G7 前提失敗：Bravo. 必須真的被搬到圍欄後面（因此進了那個 code block）');
@@ -5466,15 +5363,10 @@ async function main() {
     {
       const MD = '# Doc\n\nAlpha.\n\n```js\ncode\n```\n\n## Next\n\nBravo.\n';
       const ctx = await newPage(MD);
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('```\n\n## Next', '    ```\n\n## Next');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('```\n\n## Next', '    ```\n\n## Next');
+        return v;
       });
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\nAlpha.\n\n```js\ncode\n    ```\n\n## Next\n\nBravo.\n',
         'PIN-indent 前提失敗：收尾圍欄必須真的被縮排四格');
@@ -5626,15 +5518,10 @@ async function main() {
           window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
         ['heading[1,1]', 'paragraph[3,3]', 'code[5,6]'],
         'PIN-prev 前提失敗：fixture 必須是一份【開檔時就沒閉合】的文件');
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('Alpha.\n\n', '').replace('code\n', 'code\nAlpha.\n');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('Alpha.\n\n', '').replace('code\n', 'code\nAlpha.\n');
+        return v;
       });
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
       assert.strictEqual(await saveAndRead(ctx), '# Doc\n\n```js\ncode\nAlpha.\n',
         'PIN-prev 前提失敗：Alpha. 必須真的被搬到圍欄後面（因此進了 code block）');
       assert.strictEqual(await visibleBannerText(ctx.page), null,
@@ -5681,14 +5568,6 @@ async function main() {
     const NL = '\n';
     const SW = SWALLOW_MSG + '✕';
     const CODE = '.ed-block[data-block-type="code"]';
-    const enterSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-    };
-    const leaveSource = async (ctx) => {
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
-    };
     const rawEditCode = async (ctx, mutate) => {
       await pressClick(ctx.page, CODE, 80);
       await ctx.page.waitForSelector(CODE + ' textarea.ed-raw', { timeout: 5000 });
@@ -5707,13 +5586,10 @@ async function main() {
     // FP2：全文原始碼裡從收尾圍欄一路刪到檔尾。
     {
       const ctx = await newPage(DUP);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.slice(0, ta.value.indexOf('```\n\nnpm test'));
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.slice(0, v.indexOf('```\n\nnpm test'));
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\nRun this:\n\n```sh\nnpm test\n',
         'L1 控制列 FP2 前提失敗：尾巴必須真的被刪掉');
@@ -5784,13 +5660,10 @@ async function main() {
       const MD = '# Doc' + NL + NL + '- item' + NL + NL + 'Note.' + NL + NL + '```js' + NL +
                  'x' + NL + '```' + NL + NL + '- item' + NL + NL + 'Note.' + NL;
       const ctx = await newPage(MD);
-      await enterSource(ctx);
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('```\n\n- item', '``` MID\n\n- item');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('```\n\n- item', '``` MID\n\n- item');
+        return v;
       });
-      await leaveSource(ctx);
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\n- item\n\nNote.\n\n```js\nx\n``` MID\n\n- item\n\nNote.\n',
         'L1 FN-E 前提失敗：收尾圍欄必須真的被打壞');
@@ -5832,15 +5705,11 @@ async function main() {
     const TAB = String.fromCharCode(9);
     const MD = '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```\n\n## Next\n\nBravo.\n';
     const ctx = await newPage(MD);
-    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-    await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-    await ctx.page.evaluate((tab) => {
-      const ta = document.querySelector('.ed-source');
-      ta.value = ta.value.replace('```\n\n## Next', '```' + tab + '\n\n## Next');
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-    }, TAB);
-    await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-    await new Promise((r) => setTimeout(r, 900));
+    await editWholeDocRaw(ctx, (v) => {
+      const tab = TAB;
+      v = v.replace('```\n\n## Next', '```' + tab + '\n\n## Next');
+      return v;
+    });
     assert.strictEqual(await saveAndRead(ctx),
       '# Doc\n\nAlpha.\n\n```js\nconst a = 1;\n```' + TAB + '\n\n## Next\n\nBravo.\n',
       'L2 前提失敗：收尾圍欄後面必須真的多了一個 tab');
@@ -5941,15 +5810,10 @@ async function main() {
           window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
         ['heading[1,1]', 'code[3,8]', 'paragraph[10,10]'],
         'FN-agg 前提失敗：fixture 沒有給出「重複 } 的 code block ＋ 後面一段」');
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('}\n```\n', '');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('}\n```\n', '');
+        return v;
       });
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
       assert.strictEqual(await saveAndRead(ctx), EATEN,
         'FN-agg 前提失敗：那一份 } 與收尾圍欄必須真的被刪掉');
       assert.strictEqual(
@@ -6044,15 +5908,10 @@ async function main() {
           window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
         ['heading[1,1]', 'code[3,5]', 'code[7,8]'],
         'PIN-o-indent 前提失敗：fixture 必須是「圍欄 ＋ 縮排式 code block」');
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await ctx.page.waitForSelector('.ed-source', { timeout: 6000 });
-      await ctx.page.evaluate(() => {
-        const ta = document.querySelector('.ed-source');
-        ta.value = ta.value.replace('```\n\n    ```sh', '``` MID\n\n    ```sh');
-        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      await editWholeDocRaw(ctx, (v) => {
+        v = v.replace('```\n\n    ```sh', '``` MID\n\n    ```sh');
+        return v;
       });
-      await pressClick(ctx.page, '[data-ed-tb="preview"]', 80);
-      await new Promise((r) => setTimeout(r, 900));
       assert.strictEqual(await saveAndRead(ctx),
         '# Doc\n\n```js\nx\n``` MID\n\n    ```sh\n    echo\n',
         'PIN-o-indent 前提失敗：收尾圍欄必須真的被打壞');
@@ -6817,7 +6676,8 @@ async function main() {
   }
   console.log('journey: the toolbar is reachable from the keyboard and gives the caret back — OK');
 
-  // K2：走到列尾那顆。420 寬時 M↓ 在靜止位置根本不在畫面上 —— 這一列斷的是
+  // K2：走到列尾那顆（v3.10.0 起是 ☰ outline；M↓ 隨原始碼模式移除）。420 寬時
+  // 它在靜止位置根本不在畫面上 —— 這一列斷的是
   // 游標每一站都被捲進「按鈕真正站得住」的那條帶子裡（畫面內，且不在模式槽
   // 底下），而不只是「屬性寫對了」。
   {
@@ -6830,7 +6690,7 @@ async function main() {
     for (let i = 0; i < 22; i++) {
       const s = await f12Snap(ctx.page);
       stops.push(s);
-      if (s.at === 'preview') break;
+      if (s.at === 'outline') break;
       await ctx.page.keyboard.press('ArrowRight');
       await new Promise((r) => setTimeout(r, 90));
     }
@@ -6854,7 +6714,7 @@ async function main() {
       '往左走必須走得回列首，got ' + JSON.stringify(backStops.map((x) => x.at)));
     assert.deepStrictEqual(
       { at: last.at, scrolled: last.scrolled, who: last.who },
-      { at: 'preview', scrolled: true, who: 'P.ed-wys-armed' },
+      { at: 'outline', scrolled: true, who: 'P.ed-wys-armed' },
       '往右走必須真的走到列尾那顆，而且工具列必須為了它捲動過，got ' +
       JSON.stringify(last));
     assert.strictEqual(ctx.errs.length, 0,
@@ -6889,36 +6749,46 @@ async function main() {
 
   // K4：游標腳下那顆被 updateToolbar() 關掉時。真焦點在這裡會被瀏覽器丟回
   // BODY，而從 BODY 按 Tab 又拿不回來；虛擬游標改成走到下一顆還開著的。
-  // 原始碼模式曾經是這件事最極端的一格：整列只剩一顆是開著的。T11-2 之後
-  // 剩兩顆——'outline'（☰，BUTTON_DEFS 裡排在 'preview' 之前）也留著，因為
-  // 拿掉 .sidebar-toggle 之後它是側欄在 edit 模式下唯一的入口。游標從
-  // 'quote' 往前找第一顆還開著的按鈕，中間的 code/list/…/image 全部
-  // disabled，所以停在 'outline'，不是 'preview'。
+  // v3.10.0：這一格原本的載具是原始碼模式（切進去之後整列只剩 outline 與
+  // preview 開著）。原始碼模式移除後改用 save：有未存檔變更時它是開著的，
+  // 存完檔就被 updateToolbar() 關掉 —— 同一個「游標腳下那顆死掉」的形狀。
+  // 期望值不寫死：從存檔【之後】實際開著的按鈕裡，取 save 之後（循環）的
+  // 第一顆，跟 moveToolbarCursor() 自己的規則同一個定義。
   {
     const ctx = await newPage(F12_MD);
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type(' K4');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
-    for (let i = 0; i < 3; i++) {
-      await ctx.page.keyboard.press('ArrowRight');
-      await new Promise((r) => setTimeout(r, 90));
-    }
+    await ctx.page.keyboard.press('Home');
+    await new Promise((r) => setTimeout(r, 120));
     const before = await f12Snap(ctx.page);
-    await ctx.page.click('.ed-toolbar [data-ed-tb="preview"]');
+    await ctx.page.click('.ed-toolbar [data-ed-tb="save"]');
     await new Promise((r) => setTimeout(r, 900));
     const after = await f12Snap(ctx.page);
-    const enabled = await ctx.page.evaluate(() => Array.from(
-      document.querySelectorAll('.ed-toolbar-btn')).filter((b) => !b.disabled)
-      .map((b) => b.getAttribute('data-ed-tb')));
-    assert.strictEqual(before.at, 'quote',
-      'K4 前提失敗：切模式之前游標必須在 ❝ 上，got ' + JSON.stringify(before));
-    assert.deepStrictEqual(enabled, ['outline', 'preview'],
-      'K4 前提失敗：原始碼模式下必須恰好剩 outline 與 preview 這兩顆是開著的，got ' +
-      JSON.stringify(enabled));
+    const row = await ctx.page.evaluate(() => Array.from(
+      document.querySelectorAll('.ed-toolbar-btn')).map((b) =>
+      ({ id: b.getAttribute('data-ed-tb'), on: !b.disabled })));
+    const disk = fs.readFileSync(ctx.mdPath, 'utf8');
+    const si = row.findIndex((b) => b.id === 'save');
+    let want = null;
+    for (let k = 1; k <= row.length; k++) {
+      const b = row[(si + k) % row.length];
+      if (b.on) { want = b.id; break; }
+    }
+    assert.strictEqual(before.at, 'save',
+      'K4 前提失敗：有未存檔變更時 Home 必須把游標放在 save 上，got ' + JSON.stringify(before));
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph. K4\n\nBravo paragraph.\n',
+      'K4 前提失敗：按下 save 必須真的存檔，got ' + JSON.stringify(disk));
+    assert.strictEqual(row[si].on, false,
+      'K4 前提失敗：存完檔 save 必須變灰，got ' + JSON.stringify(row[si]));
+    assert.ok(want && want !== 'save', 'K4 前提失敗：存檔之後整列至少要有一顆開著，got ' +
+      JSON.stringify(row));
     assert.deepStrictEqual({ at: after.at, cursors: after.cursors },
-      { at: 'outline', cursors: ['outline'] },
-      '腳下那顆被關掉時，游標必須自己走到「下一顆」還開著的按鈕上 —— BUTTON_DEFS 裡 outline 排在 ' +
-      'preview 之前，所以是 outline，got ' + JSON.stringify(after));
+      { at: want, cursors: [want] },
+      '腳下那顆被關掉時，游標必須自己走到「下一顆」還開著的按鈕上（save 之後第一顆是 ' +
+      want + '），got ' + JSON.stringify(after));
     assert.strictEqual(ctx.errs.length, 0,
       'F12 K4：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
@@ -7044,29 +6914,10 @@ async function main() {
   }
   console.log('journey: Escape takes the H▾ menu first and the keyboard mode second — OK');
 
-  // K7：三種狀態都到得了，而且進去不動任何東西。原始碼模式的插入點在整份
-  // 文件的 textarea 上；區塊選取模式下，選取在進工具列之後原封不動，Escape
-  // 的名次是「先退工具列、再清選取」。順帶釘住「打字就交還鍵盤」。
-  //
-  // T11-2: 這裡從 -1 重新進入鍵盤模式（enterToolbarKeynav() 是
-  // moveToolbarCursor(1) 從頭掃），原始碼模式下第一顆還開著的按鈕現在是
-  // 'outline'（BUTTON_DEFS 排序在 'preview' 之前），不再是 'preview' —— 那
-  // 是本檔案 K4 已經釘住的同一個排序事實，這裡是同一件事的另一個入口。
-  {
-    const ctx = await newPage(F12_MD);
-    await ctx.page.click('.ed-toolbar [data-ed-tb="preview"]');
-    await new Promise((r) => setTimeout(r, 800));
-    await f12Enter(ctx.page);
-    const inSource = await f12Snap(ctx.page);
-    assert.deepStrictEqual(
-      { at: inSource.at, who: inSource.who },
-      { at: 'outline', who: 'TEXTAREA.ed-source' },
-      '原始碼模式下也必須進得了工具列，而且插入點留在原始碼上，got ' +
-      JSON.stringify(inSource));
-    assert.strictEqual(ctx.errs.length, 0,
-      'F12 K7 source：不得有 pageerror: ' + ctx.errs.join(' | '));
-    await ctx.page.close(); ctx.srv.close();
-  }
+  // K7：兩種狀態都到得了，而且進去不動任何東西。區塊選取模式下，選取在進
+  // 工具列之後原封不動，Escape 的名次是「先退工具列、再清選取」。順帶釘住
+  // 「打字就交還鍵盤」。（v3.10.0 前還有第三種：原始碼模式的 textarea，隨原始碼
+  // 模式一起移除。）
   {
     const ctx = await newPage(F12_MD);
     await ctx.page.evaluate(() => window.__edTestSetSelection(3, 5));
@@ -9054,7 +8905,7 @@ async function main() {
       'save', 'undo', 'redo', 'headings', 'quote', 'code', 'list', 'ordered-list',
       'check', 'bold', 'italic', 'strike', 'inline-code', 'link', 'outdent',
       'indent', 'table', 'insert-before', 'insert-after', 'line', 'image',
-      'outline', 'preview',
+      'outline',
     ];
     const hitTestAllButtons = () => ctx.page.evaluate((ids) => {
       const out = {};
@@ -9084,7 +8935,7 @@ async function main() {
       'T10 前提失敗：keynav-exit banner 沒有升起');
     const hits1 = await hitTestAllButtons();
     assert.strictEqual(bannerCount(hits1), 0,
-      'T10：keynav-exit banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      'T10：keynav-exit banner 升起時，22 顆工具列按鈕必須仍打得到自己，got ' +
       JSON.stringify(hits1));
 
     // Dismiss and switch to trigger 2: the real save-conflict banner
@@ -9103,7 +8954,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 200));
     const hits2 = await hitTestAllButtons();
     assert.strictEqual(bannerCount(hits2), 0,
-      'T10：真正的存檔衝突 banner 升起時，23 顆工具列按鈕必須仍打得到自己，got ' +
+      'T10：真正的存檔衝突 banner 升起時，22 顆工具列按鈕必須仍打得到自己，got ' +
       JSON.stringify(hits2));
 
     assert.strictEqual(ctx.errs.length, 0, 'T10：不得有 pageerror: ' + ctx.errs.join(' | '));

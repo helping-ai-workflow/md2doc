@@ -1483,8 +1483,10 @@ function countInCode(source, needle) {
   // rather than one keystroke, so the work stays in `lines` and the banner is
   // corrected instead. That exception is recorded at the call site.
   // The expected total is therefore 1 declaration + 16 call sites = 17.
-  assert.strictEqual(helperCalls, 17,
-    'the helper must be DECLARED once and used at all sixteen ' +
+  // MIGRATED by v3.10.0 (17 -> 16): leaveSourceMode() is gone with the
+  // whole-document source mode, so 1 declaration + 15 call sites = 16.
+  assert.strictEqual(helperCalls, 16,
+    'the helper must be DECLARED once and used at all fifteen ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 

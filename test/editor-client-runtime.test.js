@@ -14135,7 +14135,7 @@ async function gutterGeometry(page, sel) {
         // Assert the text itself so a future shadowing cannot pass silently.
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
           '刪除 on a block that owns no line must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
@@ -14163,7 +14163,7 @@ async function gutterGeometry(page, sel) {
           'the refused body click must REFUSE VISIBLY (banner), not fail silently');
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法刪除或直接編輯' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
           'the refused body click must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
@@ -14951,7 +14951,7 @@ async function gutterGeometry(page, sel) {
           const el = document.querySelector('.ed-conflict');
           return el ? el.textContent : null;
         });
-        assert.ok(banner && banner.indexOf('無法在其後插入區塊') !== -1,
+        assert.ok(banner && banner.indexOf('無法在其後插入。') !== -1,
           'the refusal must reach the user as a banner, not be silent; got: ' +
           JSON.stringify(banner));
         const types = await page.evaluate(() =>
@@ -23654,7 +23654,8 @@ async function gutterGeometry(page, sel) {
     // survives a rerender at all, and that a button on it actually edits),
     // the list item's restored MD 原始碼 escape hatch, HTML paste, and
     // image drop. Everything else this version added is covered by the
-    // pure-function suites (toolbar-model / paste-md / asset / docsource).
+    // pure-function suites (toolbar-model / paste-md / asset; docsource until
+    // v3.10.0 removed it with source mode).
     // ════════════════════════════════════════════════════════════════════
 
     // ── v3.1.0 §4 (the blocker this case exists for): the toolbar is mounted
@@ -23665,11 +23666,12 @@ async function gutterGeometry(page, sel) {
     //    it back. __edTestForceRerender() runs the REAL rerenderAll() (see
     //    client.js's own comment on that seam), which is the only way to reach
     //    that swap without going through a commit first. The bar must still be
-    //    there, still be the ONLY one, still carry the whole 23-button roster
+    //    there, still be the ONLY one, still carry the whole 22-button roster
     //    — and still be LIVE, not merely present: resetToolbarBlock() zeroes
     //    the tracked block on every rerender, so what a post-rerender click
     //    meets is the model's documented no-block state (undo / redo /
-    //    outline / preview stay enabled, everything else greys out). ────────
+    //    outline stay enabled, everything else greys out; v3.10.0 removed
+    //    the source-mode button that used to be the fourth). ──────────────
     {
       const { srv, url } = await setupTableDoc(['# Doc', '', 'A paragraph.', '']);
       try {
@@ -23685,8 +23687,8 @@ async function gutterGeometry(page, sel) {
             bars: document.querySelectorAll('.ed-toolbar').length,
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
           })),
-          { bars: 1, btns: 23 },
-          'sanity: exactly one toolbar carrying the 23-button roster before any rerender');
+          { bars: 1, btns: 22 },
+          'sanity: exactly one toolbar carrying the 22-button roster before any rerender');
 
         await page.evaluate(() => window.__edTestForceRerender());
         await settleEditor(page);
@@ -23697,14 +23699,14 @@ async function gutterGeometry(page, sel) {
             btns: document.querySelectorAll('.ed-toolbar .ed-toolbar-btn').length,
             attached: document.body.contains(document.querySelector('.ed-toolbar')),
           })),
-          { bars: 1, btns: 23, attached: true },
-          'the toolbar must survive a full rerenderAll() — one bar, all 23 buttons, still on document.body');
+          { bars: 1, btns: 22, attached: true },
+          'the toolbar must survive a full rerenderAll() — one bar, all 22 buttons, still on document.body');
 
         assert.strictEqual(
           await page.evaluate(() =>
             document.querySelector('.ed-toolbar [data-ed-tb="outline"]').disabled),
           false,
-          'outline is one of the four buttons the model keeps live in the no-block state rerenderAll() leaves behind');
+          'outline is one of the three buttons the model keeps live in the no-block state rerenderAll() leaves behind');
         const outlineHiddenBefore = await page.evaluate(() =>
           document.body.hasAttribute('data-ed-outline-hidden'));
         await page.click('.ed-toolbar [data-ed-tb="outline"]');

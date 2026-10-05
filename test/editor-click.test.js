@@ -188,6 +188,16 @@ check('gutter: handle and plus are 24px and centred on the first text line', DES
   }
 });
 
+check('source mode: gone from the page', DESKTOP, async (page) => {
+  const r = await page.evaluate(() => ({
+    btn: !!document.querySelector('[data-ed-tb="preview"]'),
+    attr: document.body.hasAttribute('data-ed-mode'),
+    ta: !!document.querySelector('textarea.ed-source'),
+    count: document.querySelectorAll('.ed-toolbar-btn').length,
+  }));
+  assert.deepStrictEqual(r, { btn: false, attr: false, ta: false, count: 22 });
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
