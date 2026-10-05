@@ -17317,12 +17317,16 @@ async function gutterGeometry(page, sel) {
         // the --ed-gutter-shift comment in lib/md2doc.js) — it now occupies
         // [contentLeft-50, contentLeft-14], one Y, no gap between them, 4px
         // of breathing room on the right.
-        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -32,
-          'spec §4.2 + v3.0.1 shift: ⠿ must start 32px left of the block, got ' + (geo.handle.l - geo.block.l));
-        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -14,
-          'spec §4.2 + v3.0.1 shift: ⠿ must end 14px left of the block, got ' + (geo.handle.r - geo.block.l));
-        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -50,
-          'spec §4.2 + v3.0.1 shift: ＋ must start 50px left of the block, got ' + (geo.insert.l - geo.block.l));
+        // v3.10.0 B 外觀, MIGRATED again: 24px buttons and --ed-gutter-gap 2px
+        // (see the --ed-gutter-shift comment in lib/md2doc.js for why not the
+        // spec's 0) put the pair at [contentLeft-60, contentLeft-12] —
+        // re-measured here at v3.10.0: ⠿ -36 / -12, ＋ -60.
+        assert.strictEqual(Math.round(geo.handle.l - geo.block.l), -36,
+          'v3.10.0: ⠿ must start 36px left of the block, got ' + (geo.handle.l - geo.block.l));
+        assert.strictEqual(Math.round(geo.handle.r - geo.block.l), -12,
+          'v3.10.0: ⠿ must end 12px left of the block, got ' + (geo.handle.r - geo.block.l));
+        assert.strictEqual(Math.round(geo.insert.l - geo.block.l), -60,
+          'v3.10.0: ＋ must start 60px left of the block, got ' + (geo.insert.l - geo.block.l));
         assert.strictEqual(Math.round(geo.insert.r - geo.handle.l), 0,
           'spec §4.2: ＋ and ⠿ sit flush, no gap');
         // A REAL pointer walk from inside the text out past the ＋. Jumping
