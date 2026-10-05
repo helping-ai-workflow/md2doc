@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.10.0 — 2026-10-??
+## v3.10.0 — 2026-10-05
 
 ### Added — 編輯模式有深色、程式碼有顏色、存檔狀態看得到
 
