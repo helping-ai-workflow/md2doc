@@ -6920,10 +6920,9 @@ async function gutterGeometry(page, sel) {
     }
 
     // Row menu: click shows the menu (刪除列 only, row highlighted),
-    // deleting a body row removes it; the LAST body row refuses with a
-    // banner. The header row is covered separately below (it never gets a
-    // row grip at all, so there is no click path left to reach its old
-    // refusal banner through).
+    // deleting a body row removes it. v3.11: the LAST body row deletes too,
+    // leaving a header-only table (valid GFM) — it used to refuse. The header
+    // row's own menu is covered separately below.
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '| 3 | 4 |', '',
@@ -6959,19 +6958,22 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(afterDelete, ['| A | B |', '|---|---|', '| 3 | 4 |', ''].join('\n'),
           '刪除列 must remove exactly that row, got:\n' + afterDelete);
 
-        // Refusal: the LAST body row refuses.
+        // v3.11: the LAST body row deletes as well.
         const lastRow = await rowGripCoords(page, table0, 0);
         await pressReleaseAt(page, lastRow.x, lastRow.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         await page.click('.ed-te-menu-delete');
-        await page.waitForSelector('.ed-conflict', { timeout: 3000 });
-        assert.strictEqual(
-          await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
-          'refusing to delete the last body row must leave it in place');
-        await dismissBanner(page);
+        await page.waitForFunction(
+          (s) => document.querySelectorAll(s + ' tbody tr').length === 0, {}, table0);
+        assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-conflict')), false,
+          'deleting the last body row raises nothing');
+        await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
+        const headerOnly = await saveAndRead(page, tmdPath);
+        assert.strictEqual(headerOnly, ['| A | B |', '|---|---|', ''].join('\n'),
+          'the last body row goes and the header-only table stays, got:\n' + headerOnly);
 
         await page.close();
-        console.log('table edge menus: row menu highlights/deletes; last-body-row refuses — OK');
+        console.log('table edge menus: row menu highlights/deletes, the last body row included — OK');
       } finally {
         tsrv.close();
       }
@@ -7431,10 +7433,10 @@ async function gutterGeometry(page, sel) {
       }
     }
 
-    // Invariant: thead always has exactly one row. A header-only table (no
-    // body rows) must NOT offer a row grip on its header — dragging its
-    // only row away would empty the thead; serializeTable() would degrade
-    // it (Task 2) and the user's table would vanish from the page.
+    // Invariant: thead always has exactly one row. v3.11: a header-only table
+    // DOES offer a row grip — its menu's 刪除列 removes the table — but a drag
+    // of its only row must still move nothing (performRowDrop() refuses), or
+    // the thead would empty and serializeTable() would degrade the table.
     {
       const { srv: tsrv, url: turl } = await setupTableDoc(['| A | B |', '|---|---|', '']);
       try {
@@ -7444,20 +7446,27 @@ async function gutterGeometry(page, sel) {
         await hoverHeaderRowCell(page, table0);
         await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
         assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), true,
-          'a header-only table must not offer a row grip (dragging its only row would empty the thead)');
+          await page.evaluate(() => document.querySelector('.ed-te-grip-row').hidden), false,
+          'a header-only table offers a row grip (its menu removes the table)');
+        const hg = await headerGripCoords(page, table0);
+        await page.mouse.move(hg.x, hg.y);
+        await page.mouse.down();
+        await page.mouse.move(hg.x, hg.y + 60, { steps: 8 });
+        await page.mouse.up();
+        await new Promise((r) => setTimeout(r, 400));
+        assert.deepStrictEqual(
+          await page.evaluate((sel) => [...document.querySelectorAll(sel + ' thead th')].map((c) => c.textContent.trim()), table0),
+          ['A', 'B'], 'dragging the only row of a header-only table moves nothing');
         await page.close();
-        console.log('table header grip: header-only table gets no row grip — OK');
+        console.log('table header grip: a header-only table has a grip, and its only row cannot be dragged away — OK');
       } finally { tsrv.close(); }
     }
 
-    // spec §3.10: the row menu's only applicable item is "delete row", and a
-    // header row can never be deleted -> a plain click on the header grip
-    // must NOT open that (now-empty) menu. Instead it just highlights the
-    // header row; clicking elsewhere must clear that highlight too (the old
-    // dismiss condition at the pointerdown handler gated on teMenuKind, which
-    // stays null for this highlight-only path, so the highlight used to
-    // survive until resolveBurst() — never cleared by another click).
+    // v3.11: the header grip opens the row menu like any other row (刪除列
+    // there promotes the first body row), highlighting the header's cells;
+    // clicking elsewhere must clear that highlight (the dismiss condition at
+    // the pointerdown handler once gated on teMenuKind and let a header-only
+    // highlight survive until resolveBurst()).
     {
       const { srv: tsrv, url: turl } = await setupTableDoc([
         '| Name | Note |', '|---|---|', '| Alice | a |', '',
@@ -7469,8 +7478,8 @@ async function gutterGeometry(page, sel) {
         const g = await headerGripCoords(page, table0);
         await pressReleaseAt(page, g.x, g.y);
         assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
-          'clicking the header grip must NOT open the row menu');
+          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), false,
+          'clicking the header grip opens the row menu');
         assert.strictEqual(
           await page.evaluate((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'), table0),
           true, 'clicking the header grip highlights the header row\'s cells');
@@ -7483,7 +7492,7 @@ async function gutterGeometry(page, sel) {
         await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
           { timeout: 3000 }, table0);
         await page.close();
-        console.log('table header grip: click highlights only, and the highlight clears — OK');
+        console.log('table header grip: click opens the row menu with the header highlighted, and the highlight clears — OK');
       } finally { tsrv.close(); }
     }
 

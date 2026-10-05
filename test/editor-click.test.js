@@ -236,32 +236,40 @@ check('messages: a failed save is a sticky error card under the toolbar', DESKTO
   await wait(4500);
   assert.ok(await page.$('.ed-conflict[data-level="error"]'), 'error card does not fade');
 });
-const deleteTwoBodyRows = async (page) => {
+// Table edge menus, driven the way a person does: hover the row (or the
+// header cell), press the grip that appears, press the menu entry.
+const tableMenu = async (page, kind, target, label) => {
   await page.evaluate(() => document.querySelector('.ed-block[data-block-type="table"]').scrollIntoView({ block: 'center' }));
-  // two body rows: delete one (ok), then try to delete the last body row -> "無法刪除最後一列"
+  const box = await target.boundingBox();
+  await page.mouse.move(box.x + 12, box.y + box.height / 2); await wait(300);
+  const g = await page.evaluate((k) => { const e = document.querySelector('.ed-te-grip-' + k); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, kind);
+  assert.ok(g, 'guard: the ' + kind + ' grip is showing');
+  await page.mouse.click(g.x, g.y); await wait(300);
+  await page.locator('.ed-te-menu button', { hasText: label }).click(); await wait(800);
+};
+// v3.11: deleting the LAST column is the one table delete that still refuses
+// (a table needs a column; the table itself goes through ⠿ → 刪除), so it is
+// the notice these message checks raise.
+const refuseLastColumn = async (page) => {
   for (let i = 0; i < 2; i++) {
-    const tr = await page.locator('.ed-block[data-block-type="table"] tbody tr').first().boundingBox();
-    await page.mouse.move(tr.x + 20, tr.y + tr.height / 2); await wait(300);
-    const g = await page.evaluate(() => { const e = document.querySelector('.ed-te-grip-row'); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
-    await page.mouse.click(g.x, g.y); await wait(300);
-    await page.locator('.ed-te-menu button', { hasText: '刪除列' }).click(); await wait(800);
+    await tableMenu(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').first(), '刪除欄');
   }
 };
 check('messages: a notice sits at the bottom and goes away by itself', DESKTOP, async (page) => {
-  await deleteTwoBodyRows(page);
+  await refuseLastColumn(page);
   const n = await page.evaluate(() => {
     const e = document.querySelector('.ed-conflict[data-level="notice"]');
     if (!e) return null; const r = e.getBoundingClientRect();
     return { text: e.textContent, role: e.getAttribute('role'), bottom: innerHeight - r.bottom };
   });
-  assert.ok(n, 'notice present'); assert.ok(n.text.includes('無法刪除最後一列'), n.text);
+  assert.ok(n, 'notice present'); assert.ok(n.text.includes('最後一欄'), n.text);
   assert.strictEqual(n.role, 'status'); assert.ok(n.bottom >= 16 && n.bottom <= 48, 'near the bottom ' + JSON.stringify(n));
   await wait(4600);
   assert.strictEqual(await page.$('.ed-conflict[data-level="notice"]'), null, 'notice faded');
   await page.keyboard.press('Escape');
 });
 check('messages: after a notice fades, Esc still clears a block selection', DESKTOP, async (page) => {
-  await deleteTwoBodyRows(page);
+  await refuseLastColumn(page);
   assert.ok(await page.$('.ed-conflict[data-level="notice"]'), 'guard: the refusal notice appeared');
   await page.keyboard.press('Escape'); await wait(200);   // closes the table menu if still open
   await wait(4600);
@@ -384,6 +392,36 @@ check('messages: a long error card uses the full 760px before it wraps', { width
   assert.strictEqual(r.w, 760, 'card width ' + JSON.stringify(r));
   assert.ok(Math.abs(r.mid - 400) <= 2, 'card centred ' + JSON.stringify(r));
 });
+
+const saveAndRead = async (page, boot) => { await page.keyboard.press('Control+s'); await wait(900); return fs.readFileSync(boot.mdPath, 'utf8'); };
+check('tables: deleting every body row leaves a header-only table', DESKTOP, async (page, boot) => {
+  for (let i = 0; i < 2; i++) await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] tbody tr').first(), '刪除列');
+  const r = await page.evaluate(() => ({ rows: document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length, notice: !!document.querySelector('.ed-conflict') }));
+  assert.deepStrictEqual(r, { rows: 0, notice: false });
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(500);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *Signal *\| *Width *\|\n\|[-: |]+\|\n\n/.test(disk) && disk.indexOf('clk_tx') === -1, 'header-only table on disk: ' + disk);
+});
+check('tables: deleting the header row promotes the first body row', DESKTOP, async (page, boot) => {
+  await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] thead tr'), '刪除列');
+  const r = await page.evaluate(() => ({ head: [...document.querySelectorAll('.ed-block[data-block-type="table"] thead th')].map((c) => c.textContent.trim()), rows: document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length, notice: !!document.querySelector('.ed-conflict') }));
+  assert.deepStrictEqual(r, { head: ['clk_tx', '1'], rows: 1, notice: false });
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(500);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *`clk_tx` *\| *1 *\|\n\|[-: |]+\|\n\| *`rst_n` *\| *1 *\|/.test(disk) && disk.indexOf('Signal') === -1, 'promoted header on disk: ' + disk);
+});
+check('tables: deleting the header of a header-only table removes the table', DESKTOP, async (page, boot) => {
+  await tableMenu(page, 'row', page.locator('.ed-block[data-block-type="table"] thead tr'), '刪除列');
+  await wait(500);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-block[data-block-type="table"]').length), 0, 'table gone');
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '# T\n\nBefore.\n\nAfter.\n');
+}, { md: '# T\n\nBefore.\n\n| a | b |\n|---|---|\n\nAfter.\n' });
+check('tables: the last column still refuses, and says how to remove the table', DESKTOP, async (page) => {
+  await tableMenu(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').first(), '刪除欄');
+  const t = await page.evaluate(() => (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || '');
+  assert.ok(t.includes('最後一欄') && t.includes('⠿'), t);
+}, { md: '# T\n\n| a |\n|---|\n| 1 |\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
