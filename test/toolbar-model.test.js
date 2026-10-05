@@ -447,4 +447,14 @@ function baseCtx(overrides) {
     'source 模式下 outline 必須明確是 disabled === false（覆寫改寫後不得退化）');
 }
 
+{
+  const icons = require('../lib/editor/icons.js');
+  for (const b of tm.BUTTONS) {
+    ok(icons.NAMES.includes(b.icon), 'toolbar icon is a known Lucide name: ' + b.id + ' -> ' + b.icon);
+  }
+  const s = icons.svg('bold', 16);
+  ok(/^<svg class="ed-ico"/.test(s) && s.includes('aria-hidden="true"') && s.includes('width="16"'), 'svg() shape');
+  ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
+}
+
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');

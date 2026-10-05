@@ -136,6 +136,34 @@ check('wave: the waveform editor panel follows dark', DESKTOP, async (page) => {
   assert.ok(contrast(s.fg, s.bg) >= 4.5, 'wave label contrast ' + JSON.stringify(s));
 }, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
 
+check('icons: every toolbar button draws an svg and no emoji', DESKTOP, async (page) => {
+  const r = await page.evaluate(() => [].map.call(document.querySelectorAll('.ed-toolbar-btn'), (b) => ({
+    id: b.getAttribute('data-ed-tb'), svg: !!b.querySelector('svg'), text: b.textContent.trim(),
+    vis: (() => { const q = b.getBoundingClientRect(); return q.right <= innerWidth && q.width > 0; })(),
+  })));
+  assert.ok(r.length >= 22, 'guard: toolbar present ' + r.length);
+  assert.deepStrictEqual(r.filter((x) => !x.svg || x.text), [], 'buttons without svg or with glyph text');
+  assert.deepStrictEqual(r.filter((x) => !x.vis).map((x) => x.id), [], 'buttons off screen at 1440');
+});
+check('icons: selection toolbar has six icon buttons and a divider before link', DESKTOP, async (page) => {
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').first();
+  // dblclick on the first word, not the element centre (see the chrome: check).
+  const box = await ed.boundingBox();
+  await page.mouse.dblclick(box.x + 12, box.y + box.height / 2); await wait(400);
+  const r = await page.evaluate(() => {
+    const t = document.querySelector('.ed-seltb');
+    const kids = [].map.call(t.children, (c) => c.classList.contains('ed-seltb-sep') ? '|' : (c.querySelector('svg') ? 'svg' : 'text'));
+    return kids.join(',');
+  });
+  assert.strictEqual(r, 'svg,svg,svg,svg,svg,|,svg');
+});
+check('icons: gutter handle and plus are svg', DESKTOP, async (page) => {
+  const p = page.locator('.ed-block[data-block-type="paragraph"]').first();
+  await p.hover(); await wait(200);
+  const r = await p.evaluate((e) => ({ h: !!e.querySelector('.ed-handle svg'), i: !!e.querySelector('.ed-insert svg') }));
+  assert.deepStrictEqual(r, { h: true, i: true });
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
