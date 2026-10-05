@@ -462,6 +462,44 @@ check('wrapped items: 轉換成 編號列表 re-indents the continuation', DESKT
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. alpha is a long item\n   that wraps onto a second line\n- bravo\n');
 }, { md: WRAP_MD });
 
+// Shift-click two blocks: everything between them becomes the block selection.
+const selectBlocks = async (page, fromText, toText) => {
+  for (const t of [fromText, toText]) {
+    const sel = await blockByText(page, t);
+    const r = await page.evaluate((q) => { const e = document.querySelector(q); e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.left + Math.min(40, b.width / 2), y: b.top + b.height / 2 }; }, sel);
+    await page.keyboard.down('Shift'); await page.mouse.click(r.x, r.y); await page.keyboard.up('Shift');
+    await wait(200);
+  }
+  return page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
+};
+const MIX_MD = '# D\n\nIntro.\n\n- alpha\n- bravo\n- charlie\n\nOutro.\n';
+check('mixed delete: a paragraph plus the top of a list', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Intro', 'bravo'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Intro'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- charlie\n\nOutro.\n');
+}, { md: MIX_MD });
+check('mixed delete: the bottom of a list plus a paragraph', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'bravo', 'Outro'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Outro'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nIntro.\n\n- alpha\n');
+}, { md: MIX_MD });
+check('mixed delete: across two lists, the survivors join', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 3, 'guard: three blocks selected');
+  await gutterMenu(page, await blockByText(page, 'Mid'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- b2\n');
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n', 'one undo step restores it all');
+}, { md: '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n' });
+check('mixed delete: items of two adjacent lists', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'a2', 'b1'), 2, 'guard: two items selected');
+  await gutterMenu(page, await blockByText(page, 'a2'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a1\n1. b2\n');
+}, { md: '# D\n\n- a1\n- a2\n1. b1\n2. b2\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

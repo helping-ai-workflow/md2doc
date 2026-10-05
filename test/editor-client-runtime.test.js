@@ -18270,11 +18270,10 @@ async function gutterGeometry(page, sel) {
             'and not one byte moved');
         }, 'T6');
 
-      // Scope boundary, stated as a refusal rather than guessed at: a span
-      // holding BOTH list items and non-list blocks is neither a run
-      // re-serialization nor a plain line splice, and the blank-line policy at
-      // the seam between them has no ruling in the spec.
-      await s3Scenario('a set mixing list items and other blocks refuses, byte-identical',
+      // v3.11: a span holding BOTH list items and non-list blocks deletes what
+      // was selected — the paragraph goes, the list keeps its unselected item
+      // (deleteSpanAcrossLists(); it used to refuse).
+      await s3Scenario('a set mixing list items and other blocks deletes exactly the set',
         '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           const shape = await t6Blocks(page);
@@ -18293,12 +18292,10 @@ async function gutterGeometry(page, sel) {
           await clickGutterMenuItem(page, await liBlockSelByText(page, 'bravo'), '刪除');
           await settleEditor(page);
 
-          assert.strictEqual(await t6Banner(page),
-            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
-            'the mixed span covers only PART of the list (charlie is outside), so 刪除 '
-            + 'refuses with its partial-list banner, distinct from the gap one');
-          assert.strictEqual(await saveAndRead(page, mdPath), original,
-            'and not one byte moved');
+          assert.strictEqual(await t6Banner(page), null, 'no refusal');
+          void original;
+          assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- charlie\n',
+            'the paragraph and bravo go; charlie stays');
         }, 'T6');
     }
 
@@ -18802,14 +18799,11 @@ async function gutterGeometry(page, sel) {
             + 'it a safe thing to allow rather than a trap');
         }, 'T7');
 
-      // The Delete key inherits the shared preamble's refusals because it goes
-      // through the SAME entry point, not because it re-checks anything.
-      // Updated for the whole-list delete: a mixed span that covers only PART
-      // of a list still refuses, now with the delete-specific banner that says
-      // what to select instead. `charlie` is outside the set, so the run
-      // would need its survivor re-serialized in the same commit as the
-      // paragraph's removal — still out of scope.
-      await s3Scenario('Delete over a mixed span covering PART of a list refuses, byte-identical',
+      // The Delete key goes through the SAME entry point as ⠿ 刪除, so it
+      // inherits its behaviour rather than carrying a copy of it. v3.11: a
+      // mixed span that covers only PART of a list deletes exactly the set —
+      // `charlie`, outside it, survives (it used to refuse).
+      await s3Scenario('Delete over a mixed span covering PART of a list deletes exactly the set',
         '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           await t7Set(page, 3, 5);
@@ -18820,14 +18814,13 @@ async function gutterGeometry(page, sel) {
 
           await t7Press(page, 'Delete');
 
-          assert.strictEqual(await t7Banner(page),
-            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
-            'the key routes through deleteBlockViaGutter(), so it inherits the partial-list '
-            + 'refusal rather than carrying a copy of it');
+          assert.strictEqual(await t7Banner(page), null, 'no refusal');
+          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'charlie'],
+            'the paragraph and bravo left the document, charlie stayed');
+          assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- charlie\n');
+          await t7Undo(page);
           assert.strictEqual(await saveAndRead(page, mdPath), original,
-            'and not one byte moved');
-          assert.deepStrictEqual(await t7Texts(page), ['Doc', 'alpha', 'bravo', 'charlie'],
-            'and nothing left the document');
+            'ONE Ctrl+Z brings the whole set back byte-identical');
         }, 'T7');
 
       // A mixed span whose every list is covered WHOLE is one contiguous line
@@ -18881,9 +18874,10 @@ async function gutterGeometry(page, sel) {
       }
 
       // The nested child belongs to bravo's run, so a set that stops at bravo
-      // covers the list only in part — and refuses, rather than deleting the
-      // parent and orphaning the child at an indent nothing anchors.
-      await s3Scenario('Delete over a paragraph and a parent item WITHOUT its child refuses',
+      // covers the list only in part. v3.11: it deletes, and the child is
+      // re-anchored (applyIndentClamp()) rather than left at an indent nothing
+      // anchors — it used to refuse.
+      await s3Scenario('Delete over a paragraph and a parent item WITHOUT its child keeps the child',
         '# Doc\n\nalpha\n\n- bravo\n  - child\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           await t7Set(page, 3, 5);
@@ -18893,11 +18887,10 @@ async function gutterGeometry(page, sel) {
 
           await t7Press(page, 'Delete');
 
-          assert.strictEqual(await t7Banner(page),
-            '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目',
-            'the uncovered child makes the list partial');
-          assert.strictEqual(await saveAndRead(page, mdPath), original,
-            'and not one byte moved');
+          assert.strictEqual(await t7Banner(page), null, 'no refusal');
+          assert.strictEqual(await saveAndRead(page, mdPath), '# Doc\n\n- child\n',
+            'the child is re-anchored as a top-level item');
+          void original;
         }, 'T7');
 
       // REGRESSION GUARD (green before the implementation, and named as such —
@@ -20172,24 +20165,20 @@ async function gutterGeometry(page, sel) {
       // later gesture that DID work is a straightforward lie about the state
       // of the document.
       await s3Scenario('a refusal banner is cleared by the next gesture that succeeds',
-        '# Doc\n\nalpha\n\n- bravo\n- charlie\n', async (page, mdPath) => {
-          // 刪除 over this partial mixed span refuses with its partial-list
-          // banner (charlie is outside the set).
-          const MIXED = '刪除時清單只選到一部分：請把整個清單選進來，或只選清單項目';
+        '# Doc\n\nalpha\n\n- a\n- - b\n- c\n', async (page, mdPath) => {
+          // v3.11: a mixed span no longer refuses, so the refusal is raised by
+          // a span with a phantom in it (`- - b`'s outer item owns no source
+          // line) — one of the refusals that stays. The constant keeps its old
+          // name; it is the banner this scenario expects to see cleared.
+          const MIXED = '選取範圍不連續，無法整批操作';
           const original = fs.readFileSync(mdPath, 'utf8');
-          assert.deepStrictEqual(await tXBlocks(page),
-            [['heading', null, [1, 1]], ['paragraph', null, [3, 3]], ['li', '0', [5, 5]],
-              ['li', '0', [6, 6]]],
-            'fixture shape: a paragraph and a list run, so a span across them is §3.6\'s '
-            + 'mixed span and refuses');
           assert.strictEqual(await tXBanner(page), null,
             'precondition: the page starts with no banner');
 
-          await tXSet(page, 3, 5);
+          await tXSet(page, 5, 7);
           const before = await tXSel(page);
-          assert.deepStrictEqual(before.memberLines, [[3, 3], [5, 5]],
-            'precondition: the set really spans the paragraph AND a list item. Got '
-            + JSON.stringify(before));
+          assert.ok(before && before.focusHolderId != null,
+            'precondition: a set stands over the list. Got ' + JSON.stringify(before));
           await clickGutterMenuItem(page,
             '.ed-block[data-block-id="' + before.focusHolderId + '"]', '刪除');
           await settleEditor(page);
@@ -20214,7 +20203,7 @@ async function gutterGeometry(page, sel) {
           await clickGutterMenuItem(page, '.ed-block[data-block-id="1"]', '刪除');
           await settleEditor(page);
           const after = await saveAndRead(page, mdPath);
-          assert.strictEqual(after, '# Doc\n\n- bravo\n- charlie\n',
+          assert.strictEqual(after, '# Doc\n\n- a\n- - b\n- c\n',
             'ANTI-VACUITY: the later gesture must really have SUCCEEDED — the paragraph '
             + 'is gone from the file. A banner-clearing fix hung off a path that never '
             + 'ran would be green on the assertion below and wrong. Got '
