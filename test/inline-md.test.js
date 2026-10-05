@@ -364,4 +364,19 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
   assert.strictEqual(serializeInline(shapeWithTwoStaleComments).md, freshMd);
 }
 
+// v3.11: a RAW HTML anchor — `<a id="ref-x"></a>`, no href attribute at all —
+// is not a markdown link. It used to come out as '[]()', which erased the
+// anchor the moment the block was edited (measured on mac-tx-core's 21
+// reference items). It is unsupported now, so the block falls back to the
+// source box instead of being rewritten. An EMPTY href is still a link:
+// '[x]()' renders as <a href="">.
+{
+  const anchor = el('p', {}, el('a', { id: 'ref-x' }), 'RFC 2863');
+  const res = serializeInline(anchor);
+  assert.deepStrictEqual(res.unsupported, ['A'], 'a raw anchor is unsupported');
+  assert.strictEqual(canWysiwyg(anchor), false, 'so the block is never rewritten in place');
+  assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '' }, 'x'))).md, '[x]()',
+    'an empty href is still a markdown link');
+}
+
 console.log('inline-md.test.js OK');

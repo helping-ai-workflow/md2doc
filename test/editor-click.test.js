@@ -234,7 +234,7 @@ check('messages: a failed save is a sticky error card under the toolbar', DESKTO
   assert.ok(err.text.includes('無法儲存'), err.text);
   assert.strictEqual(err.role, 'alert'); assert.ok(err.belowBar && err.centred, JSON.stringify(err));
   await wait(4500);
-  assert.ok(await page.$('.ed-conflict[data-level="error"]'), 'error card does not fade');
+  assert.ok(!!(await page.$('.ed-conflict[data-level="error"]')), 'error card does not fade');
 });
 // Table edge menus, driven the way a person does: hover the row (or the
 // header cell), press the grip that appears, press the menu entry.
@@ -265,15 +265,15 @@ check('messages: a notice sits at the bottom and goes away by itself', DESKTOP, 
   assert.ok(n, 'notice present'); assert.ok(n.text.includes('最後一欄'), n.text);
   assert.strictEqual(n.role, 'status'); assert.ok(n.bottom >= 16 && n.bottom <= 48, 'near the bottom ' + JSON.stringify(n));
   await wait(4600);
-  assert.strictEqual(await page.$('.ed-conflict[data-level="notice"]'), null, 'notice faded');
+  assert.strictEqual(!!(await page.$('.ed-conflict[data-level="notice"]')), false, 'notice faded');
   await page.keyboard.press('Escape');
 });
 check('messages: after a notice fades, Esc still clears a block selection', DESKTOP, async (page) => {
   await refuseLastColumn(page);
-  assert.ok(await page.$('.ed-conflict[data-level="notice"]'), 'guard: the refusal notice appeared');
+  assert.ok(!!(await page.$('.ed-conflict[data-level="notice"]')), 'guard: the refusal notice appeared');
   await page.keyboard.press('Escape'); await wait(200);   // closes the table menu if still open
   await wait(4600);
-  assert.strictEqual(await page.$('.ed-conflict'), null, 'notice gone');
+  assert.strictEqual(!!(await page.$('.ed-conflict')), false, 'notice gone');
   const paras = page.locator('.ed-block[data-block-type="paragraph"]');
   await paras.nth(0).click({ modifiers: ['Shift'] }); await paras.nth(1).click({ modifiers: ['Shift'] }); await wait(300);
   const before = await page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
@@ -352,7 +352,7 @@ check('external edit: not while the waveform editor is open, then right after it
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
   await wait(300);
   await page.locator('.ed-wave-edit-btn').click(); await wait(800);
-  assert.ok(await page.$('.ed-wave-panel'), 'guard: the waveform editor is open');
+  assert.ok(!!(await page.$('.ed-wave-panel')), 'guard: the waveform editor is open');
   fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8').replace('Second paragraph.', 'Second paragraph, edited outside.'));
   await wait(12500);   // more than one 10s ping
   const during = await page.evaluate(() => ({ open: !!document.querySelector('.ed-wave-panel'), seen: document.body.textContent.includes('edited outside') }));
@@ -623,6 +623,49 @@ check('drag: a parent item takes its children along', DESKTOP, async (page, boot
   assert.strictEqual(await noticeText(page), null, 'no refusal');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- q\n\nEnd.\n\n- p\n  - c\n');
 }, { md: '# D\n\n- p\n  - c\n- q\n\nEnd.\n' });
+
+// A loose list: a blank line between every item.
+const LOOSE_MD = '# D\n\n- alpha\n\n- bravo\n\n- charlie\n';
+const liText = (page, t) => page.locator('.ed-block[data-block-type="li"]', { hasText: t }).locator('.ed-li-text');
+check('loose lists: an item is typed into in place, the blank lines stay', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  // A boolean, never the handle itself: a failing assert inspects `actual`,
+  // and inspecting a Playwright ElementHandle walked its whole object graph
+  // until node ran the machine out of memory (measured: 20 GB, global OOM).
+  assert.strictEqual(!!(await page.$('textarea.ed-raw')), false, 'no source box');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravoX\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: a checkbox toggles', DESKTOP, async (page, boot) => {
+  await page.locator('.ed-block[data-task="1"]', { hasText: 'bravo' }).locator('.ed-li-check').click(); await wait(800);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- [ ] alpha\n\n- [x] bravo\n\n- [ ] charlie\n');
+}, { md: '# D\n\n- [ ] alpha\n\n- [ ] bravo\n\n- [ ] charlie\n' });
+check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'bravo'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: Enter starts a new item that keeps the spacing', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  // Wait for the caret to land in the new, empty item. Keys typed while
+  // Enter's commit re-renders are lost — on a tight list too (measured), a
+  // pre-existing race this check is not about.
+  await page.waitForFunction(() => { const li = document.activeElement && document.activeElement.closest('.ed-block[data-block-type="li"]'); return !!li && li.textContent.trim() === ''; }, null, { timeout: 3000 });
+  await page.keyboard.type('new'); await wait(200);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
+}, { md: LOOSE_MD });
+check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
+  await liText(page, 'charlie').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Tab'); await wait(400);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n  - charlie\n');
+}, { md: LOOSE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

@@ -645,8 +645,35 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   });
   assert.strictEqual(r.md.split('\n')[1], '- plain',
     'the block AFTER the loose one must still own line index 1');
-  assert.ok(r.unsupported.indexOf('P') !== -1,
-    'the loose <p> is still reported unsupported (T2-B: as a per-block inline name)');
+  // v3.11 (batch-2 §6): a loose item with ONE <p> is an ordinary item now —
+  // its text is the paragraph's, and it is no longer reported unsupported.
+  assert.strictEqual(r.md.split('\n')[0], '- loose text', 'the paragraph is the item text');
+  assert.strictEqual(r.unsupported.indexOf('P'), -1,
+    'a single-<p> loose item is no longer unsupported (it used to be, T2-B)');
+  assert.deepStrictEqual(r.unsupportedByLi, [], 'nor per block');
+
+  // Two <p> (a multi-paragraph item) still reach the inline serializer whole
+  // and stay unsupported — out of batch 2's scope.
+  const twoP = el('div', {
+    class: 'ed-block', 'data-block-id': '0', 'data-block-type': 'li',
+    'data-list-type': 'ul', 'data-task': '0', 'data-indent': '0',
+  },
+    el('span', { class: 'ed-li-marker' }, '•'),
+    el('div', { class: 'ed-li-text' }, el('p', {}, 'one'), el('p', {}, 'two'))
+  );
+  assert.ok(serializeBlocks([twoP]).unsupported.indexOf('P') !== -1,
+    'a two-paragraph item is still unsupported');
+
+  // opts.blankBefore: the caller says where a blank line goes; lineMeta keeps
+  // an entry for it (blockId null, blank: true) so it stays parallel.
+  const seen = [];
+  const rb = serializeBlocks([liBlock({ id: '0' }, 'a'), liBlock({ id: '1' }, 'b'), liBlock({ id: '2' }, 'c')], {
+    blankBefore: (cur, prev) => { seen.push([cur.getAttribute('data-block-id'), prev && prev.getAttribute('data-block-id')]); return cur.getAttribute('data-block-id') !== '1'; },
+  });
+  assert.strictEqual(rb.md, '- a\n- b\n\n- c', 'a blank only where the caller asked, never before the first line');
+  assert.strictEqual(rb.lineMeta.length, rb.md.split('\n').length, 'lineMeta parallel');
+  assert.deepStrictEqual(rb.lineMeta[2], { blockId: null, indentPrefix: '', marker: '', blank: true });
+  assert.deepStrictEqual(seen, [['1', '0'], ['2', '1']], 'asked with the item emitted before it');
 
   // A bare ' ' between inline nodes is NOT the artifact and must survive —
   // this is why isBlankText() (newline-requiring) is the right predicate and
