@@ -77,6 +77,8 @@ check('themeCss declares every token in light on :root and in dark under @media 
 check('dark palette meets the spec contrast table (text >= 4.5, focus ring >= 3)', () => {
   const pairs = [
     ['fg', 'bg', 4.5], ['fg', 'panel', 4.5], ['strong', 'bg', 4.5], ['muted', 'bg', 4.5], ['muted', 'panel', 4.5],
+    ['syn-keyword', 'surface', 4.5], ['syn-number', 'surface', 4.5], ['syn-comment', 'surface', 4.5],
+    ['syn-string', 'surface', 4.5], ['syn-type', 'surface', 4.5], ['syn-title', 'surface', 4.5],
     ['code', 'bg', 4.5], ['code', 'surface', 4.5], ['active-fg', 'active-bg', 4.5], ['fg', 'hit-bg', 4.5],
     ['fg', 'mark-bg', 4.5], ['accent', 'panel', 3],
     ['strong', 'ed-surface', 4.5], ['muted', 'ed-chrome', 4.5], ['muted', 'ed-surface', 4.5],
@@ -88,6 +90,13 @@ check('dark palette meets the spec contrast table (text >= 4.5, focus ring >= 3)
     assert.ok(r >= min, a + ' on ' + b + ' = ' + r.toFixed(2) + ' < ' + min);
   }
   assert.ok(contrast(T.LINK_DARK, dark('bg')) >= 4.5, 'link on bg');
+  // v3.10.0: the syntax colours have to read in LIGHT too, on the light code
+  // surface the reader's pre uses.
+  const lightOf = (n) => T.THEME_TOKENS.find((t) => t.name === n).light[0];
+  for (const n of ['syn-keyword', 'syn-number', 'syn-comment', 'syn-string', 'syn-type', 'syn-title']) {
+    const r = contrast(lightOf(n), lightOf('surface'));
+    assert.ok(r >= 4.5, n + ' on light surface = ' + r.toFixed(2) + ' < 4.5');
+  }
 });
 check('mermaid dark variables are the spec values and keep the light fontFamily', () => {
   assert.deepStrictEqual(T.MERMAID_DARK_VARS, Object.assign({}, T.MERMAID_LIGHT_VARS, {
