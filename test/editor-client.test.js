@@ -1485,8 +1485,20 @@ function countInCode(source, needle) {
   // The expected total is therefore 1 declaration + 16 call sites = 17.
   // MIGRATED by v3.10.0 (17 -> 16): leaveSourceMode() is gone with the
   // whole-document source mode, so 1 declaration + 15 call sites = 16.
-  assert.strictEqual(helperCalls, 16,
-    'the helper must be DECLARED once and used at all fifteen ' +
+  // MIGRATED by v3.11.0 (16 -> 21). FIVE genuinely new commit-then-render
+  // sites, one per gesture that used to refuse a span crossing a list
+  // boundary. Each rewrites a region it computes itself (from the first
+  // touched list's first line to the last one's last line) with ONE
+  // commitRangeEdit(), so each owns that range and its rollback outright:
+  //   * deleteSpanAcrossLists()    — 刪除 / Delete over part of a list
+  //   * duplicateSpanAcrossLists() — 建立副本 over a mixed / two-list span
+  //   * convertSpanAcrossLists()   — 轉換成 over a mixed / two-list span, or
+  //                                  one holding a table / hr / html block
+  //   * tabSpanAcrossLists()       — Tab / Shift+Tab over the same shapes
+  //   * moveSpanAcrossLists()      — the ⠿ drops the seam gates refused
+  // 1 declaration + 20 call sites = 21.
+  assert.strictEqual(helperCalls, 21,
+    'the helper must be DECLARED once and used at all twenty ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2119,6 +2131,9 @@ function countInCode(source, needle) {
     if (l.trim().indexOf('//') === 0) continue;
     if (!/(^|[^\w.])return\s*;/.test(l)) continue;
     if (/await performListItemDrop\(/.test(lines[i - 1] || '')) continue; // delegation, not an exit
+    // v3.11: so is handing the drop to moveSpanAcrossLists(), whose OWN
+    // exits are inside this window and audited below like everyone else's.
+    if (/await moveSpanAcrossLists\(/.test(l) || /await moveSpanAcrossLists\(/.test(lines[i - 1] || '')) continue;
     if (/if \(!operands\) return;/.test(l)) continue;                     // the preamble bannered already
     if (raises(i)) continue;
     silent.push(l.trim().replace(/\s+/g, ' '));
@@ -2139,12 +2154,19 @@ function countInCode(source, needle) {
     // IS the document before it, so a banner would report a failure the user
     // can see did not happen.
     'if (!result.op) return;',
+    // v3.11, moveSpanAcrossLists(): its two home positions — the target is
+    // part of what moves (a member's subtree included), or the drop lands
+    // where the span already is …
+    'if (destEl && moving.indexOf(destEl) !== -1) return;',
+    'if (di === firstIdx) return; // dropped where it already is',
+    // … and the same byte-identical commit as `!result.op` above.
+    'if (result.op === null) return;',
     // The li path's own second home position …
     'if (destEl ? destEl === afterSrcEl : all[all.length - 1] === lastLiEl) return;',
     // … and reorderSpanRange()'s order-is-unchanged answer, which the two
     // home positions reach by another road.
     'if (!order) return;',
-  ], 'SIX silent exits, every one of them a documented BYTE NO-OP or an '
+  ], 'NINE silent exits, every one of them a documented BYTE NO-OP or an '
     + 'unreachable defensive guard. Anything else in this list is §3.6\'s '
     + '「靜默不動作是缺陷」 — a drag that neither moved nor said why. Got:\n'
     + silent.map((x) => '  ' + x).join('\n'));

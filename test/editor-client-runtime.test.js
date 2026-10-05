@@ -21192,8 +21192,10 @@ async function gutterGeometry(page, sel) {
     // The ACCEPTED PARTNER comes first, on the same fixture and through the
     // same drop path: without it "the move was refused" is satisfied by an
     // implementation that refuses every move on this page.
-    await s4Scenario('a paragraph dropped between two items of ONE list run is REFUSED '
-      + 'with a banner and writes nothing — while an ordinary move on the same page is '
+    // v3.11: the drop between two items no longer refuses — the list splits
+    // around the paragraph (Notion's behaviour). It used to be REFUSED.
+    await s4Scenario('a paragraph dropped between two items of ONE list run splits the '
+      + 'list around it, in one undo op — and an ordinary move on the same page is '
       + 'accepted', '# Doc\n\npara\n\n- a\n- b\n\ntail\n',
       async (page, mdPath) => {
       const original = '# Doc\n\npara\n\n- a\n- b\n\ntail\n';
@@ -21240,31 +21242,25 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[3].top,
         'PRECONDITION: the drop target must be before-block 3 — the seam BETWEEN the two '
         + 'list items, which is the whole point of this scenario');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('無法把區塊放進清單項目之間') !== -1,
-        'a drop into the middle of a list run must REFUSE OUT LOUD — §3.6: a silent no-op '
-        + 'is a defect. The EXACT wording is asserted, not merely the presence of a '
-        + 'banner mentioning 清單: five other refusals in this file (the default '
-        + 'structural-edit message, BATCH_MIXED_MESSAGE, BATCH_MULTIRUN_MESSAGE, and '
-        + 'Task 5\'s own source-seam and out-of-run messages) contain that word too, and '
-        + 'any of them appearing here would mean the gesture was refused for a reason '
-        + 'this scenario is not about. Got ' + JSON.stringify(banner));
-      assert.strictEqual(banner.indexOf('會讓上下兩串清單接在一起'), -1,
-        'and specifically NOT the SOURCE-seam message: this block\'s own seam (heading '
-        + 'above, list below) is perfectly legal — one message for both seams would tell '
-        + 'the user to go and fix the wrong end of the gesture');
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'para', 'a', 'b', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'a refused move must not write a byte');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b', 'tail'],
+        'the paragraph sits between the two items');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- a\n\npara\n\n- b\n\ntail\n',
+        'the list splits around the paragraph, a blank line on each side');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
     }, 'T3/T5');
 
-    // ── 7. the SOURCE seam is between two list items → refused ──────────
+    // ── 7. the SOURCE seam is between two list items → they join ────────
     // The mirror case, and the one the plan's own enumeration does not list:
-    // lifting the paragraph out of '- a\n\npara\n\n- b\n' leaves
-    // '- a\n\n- b\n', which marked.lexer answers as ONE list with
-    // `loose === true` — the same read-only degradation, arriving from the
-    // seam the block LEFT rather than the one it landed in.
+    // lifting the paragraph out of '- a\n\npara\n\n- b\n' and splicing out
+    // its lines would leave '- a\n\n- b\n', which marked.lexer answers as
+    // ONE list with `loose === true` — the same read-only degradation,
+    // arriving from the seam the block LEFT rather than the one it landed in.
+    // v3.11: moveSpanAcrossLists() re-serializes the two lists as one TIGHT
+    // list instead ('- a\n- b\n'), so the move is accepted (it used to be
+    // REFUSED with the source-seam banner).
     //
     // MIGRATED BY TASK 5 in three ways, all recorded here:
     //   (a) the WORDING — Task 5 split the provisional one-size message into
@@ -21279,9 +21275,9 @@ async function gutterGeometry(page, sel) {
     //       is SILENT rather than refused. That combination is now driven
     //       here, in the middle of this scenario, on the one fixture where
     //       the gate is provably armed.
-    await s4Scenario('a paragraph lifted from between two list items is REFUSED with a '
-      + 'banner and writes nothing — while a put-it-back gesture on the same block is '
-      + 'SILENT, and an ordinary move on the same page is accepted',
+    await s4Scenario('a paragraph lifted from between two list items lets them join as ONE '
+      + 'tight list — while a put-it-back gesture on the same block is SILENT, and an '
+      + 'ordinary move on the same page is accepted',
       '# Doc\n\n- a\n\npara\n\n- b\n', async (page, mdPath) => {
       const original = '# Doc\n\n- a\n\npara\n\n- b\n';
       const g = await s4Geometry(page);
@@ -21353,27 +21349,22 @@ async function gutterGeometry(page, sel) {
       assert.strictEqual(await saveAndRead(page, mdPath), original,
         'and not a byte was written');
 
-      // ── (3) the refusal, out loud ──────────────────────────────────────
+      // ── (3) the move, accepted: the two lists join TIGHT ───────────────
       const g3 = await s4Geometry(page);
       await s4ArmedOn(page, g3[2], 'para');
       const ind = await s4DragHandleTo(page, g3[2], 1);
       expectApprox(ind.top, g3[0].top,
         'PRECONDITION: the drop target is before-block 0 — a perfectly legal DESTINATION, '
-        + 'so the refusal below can only be about the seam the block would LEAVE');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('移走這個區塊會讓上下兩串清單接在一起') !== -1,
-        'lifting the only thing separating two list runs merges them into one LOOSE list '
-        + '— it must refuse out loud rather than corrupt. The EXACT wording again, for '
-        + 'the same reason: five other refusals in this file also say 清單. Got '
-        + JSON.stringify(banner));
-      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
-        'and specifically NOT the DESTINATION-seam message: the destination here is the '
-        + 'top of the document, which is legal. Telling the user to aim somewhere else '
-        + 'would be a lie — there is nowhere this block can go');
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'para', 'b'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'a refused move must not write a byte');
+        + 'so the only question is the seam the block LEAVES');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      const joined = await saveAndRead(page, mdPath);
+      assert.strictEqual(joined, 'para\n\n# Doc\n\n- a\n- b\n',
+        'the paragraph moved to the top and the two lists it separated joined');
+      assert.deepStrictEqual(lexLooseDeep('- a\n- b\n'), [false],
+        'and the joined list is TIGHT — the loose-list degradation the old refusal '
+        + 'guarded against does not happen');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
     }, 'T3/T5');
 
     // ── 8. the one document shape where the separator count MOVES ────────
@@ -21703,8 +21694,10 @@ async function gutterGeometry(page, sel) {
     // constant. Task 5 also added the ACCEPTED PARTNER below: the refusal
     // stood alone on this page, which an implementation that refuses every li
     // drag would have passed.
-    await s4Scenario('a list item dragged out of its own run is REFUSED with a banner '
-      + 'and writes nothing — while a move inside the run is accepted on the same page',
+    // v3.11: leaving the run is accepted too — the item becomes a list of its
+    // own where it lands (it used to be REFUSED with the out-of-run banner).
+    await s4Scenario('a list item dragged out of its own run becomes a list of its own '
+      + 'where it lands — and a move inside the run is accepted on the same page',
       T4_BULLET, async (page, mdPath) => {
       const g = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'out-of-run');
@@ -21720,7 +21713,7 @@ async function gutterGeometry(page, sel) {
       assert.strictEqual(await s4Banner(page), null, 'and it raises NO banner');
       await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
-        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+        'PRECONDITION for the move below: the fixture is back, byte for byte');
 
       // ── now out of the run entirely ───────────────────────────────────
       const g2 = await t4Fixture(page,
@@ -21730,19 +21723,14 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[0].top,
         'PRECONDITION: above every block\'s midline the drop target is before-block 0 — '
         + 'ABOVE the heading, which is outside the item\'s run by any reading');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
-        'a li that leaves its run must refuse OUT LOUD — until Task 4 the same '
-        + 'gesture did nothing at all and said nothing at all, which §3.6 calls a '
-        + 'defect. The EXACT wording is asserted, not merely a banner mentioning 清單: '
-        + 'five other refusals in this file contain that word. Got ' + JSON.stringify(banner));
-      assert.strictEqual(banner.indexOf('移走這個區塊會讓上下兩串清單接在一起'), -1,
-        'and NOT the source-seam message, which belongs to the non-li path and would '
-        + 'mean the gesture was declined for a reason this scenario is not about');
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
-        'a refused move must not write a byte');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['bravo', 'Doc', 'alpha', 'charlie', 'tail'],
+        'bravo is above the heading, the rest of its list stayed');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '- bravo\n\n# Doc\n\n- alpha\n- charlie\n\ntail\n',
+        'a one-item list at the top, the old list closed over the gap');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET, 'ONE undo op');
     }, 'T4/T5');
 
     // ── 7. a DEGRADED run → §4.3's run-wide gate refuses ─────────────────
@@ -22035,9 +22023,10 @@ async function gutterGeometry(page, sel) {
     // the same branch — `insertAt` never leaves −1 because the destination is
     // neither one of the item's own §3.8 siblings nor the block just past its
     // subtree — and both are refused with the same, accurate message.
-    await s4Scenario('a list item dragged into the middle of ANOTHER run is REFUSED '
-      + 'with a banner and writes nothing — while a move to the end of its own run is '
-      + 'accepted on the same page',
+    // v3.11: entering another run is accepted — a bullet dropped between two
+    // ordered items splits that list around it (it used to be REFUSED).
+    await s4Scenario('a list item dragged into the middle of ANOTHER run lands there, '
+      + 'splitting it — and a move to the end of its own run is accepted on the same page',
       '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n', async (page, mdPath) => {
       const original = '# Doc\n\n- a\n- b\n\n1. c\n1. d\n\ntail\n';
       const g = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
@@ -22071,7 +22060,7 @@ async function gutterGeometry(page, sel) {
         + 'untouched');
       await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+        'PRECONDITION for the move below: the fixture is back, byte for byte');
 
       // ── now ONE slot further: inside the other run ────────────────────
       const g2 = await t4Fixture(page, ['heading', 'li', 'li', 'li', 'li', 'paragraph'],
@@ -22081,20 +22070,16 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[4].top,
         'PRECONDITION: the drop target is before-block 4 — BETWEEN the two members of '
         + 'the ordered run, which is the one slot the partner above is not');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
-        'a li may not enter another run — the marker widths and ordinals of BOTH runs '
-        + 'would have to be restated and §3.4 allows one contiguous range per gesture. '
-        + 'The EXACT wording. Got ' + JSON.stringify(banner));
-      assert.strictEqual(banner.indexOf('無法把區塊放進清單項目之間'), -1,
-        'and NOT the non-li destination message: this source IS a list item, and the '
-        + 'advice it needs is different');
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'a', 'b', 'c', 'd', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'a refused move must not write a byte');
-      assert.deepStrictEqual(lexLooseDeep(await saveAndRead(page, mdPath)), [false, false],
-        'and neither run degraded');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'b', 'c', 'a', 'd', 'tail'],
+        'a sits between c and d');
+      const moved = await saveAndRead(page, mdPath);
+      assert.strictEqual(moved, '# Doc\n\n- b\n\n1. c\n- a\n1. d\n\ntail\n',
+        'the blank line between the two lists is kept; the bullet splits the ordered list');
+      assert.deepStrictEqual(lexLooseDeep(moved), [false, false, false, false],
+        'and every list is tight');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
     }, 'T5');
 
     // ── 3. a li dragged PAST THE END of the document → refused ────────────
@@ -22104,8 +22089,10 @@ async function gutterGeometry(page, sel) {
     // append target is outside the run and the move is refused. Without this
     // scenario the `destEl === null` arm of the out-of-run refusal has no
     // coverage at all — the other three cases all arrive with a real element.
-    await s4Scenario('a list item dragged below every block is REFUSED when its run does '
-      + 'not end the document — and accepted when it does',
+    // v3.11: accepted either way now — the item leaves its list and becomes a
+    // list of its own below the paragraph (it used to be REFUSED).
+    await s4Scenario('a list item dragged below every block lands there even when its run '
+      + 'does not end the document',
       T4_BULLET, async (page, mdPath) => {
       const g = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'paragraph'], [null, '0', '0', '0', null], 'append');
@@ -22123,15 +22110,12 @@ async function gutterGeometry(page, sel) {
         'PRECONDITION: below the LAST block the drop target is {mode:\'append\'} — the '
         + 'indicator sits on that block\'s BOTTOM, a position no before-block target '
         + 'can produce');
-      const banner = await s4Banner(page);
-      assert.ok(banner && banner.indexOf('清單項目只能在所屬清單內搬移') !== -1,
-        'the end of the DOCUMENT is not the end of this item\'s run — a paragraph '
-        + 'stands between them — so the move leaves the run and must refuse out loud. '
-        + 'Got ' + JSON.stringify(banner));
-      assert.deepStrictEqual(await s4BlockTexts(page), ['Doc', 'alpha', 'bravo', 'charlie', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET,
-        'a refused move must not write a byte');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- bravo\n- charlie\n\ntail\n\n- alpha\n',
+        'alpha left its list and is a one-item list after the paragraph');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T4_BULLET, 'ONE undo op');
     }, 'T5');
 
     // ── 4. the partner for #3, on a document whose run DOES end it ────────
@@ -22401,13 +22385,13 @@ async function gutterGeometry(page, sel) {
         + 'green on this project)');
     }, 'T6');
 
-    // ── 4. a MIXED set refuses; an all-li set on the same fixture moves ────
-    // §3.6's 2026-08-31 ruling: 「混合 span 一律拒絕」, with the EXISTING
-    // banner. Task 6 does not invent a second message for it, and does not
-    // invent a blank-line rule at the run/non-run seam — §3.6 records that the
-    // spec lacks one and that inventing it late repeats the marker-width error.
-    await s4Scenario('a set holding a paragraph AND a list item refuses the drag with the '
-      + 'existing mixed banner, and an all-li set on the same list still moves',
+    // ── 4. a MIXED set moves; an all-li set on the same fixture moves ──────
+    // v3.11: §3.6's 2026-08-31 ruling (「混合 span 一律拒絕」) is gone —
+    // moveSpanAcrossLists() supplies the blank-line rule at the run/non-run
+    // seam it said was missing: list items in a row are one tight list, any
+    // other new neighbours get one blank line, old neighbours keep theirs.
+    await s4Scenario('a set holding a paragraph AND a list item moves together, and an '
+      + 'all-li set on the same list still moves',
       '# Doc\n\npara\n\n- a\n- b\n- c\n\ntail\n', async (page, mdPath) => {
       const original = '# Doc\n\npara\n\n- a\n- b\n- c\n\ntail\n';
       const g = await s4Geometry(page);
@@ -22420,9 +22404,12 @@ async function gutterGeometry(page, sel) {
       await s4ArmedOn(page, g[1], 'para');
       const ind = await s4DragHandleTo(page, g[1], g[5].bottom + 200);
       expectApprox(ind.top, g[5].bottom, 'PRECONDITION: the drag ENGAGED, aimed at append');
-      await t6AssertOnly(page, 'mixed', 'a paragraph + li set');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'and the file is byte-identical');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- b\n- c\n\ntail\n\npara\n\n- a\n',
+        'the paragraph and its item moved below tail, keeping the blank between them');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
 
       // THE ACCEPTED PARTNER: the same list, the same drop path, a set of TWO
       // list items reordered inside their own run. Without it, "the mixed set
@@ -22455,11 +22442,12 @@ async function gutterGeometry(page, sel) {
 
     // ── 5. the SOURCE seam, for a SET ─────────────────────────────────────
     // Task 5 measured that the source seam cannot be narrowed by run identity:
-    // the block model does not carry the byte that decides it. A batch has to
-    // refuse there exactly as a single move does — the removal is the same
-    // removal, only wider.
-    await s4Scenario('a SET whose removal would join the two lists it stands between is '
-      + 'refused at the source seam, and another set on the same document still moves',
+    // the block model does not carry the byte that decides it. v3.11: it does
+    // not need narrowing — moveSpanAcrossLists() re-serializes the two lists
+    // the set stood between as ONE tight list, so the move is accepted (it
+    // used to refuse at the source seam, exactly as a single move did).
+    await s4Scenario('a SET lifted from between two lists lets them join as one tight '
+      + 'list, and another set on the same document still moves',
       '# Doc\n\nx1\n\nx2\n\n- a\n\npara1\n\npara2\n\n- b\n\ntail\n',
       async (page, mdPath) => {
       const original = '# Doc\n\nx1\n\nx2\n\n- a\n\npara1\n\npara2\n\n- b\n\ntail\n';
@@ -22476,8 +22464,8 @@ async function gutterGeometry(page, sel) {
         'MEASURED: lifting the set out leaves `- a` and `- b` adjacent, and marked '
         + 'answers ONE list token — not two');
       assert.deepStrictEqual(lexLooseDeep('- a\n\n- b\n'), [true],
-        'MEASURED: and that one list is LOOSE. This is the corruption the source seam '
-        + 'gate exists to prevent, and it is not undoable once it lands');
+        'MEASURED: and that one list is LOOSE if the bytes are spliced. The move must '
+        + 'therefore NOT splice them — it joins the two lists tight instead');
       await page.evaluate(() => window.__edTestSetSelection(9, 11));
       assert.deepStrictEqual(await t6SelectedIndices(page), [4, 5],
         'THE PRECONDITION: the set is blocks 4 and 5 — the two paragraphs that sit '
@@ -22488,9 +22476,14 @@ async function gutterGeometry(page, sel) {
       await s4ArmedOn(page, g[4], 'para1');
       const ind = await s4DragHandleTo(page, g[4], g[7].bottom + 200);
       expectApprox(ind.top, g[7].bottom, 'PRECONDITION: the drag ENGAGED, aimed at append');
-      await t6AssertOnly(page, 'srcSeam', 'a set lifted out from between two lists');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'and the file is byte-identical');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      const joined = await saveAndRead(page, mdPath);
+      assert.strictEqual(joined,
+        '# Doc\n\nx1\n\nx2\n\n- a\n- b\n\ntail\n\npara1\n\npara2\n',
+        'the two lists joined tight and the set moved below tail');
+      assert.deepStrictEqual(lexLooseDeep(joined), [false], 'one TIGHT list');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
 
       // THE ACCEPTED PARTNER: a set of the same size and kind on the same
       // document, whose source seam has no list on it.
@@ -22515,8 +22508,10 @@ async function gutterGeometry(page, sel) {
     // thing: landing INSIDE one run. Same fixture, same set, two destinations
     // — which makes this the strongest partner shape in the file: only the
     // AIM differs.
-    await s4Scenario('a SET dropped between two items of ONE run is refused at the '
-      + 'destination seam, and the SAME set aimed past the list is accepted',
+    // v3.11: the destination seam no longer refuses — the run splits around
+    // the set (it used to be refused there).
+    await s4Scenario('a SET dropped between two items of ONE run splits it around the set, '
+      + 'and the SAME set aimed past the list is accepted',
       '# Doc\n\nx1\n\nx2\n\n- a\n- b\n\ntail\n', async (page, mdPath) => {
       const original = '# Doc\n\nx1\n\nx2\n\n- a\n- b\n\ntail\n';
       const g = await s4Geometry(page);
@@ -22535,9 +22530,13 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g[4].top,
         'THE PRECONDITION THIS SCENARIO IS ABOUT: the drop indicator is on the SECOND '
         + 'list item\'s top edge, i.e. the seam BETWEEN the two items of one run');
-      await t6AssertOnly(page, 'destSeam', 'a set dropped inside a run');
-      assert.strictEqual(await saveAndRead(page, mdPath), original,
-        'and the file is byte-identical');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- a\n\nx1\n\nx2\n\n- b\n\ntail\n',
+        'the list splits around the two paragraphs');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), original, 'ONE undo op');
+      await page.evaluate(() => window.__edTestSetSelection(3, 5));
 
       // THE ACCEPTED PARTNER: the SAME set, the SAME fixture, the same drop
       // path — only the aim differs.
@@ -22790,9 +22789,13 @@ async function gutterGeometry(page, sel) {
     // 3.0.0, not unimplemented; it is the destination gate that makes it so,
     // and if that gate is ever widened (3.1.0) this is the assertion that
     // says the clamp for the moved block itself is now owed.
+    //
+    // v3.11: that gate WAS widened — moveSpanAcrossLists() takes the drop —
+    // and the clamp is paid: the item lands at the level of the item it is
+    // dropped in front of (depth 0 here), keeping its own subtree's shape.
     const T7_DEEP = '# Doc\n\n- alpha\n  - a1\n    - a1a\n    - a1b\n- bravo\n\ntail\n';
-    await s4Scenario('a depth-2 item aimed at a depth-0 seam is REFUSED by the run gate, '
-      + 'never clamped — and among its own siblings it keeps its depth',
+    await s4Scenario('a depth-2 item aimed at a depth-0 seam lands there clamped to depth '
+      + '0 — and among its own siblings it keeps its depth',
       T7_DEEP, async (page, mdPath) => {
       const g = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
@@ -22821,9 +22824,9 @@ async function gutterGeometry(page, sel) {
         + JSON.stringify(indents));
       await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
-        'PRECONDITION for the refusal below: the fixture is back, byte for byte');
+        'PRECONDITION for the move below: the fixture is back, byte for byte');
 
-      // ── the refusal: a depth-0 destination is out of the run ────────────
+      // ── a depth-0 destination: the item is clamped to depth 0 ───────────
       const g2 = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
         [null, '0', '1', '2', '2', '0', null], 'depth-2 (after undo)');
@@ -22832,14 +22835,19 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[1].top,
         'PRECONDITION: the drop target is before-block 1 — the head of the OUTER list, '
         + 'the one seam in this document where only depth 0 is legal');
-      await t6AssertOnly(page, 'outOfRun', 'a depth-2 item aimed at a depth-0 seam');
-      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
-        'and not a byte was written: the item is neither moved to column 0 nor clamped — '
-        + 'the destination is refused outright, which is why the moved block\'s own '
-        + 'clamp has no reachable case in 3.0.0');
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- a1b\n- alpha\n  - a1\n    - a1a\n- bravo\n\ntail\n',
+        'a1b heads the outer list at column 0 — the clamp for the moved block itself');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP, 'ONE undo op');
     }, 'T7');
 
-    // ── 4. THE SURVIVING REFUSAL: a batch whose LANDING orphans a block ────
+    // ── 4. a batch whose LANDING would orphan a block → re-anchored ───────
+    // v3.11: the refusal described below is gone. moveSpanAcrossLists()
+    // lands the set at the level of the block it is dropped in front of and
+    // clamps every item to at most one level below the item above it, which
+    // is the insertion-half rule §3.4 lacked.
     // 14 drops out of 4067 are still unanchored after the removal-clamp, and
     // all 14 look like this one: a BATCH whose last member is SHALLOWER than
     // the block it lands before, so the destination block loses the parent
@@ -22848,8 +22856,8 @@ async function gutterGeometry(page, sel) {
     // refusal is kept, narrowed to exactly this family and re-worded from
     // Task 4's 「搬移後子項目會失去上層項目，暫時無法搬移到這裡」: the remedy
     // here is to aim somewhere else, which is what the new wording says.
-    await s4Scenario('a batch whose last member is shallower than its destination is '
-      + 'refused, and the same destination accepts the same grip alone', T7_DEEP,
+    await s4Scenario('a batch whose last member is shallower than its destination lands '
+      + 'there re-anchored, and the same destination accepts the same grip alone', T7_DEEP,
       async (page, mdPath) => {
       const g = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
@@ -22871,9 +22879,9 @@ async function gutterGeometry(page, sel) {
         'and it really moved');
       await s4UndoOnce(page);
       assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
-        'PRECONDITION for the refusal: the fixture is back, byte for byte');
+        'PRECONDITION for the batch move: the fixture is back, byte for byte');
 
-      // ── the refusal ─────────────────────────────────────────────────────
+      // ── the batch move ─────────────────────────────────────────────────
       const g2 = await t4Fixture(page,
         ['heading', 'li', 'li', 'li', 'li', 'li', 'paragraph'],
         [null, '0', '1', '2', '2', '0', null], 'residual-orphan (after undo)');
@@ -22889,25 +22897,12 @@ async function gutterGeometry(page, sel) {
       expectApprox(ind.top, g2[3].top,
         'PRECONDITION: the SAME drop target the partner above was accepted at — a1a. '
         + 'The destination is identical; only the operand set differs');
-      await t6AssertOnly(page, 'orphan', 'a batch landing above a deeper block');
-      assert.deepStrictEqual(await s4BlockTexts(page),
-        ['Doc', 'alpha', 'a1', 'a1a', 'a1b', 'bravo', 'tail'],
-        'a refused move must leave the rendered document exactly as it was');
-      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP,
-        'a refused move must not write a byte — and committing this one would put a1a '
-        + '(column 4) directly under bravo (column 0), which serializeBlocks() emits at '
-        + 'column 0 and the DOM never showed');
-      const indents = await page.evaluate(() => Array.prototype.slice.call(
-        document.querySelectorAll('main.content .ed-block'))
-        .map((el) => el.getAttribute('data-indent')));
-      assert.deepStrictEqual(indents, [null, '0', '1', '2', '2', '0', null],
-        'and the REFUSAL WROTE NO data-indent EITHER — a refused gesture must leave the '
-        + 'model exactly as it found it. NOTE, honestly: on THIS fixture the clamp is '
-        + 'empty anyway (the removal side is clean, which is true of all 14 residual '
-        + 'shapes), so this assertion does not by itself prove the compute-then-write '
-        + 'ordering in performListItemDrop(). That ordering is defensive: it is what '
-        + 'keeps the guarantee true if the residual family ever grows past the depth-3, '
-        + 'length-6 space the sweep covers. Got ' + JSON.stringify(indents));
+      assert.strictEqual(await s4Banner(page), null, 'no refusal');
+      assert.strictEqual(await saveAndRead(page, mdPath),
+        '# Doc\n\n- alpha\n  - a1\n    - a1b\n    - bravo\n    - a1a\n\ntail\n',
+        'both members land at a1a\'s level, so a1a keeps a parent (a1) above it');
+      await s4UndoOnce(page);
+      assert.strictEqual(await saveAndRead(page, mdPath), T7_DEEP, 'ONE undo op');
     }, 'T7');
 
     // <<<S4T7SECTION

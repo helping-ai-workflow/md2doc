@@ -572,6 +572,58 @@ check('mixed Tab: items of two adjacent lists indent together', DESKTOP, async (
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n  - c\n');
 }, { md: '# D\n\n- a\n- b\n* c\n' });
 
+// Press a block's ⠿ and drop it before the block holding `destText`, or
+// below the last block when `destText` is null.
+const dragBlock = async (page, srcText, destText) => {
+  const src = await blockByText(page, srcText);
+  await page.hover(src); await wait(150);
+  const h = await page.evaluate((q) => { const b = document.querySelector(q + ' > .ed-handle').getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; }, src);
+  let y;
+  if (destText === null) {
+    y = await page.evaluate(() => { const all = document.querySelectorAll('.content .ed-block'); return all[all.length - 1].getBoundingClientRect().bottom - 2; });
+  } else {
+    const dst = await blockByText(page, destText);
+    y = await page.evaluate((q) => document.querySelector(q).getBoundingClientRect().top + 3, dst);
+  }
+  await page.mouse.move(h.x, h.y); await page.mouse.down();
+  await page.mouse.move(h.x, (h.y + y) / 2, { steps: 6 });
+  await page.mouse.move(h.x, y, { steps: 6 }); await wait(150);
+  await page.mouse.up(); await wait(700);
+};
+check('drag: a paragraph dropped into the middle of a list splits it', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'Para', 'b');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n\nPara.\n\n- b\n- c\n');
+}, { md: '# D\n\nPara.\n\n- a\n- b\n- c\n' });
+check('drag: a list item dragged out of its list', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- b\n\nEnd.\n\n- a\n');
+}, { md: '# D\n\n- a\n- b\n\nEnd.\n' });
+check('drag: moving the paragraph between two lists joins them', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'Mid', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n\nEnd.\n\nMid.\n');
+  await page.keyboard.press('Control+z'); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n\nMid.\n\n- b\n\nEnd.\n', 'one undo step');
+}, { md: '# D\n\n- a\n\nMid.\n\n- b\n\nEnd.\n' });
+check('drag: a list item dropped into another list joins it', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a1', 'b2');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a2\n\nMid.\n\n- b1\n- a1\n- b2\n');
+}, { md: '# D\n\n- a1\n- a2\n\nMid.\n\n- b1\n- b2\n' });
+check('drag: a paragraph plus a list item move together', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'Para', 'alpha'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'Para', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- bravo\n\nEnd.\n\nPara.\n\n- alpha\n');
+}, { md: '# D\n\nPara.\n\n- alpha\n- bravo\n\nEnd.\n' });
+check('drag: a parent item takes its children along', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'p', null);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- q\n\nEnd.\n\n- p\n  - c\n');
+}, { md: '# D\n\n- p\n  - c\n- q\n\nEnd.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
