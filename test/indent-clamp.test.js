@@ -252,20 +252,27 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
   // `removed` is now reachable, from exactly one gesture. Both halves matter:
   // zero call sites means BLOCKING 1's fix was reverted, and more than one
   // means a second gesture grew a clamp without anyone re-reading this note.
+  // v3.11: TWO, and the second is the same gesture over a wider span —
+  // deleteSpanAcrossLists(), 刪除 over a span that takes part of a list (or
+  // items of two lists), clamps each touched list's orphans exactly the way
+  // deleteListItemsViaGutter() does.
   const removedSites = codeLines.filter((l) => /applyIndentClamp\([^\n]*removed:\s*true/.test(l));
-  assert.strictEqual(removedSites.length, 1,
-    '`opts.removed` must have exactly ONE production caller — the ⠿ delete of a list ' +
-    'item (spec §6, S1 期間的已知危險 item 1). Found ' + removedSites.length + ':\n  ' +
-    removedSites.join('\n  '));
+  assert.strictEqual(removedSites.length, 2,
+    '`opts.removed` must have exactly TWO production callers — the ⠿ delete of list ' +
+    'items (spec §6, S1 期間的已知危險 item 1) and its across-lists span form. Found ' +
+    removedSites.length + ':\n  ' + removedSites.join('\n  '));
   // Same two halves as `removed` above, for the same two reasons: zero call
   // sites means Task 4's clamp was reverted, and more than one means a second
   // gesture grew a conversion clamp without anyone re-reading this note.
+  // v3.11: TWO — convertSpanAcrossLists() is the same conversion over a span
+  // mixing kinds or taking two lists, and clamps the orphans after it the
+  // same way. (Written on ONE line on purpose: this check reads a line.)
   const becomesSites = codeLines.filter(
     (l) => /applyIndentClamp\([^\n]*operatedBecomes/.test(l));
-  assert.strictEqual(becomesSites.length, 1,
-    '`opts.operatedBecomes` must have exactly ONE production caller — the ⠿ 轉換成 of a ' +
-    'list item to a NON-list target (spec §3.3, §4.3 rule 1). Found ' + becomesSites.length +
-    ':\n  ' + becomesSites.join('\n  '));
+  assert.strictEqual(becomesSites.length, 2,
+    '`opts.operatedBecomes` must have exactly TWO production callers — the ⠿ 轉換成 of ' +
+    'list items to a NON-list target (spec §3.3, §4.3 rule 1) and its across-lists span ' +
+    'form. Found ' + becomesSites.length + ':\n  ' + becomesSites.join('\n  '));
 }
 
 console.log('indent-clamp: spec §3.4 shift-then-clamp — OK');
