@@ -290,6 +290,23 @@ check('external edit: a clean page reloads itself, a dirty one raises the confli
   assert.ok(r.mine, 'the unsaved edit is still on the page');
 });
 
+check('lists: bullets change by depth, checked items are struck, children are not', DESKTOP, async (page) => {
+  const marks = await page.evaluate(() => [].map.call(document.querySelectorAll('.ed-block[data-list-type="ul"][data-task="0"] > .ed-li-marker'),
+    (m) => getComputedStyle(m, '::before').content).slice(0, 3));
+  assert.deepStrictEqual(marks, ['"•"', '"◦"', '"▪"']);
+  const r = await page.evaluate(() => {
+    const items = [...document.querySelectorAll('.ed-block[data-task="1"]')];
+    const done = items.find((b) => b.textContent.includes('done item'));
+    const child = items.find((b) => b.textContent.includes('open child'));
+    const box = done.querySelector('.ed-li-check');
+    return { doneDeco: getComputedStyle(done.querySelector('.ed-li-text')).textDecorationLine,
+      childDeco: getComputedStyle(child.querySelector('.ed-li-text')).textDecorationLine,
+      boxW: box.getBoundingClientRect().width, boxBg: getComputedStyle(box).backgroundImage };
+  });
+  assert.strictEqual(r.doneDeco, 'line-through'); assert.strictEqual(r.childDeco, 'none');
+  assert.strictEqual(Math.round(r.boxW), 16); assert.ok(r.boxBg.includes('svg'), 'check mark drawn');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

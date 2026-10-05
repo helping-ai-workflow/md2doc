@@ -541,3 +541,17 @@ console.log('md2doc dot WASM test passed');
     await browser.close();
   }
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.10.0 Task 10: a task item drops its bullet and keeps its own text in a
+// span, so a checked item's strike-through stops at its own words.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const render = async (md) => (await renderMarkdown(md, path.join(tmpDir, 'tasks.md'), {})).bodyHtml;
+  const html = await render('- [x] done\n  - [ ] child\n- [ ] open\n- plain\n');
+  assert.ok(/<li class="task-item is-checked"><input[^>]*checked[^>]*>\s*<span class="task-text">done<\/span>\s*<ul>/.test(html), 'checked task wraps only its own text: ' + html);
+  assert.ok(/<li class="task-item"><input[^>]*>\s*<span class="task-text">child<\/span><\/li>/.test(html), 'unchecked child');
+  assert.ok(/<li>plain<\/li>/.test(html), 'plain items untouched');
+  const loose = await render('- [x] a\n\n- [ ] b\n');
+  assert.ok(loose.includes('<span class="task-text">a</span></p>'), 'loose task item: ' + loose);
+  console.log('md2doc task-item rendering test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
