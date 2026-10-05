@@ -9474,6 +9474,13 @@ async function main() {
       const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       await pickPage(ctx.page, 2);
       assert.strictEqual(await shownPage(ctx.page), 'Flow', 'F5 前提失敗：必須先切到 Flow');
+      // v3.10.0: unsaved work first. The outside-edit check (task 9) reloads a
+      // CLEAN page on its next ping — the conflict card would be gone with the
+      // old page, and rightly so — so the card this row guards only stands
+      // while there is something to lose.
+      await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+      await ctx.page.keyboard.press('End');
+      await ctx.page.keyboard.type(' local');
       // An external write to the MARKDOWN moves its mtime, so the next save
       // fails the mtime guard and raises the conflict banner for real.
       fs.writeFileSync(ctx.mdPath, DRAWIO_MD + '\nAppended outside the editor.\n', 'utf8');
@@ -11647,7 +11654,7 @@ async function main() {
           overlayZ: Number(getComputedStyle(document.querySelector('.ed-wave-overlay')).zIndex),
         };
       });
-      assert.ok(banner.text.indexOf('changed on disk') !== -1,
+      assert.ok(banner.text.indexOf('這個檔案剛在別處被修改') !== -1,
         'T6l: 那必須是磁碟衝突那條 banner。Got ' + JSON.stringify(banner.text));
       assert.ok(banner.buttons.indexOf('重新載入') !== -1,
         'T6l: banner 上要有 Reload 可以按。Got ' + JSON.stringify(banner.buttons));
