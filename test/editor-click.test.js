@@ -368,6 +368,23 @@ check('external edit: typing in an open MD 原始碼 box counts as unsaved work'
   assert.ok(r.ta.includes('RAWTYPED'), 'the typed text is still in the box, not reloaded away: ' + JSON.stringify(r));
 });
 
+check('messages: a long error card uses the full 760px before it wraps', { width: 800, height: 600 }, async (page) => {
+  // Regression guard: centring with left: 50% + translateX(-50%) capped a
+  // fixed card at half the viewport, so a long message wrapped into a tall
+  // card that covered the waveform editor's buttons.
+  // Breakable text (CJK wraps anywhere): an unbreakable run would force the
+  // card wide under either centring and prove nothing.
+  const long = '伺服器拒絕了這次寫入，原因說明很長。'.repeat(12);
+  await page.route('**/api/save', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: long }) }));
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').first();
+  await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' x');
+  await page.locator('.ed-block[data-block-type="heading"]').last().click(); await wait(500);
+  await page.keyboard.press('Control+s'); await wait(600);
+  const r = await page.evaluate(() => { const e = document.querySelector('.ed-conflict[data-level="error"]'); const q = e.getBoundingClientRect(); return { w: Math.round(q.width), mid: Math.round((q.left + q.right) / 2) }; });
+  assert.strictEqual(r.w, 760, 'card width ' + JSON.stringify(r));
+  assert.ok(Math.abs(r.mid - 400) <= 2, 'card centred ' + JSON.stringify(r));
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
