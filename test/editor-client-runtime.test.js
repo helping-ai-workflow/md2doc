@@ -15491,12 +15491,16 @@ async function gutterGeometry(page, sel) {
           rows: ['# Doc', '', '- Only', '', 'Trailer', ''],
           target: 'Only',
           expect: '# Doc\n\nTrailer\n' },
-        { name: '(e) a MULTI-LINE target refuses (§4.1: delete rewrites its line range)',
+        // v3.11: a multi-line target is removed, not re-serialized, so it no
+        // longer refuses (§4.1's delete refusal is gone).
+        { name: '(e) a MULTI-LINE target is deleted whole, both lines',
           rows: ['# L', '', '- hard one  ', '  hard two', '- other', ''],
           target: 'hard one',
-          refuse: true },
+          expect: '# L\n\n- other\n' },
+        // v3.11: the bystander is a TWO-PARAGRAPH item — a merely loose one is
+        // supported now.
         { name: '(f) an unsupported bystander refuses RUN-WIDE (RULING F-R)',
-          rows: ['# L', '', '- a', '', '- b', '', 'tail', ''],
+          rows: ['# L', '', '- a', '', '- b', '', '  b more', '', 'tail', ''],
           target: 'a',
           refuse: true },
       ];
