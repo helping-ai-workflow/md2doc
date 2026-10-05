@@ -194,6 +194,17 @@ function assertNoAutoCloseFor(server, ms) {
     // state-changing POST routes)
     assert.strictEqual((await req(srv.port, 'POST', '/api/ping', {})).status, 204);
 
+    // v3.10.0: ping reports the file's mtime in a header; the 204 stays bodiless.
+    {
+      const r = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      assert.strictEqual(r.status, 204);
+      assert.strictEqual(r.body, '');
+      const ms = Number(r.headers['x-md2doc-mtime']);
+      assert.strictEqual(ms, fs.statSync(mdPath).mtimeMs, 'mtime header');
+      const bad = await req(srv.port, 'POST', '/api/ping', { fileId: 99 });
+      assert.strictEqual(bad.headers['x-md2doc-mtime'], undefined, 'no header for an unknown file');
+    }
+
     // Finding 3(a): missing/wrong content-type on a state-changing POST → 415
     for (const p of ['/api/render', '/api/save', '/api/ping']) {
       const bare = await new Promise((resolve, reject) => {
@@ -437,6 +448,9 @@ function assertNoAutoCloseFor(server, ms) {
   // existing heartbeat instead of a new transport.
 
   // (a) A document with NO drawio references must not pay anything extra:
+  // (v3.10.0: apart from the one non-blocking fs.promises.stat of the
+  // markdown file itself that every ping now makes for the X-Md2doc-Mtime
+  // header — the outside-edit check the user asked for in E10)
   // the ping fast path must issue ZERO fs.statSync calls (not just "be fast"
   // — a direct, mechanical proof of the "(a) 沒有 drawio 的文件，心跳不得變
   // 重" requirement), and must still answer plain 204 exactly as before.

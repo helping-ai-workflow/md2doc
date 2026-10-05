@@ -274,6 +274,22 @@ check('messages: after a notice fades, Esc still clears a block selection', DESK
   assert.strictEqual(after, 0, 'Esc cleared the selection after the notice faded');
 });
 
+check('external edit: a clean page reloads itself, a dirty one raises the conflict card', DESKTOP, async (page, boot) => {
+  const t0 = Date.now();
+  fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8').replace('Second paragraph.', 'Second paragraph, edited outside.'));
+  await page.waitForFunction(() => document.body.textContent.includes('edited outside'), null, { timeout: 15000 });
+  assert.ok(Date.now() - t0 <= 13000, 'picked up within one ping');
+  // The reload replaced the page: wait for the new one's editor before typing.
+  await page.waitForSelector('.ed-toolbar'); await wait(400);
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').first();
+  await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' local');
+  fs.writeFileSync(boot.mdPath, fs.readFileSync(boot.mdPath, 'utf8') + '\nAppended outside.\n');
+  await page.waitForSelector('.ed-conflict[data-level="error"]', { timeout: 15000 });
+  const r = await page.evaluate(() => ({ text: document.querySelector('.ed-conflict').textContent, mine: document.body.textContent.includes(' local') }));
+  assert.ok(r.text.includes('這個檔案剛在別處被修改'), r.text);
+  assert.ok(r.mine, 'the unsaved edit is still on the page');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
