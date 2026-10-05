@@ -423,6 +423,45 @@ check('tables: the last column still refuses, and says how to remove the table',
   assert.ok(t.includes('最後一欄') && t.includes('⠿'), t);
 }, { md: '# T\n\n| a |\n|---|\n| 1 |\n' });
 
+// ⠿ menu, the way a person drives it. `path` is the menu entry, or
+// ['轉換成', '<target>'] for the convert submenu.
+const blockByText = (page, text) => page.evaluate((t) => {
+  const b = [...document.querySelectorAll('.ed-block')].find((x) => (x.textContent || '').includes(t));
+  return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+}, text);
+const gutterMenu = async (page, sel, path) => {
+  await page.hover(sel); await wait(150);
+  await page.click(sel + ' > .ed-handle'); await wait(300);
+  const steps = Array.isArray(path) ? path : [path];
+  for (const label of steps) {
+    await page.evaluate((l) => [...document.querySelectorAll('.ed-handle-menu-btn')].find((b) => b.textContent.trim() === l || b.textContent.trim().startsWith(l + ' ')).click(), label);
+    await wait(500);
+  }
+};
+const noticeText = (page) => page.evaluate(() => (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null);
+const WRAP_MD = '# D\n\n- alpha is a long item\n  that wraps onto a second line\n- bravo\n';
+check('wrapped items: ⠿ 刪除 removes a hard-wrapped item', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: ⠿ 建立副本 copies a hard-wrapped item byte for byte', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), '建立副本');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot),
+    '# D\n\n- alpha is a long item\n  that wraps onto a second line\n- alpha is a long item\n  that wraps onto a second line\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: 轉換成 文字 keeps both lines', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '文字']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nalpha is a long item\nthat wraps onto a second line\n\n- bravo\n');
+}, { md: WRAP_MD });
+check('wrapped items: 轉換成 編號列表 re-indents the continuation', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'alpha'), ['轉換成', '編號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. alpha is a long item\n   that wraps onto a second line\n- bravo\n');
+}, { md: WRAP_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

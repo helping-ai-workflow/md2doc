@@ -2744,56 +2744,24 @@ async function gutterGeometry(page, sel) {
           return b ? b.querySelector('.ed-msg-text').textContent : null;
         });
 
+        // v3.11: a hard-wrapped item converts like any other. A li→li change
+        // replays its source bytes with the new marker's column delta; li →
+        // 文字 takes them straight from the file (convert-md.js's stripMarker()
+        // strips the content column off the continuation).
+        void before;
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
-        // §4.1: a conversion rewrites the item's own line, so it is NOT
-        // column-only and a multi-line li refuses as its TARGET.
-        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
-          'spec 4.1 refusal banner, not convert-md.js’s per-block one');
-        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
-          'a refused conversion must not touch a single byte');
-
-        // The MESSAGE on a NON-list target is the ordering tripwire. §4.3's
-        // run-wide gate has to sit ahead of everything else in
-        // convertBlockViaMenu() — ahead of the li→list routing, and therefore
-        // ahead of the stripMarker() call further down, which refuses a
-        // multi-line li too but with its own, narrower 「此區塊的格式無法轉換」.
-        // Today a li → 文字 stops at Task 4's not-implemented refusal; the
-        // gate is what makes the answer §4.1's banner instead, and that stays
-        // true when Task 4 replaces that refusal with a stripMarker() path.
-        // If the gate is ever moved below either one, this is the line that
-        // notices — it goes 「清單的轉換尚未實作」 now, 「此區塊的格式無法轉換」
-        // after Task 4.
-        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
-        assert.strictEqual(await bannerNow(), '此清單含不支援的格式，無法調整結構',
-          'the §4.3 gate must run BEFORE the per-target routing, not after it');
-        assert.strictEqual(await saveAndRead(page, s3eMdPath), before,
-          'still not one byte');
-
-        // ANTI-VACUOUS (2026-08-30 test-integrity review). MEASURED: both
-        // refusals above stay GREEN when convertBlockViaMenu() is stubbed to
-        // `refuseStructuralListEdit(); return;`, so on their own they cannot
-        // tell "refuses THIS shape" from "refuses everything". The control
-        // gesture below is what separates the two, and it is not a fig leaf:
-        // §4.1's multi-line refusal is TARGET-scoped, not run-wide —
-        // listRunSupportsStructuralEdit() lets MULTILINE past for a BYSTANDER
-        // and refuses only the operated block — so `bravo`, the single-line
-        // sibling of the item that just refused twice, must still convert.
-        // The banner is dismiss-only (it does not time out, and rerenderAll()
-        // leaves it alone), so it is cleared by hand first or the next read
-        // would just see this same one.
-        await dismissBanner(page);
-        assert.strictEqual(await bannerNow(), null,
-          'banner cleared before the control gesture');
-        await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
-        assert.strictEqual(await bannerNow(), null,
-          'a single-line target in the SAME run still converts — §4.1 refuses the ' +
-          'multi-line TARGET, not the run around it');
+        assert.strictEqual(await bannerNow(), null, 'a multi-line li converts, no refusal');
         assert.strictEqual(await saveAndRead(page, s3eMdPath),
-          '# Doc\n\n- alpha\n  continued\n1. bravo\n',
-          'and the control gesture actually landed');
+          '# Doc\n\n1. alpha\n   continued\n- bravo\n',
+          'the continuation follows the wider marker');
+        await convertVia(page, await liBlockSelByText(page, 'alpha'), '文字');
+        assert.strictEqual(await bannerNow(), null, 'and converts away from a list too');
+        assert.strictEqual(await saveAndRead(page, s3eMdPath),
+          '# Doc\n\nalpha\ncontinued\n\n- bravo\n',
+          'both lines become the paragraph, the list after it kept apart');
 
         await page.close();
-        console.log('S2 轉換成: a multi-line li refuses with the §4.1 banner — OK');
+        console.log('S2 轉換成: a multi-line li converts both ways (v3.11; it used to refuse) — OK');
       } finally {
         s3eSrv.close();
       }
@@ -3788,9 +3756,9 @@ async function gutterGeometry(page, sel) {
     }
 
     {
-      // §4.1 修訂 2: a duplicate is NOT column-only — it adds the item's lines
-      // over again — so a multi-line li refuses as a TARGET, with §4.1's
-      // run-wide banner and not convert-md.js's per-block one.
+      // v3.11: a duplicate of a multi-line li replays its source lines for
+      // the copy (it carries the original's id into bystanderCarryOver()), so
+      // it no longer refuses — §4.1 修訂 2's refusal is gone.
       const { srv: s6fSrv, url: s6fUrl, mdPath: s6fMdPath } =
         await setupTableDoc(['# Doc', '', '- alpha', '  continued', '- bravo', '']);
       try {
@@ -3800,22 +3768,16 @@ async function gutterGeometry(page, sel) {
 
         await clickGutterMenuItem(page, await liBlockSelByText(page, 'alpha'), '建立副本');
         await settleEditor(page);
+        void s6fBefore;
         assert.strictEqual(
-          await page.evaluate(() => {
-            const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('.ed-msg-text').textContent : null;
-          }),
-          '此清單含不支援的格式，無法調整結構',
-          '§4.1: a duplicate rewrites line COUNT, so a multi-line li refuses as a target');
-        assert.strictEqual(
-          await page.evaluate(
-            () => document.querySelectorAll('.ed-block[data-block-type="li"]').length),
-          2, 'the refusal must be a refusal — no copy on screen either');
-        assert.strictEqual(await saveAndRead(page, s6fMdPath), s6fBefore,
-          'a refused duplicate must not touch a single byte');
+          await page.evaluate(() => !!document.querySelector('.ed-conflict')), false,
+          'a multi-line li duplicates, no refusal');
+        assert.strictEqual(await saveAndRead(page, s6fMdPath),
+          '# Doc\n\n- alpha\n  continued\n- alpha\n  continued\n- bravo\n',
+          'the copy is the original byte for byte');
 
         await page.close();
-        console.log('S2 建立副本: a multi-line li refuses with the §4.1 banner — OK');
+        console.log('S2 建立副本: a multi-line li duplicates byte for byte (v3.11; it used to refuse) — OK');
       } finally {
         s6fSrv.close();
       }
