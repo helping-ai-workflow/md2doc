@@ -454,6 +454,9 @@ function baseCtx(overrides) {
   }
   const s = icons.svg('bold', 16);
   ok(/^<svg class="ed-ico"/.test(s) && s.includes('aria-hidden="true"') && s.includes('width="16"'), 'svg() shape');
+  // No whitespace between tags: it would become text nodes inside every ⠿ / ＋
+  // and leak into the block's textContent (measured: 6 spaces per block).
+  ok(icons.NAMES.every((n) => !/>\s+</.test(icons.svg(n, 16))), 'icon markup has no whitespace text nodes');
   ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
 }
 
