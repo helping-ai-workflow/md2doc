@@ -2077,7 +2077,8 @@ function countInCode(source, needle) {
   assert.ok(from > 0 && to > from,
     'PRECONDITION: both drag-path functions must be locatable by content — line numbers '
     + 'have drifted every stage, so nothing here may be pinned to one');
-  const BANNER_RE = /showBanner\(|refuseStructuralListEdit\(/;
+  // v3.10.0: callers raise a message through showError() / showNotice().
+  const BANNER_RE = /showBanner\(|showError\(|showNotice\(|refuseStructuralListEdit\(/;
   const RETURN_RE = /(^|[^\w.])return\s*;/;
   const isCommentLine = (l) => l.trim().indexOf('//') === 0;
   // Does the banner belong to THIS exit? On the return's own line
@@ -2264,7 +2265,7 @@ function countInCode(source, needle) {
   assert.strictEqual(
     count("const why = (j && typeof j.error === 'string' && j.error) ? j.error : ('HTTP ' + res.status);"), 1,
     'a non-2xx upload response must carry the server\'s reason, falling back to the status');
-  assert.strictEqual(count("showBanner('檔案上傳失敗 — ' + why, null, null)"), 1,
+  assert.strictEqual(count("showError('檔案上傳失敗 — ' + why, null, null)"), 1,
     "the server's own refusal text must be what the user sees");
 
   console.log('editor-client: the .drawio/.xml insert path is wired on the client — OK');

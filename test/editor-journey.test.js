@@ -4540,7 +4540,7 @@ async function main() {
         return d ? d.textContent.trim() : null;
       });
       // 這是本列的內容：降級子樹拿到的是【它自己那句】，不是同行巢狀那句。
-      assert.strictEqual(banner, '這段巢狀清單對不到自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
+      assert.strictEqual(banner, '這段巢狀清單對不到自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。',
         'N4：點進一個降級的清單項，必須出現降級專用的那句話 —— 不是 ' +
         '「此項目沒有自己的來源行…」（那句屬於 - - a 那種同行巢狀，它真的沒有來源行），' +
         'got ' + JSON.stringify(banner));
@@ -4713,7 +4713,7 @@ async function main() {
         JSON.stringify(disk));
       const banner = await visibleBannerText(ctx.page);
       // showBanner() 的節點是「訊息 span ＋ 關閉鈕（✕）」，所以 textContent 帶尾巴。
-      assert.strictEqual(banner, SWALLOW_MSG + '✕',
+      assert.strictEqual(banner, SWALLOW_MSG,
         'F10：吞噬必須升起【吞噬那一句】。任何其他 .ed-conflict（磁碟衝突／' +
         'render 失敗／save 失敗／手勢失去目標／結構性拒絕／降級成原始碼編輯／' +
         '插圖失敗）' +
@@ -5019,12 +5019,12 @@ async function main() {
       const ctx = await newPage(MD);
       await openCode(ctx);
       await commitCode(ctx, '```js\nconst a = 1;\n``` MID');
-      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
         'F10 退場 前提失敗：吞噬必須先升起那句話');
       // 還開著的時候做一次別的編輯：警告必須留著。
       await openCode(ctx);
       await commitCode(ctx, '```js\nconst a = 2;\n``` MID\n\n## Next\n\nBravo.');
-      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
         'F10 退場：圍欄還開著的時候，一次成功的編輯【不得】把警告收掉 —— ' +
         '後面的內容還被吃著');
       // 補回收尾圍欄：警告必須退場。
@@ -5044,10 +5044,10 @@ async function main() {
       const ctx = await newPage(MD);
       await openCode(ctx);
       await commitCode(ctx, '```js\nconst a = 1;\n``` MID');
-      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
         'F10 ✕ 前提失敗：吞噬必須先升起那句話');
       await ctx.page.evaluate(() => {
-        const b = document.querySelector('.ed-conflict button[aria-label="Dismiss"]');
+        const b = document.querySelector('.ed-conflict .ed-msg-x');
         if (!b) throw new Error('F10 ✕ 前提失敗：banner 上沒有 ✕');
         b.click();
       });
@@ -5214,7 +5214,7 @@ async function main() {
     // ── 反面：歸屬測試不得把真吞噬也一起變安靜 ────────────────────────────
     // TP3 是最常見的那一種（只刪掉收尾圍欄那一行），TP5 是 588ae30 漏掉的那一格
     // （新圍欄正好吃掉一個區塊，區塊數因此不減）。
-    const SW = SWALLOW_MSG + '✕';
+    const SW = SWALLOW_MSG;
     {
       const ctx = await newPage(FDOC);
       await editWholeDocRaw(ctx, (v) => {
@@ -5376,7 +5376,7 @@ async function main() {
       assert.strictEqual(
         await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 3,
         'PIN-indent 前提失敗：吞噬必須真的發生');
-      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
         'PIN-indent：縮排四格的 ``` 不是收尾圍欄，這是真吞噬');
       assert.strictEqual(ctx.errs.length, 0,
         'PIN-indent：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -5569,7 +5569,7 @@ async function main() {
   // （fd2913f）自己引進的迴歸。
   {
     const NL = '\n';
-    const SW = SWALLOW_MSG + '✕';
+    const SW = SWALLOW_MSG;
     const CODE = '.ed-block[data-block-type="code"]';
     const rawEditCode = async (ctx, mutate) => {
       await pressClick(ctx.page, CODE, 80);
@@ -5719,7 +5719,7 @@ async function main() {
     assert.strictEqual(
       await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 3,
       'L2 前提失敗：marked 不認這個收尾，吞噬必須真的發生（5 個區塊掉到 3 個）');
-    assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+    assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
       'L2：收尾圍欄後面跟一個 tab 時 marked 說沒收 —— 我們必須跟它一致，否則真吞噬靜默');
     assert.strictEqual(ctx.errs.length, 0, 'L2：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
@@ -5799,7 +5799,7 @@ async function main() {
   // 改成逐行、命中就 return true：一行要自己同時滿足前半與後半才算數。
   {
     const NL = '\n';
-    const SW = SWALLOW_MSG + '✕';
+    const SW = SWALLOW_MSG;
     const CODE = '.ed-block[data-block-type="code"]';
     // '}' 在 code block 裡重複出現；使用者刪掉後面那一份與收尾圍欄。
     const DUPBRACE = '# Doc' + NL + NL + '```js' + NL + 'if (a) {' + NL + '}' + NL +
@@ -5921,7 +5921,7 @@ async function main() {
       assert.strictEqual(
         await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 2,
         'PIN-o-indent 前提失敗：那個縮排式 code block 必須真的被吃進去');
-      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG + '✕',
+      assert.strictEqual(await visibleBannerText(ctx.page), SWALLOW_MSG,
         'PIN-o-indent：縮排四格的 ```sh 不是圍欄，它那兩行本來活在圍欄外面');
       assert.strictEqual(ctx.errs.length, 0,
         'PIN-o-indent：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -9453,18 +9453,18 @@ async function main() {
       // every other site rather than guessing 600 ms.
       await pressSaveAndLand(ctx);
       const conflict = await visibleBannerText(ctx.page);
-      assert.strictEqual(typeof conflict === 'string' && conflict.indexOf('File changed on disk') !== -1, true,
+      assert.strictEqual(typeof conflict === 'string' && conflict.indexOf('這個檔案剛在別處被修改') !== -1, true,
         'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
       // Now make the background path WANT to raise its own notice.
       rewriteDrawio(ctx, ARCH_TIMING);
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const stillConflict = await visibleBannerText(ctx.page);
       assert.strictEqual(
-        typeof stillConflict === 'string' && stillConflict.indexOf('File changed on disk') !== -1, true,
+        typeof stillConflict === 'string' && stillConflict.indexOf('這個檔案剛在別處被修改') !== -1, true,
         'F5：背景刷新不得把磁碟衝突 banner（連同它的 Reload 按鈕）換掉，got ' + JSON.stringify(stillConflict));
       const reloadBtns = await ctx.page.evaluate(() =>
         Array.from(document.querySelectorAll('.ed-conflict button')).map((b) => b.textContent).join('|'));
-      assert.strictEqual(reloadBtns.indexOf('Reload') !== -1, true,
+      assert.strictEqual(reloadBtns.indexOf('重新載入') !== -1, true,
         'F5：Reload 按鈕必須還在 —— 那是使用者解衝突的唯一入口，got ' + reloadBtns);
       // And the DOM update itself still happened underneath it.
       const landed = await shownPage(ctx.page);
@@ -11454,7 +11454,7 @@ async function main() {
         el.className = 'ed-conflict';
         const b = document.createElement('button');
         b.type = 'button';
-        b.textContent = 'Reload';
+        b.textContent = '重新載入';
         el.appendChild(b);
         document.body.appendChild(el);
         const r = el.getBoundingClientRect();
@@ -11614,7 +11614,7 @@ async function main() {
       });
       assert.ok(banner.text.indexOf('changed on disk') !== -1,
         'T6l: 那必須是磁碟衝突那條 banner。Got ' + JSON.stringify(banner.text));
-      assert.ok(banner.buttons.indexOf('Reload') !== -1,
+      assert.ok(banner.buttons.indexOf('重新載入') !== -1,
         'T6l: banner 上要有 Reload 可以按。Got ' + JSON.stringify(banner.buttons));
       assert.strictEqual(banner.overlayStillUp, true,
         'T6l: banner 升起來不得把使用者手上的波形編輯器無預警關掉');
@@ -11655,7 +11655,7 @@ async function main() {
         el.className = 'ed-conflict';
         const b = document.createElement('button');
         b.type = 'button';
-        b.textContent = 'Reload';
+        b.textContent = '重新載入';
         el.appendChild(b);
         document.body.appendChild(el);
         b.focus();
@@ -11828,7 +11828,7 @@ async function main() {
       // 的主詞就是那顆按鈕。
       await ctx.page.evaluate(() => {
         const bs = document.querySelectorAll('.ed-conflict button');
-        for (const b of bs) if (b.textContent === 'Reload') { b.click(); return; }
+        for (const b of bs) if (b.textContent === '重新載入') { b.click(); return; }
         throw new Error('no Reload button on the banner');
       }).catch(() => {});
       await new Promise((r) => setTimeout(r, 1200));

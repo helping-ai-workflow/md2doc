@@ -1616,6 +1616,16 @@ async function gutterOpacityWalk(page, sel, xFrom, xTo, y, step) {
 }
 
 // Box of a block and of its two gutter buttons, in viewport coordinates.
+// v3.10.0: an error card carries a ✕ (.ed-msg-x); a notice has none and
+// fades by itself after 4 seconds. Rows that only need the banner gone before
+// their next gesture press the ✕ when there is one, and otherwise take the
+// notice down through the same dismissBannerEl() its own timer calls.
+async function dismissBanner(page) {
+  const x = await page.$('.ed-conflict .ed-msg-x');
+  if (x) { await x.click(); return; }
+  await page.evaluate(() => window.__edTestDismissBanner());
+}
+
 async function gutterGeometry(page, sel) {
   return page.evaluate((s) => {
     const b = document.querySelector(s);
@@ -1712,7 +1722,7 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'FIX 2: banner must explain the render failure, got: ' + bannerText);
 
       const contentHtml = await page.evaluate(() => document.querySelector('.content').innerHTML);
@@ -1732,7 +1742,7 @@ async function gutterGeometry(page, sel) {
         'FIX 2 (Phase-2): a failed commit must keep the editor open with the unsaved text, not discard it'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       assert.ok(
         await page.evaluate(() => !document.querySelector('.ed-conflict')),
         'FIX 2: the render-failure banner must be dismissible'
@@ -1801,9 +1811,9 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/save failed/i.test(bannerText),
+      assert.ok(/無法儲存/.test(bannerText),
         'FIX 3: banner must explain the save failure, got: ' + bannerText);
-      assert.ok(/not saved/i.test(bannerText),
+      assert.ok(/變更還在這個分頁裡/.test(bannerText),
         'FIX 3: banner must make clear changes were NOT saved, got: ' + bannerText);
 
       const titleAfterFailedSave = await page.title();
@@ -2012,7 +2022,7 @@ async function gutterGeometry(page, sel) {
       await page.click(selB);
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'switch-commit-failure: banner must explain the render failure, got: ' + bannerText);
 
       assert.strictEqual(
@@ -2029,7 +2039,7 @@ async function gutterGeometry(page, sel) {
         'switch-commit-failure: B must NOT open when A\'s auto-commit failed'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       // Cleanup: cancel A's still-open editor via its ✕ button (same reason
       // as above — focus is on the banner's Dismiss button, not the
       // textarea, so Esc's per-textarea handler wouldn't fire).
@@ -2771,7 +2781,7 @@ async function gutterGeometry(page, sel) {
         // The banner is dismiss-only (it does not time out, and rerenderAll()
         // leaves it alone), so it is cleared by hand first or the next read
         // would just see this same one.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null,
           'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'bravo'), '編號列表');
@@ -2871,7 +2881,7 @@ async function gutterGeometry(page, sel) {
 
         // The control gesture. Dismiss first: the banner is dismiss-only, so
         // a stale one would answer the read below.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null,
           'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'healthy'), '文字');
@@ -3491,7 +3501,7 @@ async function gutterGeometry(page, sel) {
         // is dismiss-only (it does not time out and rerenderAll() leaves it
         // alone — it lives on document.body, outside .content), so it has to
         // be cleared by hand or the next read would just see this same one.
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         assert.strictEqual(await bannerNow(), null, 'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
         assert.strictEqual(await bannerNow(), null, 'a NON-merging target still works');
@@ -5225,7 +5235,7 @@ async function gutterGeometry(page, sel) {
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
       assert.ok(bannerText.includes('不支援'), 'unsupported commit must show the fallback banner');
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.click(sel + ' .ed-cancel');
       await page.close();
       console.log('wysiwyg: unsupported mid-session content degrades to raw-edit with original source — OK');
@@ -5358,7 +5368,7 @@ async function gutterGeometry(page, sel) {
         'A\'s degraded raw-edit content must stay exactly as degraded — unaffected by C\'s independent burst'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.click(selA + ' .ed-cancel');
       await page.keyboard.press('Escape'); // end C's burst too
       await page.close();
@@ -5608,7 +5618,7 @@ async function gutterGeometry(page, sel) {
 
       await page.waitForSelector('.ed-conflict', { timeout: 5000 });
       const bannerText = await page.evaluate(() => document.querySelector('.ed-conflict').textContent);
-      assert.ok(/render failed/i.test(bannerText),
+      assert.ok(/這次修改沒有套用/.test(bannerText),
         'burst commit-failure: banner must explain the render failure, got: ' + bannerText);
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).textContent.includes('UNSAVED-BURST-TEXT'), editEl),
@@ -5621,7 +5631,7 @@ async function gutterGeometry(page, sel) {
         'burst commit-failure: the burst must stay open — focus returns to the surface after the failed blur-commit'
       );
 
-      await page.click('.ed-conflict button[aria-label="Dismiss"]');
+      await dismissBanner(page);
       await page.keyboard.press('Escape'); // discard the still-open burst
       await page.close();
       console.log('burst commit-failure: stays open with typed text intact, banner dismissible — OK');
@@ -6958,7 +6968,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
           'refusing to delete the last body row must leave it in place');
-        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+        await dismissBanner(page);
 
         await page.close();
         console.log('table edge menus: row menu highlights/deletes; last-body-row refuses — OK');
@@ -12713,7 +12723,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the row insert'
         );
 
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f7MdPath, 'utf8');
@@ -12838,7 +12848,7 @@ async function gutterGeometry(page, sel) {
           'the dirty paragraph burst elsewhere must still have been COMMITTED — this fix only guards the col insert'
         );
 
-        await page.click('.ed-conflict button[aria-label="Dismiss"]');
+        await dismissBanner(page);
         await pressSaveAndLand(page);
 
         const fileText = fs.readFileSync(f8MdPath, 'utf8');
@@ -13778,7 +13788,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
           'sanity: the refusal must leave the row in place');
-        await page.evaluate(() => document.querySelector('.ed-conflict button[aria-label="Dismiss"]').click());
+        await dismissBanner(page);
 
         // Click a DIFFERENT block — this is what strips the highlight and,
         // pre-fix, turned the burst into a "changed" one.
@@ -14135,7 +14145,7 @@ async function gutterGeometry(page, sel) {
         // Assert the text itself so a future shadowing cannot pass silently.
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。',
           '刪除 on a block that owns no line must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
@@ -14163,7 +14173,7 @@ async function gutterGeometry(page, sel) {
           'the refused body click must REFUSE VISIBLY (banner), not fail silently');
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-conflict').textContent.trim()),
-          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。' + '✕',
+          '此項目沒有自己的來源行，無法在這裡刪除或編輯。請用文字編輯器修改，存檔後這裡會自動更新。',
           'the refused body click must show the NO-SOURCE-LINE banner text, ' +
           'not the run-level structural-refusal message');
         await page.evaluate(() => {
