@@ -17375,16 +17375,21 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(lowDead.length, 0,
           'the gutter must stay live along the BOTTOM of a row, below the 20px buttons — ' +
           JSON.stringify(lowDead));
-        // A heading is 61.5px tall; its vertical centre is 20px below the
-        // bottom of its own ⠿.
+        // A heading is 61.5px tall, much taller than its ⠿.
         const hSel = await blockSelByType(page, 'heading');
         const hGeo = await gutterGeometry(page, hSel);
         assert.ok(hGeo.block.h > hGeo.handle.h + 10,
           'fixture sanity: the heading must be taller than its 20px handle, got ' + hGeo.block.h);
-        const hMidY = hGeo.block.t + hGeo.block.h / 2;
-        assert.ok(hMidY > hGeo.handle.b,
-          'fixture sanity: the heading\'s vertical centre must sit BELOW its ⠿ — that is the ' +
-          'gap being closed');
+        // v3.10.0: the ⠿ is centred on the heading's first text line now
+        // (alignGutterTops), so the heading's vertical centre is ON the ⠿ and
+        // no longer the gap. The gap this walk exists for is any row of the
+        // block the button does not cover; walk the one farthest from it.
+        const hAbove = hGeo.handle.t - (hGeo.block.t + 2);
+        const hBelow = (hGeo.block.b - 2) - hGeo.handle.b;
+        const hMidY = hBelow >= hAbove ? hGeo.block.b - 2 : hGeo.block.t + 2;
+        assert.ok(hMidY > hGeo.handle.b || hMidY < hGeo.handle.t,
+          'fixture sanity: the walked row must lie OUTSIDE the ⠿\'s own band — that is the ' +
+          'gap being closed; row=' + hMidY + ' handle=[' + hGeo.handle.t + ', ' + hGeo.handle.b + ']');
         // v3.0.2: -48, same reasoning as the row-bottom walk above — the
         // loop's step of 4 from blockLeft+6 makes -46 the deepest point
         // actually sampled here too.
@@ -17392,7 +17397,7 @@ async function gutterGeometry(page, sel) {
           hGeo.block.l + 6, hGeo.block.l - 48, hMidY, 4);
         const hDead = hWalk.filter((s) => s.handle < 0.99 || !s.hover);
         assert.strictEqual(hDead.length, 0,
-          'moving left from the MIDDLE of a heading must reveal and keep its ⠿ — ' +
+          'moving left along a heading row the ⠿ does not cover must reveal and keep it — ' +
           JSON.stringify(hDead));
         // Hit-test conflict 1 (spec §4.2): the gutter must still leave the
         // sidebar splitter's own drag zone alone.
