@@ -2741,7 +2741,7 @@ async function gutterGeometry(page, sel) {
         const before = fs.readFileSync(s3eMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
           const b = document.querySelector('.ed-conflict');
-          return b ? b.querySelector('span').textContent : null;
+          return b ? b.querySelector('.ed-msg-text').textContent : null;
         });
 
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
@@ -2869,7 +2869,7 @@ async function gutterGeometry(page, sel) {
 
         const bannerNow = () => page.evaluate(() => {
           const b = document.querySelector('.ed-conflict');
-          return b ? b.querySelector('span').textContent : null;
+          return b ? b.querySelector('.ed-msg-text').textContent : null;
         });
         const before = fs.readFileSync(s3gMdPath, 'utf8');
         await convertVia(page, await liBlockSelByText(page, 'alpha'), '編號列表');
@@ -3090,7 +3090,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }),
           null, 'a multi-line BYSTANDER must not veto the gesture (§4.1)');
         assert.strictEqual(await saveAndRead(page, s4gMdPath),
@@ -3803,7 +3803,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }),
           '此清單含不支援的格式，無法調整結構',
           '§4.1: a duplicate rewrites line COUNT, so a multi-line li refuses as a target');
@@ -3874,7 +3874,7 @@ async function gutterGeometry(page, sel) {
       }
       const bannerNow = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
 
       {
@@ -3949,7 +3949,7 @@ async function gutterGeometry(page, sel) {
     {
       const bannerNow = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Banners hang on document.body, never time out and survive
       // rerenderAll() — a leftover one makes the NEXT scenario's read a lie.
@@ -4347,7 +4347,7 @@ async function gutterGeometry(page, sel) {
 
       const bannerNow = (p) => p.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Banners hang on document.body, never time out and survive
       // rerenderAll() — a leftover one makes the NEXT cell's read a lie, and
@@ -17292,7 +17292,7 @@ async function gutterGeometry(page, sel) {
           assert.strictEqual(t.after, t.before, 'a refused Tab must not move focus');
           assert.strictEqual(await page.evaluate(() => {
             const b = document.querySelector('.ed-conflict');
-            return b ? b.querySelector('span').textContent : null;
+            return b ? b.querySelector('.ed-msg-text').textContent : null;
           }), '此清單含不支援的格式，無法調整結構',
             'the run-wide refusal banner must still be the one shown');
           assert.strictEqual(await saveAndRead(page, tnrMdPath), before,
@@ -17985,7 +17985,7 @@ async function gutterGeometry(page, sel) {
       const t6Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t6Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       // Every block's identity as the batch machinery sees it: the id the DOM
       // addresses it by, its type, its indent, and the source line range off
@@ -18367,7 +18367,7 @@ async function gutterGeometry(page, sel) {
       const t7Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t7Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const t7Blocks = (page) => page.evaluate(() =>
         window.__edTestBlocks().map((b, i) => {
@@ -19427,7 +19427,7 @@ async function gutterGeometry(page, sel) {
 
       const t8Banner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const t8Sel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const t8Blocks = (page) => page.evaluate(() => window.__edTestBlocks());
@@ -20021,7 +20021,7 @@ async function gutterGeometry(page, sel) {
       const tXSel = (page) => page.evaluate(() => window.__edTestGetSelection());
       const tXBanner = (page) => page.evaluate(() => {
         const b = document.querySelector('.ed-conflict');
-        return b ? b.querySelector('span').textContent : null;
+        return b ? b.querySelector('.ed-msg-text').textContent : null;
       });
       const tXBlocks = (page) => page.evaluate(() =>
         window.__edTestBlocks().map((b) => {
