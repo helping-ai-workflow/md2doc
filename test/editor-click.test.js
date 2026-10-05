@@ -198,6 +198,25 @@ check('source mode: gone from the page', DESKTOP, async (page) => {
   assert.deepStrictEqual(r, { btn: false, attr: false, ta: false, count: 22 });
 });
 
+check('save status: clean, dirty with save lit, then saved after Ctrl+S', DESKTOP, async (page, boot) => {
+  const st = () => page.evaluate(() => {
+    const s = document.querySelector('.ed-toolbar-status');
+    const b = document.querySelector('[data-ed-tb="save"]');
+    return { state: s.getAttribute('data-state'), text: s.textContent.trim(), pressed: b.getAttribute('aria-pressed'), role: s.getAttribute('role') };
+  });
+  let s = await st();
+  assert.strictEqual(s.state, 'clean'); assert.ok(s.text.includes('已儲存'), s.text); assert.strictEqual(s.role, 'status');
+  const ed = page.locator('.ed-block[data-block-type="paragraph"] .ed-wys-armed').first();
+  await ed.click(); await page.keyboard.press('End'); await page.keyboard.type(' more');
+  await page.locator('.ed-block[data-block-type="heading"]').last().click(); await wait(600);
+  s = await st();
+  assert.strictEqual(s.state, 'dirty'); assert.ok(s.text.includes('有未儲存的變更'), s.text); assert.strictEqual(s.pressed, 'true');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s'); await wait(800);
+  s = await st();
+  assert.strictEqual(s.state, 'clean');
+  assert.ok(fs.readFileSync(boot.mdPath, 'utf8').includes('(https://example.com). more'), 'file saved');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

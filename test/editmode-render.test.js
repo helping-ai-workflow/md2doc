@@ -248,6 +248,10 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
   // the assertion messages below say "fixed slot", not "empty fixed slot".
   // Nothing about the rule itself changed: the box is the same 7rem
   // `position: fixed` box whether or not it has text in it.
+  // v3.10.0: the slot carries the save state instead (paintSaveStatus():
+  // 已儲存 / 有未儲存的變更 · Ctrl+S 儲存 / 儲存中… / 無法儲存). It is still
+  // min-width 7rem, out of flow and pointer-events: none; the dirty text makes
+  // it ~183px wide at 1440px, which is why .ed-toolbar reserves 260px now.
   // Both are invisible to every other assertion in the suite, so they are
   // pinned here, at the source of the stylesheet, rather than through a
   // browser. The CSS comment above the rule in lib/md2doc.js explains what
@@ -290,8 +294,9 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     // stylesheet honest in the fast tier.
     assert.ok(/\.ed-toolbar \{[^}]*justify-content:\s*flex-start/.test(full.html),
       '.ed-toolbar must lay its row out from the leading edge');
-    assert.ok(/\.ed-toolbar \{[^}]*padding-right:\s*124px/.test(full.html),
-      '.ed-toolbar must keep the room its buttons need to clear the mode slot');
+    assert.ok(/\.ed-toolbar \{[^}]*padding-right:\s*260px/.test(full.html),
+      '.ed-toolbar must keep the room its buttons need to clear the status slot ' +
+      '(v3.10.0: 124px -> 260px for the save-state text)');
   }
 
   console.log('editmode-render.test.js OK');
