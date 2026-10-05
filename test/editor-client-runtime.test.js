@@ -3441,7 +3441,7 @@ async function gutterGeometry(page, sel) {
         // the fix this refused with §4.1's banner every time.
         const bannerNow = () => page.evaluate(() => {
           const bn = document.querySelector('.ed-conflict');
-          return bn ? bn.querySelector('span').textContent : null;
+          return bn ? bn.querySelector('.ed-msg-text').textContent : null;
         });
         assert.strictEqual(await bannerNow(), null, 'the conversion itself must not banner');
         await convertVia(page, await liBlockSelByText(page, 'b'), '文字');
@@ -3474,7 +3474,7 @@ async function gutterGeometry(page, sel) {
         const before = fs.readFileSync(s5hMdPath, 'utf8');
         const bannerNow = () => page.evaluate(() => {
           const bn = document.querySelector('.ed-conflict');
-          return bn ? bn.querySelector('span').textContent : null;
+          return bn ? bn.querySelector('.ed-msg-text').textContent : null;
         });
 
         // FIXTURE SANITY, asked of the serializer rather than assumed from
