@@ -383,6 +383,25 @@ async function editWholeDocRaw(ctx, mutate) {
   await new Promise((r) => setTimeout(r, 900));
 }
 
+// v3.10.0: a notice fades after 4 seconds, so a row that waits out a 10s
+// heartbeat before looking cannot read it off the screen any more — and a
+// "no banner" row would pass vacuously. These record every .ed-conflict the
+// page shows from the moment recordBanners() is called (showBanner() builds
+// the element in full before it is appended, so its text is there).
+async function recordBanners(page) {
+  await page.evaluate(() => {
+    window.__seenBanners = [];
+    if (window.__bannerObs) window.__bannerObs.disconnect();
+    window.__bannerObs = new MutationObserver((recs) => {
+      for (const r of recs) for (const n of r.addedNodes) {
+        if (n.nodeType === 1 && n.classList.contains('ed-conflict')) window.__seenBanners.push(n.textContent);
+      }
+    });
+    window.__bannerObs.observe(document.body, { childList: true });
+  });
+}
+function seenBanners(page) { return page.evaluate(() => window.__seenBanners || []); }
+
 async function visibleBannerText(page) {
   return page.evaluate(() => {
     const b = document.querySelector('.ed-conflict');
@@ -9326,6 +9345,7 @@ async function main() {
       await pickPage(ctx.page, 2);
       const picked = await shownPage(ctx.page);
       assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
+      await recordBanners(ctx.page);
       rewriteDrawio(ctx, FLOW_ARCH);
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const attr = await pagesAttr(ctx.page);
@@ -9337,6 +9357,9 @@ async function main() {
       const banner = await visibleBannerText(ctx.page);
       assert.strictEqual(banner, null,
         '(c)：頁還在的時候不得升起「分頁已不存在」的 banner，got ' + JSON.stringify(banner));
+      const seenC = await seenBanners(ctx.page);
+      assert.deepStrictEqual(seenC.filter((t) => t.indexOf('分頁已不存在') !== -1), [],
+        '(c)：等待期間也從未升起過（提示 4 秒會自己消失，所以看紀錄），got ' + JSON.stringify(seenC));
       assert.strictEqual(ctx.errs.length, 0, '(c)：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: drawio/(c) a reordered re-bake keeps the reader on the same page — OK');
@@ -9348,6 +9371,7 @@ async function main() {
       const ctx = await newPage(DRAWIO_MD, { 'd.drawio': ARCH_FLOW }, DRAWIO_SRV_OPTS);
       await pickPage(ctx.page, 2);
       assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
+      await recordBanners(ctx.page);
       rewriteDrawio(ctx, ARCH_TIMING);
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const attr = await pagesAttr(ctx.page);
@@ -9356,9 +9380,11 @@ async function main() {
       const landed = await shownPage(ctx.page);
       assert.strictEqual(landed, 'Architecture',
         'B2-P1：使用者開著的那一頁被刪掉時必須退回第一頁');
-      const banner = await visibleBannerText(ctx.page);
-      assert.strictEqual(typeof banner === 'string' && banner.indexOf('分頁已不存在') !== -1, true,
-        'B2-P1：而且必須看得見一條說明 —— 靜默跳頁正是這條規則禁止的，got ' + JSON.stringify(banner));
+      // v3.10.0: the explanation is a notice and fades after 4s, while this
+      // row waits a whole heartbeat — so it asserts the notice was SHOWN.
+      const seen = await seenBanners(ctx.page);
+      assert.strictEqual(seen.some((t) => t.indexOf('分頁已不存在') !== -1), true,
+        'B2-P1：而且必須看得見一條說明 —— 靜默跳頁正是這條規則禁止的，got ' + JSON.stringify(seen));
       assert.strictEqual(ctx.errs.length, 0, 'B2-P1：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: drawio/(c) a deleted page falls back to page 1 with a visible banner — OK');
@@ -9686,6 +9712,7 @@ async function main() {
       assert.strictEqual(annotated, 1,
         'H3 前提失敗：註記必須真的畫進 .drawio-page 裡，got ' + annotated);
       // (1) unrelated write: a.drawio changes, b's annotations must survive.
+      await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const kept = await ctx.page.evaluate(() =>
@@ -9698,16 +9725,20 @@ async function main() {
       const bannerNow = await visibleBannerText(ctx.page);
       assert.strictEqual(bannerNow, null,
         'H3：沒有東西被丟掉的時候不得升起「註記已移除」的訊息，got ' + JSON.stringify(bannerNow));
+      const seen1 = await seenBanners(ctx.page);
+      assert.deepStrictEqual(seen1.filter((t) => t.indexOf('註記') !== -1), [],
+        'H3：等待期間也從未升起過（提示會自己消失，所以看紀錄），got ' + JSON.stringify(seen1));
       // (2) the annotated diagram's own bytes change: it updates, the
       // annotations cannot follow, and the reader is told.
+      await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const marksAfter = await bothMarks(ctx.page);
       assert.strictEqual(marksAfter, 'CHANGED_BOX|OTHER_CHANGED',
         'H3：被註記的那張圖自己變了時仍然必須重烤，got ' + marksAfter);
-      const banner = await visibleBannerText(ctx.page);
-      assert.strictEqual(typeof banner === 'string' && banner.indexOf('註記') !== -1, true,
-        'H3：使用者自己畫的東西被丟掉不可以無聲 —— 必須看得見一條說明，got ' + JSON.stringify(banner));
+      const seen2 = await seenBanners(ctx.page);
+      assert.strictEqual(seen2.some((t) => t.indexOf('註記') !== -1), true,
+        'H3：使用者自己畫的東西被丟掉不可以無聲 —— 必須看得見一條說明（提示會淡出，看紀錄），got ' + JSON.stringify(seen2));
       assert.strictEqual(ctx.errs.length, 0, 'H3：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
       console.log('journey: drawio/H3 annotations survive an unrelated write and are announced when dropped — OK');
