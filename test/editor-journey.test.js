@@ -6455,7 +6455,7 @@ async function main() {
     });
     // 前提：這一列在「工具列沒有任何按鈕」時會自動空過 —— btns 是空的、
     // 兩個差集也都是空的。先把數量釘住，前提倒了就要大聲紅。
-    assert.strictEqual(shape.count, 23,
+    assert.strictEqual(shape.count, 22,   // v3.10.0: 23 -> 22, the source-mode button is gone
       w + '×900 F12 前提失敗：工具列必須真的有按鈕可掃，got ' + shape.count);
     assert.deepStrictEqual(shape.unreachable, [],
       w + '×900：這些按鈕在整個捲動範圍內都拿不到: ' + JSON.stringify(shape.unreachable));
