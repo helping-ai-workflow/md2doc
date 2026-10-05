@@ -15020,11 +15020,12 @@ async function gutterGeometry(page, sel) {
                 text: t ? t.textContent.trim() : null };
             }));
         assert.strictEqual(info.length, 17, 'every li block must render as a li element');
-        assert.deepStrictEqual(info.filter((x) => !x.armed).map((x) => x.text),
-          ['loose one', 'loose two'],
-          'the ONLY unarmable items are the two LOOSE ones (list-md.js reports them ' +
-          "as 'P' — a loose item's content is a paragraph it cannot round-trip). " +
-          'Naming them positively is what makes the skip a decision rather than a hole.');
+        // v3.11 (batch-2 §6): the two LOOSE items used to be the only unarmable
+        // ones (list-md.js reported them as 'P'). They are editable now, so
+        // every item is armed — and pass 2 below makes each of them take a
+        // REAL commit too, which is the byte-stability proof for loose lists.
+        assert.deepStrictEqual(info.filter((x) => !x.armed).map((x) => x.text), [],
+          'every item in the matrix is armable, the two loose ones included');
         let walked = 0;
         for (const it of info) {
           if (!it.armed) continue;
@@ -15039,8 +15040,8 @@ async function gutterGeometry(page, sel) {
           await settleEditor(page);
           walked++;
         }
-        assert.strictEqual(walked, 15,
-          'pass 1 must actually have focused and blurred 15 items, got ' + walked);
+        assert.strictEqual(walked, 17,
+          'pass 1 must actually have focused and blurred 17 items, got ' + walked);
         assert.strictEqual(await saveAndRead(page, mdPath), fixture,
           'focus+blur with nothing typed must leave the file byte-identical, trailing-space ' +
           'line and missing EOF newline included');
@@ -15079,8 +15080,8 @@ async function gutterGeometry(page, sel) {
           'a one-character edit must change exactly the edited item\'s own source line:\n  ' +
           problems.join('\n  '));
         await page.close();
-        console.log('T8-A: serializer byte-stability over the per-li matrix — 15 armable items ' +
-          'focus/blur clean, 15 real commits change only their own line — OK');
+        console.log('T8-A: serializer byte-stability over the per-li matrix — 17 armable items ' +
+          'focus/blur clean, 17 real commits change only their own line — OK');
       } finally { srv.close(); }
     }
 
