@@ -68,6 +68,31 @@ view (sidebar, TOC, search, mobile bar, tables, focus, lightbox) adds or updates
 check in the same change and runs this suite before it is called done — the user should
 never be the one who finds a reader UI bug. One-time setup: `npx playwright install chromium webkit`.
 
+## Push Once, After a Green Local Gate
+
+**Do not push a fix to see whether CI likes it.** On a feature branch, commit
+locally and keep going; push only after the full local gate is green on a clean
+tree (`git status` empty), run sequentially, never two long suites at once:
+
+```bash
+rtk proxy npm test        # everything CI's test job runs, long suites included
+npm run test:browser      # Chromium + WebKit click checks (CI's browser job)
+```
+
+CI is the final confirmation and should run once per batch, not once per fix.
+It is still worth that one run: the runner lays the page out at fractional
+pixels this machine does not, and v3.10.0's ⠿ / row-grip contact only showed
+up there (CI #66). Learned the hard way on PR #44: pushing after every fix let
+CI find the next leftover each time, roughly fifteen 40-minute runs in a day.
+
+Before a long run, sweep every test for every way a changed contract is read
+(a button count AND the counts derived from it, a selector AND its sibling
+spellings, a message AND its fragments). The long suites stop at the first
+throw, so each site the sweep misses costs one whole run.
+
+The exception is a handoff push (the branch has to move to another machine):
+push, and say in the PR that it is unverified.
+
 ## Release Flow
 
 This repo is **auto-published to npm on tag push** via `.github/workflows/publish.yml` (trigger: `v*.*.*` tag). Workflow:
