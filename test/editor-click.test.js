@@ -164,6 +164,30 @@ check('icons: gutter handle and plus are svg', DESKTOP, async (page) => {
   assert.deepStrictEqual(r, { h: true, i: true });
 });
 
+check('gutter: handle and plus are 24px and centred on the first text line', DESKTOP, async (page) => {
+  const kinds = ['h2', 'paragraph', 'li'];
+  for (const k of kinds) {
+    const sel = k === 'h2' ? '.ed-block[data-block-type="heading"]' : '.ed-block[data-block-type="' + k + '"]';
+    const blk = page.locator(sel).first();
+    await blk.scrollIntoViewIfNeeded(); await blk.hover(); await wait(200);
+    const r = await blk.evaluate((b) => {
+      const walker = document.createTreeWalker(b, NodeFilter.SHOW_TEXT, { acceptNode: (n) =>
+        n.data.trim() && !n.parentElement.closest('.ed-handle, .ed-insert, .ed-li-marker') ? 1 : 3 });
+      const t = walker.nextNode(); const rg = document.createRange(); rg.selectNodeContents(t);
+      const line = rg.getClientRects()[0];
+      const h = b.querySelector('.ed-handle').getBoundingClientRect();
+      const i = b.querySelector('.ed-insert').getBoundingClientRect();
+      const hit = document.elementFromPoint(h.left + h.width / 2, h.top + h.height / 2);
+      return { lineMid: line.top + line.height / 2, hMid: h.top + h.height / 2, iMid: i.top + i.height / 2,
+        hw: h.width, hh: h.height, hit: !!(hit && hit.closest('.ed-handle')) };
+    });
+    assert.strictEqual(r.hw, 24, k + ' handle width'); assert.strictEqual(r.hh, 24, k + ' handle height');
+    assert.ok(Math.abs(r.hMid - r.lineMid) <= 2, k + ' handle off the first line ' + JSON.stringify(r));
+    assert.ok(Math.abs(r.iMid - r.lineMid) <= 2, k + ' plus off the first line ' + JSON.stringify(r));
+    assert.ok(r.hit, k + ' handle centre hits the handle');
+  }
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
