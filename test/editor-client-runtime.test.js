@@ -13735,11 +13735,15 @@ async function gutterGeometry(page, sel) {
     // canonical form. Hand padding and hand-written alignment are destroyed
     // in a table the user never edited. Fixing the refusal path alone cannot
     // help: stripping the class IS the diff, whoever does it.
+    //
+    // v3.11: deleting the only body row is accepted now, so the refusal is
+    // the one table delete that remains — the LAST COLUMN — on a one-column
+    // table that still carries hand padding and a hand-written alignment.
     {
       const s2Rows = [
-        '| Name   | Note  |',
-        '|--------|:-----:|',
-        '| Alice  | a |', '',
+        '| Name   |',
+        '|:------:|',
+        '| Alice  |', '',
         'Tail paragraph.', '',
       ];
       const s2Original = s2Rows.join('\n');
@@ -13750,15 +13754,15 @@ async function gutterGeometry(page, sel) {
         const table0 = await tableBlockSel(page, 0);
         const pSel = await paragraphSelByText(page, 'Tail paragraph.');
 
-        // Row grip -> 刪除列 -> refusal (this IS the only body row).
-        const row0 = await rowGripCoords(page, table0, 0);
-        await pressReleaseAt(page, row0.x, row0.y);
+        // Column grip -> 刪除欄 -> refusal (this IS the only column).
+        const col0 = await colGripCoords(page, table0, 0);
+        await pressReleaseAt(page, col0.x, col0.y);
         await page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 3000 });
         await page.click('.ed-te-menu-delete');
         await page.waitForSelector('.ed-conflict', { timeout: 3000 });
         assert.strictEqual(
-          await page.evaluate((s) => document.querySelectorAll(s + ' tbody tr').length, table0), 1,
-          'sanity: the refusal must leave the row in place');
+          await page.evaluate((s) => document.querySelectorAll(s + ' thead th').length, table0), 1,
+          'sanity: the refusal must leave the column in place');
         await dismissBanner(page);
 
         // Click a DIFFERENT block — this is what strips the highlight and,
@@ -13769,7 +13773,7 @@ async function gutterGeometry(page, sel) {
 
         const saved = await saveAndRead(page, s2MdPath);
         assert.strictEqual(saved, s2Original,
-          'a REFUSED 刪除列 followed by a click elsewhere must leave the file byte-identical ' +
+          'a REFUSED 刪除欄 followed by a click elsewhere must leave the file byte-identical ' +
           '(hand padding and hand-written alignment intact), got:\n' + saved);
 
         await page.close();
