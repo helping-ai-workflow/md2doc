@@ -987,6 +987,116 @@ check('desktop: an ordered task item keeps its number', DESKTOP, async (page) =>
   assert.deepStrictEqual(r, ['decimal', 'decimal', 'decimal']);
 });
 
+// ── Code copy button (v3.12.0) ─────────────────────────────────────────────
+// One fixture for every copy check: a highlighted block whose first line is far
+// wider than the column (so <pre> scrolls sideways) and holds characters the
+// HTML escapes, so "what landed on the clipboard" is a real comparison.
+const COPY_SRC = ["const wide = '<tag> & ' + 'x'.repeat(40) + '" + 'y'.repeat(160) + "';", 'if (a < b) { return "ok"; }'];
+const copyUrl = () => fixtureUrl('copy', ['# Copy', '', '## 1. Code', '', 'Intro paragraph.', '',
+  '\x60\x60\x60js', ...COPY_SRC, '\x60\x60\x60', '', '## 2. Tail', '', filler('copy', 4), '']);
+// Replace the clipboard with a recorder (or a refuser). Both engines, file:// or
+// not, then answer the same way, and the assertion reads what was handed over.
+async function stubClipboard(page, refuse) {
+  await page.evaluate((no) => {
+    window.__copied = null;
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: (t) => { if (no) return Promise.reject(new Error('denied')); window.__copied = t; return Promise.resolve(); },
+    } });
+    if (no) document.execCommand = () => false;
+  }, !!refuse);
+}
+const copyState = (page) => page.evaluate(() => {
+  const b = document.querySelector('.content .code-block .code-copy');
+  return { opacity: getComputedStyle(b).opacity, label: b.getAttribute('aria-label'), copied: window.__copied,
+    done: !!b.closest('.code-block.is-copied'), text: b.textContent.trim() };
+});
+
+check('desktop: the copy button hides at rest, shows on hover, copies the exact code and reverts', DESKTOP, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  await stubClipboard(page);
+  await page.mouse.move(5, 5); await wait(250);
+  assert.strictEqual((await copyState(page)).opacity, '0', 'hidden while the pointer is elsewhere');
+  await page.hover('.content .code-block pre'); await wait(250);
+  assert.strictEqual((await copyState(page)).opacity, '1', 'shown while the pointer is over the block');
+  await page.click('.content .code-block .code-copy'); await wait(150);
+  const s = await copyState(page);
+  assert.strictEqual(s.copied, COPY_SRC.join('\n'), 'clipboard holds the source text, unescaped');
+  assert.strictEqual(s.label, 'Copied'); assert.strictEqual(s.done, true); assert.strictEqual(s.text, 'Copied');
+  await page.mouse.move(5, 5); await wait(250);
+  assert.strictEqual((await copyState(page)).opacity, '1', 'the confirmation stays visible after the pointer leaves');
+  await wait(2200);
+  const back = await copyState(page);
+  assert.deepStrictEqual([back.label, back.done, back.text, back.opacity], ['Copy code', false, '', '0'], 'reverts after two seconds');
+});
+
+check('desktop: Tab reaches the copy button and shows it', DESKTOP, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  // A bound derived from the page, not a number: every tabbable element once.
+  const cap = await page.evaluate(() => document.querySelectorAll('a[href], button, input, [tabindex]').length + 2);
+  let on = false;
+  for (let i = 0; i < cap && !on; i++) {
+    await page.keyboard.press('Tab');
+    on = await page.evaluate(() => !!document.activeElement && document.activeElement.classList.contains('code-copy'));
+  }
+  assert.strictEqual(on, true, 'Tab reached .code-copy within ' + cap + ' presses');
+  await wait(250);
+  assert.strictEqual((await copyState(page)).opacity, '1', 'keyboard focus shows the button');
+});
+
+check('desktop: a block scrolled sideways keeps its copy button in the top-right corner', DESKTOP, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  const at = () => page.evaluate(() => {
+    const w = document.querySelector('.content .code-block'), b = w.querySelector('.code-copy');
+    const wr = w.getBoundingClientRect(), br = b.getBoundingClientRect();
+    return { right: Math.round(wr.right - br.right), top: Math.round(br.top - wr.top) };
+  });
+  const before = await at();
+  const scrolled = await page.evaluate(() => { const p = document.querySelector('.content .code-block pre'); p.scrollLeft = p.scrollWidth; return p.scrollLeft; });
+  assert.ok(scrolled > 100, 'guard: the block really scrolls sideways (' + scrolled + ')');
+  assert.deepStrictEqual(await at(), before, 'button did not move with the code');
+  assert.deepStrictEqual(before, { right: 8, top: 8 }, 'inset 8px from the corner');
+  // And it is what a press there actually hits.
+  const hit = await page.evaluate(() => {
+    const r = document.querySelector('.content .code-block .code-copy').getBoundingClientRect();
+    const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!el && !!el.closest('.code-copy');
+  });
+  assert.strictEqual(hit, true, 'elementFromPoint at the button centre is the button');
+});
+
+check('desktop: when the clipboard is refused the code is selected for Ctrl+C', DESKTOP, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  await stubClipboard(page, true);
+  await page.hover('.content .code-block pre'); await wait(250);
+  await page.click('.content .code-block .code-copy'); await wait(200);
+  const r = await page.evaluate(() => ({ sel: String(window.getSelection()), label: document.querySelector('.content .code-copy').getAttribute('aria-label') }));
+  assert.strictEqual(r.sel.replace(/\n$/, ''), COPY_SRC.join('\n'), 'the whole code is selected');
+  assert.strictEqual(r.label, 'Press Ctrl+C');
+});
+
+check('desktop: the copy button follows dark mode', DESKTOP, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  await page.evaluate(() => document.documentElement.setAttribute('data-md2doc-theme', 'dark'));
+  await page.hover('.content .code-block pre'); await wait(250);
+  const r = await page.evaluate(() => {
+    const b = document.querySelector('.content .code-copy');
+    return { bg: getComputedStyle(b).backgroundColor, page: getComputedStyle(document.body).backgroundColor };
+  });
+  assert.notStrictEqual(r.bg, 'rgb(255, 255, 255)', 'not a white chip on a dark page');
+  assert.strictEqual(r.bg, r.page, 'the chip uses the page ground, as in light mode');
+});
+
+check('phone: the copy button is always shown on touch and a tap copies', PHONE, async (page) => {
+  await page.goto(copyUrl(), { waitUntil: 'load' }); await wait(300);
+  await stubClipboard(page);
+  await page.evaluate(() => document.querySelector('.content .code-block').scrollIntoView({ block: 'center' })); await wait(200);
+  assert.strictEqual((await copyState(page)).opacity, '1', 'visible with no hover');
+  assert.ok(await onScreen(page, '.content .code-copy'), 'on screen');
+  await page.tap('.content .code-block .code-copy'); await wait(150);
+  assert.strictEqual((await copyState(page)).copied, COPY_SRC.join('\n'));
+  assert.ok((await overflowX(page)) <= 0, 'no sideways page scroll');
+}, { hasTouch: true, isMobile: true });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
