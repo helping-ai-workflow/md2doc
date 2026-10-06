@@ -375,6 +375,10 @@ both, this branch moved neither:
 syntax colour): **354** every backtick byte, **4** `` \` `` escapes (still all on one line, 4856
 in that lib), **350** structural. The 352 / 348 above stay as the v3.5.0–v3.9 record.
 
+**Measured at v3.12.0** (after `renderer.code` split its fenced-code output into a `pre`
+literal plus a wrapper literal for the copy button): **356** every backtick byte, **4** `` \` ``
+escapes (one line, 4913 in that lib), **352** structural.
+
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader
 re-litigates it.

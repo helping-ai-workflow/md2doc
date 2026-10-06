@@ -3,6 +3,24 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.12.0 — 2026-10-06
+
+### Added — 程式碼區塊的複製鍵
+
+閱讀器裡每個 fenced code block 右上角多一顆複製鍵，按下就把整段程式碼（原始文字，不含 HTML escape）
+放進剪貼簿，按鍵換成 ✓ Copied，2 秒後恢復。
+
+- **平常看不到**：滑鼠移到區塊上、或用 Tab 移到按鍵時才浮現（參考 mdBook、VitePress）；觸控裝置沒有
+  hover，所以手機上一直顯示。區塊高度與前後間距不變。
+- **橫向捲動時不會跑掉**：按鍵掛在區塊外層，不在 `<pre>` 裡，程式碼捲到最右邊它還在右上角。
+- **剪貼簿被拒時**（舊瀏覽器、某些內嵌檢視器）改用選取＋`execCommand('copy')`；再不行就把整段程式碼選好，
+  按鍵提示「Press Ctrl+C」（Mac 是 Cmd+C）。
+- 只有 HTML 閱讀器有：PDF 不畫（列印樣式隱藏），編輯模式不輸出；mermaid、math、dot、wavedrom 這些圖不加。
+  深色模式跟著換色。
+
+Migration：無。HTML 輸出的 fenced code 外層多了 `<div class="code-block">`，若有外部 CSS 直接寫
+`.content > pre` 之類的子代選擇器，要改成 `.content pre`。
+
 ## v3.11.0 — 2026-10-06
 
 ### Changed — 編輯器不再拒絕「你選哪就做哪」的操作

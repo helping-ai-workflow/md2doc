@@ -559,3 +559,29 @@ console.log('md2doc dot WASM test passed');
   assert.ok(/<span class="task-text">a<\/span><blockquote>/.test(bq), 'span stops before a block child: ' + bq);
   console.log('md2doc task-item rendering test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.12.0: fenced code gets a copy button — in the reader only. The button
+// sits on a wrapper beside the <pre> (not inside it: <pre> scrolls sideways
+// and would carry the button away), holds an icon and no text (search and
+// select-all must not pick up a label), and is never emitted in edit mode,
+// where it would land inside the editable surface.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'copy.md');
+  const md = '```js\nconst a = 1;\n```\n\n```\nplain <b>\n```\n\n```x" onmouseover="y\nq\n```\n\n```math\nx^2\n```\n\n```mermaid\ngraph TD; A-->B\n```\n';
+  const { html, bodyHtml } = await renderMarkdown(md, fake, {});
+  const blocks = bodyHtml.match(/<div class="code-block"><pre><code class="language-[^"]*"[^>]*>[\s\S]*?<\/code><\/pre><button class="code-copy" type="button" aria-label="Copy code" title="Copy code"><svg[\s\S]*?<\/svg><\/button><\/div>/g) || [];
+  assert.strictEqual(blocks.length, 3, 'js, unlabelled and odd-info-string fences each get a wrapper + button: ' + bodyHtml);
+  assert.ok(blocks[1].includes('<code class="language-">plain &lt;b&gt;</code>'), 'unlabelled block text still escaped: ' + blocks[1]);
+  assert.ok(blocks[2].includes('class="language-x&quot; onmouseover=&quot;y"'), 'info string still escaped inside the wrapper: ' + blocks[2]);
+  assert.ok(!/<button class="code-copy"[^>]*>[^<]*[A-Za-z]/.test(bodyHtml), 'button carries no text node');
+  // Five fences, three buttons: math (KaTeX) and mermaid are not code to copy.
+  assert.strictEqual((bodyHtml.match(/class="code-copy"/g) || []).length, 3, 'exactly three buttons');
+  // The print sheet hides the button: a PDF has nothing to click.
+  const print = html.slice(html.indexOf('@media print {'));
+  assert.ok(/\.code-copy\s*\{[^}]*display:\s*none/.test(print), 'print CSS hides .code-copy');
+  // Edit mode: no wrapper, no button — the editor's DOM stays as it was.
+  const edit = await renderMarkdown(md, fake, { editMode: true });
+  assert.ok(!edit.html.includes('class="code-copy"') && !edit.html.includes('class="code-block"'), 'edit mode emits no copy button or wrapper');
+  console.log('md2doc code copy button render test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
