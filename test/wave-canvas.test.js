@@ -120,7 +120,10 @@ async function installHarness(page) {
       if (window.__wcCanvas && window.__wcCanvas.destroy) window.__wcCanvas.destroy();
       const host = document.createElement('div');
       host.id = 'wc-host';
-      host.style.cssText = 'position:fixed;left:13px;top:17px;z-index:99999;background:var(--md-bg);padding:3px';
+      // A fixed colour that is NOT --md-bg: --md-bg is also recolourSvg's own
+      // default backing, so a host painted with it could not tell whether the
+      // canvas passed its background through or not (task 4 review).
+      host.style.cssText = 'position:fixed;left:13px;top:17px;z-index:99999;background:rgb(31, 41, 51);padding:3px';
       document.body.appendChild(host);
       const W = window.__md2docWave;
       const canvas = W['wave-canvas.js'].createCanvas(Object.assign({
@@ -261,6 +264,7 @@ check('dark canvas', async (page) => {
       backingFill: getComputedStyle(backing).fill,
       backingStyle: backing.getAttribute('style'),
       hostBg: getComputedStyle(document.getElementById('wc-host')).backgroundColor,
+      pageBg: getComputedStyle(document.body).backgroundColor,
     };
   });
   // Drawn light, then the theme flips under it: the canvas follows by itself.
@@ -272,12 +276,16 @@ check('dark canvas', async (page) => {
   const flipped = await read();
   assert.strictEqual(flipped.dark, true);
   assert.ok(lum(flipped.nameFill) >= 0.35, 'name readable after flip ' + flipped.nameFill);
+  // The fixture must be able to tell the canvas background from the page's
+  // (recolourSvg's default backing), or the next assertion proves nothing.
+  assert.notStrictEqual(flipped.hostBg, flipped.pageBg, 'host background differs from the page background');
   assert.strictEqual(flipped.backingFill, flipped.hostBg, 'label backing = canvas background after flip');
   // Drawn while dark.
   await page.evaluate((doc) => { window.__wc(doc); }, FX.plain);
   const dark = await read();
   assert.ok(lum(dark.nameFill) >= 0.35, 'name readable ' + dark.nameFill);
   assert.notStrictEqual(dark.hostBg, 'rgba(0, 0, 0, 0)', 'host has a real background');
+  assert.notStrictEqual(dark.hostBg, dark.pageBg, 'host background differs from the page background');
   assert.strictEqual(dark.backingFill, dark.hostBg, 'label backing = canvas background');
   // And back to light: the engine's own styling comes back untouched.
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
@@ -351,9 +359,13 @@ check('redraw budget', async (page) => {
   assert.strictEqual(r.dark, true);
   assert.strictEqual(r.recoloured, true, 'dark render recolours');
   assert.strictEqual(r.lanes, 15); assert.strictEqual(r.cycles, 18);
+  // Ruling R5: the spec §3.3 budget is 16ms on a workstation; a shared CI
+  // runner gets twice that, so the check still catches a real regression
+  // without flaking on a slow machine.
+  const budget = process.env.CI ? 32 : 16;
   console.log('     render median ' + r.median.toFixed(2) + 'ms (min ' + r.min.toFixed(2) +
-    ', max ' + r.max.toFixed(2) + ')');
-  assert.ok(r.median < 16, 'median ' + r.median.toFixed(2) + 'ms over the 16ms budget');
+    ', max ' + r.max.toFixed(2) + '), budget ' + budget + 'ms' + (process.env.CI ? ' (CI)' : ''));
+  assert.ok(r.median < budget, 'median ' + r.median.toFixed(2) + 'ms over the ' + budget + 'ms budget');
 });
 
 (async () => {
