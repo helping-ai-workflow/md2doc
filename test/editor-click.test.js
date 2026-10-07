@@ -442,6 +442,248 @@ check('wave shell: the cursor mark sits on the clicked cell', DESKTOP, async (pa
   }
 }, { md: WAVE_SHELL_MD });
 
+// ── wave draw (Task 7): drawing straight on the engine canvas (spec 4.3) ──
+const waveMd = (signal) => '# W\n\n\x60\x60\x60wavedrom\n' + JSON.stringify({ signal }) + '\n\x60\x60\x60\n\nTail.\n';
+const WAVE_DRAW_MD = waveMd([{ name: 'clk', wave: 'p....' }, { name: 'a', wave: '0....' }]);
+const WAVE_RANGE_MD = waveMd([{ name: 'clk', wave: 'p.......' }, { name: 'a', wave: '01xz01xz' }]);
+const WAVE_DATA_MD = waveMd([{ name: 'clk', wave: 'p......' }, { name: 'bus', wave: 'x3.4.5x', data: ['D1', 'D2', 'D3'] }]);
+/** One lane of the block as it is written back right now. */
+async function laneNamed(page, name) {
+  const doc = JSON.parse(await page.evaluate(() => window.__edWaveSourceProbe()));
+  return doc.signal.find((l) => l && l.name === name);
+}
+/** A cell's centre, asserting a press there lands on the interaction layer. */
+async function cellPress(page, lane, cycle) {
+  const p = await page.evaluate(([l, c]) => {
+    const pt = window.__edWaveCellPoint(l, c);
+    if (!pt) return null;
+    const hit = document.elementFromPoint(pt.x, pt.y);
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    return { x: pt.x, y: pt.y, onLayer: !!(hit && layer && (hit === layer || layer.contains(hit))) };
+  }, [lane, cycle]);
+  assert.ok(p !== null && p.onLayer, 'guard: a press on lane ' + lane + ' cycle ' + cycle + ' lands on the layer ' + JSON.stringify(p));
+  return p;
+}
+/** The selection mark's client rect against the union of the cells it should cover. */
+async function selectionVs(page, lane, from, to) {
+  return page.evaluate(([l, a, b]) => {
+    const sel = document.querySelector('.ed-wave-overlay rect.ed-wave-selection');
+    const ra = window.__edWaveCellRect(l, a);
+    const rb = window.__edWaveCellRect(l, b);
+    const s = sel ? sel.getBoundingClientRect() : null;
+    return { sel: s && [s.left, s.top, s.width, s.height], want: [ra.left, ra.top, rb.left + rb.width - ra.left, ra.height] };
+  }, [lane, from, to]);
+}
+function sameRect(r, msg) {
+  assert.ok(Array.isArray(r.sel), 'the selection is drawn ' + msg + ' ' + JSON.stringify(r));
+  for (let i = 0; i < 4; i++) assert.ok(Math.abs(r.sel[i] - r.want[i]) <= 1, msg + ' ' + JSON.stringify(r));
+}
+/** The floating range toolbar, as plain values. */
+function rangeBar(page) {
+  return page.evaluate(() => {
+    const bar = document.querySelector('.ed-wave-overlay .ed-wave-range');
+    if (!bar || bar.getClientRects().length === 0) return null;
+    const del = bar.querySelector('[data-focus-key="ed-wave-range-delete"]');
+    const r = bar.getBoundingClientRect();
+    return { keys: [...bar.querySelectorAll('[data-focus-key]')].map((b) => b.getAttribute('data-focus-key')),
+      deleteText: del ? del.textContent : null, top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+  });
+}
+/** Click lane `lane` cycle `from` (its value must equal the brush, so the click paints nothing) and Shift+→ to `to`. */
+async function selectRun(page, lane, from, to) {
+  const p = await cellPress(page, lane, from);
+  await page.mouse.click(p.x, p.y); await wait(150);
+  for (let c = from; c < to; c++) { await page.keyboard.press('Shift+ArrowRight'); await wait(60); }
+}
+check('wave draw: click paints one cycle and selects it', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const p = await cellPress(page, 1, 2);
+  await page.mouse.click(p.x, p.y); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '0.10.', 'cycle 2 painted 1, the cycle after it written out');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-cursor')), '1,2');
+  sameRect(await selectionVs(page, 1, 2, 2), 'the clicked cycle is selected');
+  assert.strictEqual(await rangeBar(page), null, 'one cycle is not a range: no floating toolbar');
+}, { md: WAVE_DRAW_MD });
+check('wave draw: hover lights the whole cycle and its ruler number', DESKTOP, async (page) => {
+  await openWave(page);
+  const p = await cellPress(page, 1, 2);
+  await page.mouse.move(p.x, p.y, { steps: 3 }); await wait(150);
+  const r = await page.evaluate(() => {
+    const col = document.querySelector('.ed-wave-overlay rect.ed-wave-hover-col');
+    const top = window.__edWaveCellRect(0, 2);
+    const bottom = window.__edWaveCellRect(1, 2);
+    const c = col ? col.getBoundingClientRect() : null;
+    return { col: c && [c.left, c.width, c.top, c.bottom], cell: [top.left, top.width, top.top, bottom.top + bottom.height],
+      on: [...document.querySelectorAll('.ed-wave-overlay .ed-wave-ruler-num.is-on')].map((t) => t.getAttribute('data-cycle')) };
+  });
+  assert.ok(Array.isArray(r.col), 'a hover column is drawn ' + JSON.stringify(r));
+  assert.ok(Math.abs(r.col[0] - r.cell[0]) <= 1 && Math.abs(r.col[1] - r.cell[1]) <= 1, 'it is cycle 2 wide ' + JSON.stringify(r));
+  assert.ok(r.col[2] <= r.cell[2] + 1 && r.col[3] >= r.cell[3] - 1, 'it covers every lane ' + JSON.stringify(r));
+  assert.deepStrictEqual(r.on, ['2'], 'ruler number 2 lights up');
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '0....', 'hovering writes nothing');
+}, { md: WAVE_DRAW_MD });
+check('wave draw: drag paints a run', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const a = await cellPress(page, 1, 1);
+  const b = await cellPress(page, 1, 3);
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 6 }); await page.mouse.up(); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '01..0', 'one run of 1 over cycles 1-3');
+  sameRect(await selectionVs(page, 1, 1, 3), 'the dragged run is selected');
+  const bar = await rangeBar(page);
+  assert.ok(bar !== null, 'a run selection raises the floating toolbar');
+  assert.ok(bar.deleteText.includes('3'), 'it offers to delete 3 cycles: ' + bar.deleteText);
+  // It floats beside the run, never over it, and every cell of the run still takes a press.
+  const run = await page.evaluate(() => { const a = window.__edWaveCellRect(1, 1); const b = window.__edWaveCellRect(1, 3);
+    return { top: a.top, bottom: a.top + a.height }; });
+  assert.ok(bar.bottom <= run.top + 0.5 || bar.top >= run.bottom - 0.5, 'the toolbar does not cover the run ' + JSON.stringify({ bar, run }));
+  for (const c of [1, 2, 3]) await cellPress(page, 1, c);
+}, { md: WAVE_DRAW_MD });
+check('wave draw: ruler plus inserts a cycle at that boundary', DESKTOP, async (page) => {
+  await openWave(page);
+  // The boundary between cycles 1 and 2, at the height of the ruler numbers.
+  const at = await page.evaluate(() => {
+    const num = document.querySelector('.ed-wave-overlay .ed-wave-ruler-num[data-cycle="2"]');
+    const n = num.getBoundingClientRect();
+    return { x: window.__edWaveCellRect(0, 2).left, y: n.top + n.height / 2 };
+  });
+  await page.mouse.move(at.x, at.y, { steps: 3 }); await wait(150);
+  const plus = await page.evaluate(() => {
+    const g = document.querySelector('.ed-wave-overlay .ed-wave-ruler-plus');
+    const hit = g && g.querySelector('.ed-wave-ruler-plus-hit');
+    if (!hit) return { cycle: g ? g.getAttribute('data-cycle') : null };
+    const r = hit.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const top = document.elementFromPoint(x, y);
+    return { cycle: g.getAttribute('data-cycle'), x, y, onPlus: !!(top && top.closest && top.closest('.ed-wave-ruler-plus') === g) };
+  });
+  assert.strictEqual(plus.cycle, '2', 'the plus shows at boundary 2 ' + JSON.stringify(plus));
+  assert.strictEqual(plus.onPlus, true, 'guard: the plus is what a press there hits ' + JSON.stringify(plus));
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-cycles')), '5');
+  await page.mouse.click(plus.x, plus.y); await wait(300);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-cycles')), '6', 'one cycle more');
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '01.010', 'the new cycle continues cycle 1, in front of cycle 2');
+  assert.strictEqual((await laneNamed(page, 'clk')).wave, 'p.....', 'every lane widens');
+}, { md: waveMd([{ name: 'clk', wave: 'p....' }, { name: 'a', wave: '01010' }]) });
+check('wave draw: range toolbar buttons', DESKTOP, async (page) => {
+  await openWave(page);
+  const a = async () => (await laneNamed(page, 'a')).wave;
+  const undo = async () => { await page.keyboard.press('Control+z'); await wait(250); assert.strictEqual(await a(), '01xz01xz', 'guard: undo restores'); };
+  await selectRun(page, 1, 1, 3);
+  const bar = await rangeBar(page);
+  assert.ok(bar !== null, 'selecting 3 cycles raises the floating toolbar');
+  assert.deepStrictEqual(bar.keys, ['ed-wave-range-level', 'ed-wave-range-copy', 'ed-wave-range-delete',
+    'ed-wave-range-before', 'ed-wave-range-after', 'ed-wave-range-edge', 'ed-wave-range-note'], 'the buttons, in spec 4.3 order');
+  assert.ok(bar.deleteText.includes('3'), bar.deleteText);
+  await page.locator('[data-focus-key="ed-wave-range-delete"]').click(); await wait(300);
+  assert.strictEqual(await a(), '001xz', '刪除 3 拍');
+  await undo();
+  await selectRun(page, 1, 1, 3);
+  await page.locator('[data-focus-key="ed-wave-range-before"]').click(); await wait(300);
+  assert.strictEqual(await a(), '0.1xz01xz', '前插: one cycle in front of the run');
+  await undo();
+  await selectRun(page, 1, 1, 3);
+  await page.locator('[data-focus-key="ed-wave-range-after"]').click(); await wait(300);
+  assert.strictEqual(await a(), '01xz.01xz', '後插: one cycle after the run');
+  await undo();
+  await selectRun(page, 1, 1, 3);
+  await page.locator('[data-focus-key="ed-wave-range-level"]').click(); await wait(150);
+  await page.locator('[data-focus-key="range-level-z"]').click(); await wait(300);
+  assert.strictEqual(await a(), '0z..01xz', '電位: the run becomes one z run');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-brush')), '1',
+    'picking a level for the run does not change the brush');
+  await undo();
+  await selectRun(page, 1, 1, 3);
+  await page.locator('[data-focus-key="ed-wave-range-copy"]').click(); await wait(200);
+  assert.strictEqual(await a(), '01xz01xz', '複製 writes nothing');
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('Control+v'); await wait(300);
+  assert.strictEqual(await a(), '01xz1xz01xz', 'Ctrl+V on the canvas pastes the copied cycles in front of the selection');
+  await undo();
+  // A and T are Task 9's (Ruling R12): present, and they write nothing yet.
+  await selectRun(page, 1, 1, 3);
+  await page.locator('[data-focus-key="ed-wave-range-edge"]').click(); await wait(150);
+  await page.locator('[data-focus-key="ed-wave-range-note"]').click(); await wait(150);
+  assert.strictEqual(await a(), '01xz01xz', 'A and T change nothing until Task 9');
+}, { md: WAVE_RANGE_MD });
+check('wave draw: data label edits in place', DESKTOP, async (page) => {
+  await openWave(page);
+  const label = await page.evaluate(() => {
+    const t = [...document.querySelectorAll('.ed-wave-stage svg[id^="svgcontent"] g[id^="wavelane_draw_1_"] > text')]
+      .find((x) => x.textContent === 'D1');
+    if (!t) return null;
+    const r = t.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    return { x, y, onLayer: !!(hit && layer && (hit === layer || layer.contains(hit))) };
+  });
+  assert.ok(label !== null && label.onLayer, 'guard: the engine draws D1 and a press on it lands on the layer ' + JSON.stringify(label));
+  await page.mouse.click(label.x, label.y); await wait(300);
+  const field = await page.evaluate(([x, y]) => {
+    const input = document.querySelector('.ed-wave-overlay .ed-wave-data-input');
+    return input ? { value: input.value, focused: document.activeElement === input, atLabel: document.elementFromPoint(x, y) === input } : null;
+  }, [label.x, label.y]);
+  assert.ok(field !== null, 'a press on the label opens its field');
+  assert.deepStrictEqual(field, { value: 'D1', focused: true, atLabel: true }, 'the field sits over the label and holds its text');
+  assert.strictEqual((await laneNamed(page, 'bus')).wave, 'x3.4.5x', 'the press painted nothing');
+  await page.keyboard.type('Q9'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual((await laneNamed(page, 'bus')).data, ['Q9', 'D2', 'D3'], 'Enter writes the label');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-wave-data-input').length), 0, 'the field closes');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')), 'canvas', 'the keyboard is back on the canvas');
+  // Enter on the data cell opens the same field; Tab goes on to the next segment's.
+  await page.keyboard.press('Enter'); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-data-input') || {}).value), 'Q9', 'Enter on the cell reopens it');
+  await page.keyboard.press('Tab'); await wait(300);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-data-input') || {}).value), 'D2', 'Tab moves to the next segment');
+  // Esc cancels the field only (spec 4.3): the editor stays open, nothing changes.
+  await page.keyboard.type('zz'); await page.keyboard.press('Escape'); await wait(200);
+  const after = await page.evaluate(() => ({ fields: document.querySelectorAll('.ed-wave-data-input').length,
+    open: !!document.querySelector('.ed-wave-overlay') }));
+  assert.deepStrictEqual(after, { fields: 0, open: true }, 'Esc closes the field and not the editor');
+  assert.deepStrictEqual((await laneNamed(page, 'bus')).data, ['Q9', 'D2', 'D3'], 'Esc wrote nothing');
+}, { md: WAVE_DATA_MD });
+check('wave draw: IME composition does not commit the label', DESKTOP, async (page) => {
+  await openWave(page);
+  // Keyboard route to D2's cell (bus lane, cycle 3): onto the canvas, down a lane, right three.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter'); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-data-input') || {}).value), 'D2', 'guard: the D2 field is open');
+  const during = await page.evaluate(() => {
+    const input = document.querySelector('.ed-wave-data-input');
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+    input.value = '組字';
+    for (const key of ['Enter', 'Escape', 'Tab']) {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, isComposing: true }));
+    }
+    const still = document.querySelector('.ed-wave-data-input');
+    return { field: still === input, focused: document.activeElement === input, open: !!document.querySelector('.ed-wave-overlay') };
+  });
+  assert.deepStrictEqual(during, { field: true, focused: true, open: true }, 'Enter / Esc / Tab while composing leave the field alone');
+  assert.deepStrictEqual((await laneNamed(page, 'bus')).data, ['D1', 'D2', 'D3'], 'nothing is written while composing');
+  await page.evaluate(() => {
+    document.querySelector('.ed-wave-data-input').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '組字' }));
+  });
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual((await laneNamed(page, 'bus')).data, ['D1', '組字', 'D3'], 'the Enter after composition commits');
+}, { md: WAVE_DATA_MD });
+check('wave draw: Del deletes cycles when cycles are selected', DESKTOP, async (page) => {
+  await openWave(page);
+  await selectRun(page, 1, 1, 3);
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '001xz', 'Del removes the three selected cycles');
+  assert.strictEqual((await laneNamed(page, 'clk')).wave.length, 5, 'from every lane');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-cycles')), '5');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')), 'canvas', 'the keyboard stays on the canvas');
+  // What is left selected is the one cycle at the cut; Del again removes just it.
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '01xz', 'Del on a single selected cycle removes that cycle');
+}, { md: WAVE_RANGE_MD });
+
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
   const r = await page.evaluate(() => {

@@ -366,6 +366,13 @@ function makeDrawer() {
     const glyph = p[0].children.filter(function (n) { return n.tag === 'text'; });
     assert.strictEqual(glyph.length, 1, 'the plus has one visible glyph');
     assert.strictEqual(glyph[0].children[0].text, '+');
+    // Task 7: the plus is a press target of its own (the layer CSS gives
+    // this ring `pointer-events: all`), centred on the glyph.
+    const hit = p[0].children.filter(function (n) { return n.attrs.class === 'ed-wave-ruler-plus-hit'; });
+    assert.strictEqual(hit.length, 1, 'the plus carries one hit ring');
+    assert.strictEqual(hit[0].tag, 'circle');
+    assert.strictEqual(hit[0].attrs.cx, '0', 'the ring is centred on the boundary');
+    assert.ok(Number(hit[0].attrs.r) >= 8, 'the ring is at least the dot hit radius: ' + hit[0].attrs.r);
   }
 
   // dots: 'all' = one per transition, at the anchor, each with data-lane/data-cell and a hit circle
