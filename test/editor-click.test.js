@@ -131,7 +131,7 @@ check('wave: the waveform editor panel follows dark', DESKTOP, async (page) => {
   // the label is the canvas svg's own name text and its colour is `fill`.
   const s = await page.evaluate(() => {
     const p = document.querySelector('.ed-wave-panel');
-    const label = document.querySelector('.ed-wave-canvas-wrap svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
+    const label = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
     return { bg: getComputedStyle(p).backgroundColor, fg: label ? getComputedStyle(label).fill : null };
   });
   assert.notStrictEqual(s.bg, 'rgb(255, 255, 255)', 'panel is not white in dark');
@@ -159,7 +159,7 @@ check('wave canvas: the editor draws with the engine', DESKTOP, async (page) => 
   assert.strictEqual(LONG_NAME.length, 33, 'guard: the fixture name is 33 characters');
   await openWave(page);
   const r = await page.evaluate(() => {
-    const wrap = document.querySelector('.ed-wave-overlay .ed-wave-canvas-wrap');
+    const wrap = document.querySelector('.ed-wave-overlay .ed-wave-stage');
     const svg = wrap && wrap.querySelector('svg[id^="svgcontent"]');
     if (!svg) return { svg: false };
     const labels = [...svg.querySelectorAll('g[id^="wavelane_draw_1_"] > text')].map((t) => t.textContent);
@@ -202,6 +202,8 @@ check('wave canvas: SVG export is the engine drawing at the engine size', DESKTO
   // canvas is drawn at 1.5x; the exported file must be the engine's own
   // size (width/height = viewBox) and carry the skin it draws with.
   await openWave(page);
+  // Task 6b: the export buttons live in the 匯出 menu now.
+  await page.locator('[data-focus-key="ed-wave-export-menu"]').click(); await wait(100);
   const [dl] = await Promise.all([page.waitForEvent('download'),
     page.locator('[data-focus-key="ed-wave-export-svg"]').click()]);
   const text = fs.readFileSync(await dl.path(), 'utf8');
@@ -217,12 +219,204 @@ check('wave canvas: dark mode recolours the canvas', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
   await openWave(page);
   const fill = await page.evaluate(() => {
-    const t = document.querySelector('.ed-wave-canvas-wrap svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
+    const t = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
     return t ? getComputedStyle(t).fill : null;
   });
   assert.ok(fill !== null, 'guard: the canvas draws the lane name');
   assert.ok(lum(fill) >= 0.35, 'lane name is light on the dark canvas: ' + fill + ' lum ' + lum(fill).toFixed(3));
 }, { md: WAVE_CANVAS_MD });
+
+// ── wave shell (Task 6b): title bar, toolbar, messages, no side rail ──
+const WAVE_TOOLBAR_KEYS = ['ed-wave-undo', 'ed-wave-redo',
+  'brush-0', 'brush-1', 'brush-x', 'brush-=', 'brush-3', 'brush-p', 'ed-wave-brush-more',
+  'ed-wave-cycle-insert', 'ed-wave-cycle-delete', 'ed-wave-signal-menu', 'ed-wave-edge-arm',
+  'ed-wave-settings', 'ed-wave-export-menu', 'ed-wave-done'];
+const WAVE_SHELL_MD = '# W\n\n\x60\x60\x60wavedrom\n{"signal":[{"name":"clk","wave":"p...."},{"name":"a","wave":"0...."}]}\n\x60\x60\x60\n\nTail.\n';
+check('wave shell: no side rail, canvas uses the full width', DESKTOP, async (page) => {
+  await openWave(page);
+  const r = await page.evaluate(() => {
+    const panel = document.querySelector('.ed-wave-panel');
+    const stage = document.querySelector('.ed-wave-overlay .ed-wave-stage');
+    return {
+      side: document.querySelectorAll('.ed-wave-side').length,
+      panelW: panel.getBoundingClientRect().width,
+      stageW: stage ? stage.getBoundingClientRect().width : null,
+      keys: [...document.querySelectorAll('.ed-wave-toolbar [data-focus-key]')].map((b) => b.getAttribute('data-focus-key')),
+      title: (document.querySelector('.ed-wave-head .ed-wave-title') || {}).textContent || null,
+      statusLine: document.querySelectorAll('.ed-wave-status').length,
+      hint: !!document.querySelector('.ed-wave-panel .ed-wave-hint'),
+      live: (() => { const l = document.querySelector('.ed-wave-panel .ed-wave-live'); return l ? l.getAttribute('role') : null; })(),
+    };
+  });
+  assert.strictEqual(r.side, 0, 'no right-hand side rail');
+  assert.ok(r.stageW !== null && r.stageW >= r.panelW - 40, 'the stage takes the full width ' + JSON.stringify(r));
+  assert.deepStrictEqual(r.keys, WAVE_TOOLBAR_KEYS, 'toolbar order (spec 4.2)');
+  assert.strictEqual(r.title, '編輯波形');
+  assert.strictEqual(r.statusLine, 0, 'no visible status line');
+  assert.strictEqual(r.hint, true, 'the bottom hint bar is there');
+  assert.strictEqual(r.live, 'status', 'the hidden live region is role=status');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: title bar shows the save status', DESKTOP, async (page) => {
+  await openWave(page);
+  const read = () => page.evaluate(() => {
+    const s = document.querySelector('.ed-wave-head .ed-wave-save');
+    return s ? { dirty: s.getAttribute('data-dirty'), text: s.textContent } : null;
+  });
+  const before = await read();
+  assert.ok(before !== null, 'guard: the save status is in the title bar');
+  assert.strictEqual(before.dirty, '0', 'a freshly opened clean document reads saved ' + JSON.stringify(before));
+  assert.ok(before.text.includes('已儲存'), before.text);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const pt = await page.evaluate(() => window.__edWaveCellPoint(1, 2));
+  assert.ok(pt !== null, 'guard: lane 1 cycle 2 has a point');
+  await page.mouse.click(pt.x, pt.y); await wait(400);
+  const dirty = await read();
+  assert.strictEqual(dirty.dirty, '1', 'a paint makes it dirty ' + JSON.stringify(dirty));
+  assert.ok(dirty.text.includes('有未儲存的變更'), dirty.text);
+  await page.keyboard.press('Control+s'); await wait(900);
+  const saved = await read();
+  assert.strictEqual(saved.dirty, '0', 'Ctrl+S makes it clean ' + JSON.stringify(saved));
+  assert.ok(saved.text.includes('已儲存'), saved.text);
+  assert.strictEqual(!!(await page.$('.ed-wave-overlay')), true, 'the editor stays open after Ctrl+S');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: refusals go to the notice toast', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="ed-wave-cycle-delete"]').click(); await wait(200);
+  const r = await page.evaluate(() => {
+    const n = document.querySelector('.ed-conflict[data-level="notice"] .ed-msg-text');
+    return { text: n ? n.textContent : null, errors: document.querySelectorAll('.ed-conflict[data-level="error"]').length,
+      status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status') };
+  });
+  assert.strictEqual(r.text, '先選一段 cycle 再刪', 'the refusal is a notice toast ' + JSON.stringify(r));
+  assert.strictEqual(r.errors, 0, 'a refusal is not an error card');
+  assert.strictEqual(r.status, '先選一段 cycle 再刪', 'data-wave-status carries the last message');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: canvas is the engine drawing', DESKTOP, async (page) => {
+  await openWave(page);
+  const r = await page.evaluate(() => {
+    const stage = document.querySelector('.ed-wave-overlay .ed-wave-stage');
+    const svg = stage && stage.querySelector('svg[id^="svgcontent"]');
+    if (!svg) return { svg: false };
+    const name = svg.querySelector('g[id^="wavelane_0_"] > text');
+    return { svg: true,
+      labels: [...svg.querySelectorAll('g[id^="wavelane_draw_1_"] > text')].map((t) => t.textContent),
+      nameText: name.textContent, nameLeft: name.getBoundingClientRect().left, stageLeft: stage.getBoundingClientRect().left };
+  });
+  assert.strictEqual(r.svg, true, 'the engine svg is inside the stage');
+  assert.deepStrictEqual(r.labels, ['A', 'B', 'C'], 'x333x. draws three labels (spec 5-1)');
+  assert.strictEqual(r.nameText, LONG_NAME);
+  assert.ok(r.nameLeft >= r.stageLeft, 'the 33-character name is whole (spec 5-2) ' + JSON.stringify(r));
+}, { md: WAVE_CANVAS_MD });
+check('wave shell: more opens the grouped brush grid', DESKTOP, async (page) => {
+  await openWave(page);
+  assert.strictEqual(await page.$$eval('.ed-wave-brush-grid', (g) => g.length), 0, 'guard: the grid is closed at first');
+  await page.locator('[data-focus-key="ed-wave-brush-more"]').click(); await wait(150);
+  const r = await page.evaluate(() => {
+    const grid = document.querySelector('.ed-wave-overlay .ed-wave-brush-grid');
+    if (!grid) return null;
+    return {
+      titles: [...grid.querySelectorAll('.ed-wave-brush-group-title')].map((t) => t.textContent),
+      groups: [...grid.querySelectorAll('.ed-wave-brush-group')].map((g) =>
+        [...g.querySelectorAll('.ed-wave-brush')].map((b) => b.getAttribute('data-brush')).join(' ')),
+      count: grid.querySelectorAll('.ed-wave-brush').length,
+    };
+  });
+  assert.ok(r !== null, 'the grid opens');
+  assert.strictEqual(r.count, 16);
+  assert.deepStrictEqual(r.titles, ['電位', '時脈', '資料', '其他']);
+  assert.deepStrictEqual(r.groups, ['z h l u d', 'n P N', '2 4 5 6 7 8 9', '|']);
+  await page.locator('[data-focus-key="brush-z"]').click(); await wait(150);
+  const after = await page.evaluate(() => ({
+    brush: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-brush'),
+    more: document.querySelector('[data-focus-key="ed-wave-brush-more"]').classList.contains('is-on'),
+  }));
+  assert.deepStrictEqual(after, { brush: 'z', more: true }, 'z is picked and 更多 shows a brush from it is on');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: undrawable edges show in the notice card', DESKTOP, async (page) => {
+  await openWave(page);
+  const r = await page.evaluate(() => {
+    const n = document.querySelector('.ed-wave-overlay .ed-wave-notice');
+    return n ? { visible: !n.hidden && n.getClientRects().length > 0, text: n.textContent,
+      skipped: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-skipped-edges') } : null;
+  });
+  assert.ok(r !== null, 'the notice card exists');
+  assert.strictEqual(r.visible, true, 'the notice card is on screen ' + JSON.stringify(r));
+  assert.ok(r.text.includes('MD 原始碼'), 'it says the next step ' + r.text);
+  assert.ok(r.text.includes('q'), 'it names the missing anchor ' + r.text);
+  assert.strictEqual(r.skipped, '1', 'the point note e is drawable and not listed (spec 5-3)');
+}, { md: '# W\n\n\x60\x60\x60wavedrom\n' + JSON.stringify({ signal: [{ name: 'a', wave: '0.1.0', node: '.a..e' }],
+  edge: ['a~>q x', 'e note'] }) + '\n\x60\x60\x60\n\nTail.\n' });
+check('wave shell: missing engine shows an error card', DESKTOP, async (page) => {
+  const d = page.locator('.wavedrom-diagram').first();
+  await d.scrollIntoViewIfNeeded(); await wait(300);
+  const box = await d.boundingBox();
+  await page.mouse.move(box.x + 10, box.y + box.height / 2);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+  await wait(300);
+  const gone = await page.evaluate(() => { delete window.WaveDrom; if (window.WaveDrom) window.WaveDrom = undefined; return typeof WaveDrom; });
+  assert.strictEqual(gone, 'undefined', 'guard: the engine is gone');
+  await page.locator('.ed-wave-edit-btn').click(); await wait(800);
+  const r = await page.evaluate(() => ({
+    error: (document.querySelector('.ed-conflict[data-level="error"] .ed-msg-text') || {}).textContent || null,
+    overlay: document.querySelectorAll('.ed-wave-overlay').length,
+  }));
+  assert.ok(r.error !== null && r.error.includes('波形引擎沒有載入'), 'an error card says so ' + JSON.stringify(r));
+  assert.strictEqual(r.overlay, 0, 'no blank canvas is opened');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: Tab cycles through the toolbar and the canvas', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-close').focus();
+  // The bound is derived from the dialog's own focusable count (same selector and
+  // filters as wave-ui.js focusables()), never a number: a toolbar change must
+  // not leave the walk too short to come back round.
+  const plan = await page.evaluate(() => {
+    const SEL = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+    const roots = [document.querySelector('.ed-wave-overlay'), ...document.querySelectorAll('.ed-conflict')];
+    const all = [];
+    for (const root of roots) for (const el of root.querySelectorAll(SEL)) {
+      if (el.disabled === true || el.hidden === true || el.getClientRects().length === 0) continue;
+      all.push(el.getAttribute('data-focus-key'));
+    }
+    const toolbar = [...document.querySelectorAll('.ed-wave-toolbar [data-focus-key]')]
+      .filter((b) => !b.disabled).map((b) => b.getAttribute('data-focus-key'));
+    return { count: all.length, toolbar, start: document.activeElement.getAttribute('data-focus-key') };
+  });
+  assert.strictEqual(plan.start, 'ed-wave-close', 'guard: the walk starts on ✕');
+  const seen = [];
+  for (let i = 0; i < plan.count; i++) {
+    await page.keyboard.press('Tab'); await wait(30);
+    seen.push(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')));
+  }
+  for (const k of plan.toolbar.concat(['canvas'])) {
+    assert.ok(seen.includes(k), 'Tab reaches ' + k + ': ' + JSON.stringify(seen));
+  }
+  assert.strictEqual(seen[seen.length - 1], 'ed-wave-close', 'the walk comes back to ✕ ' + JSON.stringify(seen));
+}, { md: WAVE_SHELL_MD });
+check('wave shell: transition dots only while edge arming', DESKTOP, async (page) => {
+  await openWave(page);
+  const dots = () => page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length);
+  assert.strictEqual(await dots(), 0, 'no dots on open');
+  await page.locator('[data-focus-key="ed-wave-edge-arm"]').click(); await wait(200);
+  const n = await dots();
+  assert.ok(n > 0, 'arming shows the dots: ' + n);
+}, { md: WAVE_SHELL_MD });
+check('wave shell: the cursor mark sits on the clicked cell', DESKTOP, async (page) => {
+  await openWave(page);
+  const pt = await page.evaluate(() => window.__edWaveCellPoint(1, 2));
+  assert.ok(pt !== null, 'guard: lane 1 cycle 2 has a point');
+  await page.mouse.click(pt.x, pt.y); await wait(300);
+  const r = await page.evaluate(() => {
+    const cell = typeof window.__edWaveCellRect === 'function' ? window.__edWaveCellRect(1, 2) : null;
+    const cur = document.querySelector('.ed-wave-overlay rect.ed-wave-cursor');
+    if (cell === null || cur === null) return { cell: cell !== null, cur: cur !== null };
+    const c = cur.getBoundingClientRect();
+    return { cell: [cell.left, cell.top, cell.width, cell.height], cur: [c.left, c.top, c.width, c.height] };
+  });
+  assert.ok(Array.isArray(r.cell) && Array.isArray(r.cur), 'guard: both rects exist ' + JSON.stringify(r));
+  for (let i = 0; i < 4; i++) {
+    assert.ok(Math.abs(r.cell[i] - r.cur[i]) <= 1, 'cursor rect equals the cell rect ' + JSON.stringify(r));
+  }
+}, { md: WAVE_SHELL_MD });
 
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);

@@ -2293,4 +2293,25 @@ function countInCode(source, needle) {
   console.log('editor-client: the .drawio/.xml insert path is wired on the client — OK');
 }
 
+// ── wave redesign Task 6b: the right-hand side rail is retired ────────────
+// The rail (its five sections, its collapse toggle), the 保留並關閉 / 放棄
+// pair, the Esc-discards caption, and the rail's preview and source panels
+// were all removed together. Bare substrings with String.prototype.includes,
+// the same way the client.js guard above works: prose in a comment trips it
+// too, on purpose, so a name cannot come back as a stale sentence either.
+{
+  const fs = require('fs');
+  const path = require('path');
+  const RETIRED = ['ed-wave-side', 'ed-wave-section', 'ed-wave-file-close', 'ed-wave-file-discard',
+    'ed-wave-escape-hint', 'renderPreview', 'renderSource', 'expandSide'];
+  for (const rel of ['wave-ui.js', 'wave-panels.js']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', rel), 'utf8');
+    assert.ok(text.length > 1000, 'guard: read ' + rel);
+    for (const needle of RETIRED) {
+      assert.ok(!text.includes(needle), 'lib/editor/' + rel + ' must NOT reference the retired ' + needle);
+    }
+  }
+  console.log('editor-client: the wave side rail stays retired — OK');
+}
+
 console.log('editor-client.test.js OK');

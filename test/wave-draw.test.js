@@ -123,6 +123,22 @@ function makeDrawer() {
 
 
 // ---------------------------------------------------------------------------
+// wave redesign Task 6b：工具列常駐 6 個電位，其餘 16 個在「更多」的分組格子
+// （spec §4.2）。兩邊合起來正好是 BRUSHES，每個字元出現一次——新增一個筆刷
+// 卻忘了放進任何一邊，它就從滑鼠那一側消失了（鍵盤仍可用 isBrushKey 選到）。
+// ---------------------------------------------------------------------------
+{
+  const resident = waveUi.BRUSH_RESIDENT;
+  const groups = waveUi.BRUSH_MORE;
+  assert.deepStrictEqual(resident, ['0', '1', 'x', '=', '3', 'p'], '常駐順序照 spec §4.2');
+  assert.deepStrictEqual(groups.map(function (g) { return g[0]; }), ['電位', '時脈', '資料', '其他']);
+  const placed = resident.concat.apply(resident, groups.map(function (g) { return g[1]; }));
+  assert.strictEqual(placed.length, BRUSHES.length, '每個筆刷只放一處：' + placed.join(''));
+  assert.deepStrictEqual(placed.slice().sort(), BRUSHES.slice().sort(), '常駐＋更多＝BRUSHES');
+  console.log('wave-draw: 常駐 6 個＋更多 16 個＝BRUSHES — OK');
+}
+
+// ---------------------------------------------------------------------------
 // v3.6.0 Task 10：電位圖示重用 brick 繪製，不是第二套實作
 //
 // `BRUSHES` 是 22 個，而且是從 wave-ui.js `require` 進來的那一份本人，
