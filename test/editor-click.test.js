@@ -277,6 +277,8 @@ check('wave shell: title bar shows the save status', DESKTOP, async (page) => {
   const saved = await read();
   assert.strictEqual(saved.dirty, '0', 'Ctrl+S makes it clean ' + JSON.stringify(saved));
   assert.ok(saved.text.includes('已儲存'), saved.text);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-conflict[data-level="notice"] .ed-msg-text') || {}).textContent || null),
+    '已儲存', 'Ctrl+S says 已儲存 at the bottom (spec 4.8)');
   assert.strictEqual(!!(await page.$('.ed-wave-overlay')), true, 'the editor stays open after Ctrl+S');
 }, { md: WAVE_SHELL_MD });
 check('wave shell: refusals go to the notice toast', DESKTOP, async (page) => {
@@ -290,6 +292,28 @@ check('wave shell: refusals go to the notice toast', DESKTOP, async (page) => {
   assert.strictEqual(r.text, '先選一段 cycle 再刪', 'the refusal is a notice toast ' + JSON.stringify(r));
   assert.strictEqual(r.errors, 0, 'a refusal is not an error card');
   assert.strictEqual(r.status, '先選一段 cycle 再刪', 'data-wave-status carries the last message');
+}, { md: WAVE_SHELL_MD });
+check('wave shell: a notice never replaces an error card', DESKTOP, async (page) => {
+  // A real error path: the save request fails, so client.js raises its red
+  // card. A wave notice after that must not take the card's place (spec E2:
+  // a card about lost work stays until the user closes it).
+  await page.route('**/api/save', (route) => route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }));
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const pt = await page.evaluate(() => window.__edWaveCellPoint(1, 2));
+  await page.mouse.click(pt.x, pt.y); await wait(300);
+  await page.keyboard.press('Control+s'); await wait(900);
+  const card = await page.evaluate(() => (document.querySelector('.ed-conflict[data-level="error"] .ed-msg-text') || {}).textContent || null);
+  assert.ok(card !== null && card.includes('無法儲存'), 'guard: the failed save raised the error card ' + card);
+  // A refusal that changes nothing: Alt+→ while the edge gesture is not armed.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('Alt+ArrowRight'); await wait(200);
+  const r = await page.evaluate(() => ({
+    banners: [...document.querySelectorAll('.ed-conflict')].map((b) => b.getAttribute('data-level') + ':' + b.querySelector('.ed-msg-text').textContent),
+    status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
+  }));
+  assert.deepStrictEqual(r.banners, ['error:' + card], 'the error card is still the one on screen ' + JSON.stringify(r));
+  assert.strictEqual(r.status, '先按「關聯線」武裝，Alt+←／→ 才有轉態點可以跳', 'the editor still records the notice');
 }, { md: WAVE_SHELL_MD });
 check('wave shell: canvas is the engine drawing', DESKTOP, async (page) => {
   await openWave(page);
