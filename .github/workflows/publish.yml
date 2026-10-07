@@ -1,5 +1,9 @@
 name: Publish to npm
 
+# Tag push → publish. No test run here: the tagged commit is a merge commit on
+# protected main, which only accepts PRs whose CI and browser checks were green
+# on an up-to-date branch. This job proves the release metadata agrees and that
+# the package builds, then publishes.
 on:
   push:
     tags:
@@ -14,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -21,11 +27,17 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Release check (tag, package.json, CHANGELOG, on main)
+        run: node scripts/release-check.js "$GITHUB_REF_NAME" --on-main
+
       - name: Install
         run: npm ci || npm install
 
-      - name: Test
-        run: npm test
+      - name: Smoke render
+        run: |
+          printf '# Smoke\n\nhello\n' > "$RUNNER_TEMP/smoke.md"
+          node lib/md2doc.js "$RUNNER_TEMP/smoke.md" "$RUNNER_TEMP/smoke.html"
+          test -s "$RUNNER_TEMP/smoke.html"
 
       - name: Publish
         run: npm publish --access public
