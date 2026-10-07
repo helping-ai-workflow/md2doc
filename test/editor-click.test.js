@@ -127,14 +127,102 @@ check('wave: the waveform editor panel follows dark', DESKTOP, async (page) => {
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
   await wait(300);
   await page.locator('.ed-wave-edit-btn').click(); await wait(800);
+  // The lane name is drawn by the engine on the canvas now (Task 6a), so
+  // the label is the canvas svg's own name text and its colour is `fill`.
   const s = await page.evaluate(() => {
     const p = document.querySelector('.ed-wave-panel');
-    const label = document.querySelector('.ed-wave-lane-label, .ed-wave-section-title');
-    return { bg: getComputedStyle(p).backgroundColor, fg: getComputedStyle(label).color };
+    const label = document.querySelector('.ed-wave-canvas-wrap svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
+    return { bg: getComputedStyle(p).backgroundColor, fg: label ? getComputedStyle(label).fill : null };
   });
   assert.notStrictEqual(s.bg, 'rgb(255, 255, 255)', 'panel is not white in dark');
+  assert.ok(s.fg !== null, 'guard: the canvas draws the lane name');
   assert.ok(contrast(s.fg, s.bg) >= 4.5, 'wave label contrast ' + JSON.stringify(s));
 }, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
+
+// ── wave canvas (Task 6a): the editor draws with the WaveDrom engine ──
+async function openWave(page) {
+  const d = page.locator('.wavedrom-diagram').first();
+  await d.scrollIntoViewIfNeeded(); await wait(300);
+  const box = await d.boundingBox();
+  await page.mouse.move(box.x + 10, box.y + box.height / 2);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+  await wait(300);
+  await page.locator('.ed-wave-edit-btn').click(); await wait(800);
+  assert.strictEqual(!!(await page.$('.ed-wave-panel')), true, 'guard: the waveform editor is open');
+}
+const LONG_NAME = 'a_very_long_signal_name_33_chars_'; // 33 characters
+const WAVE_CANVAS_MD = '# W\n\n\x60\x60\x60wavedrom\n' + JSON.stringify({ signal: [
+  { name: LONG_NAME, wave: 'p.....' },
+  { name: 'bus', wave: 'x333x.', data: ['A', 'B', 'C'] },
+] }) + '\n\x60\x60\x60\n\nTail.\n';
+check('wave canvas: the editor draws with the engine', DESKTOP, async (page) => {
+  assert.strictEqual(LONG_NAME.length, 33, 'guard: the fixture name is 33 characters');
+  await openWave(page);
+  const r = await page.evaluate(() => {
+    const wrap = document.querySelector('.ed-wave-overlay .ed-wave-canvas-wrap');
+    const svg = wrap && wrap.querySelector('svg[id^="svgcontent"]');
+    if (!svg) return { svg: false };
+    const labels = [...svg.querySelectorAll('g[id^="wavelane_draw_1_"] > text')].map((t) => t.textContent);
+    const name = svg.querySelector('g[id^="wavelane_0_"] > text');
+    const wr = wrap.getBoundingClientRect();
+    const sr = svg.getBoundingClientRect();
+    const nr = name.getBoundingClientRect();
+    return { svg: true, labels, nameText: name.textContent, nameLeft: nr.left, wrapLeft: wr.left, svgLeft: sr.left,
+      clientWidth: sr.width, widthAttr: Number(svg.getAttribute('width')) };
+  });
+  assert.strictEqual(r.svg, true, 'the engine svg is inside the canvas wrap');
+  assert.deepStrictEqual(r.labels, ['A', 'B', 'C'], 'x333x. draws three labels, one per segment (spec 5-1)');
+  assert.strictEqual(r.nameText, LONG_NAME);
+  assert.ok(r.nameLeft >= r.wrapLeft && r.nameLeft >= r.svgLeft,
+    'the 33-character name is not clipped on the left (spec 5-2) ' + JSON.stringify(r));
+  assert.ok(Math.abs(r.clientWidth - r.widthAttr) < 0.5,
+    'svg client width equals its width attribute (the client conversion divides by the fixed scale) ' + JSON.stringify(r));
+}, { md: WAVE_CANVAS_MD });
+check('wave canvas: a click paints the cycle under the pointer', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-brush[data-brush="1"]').click(); await wait(100);
+  const pt = await page.evaluate(() => {
+    const p = typeof window.__edWaveCellPoint === 'function' ? window.__edWaveCellPoint(1, 2) : null;
+    if (!p) return null;
+    const hit = document.elementFromPoint(p.x, p.y);
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    return { x: p.x, y: p.y, onLayer: !!(hit && layer && (hit === layer || layer.contains(hit))) };
+  });
+  assert.ok(pt !== null, 'guard: lane 1 cycle 2 has a point on screen');
+  assert.strictEqual(pt.onLayer, true, 'guard: the press lands on the interaction layer ' + JSON.stringify(pt));
+  await page.mouse.click(pt.x, pt.y); await wait(300);
+  const src = await page.evaluate(() => window.__edWaveSourceProbe());
+  const m = /"name":"a","wave":"([^"]*)"/.exec(src);
+  assert.ok(m !== null, 'guard: lane a is in the source ' + src);
+  assert.strictEqual(m[1][2], '1', 'cycle 2 of lane a is painted 1: ' + m[1]);
+  assert.strictEqual(m[1][0], '0', 'cycle 0 is untouched: ' + m[1]);
+}, { md: '# W\n\n\x60\x60\x60wavedrom\n{"signal":[{"name":"clk","wave":"p...."},{"name":"a","wave":"0...."}]}\n\x60\x60\x60\n\nTail.\n' });
+check('wave canvas: SVG export is the engine drawing at the engine size', DESKTOP, async (page) => {
+  // Ruling R3: export reads the canvas's engine svg until Task 10. The
+  // canvas is drawn at 1.5x; the exported file must be the engine's own
+  // size (width/height = viewBox) and carry the skin it draws with.
+  await openWave(page);
+  const [dl] = await Promise.all([page.waitForEvent('download'),
+    page.locator('[data-focus-key="ed-wave-export-svg"]').click()]);
+  const text = fs.readFileSync(await dl.path(), 'utf8');
+  const root = /<svg\b[^>]*>/.exec(text)[0];
+  const attr = (k) => { const m = new RegExp('\\s' + k + '="([^"]*)"').exec(root); return m ? m[1] : null; };
+  const vb = attr('viewBox').split(/[\s,]+/).map(Number);
+  assert.deepStrictEqual([Number(attr('width')), Number(attr('height'))], [vb[2], vb[3]],
+    'exported width/height equal the viewBox: ' + root.slice(0, 200));
+  assert.ok(/<defs[\s>]/.test(text) && /<style[\s>]/.test(text), 'the export carries the skin defs and style');
+  assert.ok(text.includes('>A<') && text.includes('>C<'), 'the export is this diagram (its labels are in it)');
+}, { md: WAVE_CANVAS_MD, ctx: { acceptDownloads: true } });
+check('wave canvas: dark mode recolours the canvas', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  await openWave(page);
+  const fill = await page.evaluate(() => {
+    const t = document.querySelector('.ed-wave-canvas-wrap svg[id^="svgcontent"] g[id^="wavelane_0_"] > text');
+    return t ? getComputedStyle(t).fill : null;
+  });
+  assert.ok(fill !== null, 'guard: the canvas draws the lane name');
+  assert.ok(lum(fill) >= 0.35, 'lane name is light on the dark canvas: ' + fill + ' lum ' + lum(fill).toFixed(3));
+}, { md: WAVE_CANVAS_MD });
 
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
