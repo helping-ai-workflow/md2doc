@@ -1407,4 +1407,12 @@ const FLAT = {
   console.log('wave-geometry: cellAt／boundaryAt 的垂直界線改用 originY — OK');
 }
 
+{
+  const nd = C.parseSource('{signal:[{name:"a",wave:"01",node:".a"},{name:"b",wave:"01",node:".b"}],edge:["a~>b x","e note"]}').doc;
+  const det = G.edgeLayoutDetail(nd, G.layoutOf(nd));
+  assert.strictEqual(det.skipped.length, 0, '單點標註不算畫不出來的 edge');
+  assert.strictEqual(det.drawn.length, 1);
+  console.log('wave-geometry: 標註不進 skipped — OK');
+}
+
 console.log('wave-geometry.test.js OK');

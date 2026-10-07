@@ -2502,16 +2502,16 @@ const RSRC = [
 
   const atEdge = C.ensureNode(doc2, 0, 3); // 最後一格仍合法
   assert.notStrictEqual(atEdge.doc, doc2);
-  assert.strictEqual(atEdge.letter, 'a');
-  assert.deepStrictEqual(C.nodesOf(atEdge.doc).a, { at: 0, cell: 3 },
+  assert.strictEqual(atEdge.letter, 'A'); // P1 Task 2：池子改大寫優先
+  assert.deepStrictEqual(C.nodesOf(atEdge.doc).A, { at: 0, cell: 3 },
     '最後一格仍要能正常配字母');
 
   // pool 前段字母已被占用時必須跳過去，拿第一個還沒被用過的，不能撞名。
   const taken = C.parseSource(
-    '{signal:[{name:"x",wave:"0123",node:"a.b."}]}').doc; // a@0, b@2；cell3 空
+    '{signal:[{name:"x",wave:"0123",node:"A.B."}]}').doc; // A@0, B@2；cell3 空
   const picked = C.ensureNode(taken, 0, 3);
-  assert.strictEqual(picked.letter, 'c',
-    'a/b 已被占用時要跳過去拿第一個空字母，不可撞名');
+  assert.strictEqual(picked.letter, 'C',
+    'A/B 已被占用時要跳過去拿第一個空字母，不可撞名');
 
   console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
 }
@@ -3113,6 +3113,42 @@ const RSRC = [
   }
 
   console.log('wave-codec: setBannerField — OK');
+}
+
+// ── P1 Task 2: 單點標註、大寫優先字母池 ─────────────────────────────────
+{
+  assert.deepStrictEqual(C.parseNote('e re-arm window'), { letter: 'e', text: 're-arm window' });
+  assert.strictEqual(C.parseNote('a~>b x'), null, '有形狀的是關聯線，不是標註');
+  assert.strictEqual(C.parseNote('ab text'), null, '第一個 token 長度不是 1');
+  assert.strictEqual(C.parseEdge('e re-arm window'), null, 'parseEdge 仍拒絕單字元 head');
+  assert.strictEqual(C.formatNote({ letter: 'E', text: '  x ' }), 'E x');
+  assert.strictEqual(C.formatNote({ letter: 'E', text: '  ' }), null);
+
+  const base = C.parseSource('{signal:[{name:"a",wave:"0101"}]}').doc;
+  const added = C.addNote(base, 0, 1, 'x');
+  assert.strictEqual(added.signal[0].node, '.A', '新字母是大寫 A');
+  assert.strictEqual(added.edge[added.edge.length - 1], 'A x');
+  assert.deepStrictEqual(C.notesOf(added), [{ index: 0, letter: 'A', text: 'x' }]);
+
+  const upd = C.updateNote(added, 0, 'y');
+  assert.strictEqual(upd.edge[0], 'A y');
+
+  const removed = C.removeNote(added, 0);
+  assert.ok(removed.signal[0].node === undefined || removed.signal[0].node.indexOf('A') === -1,
+    '標註移除後字母從 node 消失');
+  assert.deepStrictEqual(C.notesOf(removed), []);
+
+  const lower = C.parseSource('{signal:[{name:"a",wave:"0101",node:"ab.."}]}').doc;
+  const e = C.ensureNode(lower, 0, 3);
+  assert.strictEqual(e.letter, 'A');
+  assert.strictEqual(e.doc.signal[0].node, 'ab.A', '既有小寫不變');
+
+  const ui = require('../lib/editor/wave-ui.js');
+  for (const k of ui.SHORTCUT_KEYS) {
+    assert.strictEqual(ui.BRUSHES.indexOf(k), -1, 'SHORTCUT_KEYS 不得與 BRUSHES 相交：' + k);
+  }
+  assert.deepStrictEqual(ui.SHORTCUT_KEYS, ['a', 'A', 't', 'T', '?']);
+  console.log('wave-codec: 單點標註與大寫優先字母池 — OK');
 }
 
 console.log('wave-codec.test.js OK');
