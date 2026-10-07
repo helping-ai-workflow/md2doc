@@ -707,6 +707,20 @@ async function signalShown(page) {
 }
 /** What the last gesture's write-back came to: 'ok', 'refused' or 'none'. */
 const patchState = (page) => page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-patch'));
+/**
+ * A write-back refusal pinned until Task 8b (Ruling R15): the gesture's patch is refused and the
+ * red card says so. The card is closed afterwards, so the next pin cannot be met by a stale one.
+ */
+async function expectStoreRefusal(page, what) {
+  assert.strictEqual(await patchState(page), 'refused', what + ': the store refuses the write-back — expected until Task 8b teaches wave-store group writes');
+  const card = await page.evaluate(() => {
+    const c = document.querySelector('.ed-conflict[data-level="error"]');
+    return c && c.getClientRects().length > 0 ? c.querySelector('.ed-msg-text').textContent : null;
+  });
+  assert.ok(card !== null && card.includes('沒辦法只改幾個位元組寫回'),
+    what + ': the red card says it cannot be written back — expected until Task 8b teaches wave-store group writes ' + JSON.stringify(card));
+  await page.locator('.ed-conflict[data-level="error"] .ed-msg-x').click(); await wait(150);
+}
 /** Every lane's name in display order (groups flattened, a spacer is '{}'). */
 function namesOf(signal) {
   const out = [];
@@ -930,11 +944,12 @@ check('wave lanes: menu actions', DESKTOP, async (page) => {
   // screen, and say what the write-back came to.
   await laneAction(page, 1, 'ed-wave-lane-group');
   assert.deepStrictEqual(await signalShown(page), [a, ['', b, c], d], '和下一條組成群組');
-  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a new group (pre-existing)');
+  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a new group — expected until Task 8b teaches wave-store group writes');
   assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), '',
     'the new group\'s name field opens');
   await page.keyboard.type('grp'); await page.keyboard.press('Enter'); await wait(300);
   assert.deepStrictEqual(await signalShown(page), [a, ['grp', b, c], d], 'and names the group');
+  await expectStoreRefusal(page, '和下一條組成群組 + 改名');
   await page.keyboard.press('Control+z'); await wait(300);
   await undo();
   await laneAction(page, 1, 'ed-wave-lane-period');
@@ -1014,12 +1029,62 @@ check('wave lanes: group row menu renames and ungroups', DESKTOP, async (page) =
   await openGroupMenu();
   await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-ungroup"]').click(); await wait(300);
   assert.deepStrictEqual(await signalShown(page), [base[0], base[1][1], base[1][2], base[2]], '解散群組 keeps the lanes, drops the group');
-  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a dissolved group (pre-existing, see 和下一條組成群組)');
+  await expectStoreRefusal(page, '解散群組');
   await page.keyboard.press('Control+z'); await wait(300);
   await openGroupMenu();
   await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-up"]').click(); await wait(300);
   assert.deepStrictEqual(await signalNow(page), [base[1], base[0], base[2]], '上移 swaps the group with the lane above it');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), base, 'guard: undo restores');
+  // 下移: on screen the group trades places with the lane below it; the store refuses every
+  // group 下移 today (a lane cannot be addressed in front of a group).
+  await openGroupMenu();
+  await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-down"]').click(); await wait(300);
+  assert.deepStrictEqual(await signalShown(page), [base[0], base[2], base[1]], '下移 swaps the group with the lane below it');
+  await expectStoreRefusal(page, '群組下移');
 }, { md: WAVE_GROUP_MD });
+check('wave lanes: Alt+arrows on a group grip move the group', DESKTOP, async (page) => {
+  await openWave(page);
+  const base = await signalNow(page);
+  // A canvas selection on d: a fall-through to the canvas's own Alt+↑ would move d.
+  const p = await cellPress(page, 3, 0);
+  await page.mouse.click(p.x, p.y); await wait(200);
+  const before = await signalNow(page);
+  await page.locator('.ed-wave-overlay [data-focus-key="group-grip-signal.1"]').focus(); await wait(100);
+  await page.keyboard.press('Alt+ArrowUp'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [before[1], before[0], before[2]], 'Alt+↑ on the group grip moves the group, not the selected lane');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')), 'group-grip-signal.0',
+    'the keyboard follows the group');
+  // From the group's menu, Alt+↓ moves it back (which is the document as written).
+  await page.keyboard.press('Enter'); await wait(200);
+  assert.ok((await laneMenu(page)) !== null, 'guard: Enter on the grip opens its menu');
+  await page.keyboard.press('Alt+ArrowDown'); await wait(300);
+  assert.deepStrictEqual(await signalShown(page), before, 'Alt+↓ with the group menu open moves the group down');
+  assert.strictEqual(await laneMenu(page), null, 'and the menu goes');
+  assert.strictEqual(base[0].wave, '01..', 'guard: fixture');
+}, { md: WAVE_GROUP_MD });
+check('wave lanes: Ctrl+D inside a text field is claimed and copies nothing', DESKTOP, async (page) => {
+  await openWave(page);
+  const base = await signalNow(page);
+  const ctrlD = () => page.evaluate(() => {
+    const ev = new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(ev);
+    return { prevented: ev.defaultPrevented, on: document.activeElement.className };
+  });
+  await page.locator('.ed-wave-overlay [data-focus-key="grip-0"]').focus(); await wait(100);
+  await page.keyboard.press('F2'); await wait(200);
+  const inName = await ctrlD();
+  assert.deepStrictEqual(inName, { prevented: true, on: 'ed-wave-rename' }, 'Ctrl+D in the name field: the browser does not get it');
+  await page.keyboard.press('Escape'); await wait(200);
+  // The data-label field of c (lane 2, cycle 1), from the keyboard.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter'); await wait(200);
+  const inData = await ctrlD();
+  assert.deepStrictEqual(inData, { prevented: true, on: 'ed-wave-data-input' }, 'Ctrl+D in the data-label field: the browser does not get it');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.deepStrictEqual(await signalNow(page), base, 'and no lane was copied');
+}, { md: WAVE_LANES_MD });
 check('wave lanes: add lane button', DESKTOP, async (page) => {
   await openWave(page);
   const b = await page.evaluate(() => {
