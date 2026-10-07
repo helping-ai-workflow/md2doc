@@ -605,6 +605,38 @@ check('desktop: WaveDrom stays recoloured through its later redraw passes', DESK
   // saturated colour (HSL s > 0.25) keeps its hue at L 0.78 -> rgb(160, 186, 238).
   assert.deepStrictEqual(r, { flagged: true, text: 'rgb(160, 186, 238)', offenders: [] });
 });
+// WaveDrom puts a white <rect> under every edge label (render-label.js: g > rect + text, inside
+// wavearcs_N). D10 used to make it transparent like any near-white fill, so in dark the edge and
+// the waveform ran straight through the label text. It must take the page colour instead; every
+// other near-white fill (the graphviz white node here) still goes transparent.
+check('desktop: dark WaveDrom edge labels keep a page-coloured backing, other white fills still go transparent', DESKTOP, async (page) => {
+  const url = fixtureUrl('wave-label-bg', ['# Wave labels', '', '## 1. A', '',
+    '\x60\x60\x60wavedrom',
+    '{ "signal": [ { "name": "a", "wave": "01..0.", "node": ".A" }, { "name": "b", "wave": "0..1.0", "node": "...B" }, { "name": "c", "wave": "0...1.", "node": "....E" } ],',
+    '  "edge": ["A~>B frame armed", "E re-arm window"] }',
+    '\x60\x60\x60', '',
+    '\x60\x60\x60dot', 'digraph { node [shape=box, style=filled, fillcolor=white]; w -> v; }', '\x60\x60\x60', '']);
+  await gotoTheme(page, url); await wait(1500);
+  const read = () => page.evaluate(() => {
+    const svg = document.querySelector('.content [id^="WaveDrom_Display_"] svg');
+    const backs = [...svg.querySelectorAll('[id^="wavearcs"] rect')].filter((r) => r.nextElementSibling && r.nextElementSibling.tagName === 'text');
+    const label = (t) => backs.find((r) => r.nextElementSibling.textContent === t);
+    const gvNode = document.querySelector('.content .graphviz svg g.node polygon');
+    return { frame: getComputedStyle(label('frame armed')).fill, note: getComputedStyle(label('re-arm window')).fill,
+      styles: backs.map((r) => r.getAttribute('style')), gv: getComputedStyle(gvNode).fill };
+  });
+  const light = await read();
+  assert.deepStrictEqual([light.frame, light.note], ['rgb(255, 255, 255)', 'rgb(255, 255, 255)'], JSON.stringify(light));
+  await page.click('#md2doc-theme-toggle'); await wait(800);
+  const dark = await read();
+  assert.deepStrictEqual([dark.frame, dark.note], ['rgb(27, 27, 29)', 'rgb(27, 27, 29)'], 'label backings take the dark page colour ' + JSON.stringify(dark));
+  assert.ok(dark.gv === 'rgba(0, 0, 0, 0)' || dark.gv === 'transparent', 'graphviz white node still goes transparent ' + JSON.stringify(dark));
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  assert.strictEqual((await read()).frame, 'rgb(255, 255, 255)', 'printing while dark shows the white backing');
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  await page.click('#md2doc-theme-toggle'); await wait(800);
+  assert.deepStrictEqual((await read()).styles, light.styles, 'every backing style attribute restored exactly');
+});
 check('desktop: images sit on a white plate in dark only', DESKTOP, async (page) => {
   await gotoTheme(page);
   const bg = () => page.$eval('.content img', (i) => getComputedStyle(i).backgroundColor);

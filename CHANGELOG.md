@@ -3,6 +3,12 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.12.1 — 2026-10-07
+
+### Fixed
+
+- **深色模式的時序圖標籤不再被線穿過**：WaveDrom 關聯線標籤（含單點標註）底下那塊白色底，深色時以前被變成透明，線和波形直接從字中間穿過；現在改成頁面底色。其他圖的白色填色照舊。
+
 ## v3.12.0 — 2026-10-06
 
 ### Added — 程式碼區塊的複製鍵
