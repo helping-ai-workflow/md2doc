@@ -136,6 +136,37 @@ check('wave: the waveform editor panel follows dark', DESKTOP, async (page) => {
   assert.ok(contrast(s.fg, s.bg) >= 4.5, 'wave label contrast ' + JSON.stringify(s));
 }, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
 
+check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  const r = await page.evaluate(() => {
+    const out = { api: typeof window.md2docTheme };
+    if (!window.md2docTheme) return out;
+    const host = document.createElement('div');
+    host.id = 'md2doc-theme-api-test-0';
+    document.body.appendChild(host);
+    const src = { signal: [{ name: 'a', wave: 'p...', node: '.a.b' }], edge: ['a~>b lbl'] };
+    const notFirst = document.querySelector('svg.WaveDrom defs #socket') !== null;
+    WaveDrom.RenderWaveForm(0, src, 'md2doc-theme-api-test-', notFirst);
+    const svg = host.querySelector('svg');
+    const el = svg.querySelector('[id^="wavearcs"] g > rect');
+    out.found = !!el;
+    if (!el) return out;
+    out.before = el.getAttribute('style');
+    out.dark = window.md2docTheme.isDark();
+    window.md2docTheme.recolourSvg(svg, true, { backing: 'rgb(1, 2, 3)' });
+    out.fill = getComputedStyle(el).fill;
+    window.md2docTheme.recolourSvg(svg, false);
+    out.after = el.getAttribute('style');
+    host.remove();
+    return out;
+  });
+  assert.strictEqual(r.api, 'object', 'md2docTheme is exposed');
+  assert.strictEqual(r.found, true, 'label backing rect exists');
+  assert.strictEqual(r.dark, true);
+  assert.strictEqual(r.fill, 'rgb(1, 2, 3)');
+  assert.strictEqual(r.after, r.before, 'light restores the original style');
+}, { md: FIXTURE + '\n\x60\x60\x60wavedrom\n{ "signal": [ { "name": "clk", "wave": "p...." } ] }\n\x60\x60\x60\n' });
+
 check('icons: every toolbar button draws an svg and no emoji', DESKTOP, async (page) => {
   const r = await page.evaluate(() => [].map.call(document.querySelectorAll('.ed-toolbar-btn'), (b) => ({
     id: b.getAttribute('data-ed-tb'), svg: !!b.querySelector('svg'), text: b.textContent.trim(),
