@@ -15807,7 +15807,11 @@ async function main() {
           cv.width = w; cv.height = h;
           const cx = cv.getContext('2d');
           cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, w, h);
-          cx.drawImage(img, 0, 0);
+          // Drawn at w x h, not at the SVG's own size: the PNG under test is
+          // exported at 2x (wave redesign spec section 5-7), so the stripped
+          // baseline it is compared against has to be rasterised at the same
+          // size, or the ink comparison quietly becomes 4x looser.
+          cx.drawImage(img, 0, 0, w, h);
           const d = cx.getImageData(0, 0, w, h).data;
           let ink = 0;
           for (let p = 0; p < d.length; p += 4) {
@@ -16009,8 +16013,10 @@ async function main() {
         'callback 裡說的，比 SVG 那條多繞一層非同步）。Got ' + JSON.stringify(png.status));
       assert.deepStrictEqual(png.magic, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
         'T15/PNG: PNG 的 magic bytes。Got ' + JSON.stringify(png.magic));
-      assert.deepStrictEqual({ w: String(png.w), h: String(png.h) }, dims,
-        'T15/PNG: 解碼回來的尺寸要跟預覽一致。Got ' + JSON.stringify(png));
+      // 2×（波形重設計規格 §5-7）：1 倍的 PNG 貼進簡報或高解析度螢幕會糊。
+      assert.deepStrictEqual({ w: png.w, h: png.h },
+        { w: Number(dims.w) * 2, h: Number(dims.h) * 2 },
+        'T15/PNG: 解碼回來的尺寸要是預覽的 2 倍（高解析度螢幕與簡報用）。Got ' + JSON.stringify(png));
       assert.ok(png.bytes > png.blankBytes,
         'T15/PNG: 檔案必須比同尺寸的全白 PNG 大。Got ' + png.bytes +
         ' vs 全白 ' + png.blankBytes);
