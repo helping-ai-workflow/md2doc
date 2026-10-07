@@ -684,6 +684,365 @@ check('wave draw: Del deletes cycles when cycles are selected', DESKTOP, async (
   assert.strictEqual((await laneNamed(page, 'a')).wave, '01xz', 'Del on a single selected cycle removes that cycle');
 }, { md: WAVE_RANGE_MD });
 
+// ── wave lanes (Task 8): managing signals from the name column (spec 4.4) ──
+const WAVE_LANES_MD = waveMd([{ name: 'a', wave: '01..' }, { name: 'b', wave: '1.0.' },
+  { name: 'c', wave: 'x=..', data: ['D'] }, { name: 'd', wave: '0...' }]);
+const WAVE_GROUP_MD = waveMd([{ name: 'a', wave: '01..' },
+  ['grp', { name: 'b', wave: '1.0.' }, { name: 'c', wave: '0.1.' }], { name: 'd', wave: '0...' }]);
+/** The block's `signal` as it is written back right now, read with the codec's own
+ *  reader: a patched source is relaxed WaveJSON (a removal can leave a trailing comma). */
+async function signalNow(page) {
+  const r = await page.evaluate(() => {
+    const src = window.__edWaveSourceProbe();
+    const parsed = window.__md2docWave['wave-codec.js'].parseSource(src);
+    return parsed.ok ? { doc: JSON.parse(JSON.stringify(parsed.doc)) } : { src };
+  });
+  assert.ok(r.doc !== undefined, 'the block is written back as readable WaveJSON: ' + r.src);
+  return r.doc.signal;
+}
+/** The block's `signal` as the editor shows it (the store's document), whether or not it can
+ *  be written back. */
+async function signalShown(page) {
+  return JSON.parse(await page.evaluate(() => window.__edWaveDocProbe())).signal;
+}
+/** What the last gesture's write-back came to: 'ok', 'refused' or 'none'. */
+const patchState = (page) => page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-patch'));
+/** Every lane's name in display order (groups flattened, a spacer is '{}'). */
+function namesOf(signal) {
+  const out = [];
+  (function walk(arr) {
+    for (const x of arr) {
+      if (Array.isArray(x)) walk(x.slice(typeof x[0] === 'string' ? 1 : 0));
+      else if (x && typeof x === 'object') out.push(x.name === undefined && x.wave === undefined ? '{}' : x.name);
+    }
+  })(signal);
+  return out;
+}
+/** The centre of lane `i`'s name as the ENGINE drew it, asserting that a press there lands on the layer. */
+async function namePoint(page, i) {
+  const p = await page.evaluate((i) => {
+    const t = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] g[id^="wavelane_' + i + '_"] > text');
+    if (!t) return null;
+    const r = t.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    return { x, y, left: r.left, onLayer: !!(hit && layer && (hit === layer || layer.contains(hit))) };
+  }, i);
+  assert.ok(p !== null && p.onLayer, 'guard: lane ' + i + '\'s name is drawn and a press on it lands on the layer ' + JSON.stringify(p));
+  return p;
+}
+/** The grip of lane `i` (or of the group, `sel`), as plain values. */
+function gripOf(page, sel) {
+  return page.evaluate((sel) => {
+    const g = document.querySelector('.ed-wave-overlay ' + sel);
+    if (!g) return null;
+    const r = g.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const top = document.elementFromPoint(x, y);
+    return { x, y, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+      shown: getComputedStyle(g).opacity === '1', onTop: top === g || (!!top && g.contains(top)),
+      key: g.getAttribute('data-focus-key') };
+  }, sel);
+}
+/** Hover lane `i`'s name; its grip has to come up beside it and take a press. */
+async function hoverLane(page, i) {
+  const n = await namePoint(page, i);
+  await page.mouse.move(n.x, n.y, { steps: 3 }); await wait(150);
+  const g = await gripOf(page, '.ed-wave-grip[data-lane="' + i + '"]');
+  assert.ok(g !== null && g.shown && g.onTop, 'hovering lane ' + i + '\'s name shows its grip on top ' + JSON.stringify(g));
+  return { name: n, grip: g };
+}
+/** The open lane menu: its items' focus keys, labels, shortcut hints. */
+function laneMenu(page) {
+  return page.evaluate(() => {
+    const m = document.querySelector('.ed-wave-overlay .ed-wave-lane-menu');
+    if (!m) return null;
+    const items = [...m.querySelectorAll('.ed-wave-menu-item')];
+    return { keys: items.map((b) => b.getAttribute('data-focus-key')),
+      labels: items.map((b) => (b.querySelector('.ed-wave-menu-label') || b).textContent),
+      hints: items.map((b) => (b.querySelector('.ed-wave-menu-key') || { textContent: '' }).textContent) };
+  });
+}
+/** Hover lane `i`, press its grip, and pick `key` from the menu. */
+async function laneAction(page, i, key) {
+  const h = await hoverLane(page, i);
+  await page.mouse.move(h.grip.x, h.grip.y, { steps: 2 }); await page.mouse.click(h.grip.x, h.grip.y); await wait(200);
+  assert.ok((await laneMenu(page)) !== null, 'guard: lane ' + i + '\'s menu is open');
+  await page.locator('.ed-wave-lane-menu [data-focus-key="' + key + '"]').click(); await wait(300);
+}
+const LANE_MENU_KEYS = ['ed-wave-lane-rename', 'ed-wave-lane-copy', 'ed-wave-lane-add-below', 'ed-wave-lane-blank-below',
+  'ed-wave-lane-up', 'ed-wave-lane-down', 'ed-wave-lane-group', 'ed-wave-lane-period', 'ed-wave-lane-delete'];
+check('wave lanes: hover shows the grip and the menu lists every action', DESKTOP, async (page) => {
+  await openWave(page);
+  const hidden = await gripOf(page, '.ed-wave-grip[data-lane="1"]');
+  assert.ok(hidden !== null && !hidden.shown, 'no grip shows before the pointer is over the row ' + JSON.stringify(hidden));
+  const h = await hoverLane(page, 1);
+  assert.ok(h.grip.right <= h.name.left + 1, 'the grip sits left of the name ' + JSON.stringify(h));
+  assert.ok(Math.abs(h.grip.y - h.name.y) <= 3, 'the grip is level with the name ' + JSON.stringify(h));
+  const row = await page.evaluate(() => {
+    const r = document.querySelector('.ed-wave-overlay rect.ed-wave-row-hover');
+    const cell = window.__edWaveCellRect(1, 0);
+    const b = r ? r.getBoundingClientRect() : null;
+    return { row: b && [b.top, b.height], want: [cell.top, cell.height],
+      others: [0, 2, 3].map((i) => getComputedStyle(document.querySelector('.ed-wave-grip[data-lane="' + i + '"]')).opacity) };
+  });
+  assert.ok(Array.isArray(row.row) && Math.abs(row.row[0] - row.want[0]) <= 1 && Math.abs(row.row[1] - row.want[1]) <= 1,
+    'the whole row is lit ' + JSON.stringify(row));
+  assert.deepStrictEqual(row.others, ['0', '0', '0'], 'only the hovered row shows its grip');
+  await page.mouse.move(h.grip.x, h.grip.y, { steps: 2 }); await wait(100);
+  assert.ok((await gripOf(page, '.ed-wave-grip[data-lane="1"]')).shown, 'the grip stays up while the pointer is on it');
+  await page.mouse.click(h.grip.x, h.grip.y); await wait(200);
+  const m = await laneMenu(page);
+  assert.ok(m !== null, 'pressing the grip opens its menu');
+  assert.deepStrictEqual(m.keys, LANE_MENU_KEYS, 'the items, in spec 4.4 order');
+  assert.deepStrictEqual(m.labels, ['改名', '建立副本', '在下方新增訊號', '在下方新增空白列', '上移', '下移',
+    '和下一條組成群組', '週期與相位…', '刪除'], 'the item labels');
+  assert.deepStrictEqual(m.hints, ['F2', 'Ctrl+D', '', '', 'Alt+↑', 'Alt+↓', '', '', 'Del'], 'the shortcut each item says');
+  const red = await page.evaluate(() => ({
+    del: getComputedStyle(document.querySelector('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-delete"]')).color,
+    other: getComputedStyle(document.querySelector('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-copy"]')).color }));
+  assert.strictEqual(red.del, 'rgb(207, 34, 46)', '刪除 is red ' + JSON.stringify(red));
+  assert.notStrictEqual(red.other, red.del, 'the other items are not ' + JSON.stringify(red));
+  // Esc closes the menu only; the keyboard goes back to the grip.
+  await page.keyboard.press('Escape'); await wait(200);
+  const after = await page.evaluate(() => ({ menu: !!document.querySelector('.ed-wave-lane-menu'),
+    open: !!document.querySelector('.ed-wave-overlay'), focus: document.activeElement.getAttribute('data-focus-key') }));
+  assert.deepStrictEqual(after, { menu: false, open: true, focus: 'grip-1' }, 'Esc closes the menu and not the editor');
+}, { md: WAVE_LANES_MD });
+check('wave lanes: drag the grip reorders lanes', DESKTOP, async (page) => {
+  await openWave(page);
+  const h = await hoverLane(page, 3);
+  const row1 = await page.evaluate(() => window.__edWaveCellRect(1, 0));
+  await page.mouse.move(h.grip.x, h.grip.y, { steps: 2 }); await page.mouse.down();
+  await page.mouse.move(h.grip.x, row1.top + 3, { steps: 8 }); await wait(100);
+  const line = await page.evaluate(() => {
+    const l = document.querySelector('.ed-wave-overlay .ed-wave-drop-line');
+    if (!l) return null;
+    const r = l.getBoundingClientRect();
+    return { y: r.top + r.height / 2, width: r.width };
+  });
+  assert.ok(line !== null, 'a drop line marks where the lane will land');
+  assert.ok(Math.abs(line.y - row1.top) <= 2 && line.width > 100, 'it is on the top edge of row 1 ' + JSON.stringify({ line, row1 }));
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'b', 'c', 'd'], 'nothing is written while dragging');
+  await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'd', 'b', 'c'], 'd lands above the second row');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-wave-drop-line').length), 0, 'the line goes on drop');
+  // Dropping on the start position changes nothing.
+  const before = await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures'));
+  const g = await hoverLane(page, 1);
+  await page.mouse.move(g.grip.x, g.grip.y, { steps: 2 }); await page.mouse.down();
+  await page.mouse.move(g.grip.x, g.grip.y + 9, { steps: 4 }); await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'd', 'b', 'c'], 'a drop on the start position is a no-op');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures')), before,
+    'and costs no undo step');
+}, { md: WAVE_LANES_MD });
+check('wave lanes: F2 renames in place', DESKTOP, async (page) => {
+  await openWave(page);
+  const n = await namePoint(page, 1);
+  await page.locator('.ed-wave-overlay [data-focus-key="grip-1"]').focus(); await wait(100);
+  await page.keyboard.press('F2'); await wait(200);
+  const field = await page.evaluate(([x, y]) => {
+    const input = document.querySelector('.ed-wave-overlay .ed-wave-rename');
+    if (!input) return null;
+    const r = input.getBoundingClientRect();
+    const st = document.querySelector('.ed-wave-stage').getBoundingClientRect();
+    return { value: input.value, focused: document.activeElement === input, overName: document.elementFromPoint(x, y) === input,
+      inStage: r.left >= st.left && r.right <= st.right };
+  }, [n.x, n.y]);
+  assert.deepStrictEqual(field, { value: 'b', focused: true, overName: true, inStage: true },
+    'F2 opens a field over the name, holding it, all of it on screen');
+  await page.keyboard.type('bus_ack'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'bus_ack', 'c', 'd'], 'Enter writes the name');
+  const done = await page.evaluate(() => ({ fields: document.querySelectorAll('.ed-wave-rename').length,
+    focus: document.activeElement.getAttribute('data-focus-key') }));
+  assert.deepStrictEqual(done, { fields: 0, focus: 'grip-1' }, 'the field closes and the keyboard is on the signal\'s name');
+  // A click on a name opens the same field; Esc cancels the field only.
+  const a = await namePoint(page, 0);
+  await page.mouse.click(a.x, a.y); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), 'a', 'clicking a name opens its field');
+  await page.keyboard.type('zz'); await page.keyboard.press('Escape'); await wait(200);
+  const esc = await page.evaluate(() => ({ fields: document.querySelectorAll('.ed-wave-rename').length,
+    open: !!document.querySelector('.ed-wave-overlay') }));
+  assert.deepStrictEqual(esc, { fields: 0, open: true }, 'Esc closes the field and not the editor');
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'bus_ack', 'c', 'd'], 'Esc wrote nothing');
+  // F2 on the canvas renames the cursor's lane.
+  const p = await cellPress(page, 2, 1);
+  await page.mouse.click(p.x, p.y); await wait(200);
+  await page.keyboard.press('F2'); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), 'c', 'F2 on the canvas renames the cursor\'s lane');
+}, { md: WAVE_LANES_MD });
+check('wave lanes: IME composition does not commit the rename', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay [data-focus-key="grip-0"]').focus(); await wait(100);
+  await page.keyboard.press('F2'); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), 'a', 'guard: the rename field is open');
+  const during = await page.evaluate(() => {
+    const input = document.querySelector('.ed-wave-rename');
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+    input.value = '時脈';
+    for (const key of ['Enter', 'Escape', 'Tab']) {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, isComposing: true }));
+    }
+    const still = document.querySelector('.ed-wave-rename');
+    return { field: still === input, focused: document.activeElement === input, open: !!document.querySelector('.ed-wave-overlay') };
+  });
+  assert.deepStrictEqual(during, { field: true, focused: true, open: true }, 'Enter / Esc / Tab while composing leave the field alone');
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['a', 'b', 'c', 'd'], 'nothing is written while composing');
+  await page.evaluate(() => {
+    document.querySelector('.ed-wave-rename').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '時脈' }));
+  });
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(namesOf(await signalNow(page)), ['時脈', 'b', 'c', 'd'], 'the Enter after composition commits');
+}, { md: WAVE_LANES_MD });
+check('wave lanes: menu actions', DESKTOP, async (page) => {
+  await openWave(page);
+  const base = await signalNow(page);
+  const [a, b, c, d] = base;
+  const undo = async () => {
+    await page.keyboard.press('Control+z'); await wait(300);
+    assert.deepStrictEqual(await signalNow(page), base, 'guard: undo restores');
+  };
+  await laneAction(page, 1, 'ed-wave-lane-copy');
+  assert.deepStrictEqual(await signalNow(page), [a, b, b, c, d], '建立副本: a copy right below');
+  await undo();
+  await laneAction(page, 0, 'ed-wave-lane-add-below');
+  assert.deepStrictEqual(await signalNow(page), [a, { name: '', wave: 'x' }, b, c, d], '在下方新增訊號');
+  await undo();
+  await laneAction(page, 0, 'ed-wave-lane-blank-below');
+  assert.deepStrictEqual(await signalNow(page), [a, {}, b, c, d], '在下方新增空白列');
+  // A blank row has a grip and a menu too, without 改名.
+  const h = await hoverLane(page, 1);
+  await page.mouse.move(h.grip.x, h.grip.y, { steps: 2 }); await page.mouse.click(h.grip.x, h.grip.y); await wait(200);
+  assert.deepStrictEqual((await laneMenu(page)).keys, LANE_MENU_KEYS.filter((k) => k !== 'ed-wave-lane-rename'),
+    'a blank row\'s menu has everything but 改名');
+  await page.keyboard.press('Escape'); await wait(150);
+  await undo();
+  await laneAction(page, 1, 'ed-wave-lane-up');
+  assert.deepStrictEqual(await signalNow(page), [b, a, c, d], '上移');
+  await undo();
+  await laneAction(page, 1, 'ed-wave-lane-down');
+  assert.deepStrictEqual(await signalNow(page), [a, c, b, d], '下移');
+  await undo();
+  // A new group is shown, but the store cannot write it back yet: its planner diffs the
+  // unchanged lane order as a value and refuses to re-serialise `signal` (pre-existing,
+  // the same for 解散群組; reported in Task 8). So these two steps read the document on
+  // screen, and say what the write-back came to.
+  await laneAction(page, 1, 'ed-wave-lane-group');
+  assert.deepStrictEqual(await signalShown(page), [a, ['', b, c], d], '和下一條組成群組');
+  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a new group (pre-existing)');
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), '',
+    'the new group\'s name field opens');
+  await page.keyboard.type('grp'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await signalShown(page), [a, ['grp', b, c], d], 'and names the group');
+  await page.keyboard.press('Control+z'); await wait(300);
+  await undo();
+  await laneAction(page, 1, 'ed-wave-lane-period');
+  const pop = await page.evaluate(() => {
+    const p = document.querySelector('.ed-wave-overlay .ed-wave-period-pop');
+    return p ? { period: p.querySelector('[data-focus-key="ed-wave-lane-period-input"]').value,
+      phase: p.querySelector('[data-focus-key="ed-wave-lane-phase-input"]').value,
+      focus: document.activeElement.getAttribute('data-focus-key') } : null;
+  });
+  assert.deepStrictEqual(pop, { period: '', phase: '', focus: 'ed-wave-lane-period-input' }, '週期與相位… opens its fields');
+  await page.keyboard.type('2'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [a, Object.assign({}, b, { period: 2 }), c, d], 'period: 2, as a number');
+  await page.keyboard.press('Escape'); await wait(150);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-wave-period-pop')), false, 'Esc closes the panel');
+  await undo();
+  await laneAction(page, 2, 'ed-wave-lane-delete');
+  assert.deepStrictEqual(await signalNow(page), [a, b, d], '刪除');
+  await undo();
+}, { md: WAVE_LANES_MD });
+check('wave lanes: Del deletes the signal whose name has the keyboard', DESKTOP, async (page) => {
+  await openWave(page);
+  const [a, b, c, d] = await signalNow(page);
+  await page.locator('.ed-wave-overlay [data-focus-key="grip-1"]').focus(); await wait(100);
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [a, c, d], 'Del on a focused name deletes that signal');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')), 'grip-1',
+    'the keyboard lands on the name that took its place');
+  // With the menu open, Del means the same signal.
+  const h = await hoverLane(page, 2);
+  await page.mouse.move(h.grip.x, h.grip.y, { steps: 2 }); await page.mouse.click(h.grip.x, h.grip.y); await wait(200);
+  assert.ok((await laneMenu(page)) !== null, 'guard: the menu is open');
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [a, c], 'Del with the menu open deletes the menu\'s signal');
+  assert.strictEqual(await laneMenu(page), null, 'and the menu goes');
+}, { md: WAVE_LANES_MD });
+check('wave lanes: group row menu renames and ungroups', DESKTOP, async (page) => {
+  await openWave(page);
+  const base = await signalNow(page);
+  // The group title as the engine drew it, rotated beside its rows.
+  const t = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('.ed-wave-stage svg[id^="svgcontent"] g[id^="groups_"] text')]
+      .find((x) => x.textContent === 'grp');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    return { x, y, onLayer: !!(hit && layer && (hit === layer || layer.contains(hit))) };
+  });
+  assert.ok(t !== null && t.onLayer, 'guard: the engine draws the title and a press on it lands on the layer ' + JSON.stringify(t));
+  const openGroupMenu = async () => {
+    await page.mouse.move(t.x, t.y, { steps: 3 }); await wait(150);
+    const g = await gripOf(page, '.ed-wave-grip[data-group]');
+    assert.ok(g !== null && g.shown && g.onTop, 'hovering the group title shows the group\'s grip ' + JSON.stringify(g));
+    await page.mouse.move(g.x, g.y, { steps: 2 }); await page.mouse.click(g.x, g.y); await wait(200);
+    const m = await laneMenu(page);
+    assert.ok(m !== null, 'the group grip opens a menu');
+    return m;
+  };
+  const m = await openGroupMenu();
+  assert.deepStrictEqual(m.keys, ['ed-wave-lane-rename', 'ed-wave-lane-ungroup', 'ed-wave-lane-up', 'ed-wave-lane-down'], 'the group items');
+  assert.deepStrictEqual(m.labels, ['改名', '解散群組', '上移', '下移']);
+  const lit = await page.evaluate(() => {
+    const r = document.querySelector('.ed-wave-overlay rect.ed-wave-row-hover');
+    const b1 = window.__edWaveCellRect(1, 0); const b2 = window.__edWaveCellRect(2, 0);
+    const b = r ? r.getBoundingClientRect() : null;
+    return { row: b && [b.top, b.bottom], want: [b1.top, b2.top + b2.height] };
+  });
+  assert.ok(Array.isArray(lit.row) && Math.abs(lit.row[0] - lit.want[0]) <= 1 && Math.abs(lit.row[1] - lit.want[1]) <= 1,
+    'the group\'s rows are lit ' + JSON.stringify(lit));
+  await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-rename"]').click(); await wait(200);
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), 'grp', '改名 opens the title\'s field');
+  await page.keyboard.type('bus'); await page.keyboard.press('Enter'); await wait(300);
+  const renamed = await signalNow(page);
+  assert.deepStrictEqual(renamed, [base[0], ['bus', base[1][1], base[1][2]], base[2]], '改名 writes the title');
+  await page.keyboard.press('Control+z'); await wait(300);
+  await openGroupMenu();
+  await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-ungroup"]').click(); await wait(300);
+  assert.deepStrictEqual(await signalShown(page), [base[0], base[1][1], base[1][2], base[2]], '解散群組 keeps the lanes, drops the group');
+  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a dissolved group (pre-existing, see 和下一條組成群組)');
+  await page.keyboard.press('Control+z'); await wait(300);
+  await openGroupMenu();
+  await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-up"]').click(); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [base[1], base[0], base[2]], '上移 swaps the group with the lane above it');
+}, { md: WAVE_GROUP_MD });
+check('wave lanes: add lane button', DESKTOP, async (page) => {
+  await openWave(page);
+  const b = await page.evaluate(() => {
+    const btn = document.querySelector('.ed-wave-overlay button.ed-wave-add-lane');
+    if (!btn) return null;
+    const r = btn.getBoundingClientRect();
+    const last = window.__edWaveCellRect(3, 0);
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    return { text: btn.textContent, x, y, top: r.top, lastBottom: last.top + last.height,
+      nameCol: document.querySelector('.ed-wave-stage svg[id^="svgcontent"]').getBoundingClientRect().left,
+      left: r.left, onTop: document.elementFromPoint(x, y) === btn };
+  });
+  assert.ok(b !== null, 'there is a 新增訊號 row');
+  assert.strictEqual(b.text, '＋ 新增訊號');
+  assert.ok(b.top >= b.lastBottom - 1, 'it sits under the last row ' + JSON.stringify(b));
+  assert.ok(Math.abs(b.left - b.nameCol) <= 12, 'at the name column ' + JSON.stringify(b));
+  assert.ok(b.onTop, 'and takes a press');
+  const base = await signalNow(page);
+  await page.mouse.click(b.x, b.y); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), base.concat([{ name: '', wave: 'x' }]), 'a new signal at the end');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes')), '5');
+}, { md: WAVE_LANES_MD });
+
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
   const r = await page.evaluate(() => {

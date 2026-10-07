@@ -427,6 +427,28 @@ function makeDrawer() {
     assert.strictEqual(ov.length, 2);
     assert.deepStrictEqual([ov[1].attrs.x, ov[1].attrs.y, ov[1].attrs.width, ov[1].attrs.height], ['5', '6', '7', '8']);
   }
+  // Task 8: a group's row hover spans its rows; the lane drag's drop line
+  {
+    const layer = make();
+    const st = quiet(); st.rowHover = 0; st.rowHoverTo = 1;
+    layerApi.paint(layer, view, st);
+    const r = all(layer, 'ed-wave-row-hover');
+    assert.strictEqual(r.length, 1, 'one rect for the whole span');
+    assert.strictEqual(num(r[0], 'y'), 20);
+    assert.strictEqual(num(r[0], 'height'), 2 * LH, 'it covers rows 0 and 1');
+  }
+  {
+    const layer = make();
+    const st = quiet(); st.dropLine = { y: 50 };
+    layerApi.paint(layer, view, st);
+    const l = all(layer, 'ed-wave-drop-line');
+    assert.strictEqual(l.length, 1, 'the drop line is drawn');
+    assert.strictEqual(l[0].tag, 'line');
+    assert.deepStrictEqual([l[0].attrs.x1, l[0].attrs.y1, l[0].attrs.x2, l[0].attrs.y2], ['0', '50', '400', '50'],
+      'across the whole layer at the given y');
+    layerApi.paint(layer, view, quiet());
+    assert.strictEqual(all(layer, 'ed-wave-drop-line').length, 0, 'quiet state draws no drop line');
+  }
   console.log('wave-draw: createLayer 互動層（尺規／懸停／選取／游標／轉態點／待連線／溢出框）— OK');
 }
 
