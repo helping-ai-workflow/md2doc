@@ -707,19 +707,21 @@ async function signalShown(page) {
 }
 /** What the last gesture's write-back came to: 'ok', 'refused' or 'none'. */
 const patchState = (page) => page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-patch'));
+/** The block's source exactly as it is written back right now. */
+const sourceNow = (page) => page.evaluate(() => window.__edWaveSourceProbe());
 /**
- * A write-back refusal pinned until Task 8b (Ruling R15): the gesture's patch is refused and the
- * red card says so. The card is closed afterwards, so the next pin cannot be met by a stale one.
+ * The gesture was written back (Task 8b, Ruling R15: group changes are local patches now):
+ * the patch is 'ok' and no red card is on screen.
  */
-async function expectStoreRefusal(page, what) {
-  assert.strictEqual(await patchState(page), 'refused', what + ': the store refuses the write-back — expected until Task 8b teaches wave-store group writes');
+async function expectWritten(page, what) {
+  assert.strictEqual(await patchState(page), 'ok', what + ': the store writes it back');
   const card = await page.evaluate(() => {
     const c = document.querySelector('.ed-conflict[data-level="error"]');
     return c && c.getClientRects().length > 0 ? c.querySelector('.ed-msg-text').textContent : null;
   });
-  assert.ok(card !== null && card.includes('沒辦法只改幾個位元組寫回'),
-    what + ': the red card says it cannot be written back — expected until Task 8b teaches wave-store group writes ' + JSON.stringify(card));
-  await page.locator('.ed-conflict[data-level="error"] .ed-msg-x').click(); await wait(150);
+  assert.strictEqual(card, null, what + ': no red card');
+  assert.deepStrictEqual(await signalNow(page), await signalShown(page),
+    what + ': the written source says what the editor shows');
 }
 /** Every lane's name in display order (groups flattened, a spacer is '{}'). */
 function namesOf(signal) {
@@ -938,18 +940,19 @@ check('wave lanes: menu actions', DESKTOP, async (page) => {
   await laneAction(page, 1, 'ed-wave-lane-down');
   assert.deepStrictEqual(await signalNow(page), [a, c, b, d], '下移');
   await undo();
-  // A new group is shown, but the store cannot write it back yet: its planner diffs the
-  // unchanged lane order as a value and refuses to re-serialise `signal` (pre-existing,
-  // the same for 解散群組; reported in Task 8). So these two steps read the document on
-  // screen, and say what the write-back came to.
+  // A new group is written back as a local patch: only the group's own syntax goes in,
+  // so on this compact one-line source the written text is exactly the compact JSON of
+  // the new document.
   await laneAction(page, 1, 'ed-wave-lane-group');
-  assert.deepStrictEqual(await signalShown(page), [a, ['', b, c], d], '和下一條組成群組');
-  assert.strictEqual(await patchState(page), 'refused', 'the store refuses to write a new group — expected until Task 8b teaches wave-store group writes');
+  assert.deepStrictEqual(await signalNow(page), [a, ['', b, c], d], '和下一條組成群組 is written back');
+  await expectWritten(page, '和下一條組成群組');
   assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-rename') || {}).value), '',
     'the new group\'s name field opens');
   await page.keyboard.type('grp'); await page.keyboard.press('Enter'); await wait(300);
-  assert.deepStrictEqual(await signalShown(page), [a, ['grp', b, c], d], 'and names the group');
-  await expectStoreRefusal(page, '和下一條組成群組 + 改名');
+  assert.deepStrictEqual(await signalNow(page), [a, ['grp', b, c], d], 'and names the group');
+  await expectWritten(page, '和下一條組成群組 + 改名');
+  assert.strictEqual(await sourceNow(page), JSON.stringify({ signal: [a, ['grp', b, c], d] }),
+    '和下一條組成群組 + 改名: the written source adds only the group\'s own bytes');
   await page.keyboard.press('Control+z'); await wait(300);
   await undo();
   await laneAction(page, 1, 'ed-wave-lane-period');
@@ -1028,20 +1031,22 @@ check('wave lanes: group row menu renames and ungroups', DESKTOP, async (page) =
   await page.keyboard.press('Control+z'); await wait(300);
   await openGroupMenu();
   await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-ungroup"]').click(); await wait(300);
-  assert.deepStrictEqual(await signalShown(page), [base[0], base[1][1], base[1][2], base[2]], '解散群組 keeps the lanes, drops the group');
-  await expectStoreRefusal(page, '解散群組');
+  assert.deepStrictEqual(await signalNow(page), [base[0], base[1][1], base[1][2], base[2]], '解散群組 keeps the lanes, drops the group');
+  await expectWritten(page, '解散群組');
+  assert.strictEqual(await sourceNow(page), JSON.stringify({ signal: [base[0], base[1][1], base[1][2], base[2]] }),
+    '解散群組: the written source loses only the group\'s own bytes');
   await page.keyboard.press('Control+z'); await wait(300);
   await openGroupMenu();
   await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-up"]').click(); await wait(300);
   assert.deepStrictEqual(await signalNow(page), [base[1], base[0], base[2]], '上移 swaps the group with the lane above it');
   await page.keyboard.press('Control+z'); await wait(300);
   assert.deepStrictEqual(await signalNow(page), base, 'guard: undo restores');
-  // 下移: on screen the group trades places with the lane below it; the store refuses every
-  // group 下移 today (a lane cannot be addressed in front of a group).
+  // 下移: the group trades places with the lane below it, written back as one move of the
+  // whole group (Task 8b).
   await openGroupMenu();
   await page.locator('.ed-wave-lane-menu [data-focus-key="ed-wave-lane-down"]').click(); await wait(300);
-  assert.deepStrictEqual(await signalShown(page), [base[0], base[2], base[1]], '下移 swaps the group with the lane below it');
-  await expectStoreRefusal(page, '群組下移');
+  assert.deepStrictEqual(await signalNow(page), [base[0], base[2], base[1]], '下移 swaps the group with the lane below it');
+  await expectWritten(page, '群組下移');
 }, { md: WAVE_GROUP_MD });
 check('wave lanes: Alt+arrows on a group grip move the group', DESKTOP, async (page) => {
   await openWave(page);
@@ -1059,7 +1064,8 @@ check('wave lanes: Alt+arrows on a group grip move the group', DESKTOP, async (p
   await page.keyboard.press('Enter'); await wait(200);
   assert.ok((await laneMenu(page)) !== null, 'guard: Enter on the grip opens its menu');
   await page.keyboard.press('Alt+ArrowDown'); await wait(300);
-  assert.deepStrictEqual(await signalShown(page), before, 'Alt+↓ with the group menu open moves the group down');
+  assert.deepStrictEqual(await signalNow(page), before, 'Alt+↓ with the group menu open moves the group down, written back');
+  await expectWritten(page, 'Alt+↓ on the group');
   assert.strictEqual(await laneMenu(page), null, 'and the menu goes');
   assert.strictEqual(base[0].wave, '01..', 'guard: fixture');
 }, { md: WAVE_GROUP_MD });

@@ -1118,6 +1118,316 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 }
 
 // ---------------------------------------------------------------------------
+// T16（wave redesign P1 Task 8b，Ruling R15）：群組的結構變更寫回成局部 patch。
+//
+// 和下一條組成群組、解散群組、群組上移／下移在畫面上都做得到，但以前除了「上移、
+// 上面是 lane」之外每一個都撞上「沒辦法只改幾個位元組寫回」的紅卡。下面每一列對應
+// brief 量測表的一列，斷言的是**整份輸出文字**（所以未動到的前綴與後綴逐位元組相同
+// 是一起釘住的），再加一次讀回比對：輸出讀回來必須就是 store 現在的文件。
+//
+// 群組的上移／下移與改名走 UI 真正用的那一條：wave-panels 的 commitGroupMove /
+// commitGroupTitle，不是這裡另寫一份「交換兩個元素」——兩份交換規則只會慢慢分家。
+//
+// 每一列各自回報（收齊之後才一起判），這樣 RED 的時候看得到是哪幾列紅、各自為什麼。
+// ---------------------------------------------------------------------------
+{
+  const geometry = require('../lib/editor/wave-geometry.js');
+  const panelsOver = function (s) {
+    return require('../lib/editor/wave-panels.js').createPanels({
+      d: null, overlay: null, codec: C, geometry: geometry,
+      actions: { commit: function (name, fn) { return s.apply(name, fn); } },
+    });
+  };
+  const expectWrite = function (s, want, what) {
+    const p = s.toPatch();
+    assert.strictEqual(p.ok, true, what + '：必須寫得回去。Got ' + JSON.stringify(p));
+    assert.strictEqual(p.text, want, what + '：輸出逐字比對。Got\n' + p.text);
+    const back = C.parseSource(p.text);
+    assert.strictEqual(back.ok, true, what + '：輸出讀得回來');
+    assert.deepStrictEqual(clone(back.doc), clone(s.doc), what + '：讀回來就是 store 的文件');
+  };
+  const failures = [];
+  const row = function (name, fn) {
+    try {
+      fn();
+    } catch (err) {
+      failures.push(name + ' — ' + String(err.message).split('\n')[0]);
+    }
+  };
+
+  // 多行、每條旁邊都有註解、b 上面還有一段屬於它的註解
+  const LSRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  // about b',
+    '  { name: "b", wave: "01" },   // lane b',
+    '  { name: "c", wave: "01" },   // lane c',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n');
+  // 同一份文件寫成一行
+  const OSRC = "{signal: [{name: 'a', wave: '01'}, {name: 'b', wave: '01'}, " +
+    "{name: 'c', wave: '01'}, {name: 'd', wave: '01'}]}";
+  const OGSRC = "{signal: [{name: 'a', wave: '01'}, ['grp', {name: 'b', wave: '01'}, " +
+    "{name: 'c', wave: '01'}], {name: 'd', wave: '01'}]}";
+
+  // 列 1：groupLanes(doc, [1,2]) —— 和下一條組成群組，接著改名（UI 的兩個手勢）。
+  // 新群組的標題照「新字串」的寫法（這份來源全是雙引號），自己一行、跟它的鄰居同縮排，
+  // 寫在 b 上面那段註解的上面（註解是 b 的，跟著 b 進群組）；收尾的 ] 緊貼在最後一條
+  // 的值後面、它原本的逗號前面。lane 的位元組一個都沒動。
+  row('列 1 和下一條組成群組 + 改名（多行）', function () {
+    const s = S.createStore(LSRC);
+    assert.strictEqual(s.apply('group-lanes', (d) => C.groupLanes(d, [1, 2], '')), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["",',
+      '  // about b',
+      '  { name: "b", wave: "01" },   // lane b',
+      '  { name: "c", wave: "01" }],   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '和下一條組成群組');
+    assert.strictEqual(panelsOver(s).commitGroupTitle(['signal', 1], 'grp'), true,
+      'guard: 改名有改到東西');
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["grp",',
+      '  // about b',
+      '  { name: "b", wave: "01" },   // lane b',
+      '  { name: "c", wave: "01" }],   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '和下一條組成群組 + 改名');
+  });
+  // 列 1 的 [0,1]，一行的來源：標題跟鄰居一樣排在同一行，引號照這份來源的單引號
+  row('列 1 [0,1] 一行的來源', function () {
+    const s = S.createStore(OSRC);
+    assert.strictEqual(s.apply('group-lanes', (d) => C.groupLanes(d, [0, 1], '')), true);
+    expectWrite(s, "{signal: [['', {name: 'a', wave: '01'}, {name: 'b', wave: '01'}], " +
+      "{name: 'c', wave: '01'}, {name: 'd', wave: '01'}]}", '一行的來源組成群組');
+  });
+  // 最後兩條組成群組：收尾的 ] 後面沒有逗號，也照樣成立
+  row('列 1 最後兩條', function () {
+    const s = S.createStore(OSRC);
+    assert.strictEqual(s.apply('group-lanes', (d) => C.groupLanes(d, [2, 3], 'tail')), true);
+    expectWrite(s, "{signal: [{name: 'a', wave: '01'}, {name: 'b', wave: '01'}, " +
+      "['tail', {name: 'c', wave: '01'}, {name: 'd', wave: '01'}]]}", '最後兩條組成群組');
+  });
+
+  // 列 2：ungroupLanes —— 解散群組。標題那一行整行拿掉，收尾那一行也是；成員的
+  // 位元組（含縮排與旁邊的註解）原封不動，c 的逗號留著隔開後面的 d。
+  row('列 2 解散群組（多行）', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(s.apply('ungroup', (d) => C.ungroupLanes(d, 1)), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '解散群組');
+  });
+  // 一行的來源：解散之後跟從來沒有群組過的那一行逐字相同
+  row('列 2 解散群組（一行）', function () {
+    const s = S.createStore(OGSRC);
+    assert.strictEqual(s.apply('ungroup', (d) => C.ungroupLanes(d, 2)), true);
+    expectWrite(s, OSRC, '一行的來源解散群組');
+  });
+  // 解散群組再改裡面一格：兩個改動互不重疊，一起寫回
+  row('列 2 解散群組 + 改一格', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(s.apply('ungroup', (d) => C.ungroupLanes(d, 1)), true);
+    assert.strictEqual(s.apply('paint', (d) => C.setCell(d, 1, 0, '1')), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '    { name: "b", wave: "11" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '解散群組 + 改一格');
+  });
+
+  // 列 3：群組上移，上面是一條 lane（以前就寫得回去；這裡把輸出逐字釘住）
+  row('列 3 群組上移，上面是 lane', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], -1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '群組上移，上面是 lane');
+  });
+
+  // 列 4：群組上移，上面是另一個群組 —— 兩個群組的標題與成員都原封不動地換位
+  row('列 4 群組上移，上面是群組', function () {
+    const src = [
+      '{ signal: [',
+      '  ["g1",',
+      '    { name: "a", wave: "01" },   // lane a',
+      '  ],',
+      '  ["g2",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n');
+    const s = S.createStore(src);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], -1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  ["g2",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  ["g1",',
+      '    { name: "a", wave: "01" },   // lane a',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '群組上移，上面是群組');
+  });
+
+  // 列 5：群組下移，下面是一條 lane
+  row('列 5 群組下移，下面是 lane', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], 1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      ']}',
+    ].join('\n'), '群組下移，下面是 lane');
+  });
+
+  // 列 6：群組下移，下面是一列 {} 空白列
+  row('列 6 群組下移，下面是空白列', function () {
+    const src = [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  {},   // spacer',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n');
+    const s = S.createStore(src);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], 1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  {},   // spacer',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '群組下移，下面是空白列');
+  });
+
+  // 列 7：群組下移，下面是另一個群組，而且它是陣列的最後一個、沒有尾逗號
+  row('列 7 群組下移，下面是群組', function () {
+    const src = [
+      '{ signal: [',
+      '  { name: "x", wave: "01" },   // lane x',
+      '  ["g1",',
+      '    { name: "a", wave: "01" },   // lane a',
+      '  ],',
+      '  ["g2",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '  ]',
+      ']}',
+    ].join('\n');
+    const s = S.createStore(src);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], 1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "x", wave: "01" },   // lane x',
+      '  ["g2",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '  ],',
+      '  ["g1",',
+      '    { name: "a", wave: "01" },   // lane a',
+      '  ],',
+      ']}',
+    ].join('\n'), '群組下移，下面是群組');
+  });
+
+  // 列 8：巢狀群組在它的父群組裡下移
+  row('列 8 巢狀群組下移', function () {
+    const src = [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["outer",',
+      '    ["inner",',
+      '      { name: "b", wave: "01" },   // lane b',
+      '    ],',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n');
+    const s = S.createStore(src);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1, 1], 1), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["outer",',
+      '    { name: "c", wave: "01" },   // lane c',
+      '    ["inner",',
+      '      { name: "b", wave: "01" },   // lane b',
+      '    ],',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), '巢狀群組下移');
+  });
+
+  // 列 9：一行的來源裡群組下移。搬家帶著它自己的逗號（move 一向如此），所以結尾
+  // 留下一個 WaveJSON 合法的尾逗號；其餘位元組逐字不動。
+  row('列 9 一行的來源群組下移', function () {
+    const s = S.createStore(OGSRC);
+    assert.strictEqual(panelsOver(s).commitGroupMove(['signal', 1], 1), true);
+    expectWrite(s, "{signal: [{name: 'a', wave: '01'}, {name: 'd', wave: '01'}, " +
+      "['grp', {name: 'b', wave: '01'}, {name: 'c', wave: '01'}],]}", '一行的來源群組下移');
+  });
+
+  // 列 10：moveLane 跨進群組（以前就寫得回去；輸出逐字釘住，旁邊的註解跟著 lane 走）
+  row('列 10 moveLane 跨進群組', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(s.apply('move', (d) => C.moveLane(d, 0, 1)), true);
+    expectWrite(s, [
+      '{ signal: [',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "a", wave: "01" },   // lane a',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'), 'moveLane 跨進群組');
+  });
+
+  assert.deepStrictEqual(failures, [], 'T16 有幾列沒寫回去：\n  ' + failures.join('\n  '));
+}
+
+// ---------------------------------------------------------------------------
 // T15：守衛要有牙齒 —— 不碰 DOM、不執行字串。
 // 清單跟 wave-codec.test.js 同一份，只少掉 `require(`（本檔正當地 require codec）。
 // 樣式與咬痕 copy 自 test/wave-geometry.test.js：散文讓路給守衛，不是反過來。
