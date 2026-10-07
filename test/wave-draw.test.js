@@ -709,4 +709,165 @@ function makeDrawer() {
   console.log('wave-draw: 轉態標記只在武裝時出現且落在錨點上 — OK');
 }
 
+// ---- Task 5: the interaction layer (createLayer) ----
+{
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const layerDoc = fakeDoc();
+  const layerApi = D.createLayer({ d: layerDoc, SVGNS: SVGNS });
+  assert.strictEqual(typeof layerApi.paint, 'function', 'createLayer returns { paint }');
+  const CW = 60, LH = 30, OX = 100, RY = 0;
+  const view = {
+    scale: 1.5,
+    cells: [{ laneIndex: 0, cycles: 4, transitions: [1, 3] }, { laneIndex: 1, cycles: 4, transitions: [2] }],
+    cellRect: function (li, c) { return { x: OX + c * CW, y: 20 + li * LH, width: CW, height: LH }; },
+    anchor: function (li, c) { return { x: OX + c * CW + 5, y: 20 + li * LH + 15 }; },
+    rulerY: RY, width: 400, height: 80,
+  };
+  const quiet = function () {
+    return { hover: null, rowHover: null, selection: null, cursor: null, rulerPlus: null,
+      dots: 'off', hotDot: null, pending: null, selectedEdge: null, overflow: [] };
+  };
+  const make = function () { return layerDoc.createElementNS(SVGNS, 'svg'); };
+  const all = function (root, cls) {
+    const out = [];
+    (function walk(n) {
+      if (n.attrs && n.attrs.class !== undefined && n.attrs.class.split(' ').indexOf(cls) !== -1) out.push(n);
+      (n.children || []).forEach(walk);
+    })(root);
+    return out;
+  };
+  const num = function (n, k) { return Number(n.attrs[k]); };
+
+  // quiet state: ruler numbers only (one per cycle), nothing interactive
+  {
+    const layer = make();
+    layerApi.paint(layer, view, quiet());
+    assert.strictEqual(all(layer, 'ed-wave-ruler-num').length, 4, 'one ruler number per cycle');
+    assert.strictEqual(all(layer, 'ed-wave-ruler-num').map(function (n) { return n.children[0].text; }).join(','), '0,1,2,3');
+    ['ed-wave-hover-col', 'ed-wave-row-hover', 'ed-wave-selection', 'ed-wave-cursor', 'ed-wave-dot',
+      'ed-wave-pending', 'ed-wave-edge-sel', 'ed-wave-edge-end', 'ed-wave-overflow', 'ed-wave-ruler-plus'].forEach(function (c) {
+      assert.strictEqual(all(layer, c).length, 0, 'quiet state draws no ' + c);
+    });
+    // idempotent: painting again replaces children
+    const before = layer.children.length;
+    layerApi.paint(layer, view, quiet());
+    assert.strictEqual(layer.children.length, before, 'paint replaces children rather than appending');
+  }
+
+  // hover column + ruler number is-on
+  {
+    const layer = make();
+    const st = quiet(); st.hover = { laneIndex: 1, cycle: 2 };
+    layerApi.paint(layer, view, st);
+    const col = all(layer, 'ed-wave-hover-col');
+    assert.strictEqual(col.length, 1);
+    assert.strictEqual(num(col[0], 'x'), OX + 2 * CW);
+    assert.strictEqual(num(col[0], 'width'), CW);
+    const on = all(layer, 'ed-wave-ruler-num').filter(function (n) { return n.attrs.class.indexOf('is-on') !== -1; });
+    assert.strictEqual(on.length, 1, 'exactly the hovered cycle number is on');
+    assert.strictEqual(on[0].children[0].text, '2');
+  }
+
+  // row hover
+  {
+    const layer = make();
+    const st = quiet(); st.rowHover = 1;
+    layerApi.paint(layer, view, st);
+    const r = all(layer, 'ed-wave-row-hover');
+    assert.strictEqual(r.length, 1);
+    assert.strictEqual(num(r[0], 'y'), 20 + LH);
+    assert.strictEqual(num(r[0], 'height'), LH);
+  }
+
+  // selection = union of cellRect(from) and cellRect(to), either order
+  {
+    const layer = make();
+    const st = quiet(); st.selection = { laneIndex: 1, from: 3, to: 1 };
+    layerApi.paint(layer, view, st);
+    const s = all(layer, 'ed-wave-selection');
+    assert.strictEqual(s.length, 1);
+    assert.strictEqual(num(s[0], 'x'), OX + 1 * CW);
+    assert.strictEqual(num(s[0], 'y'), 20 + LH);
+    assert.strictEqual(num(s[0], 'width'), 3 * CW);
+    assert.strictEqual(num(s[0], 'height'), LH);
+  }
+
+  // cursor
+  {
+    const layer = make();
+    const st = quiet(); st.cursor = { laneIndex: 0, cycle: 2 };
+    layerApi.paint(layer, view, st);
+    const c = all(layer, 'ed-wave-cursor');
+    assert.strictEqual(c.length, 1);
+    assert.notStrictEqual(c[0].attrs['data-ed-wave-cursor'], undefined);
+    assert.strictEqual(c[0].attrs['data-cell'], '0,2');
+    assert.strictEqual(num(c[0], 'x'), OX + 2 * CW);
+    assert.strictEqual(num(c[0], 'y'), 20);
+  }
+
+  // ruler plus sits on the left edge of the given cycle
+  {
+    const layer = make();
+    const st = quiet(); st.rulerPlus = 3;
+    layerApi.paint(layer, view, st);
+    const p = all(layer, 'ed-wave-ruler-plus');
+    assert.strictEqual(p.length, 1);
+    assert.strictEqual(num(p[0], 'x'), OX + 3 * CW, 'plus x equals cycle 3 left edge');
+  }
+
+  // dots: 'all' = one per transition, at the anchor, each with data-lane/data-cell and a hit circle
+  {
+    const layer = make();
+    const st = quiet(); st.dots = 'all'; st.hotDot = { laneIndex: 1, cell: 2 };
+    layerApi.paint(layer, view, st);
+    const dots = all(layer, 'ed-wave-dot');
+    assert.strictEqual(dots.length, 3, 'one dot per transition (2 + 1)');
+    const keys = dots.map(function (n) { return n.attrs['data-lane'] + ',' + n.attrs['data-cell']; }).sort();
+    assert.strictEqual(keys.join(' '), '0,1 0,3 1,2');
+    const hot = dots.filter(function (n) { return n.attrs.class.indexOf('is-hot') !== -1; });
+    assert.strictEqual(hot.length, 1);
+    assert.strictEqual(hot[0].attrs['data-lane'] + ',' + hot[0].attrs['data-cell'], '1,2');
+    const g = dots.filter(function (n) { return n.attrs['data-lane'] === '0' && n.attrs['data-cell'] === '1'; })[0];
+    const circles = g.children.filter(function (c) { return c.tag === 'circle'; });
+    assert.strictEqual(circles.length, 2, 'invisible hit circle + visible dot');
+    assert.ok(circles.some(function (c) { return num(c, 'r') === 8; }), 'hit circle radius 8');
+    assert.ok(circles.every(function (c) { return num(c, 'cx') === OX + 1 * CW + 5 && num(c, 'cy') === 35; }), 'on the anchor');
+  }
+  // dots: 'hover' = only the hovered lane; 'off' = none
+  {
+    const layer = make();
+    const st = quiet(); st.dots = 'hover'; st.hover = { laneIndex: 0, cycle: 0 };
+    layerApi.paint(layer, view, st);
+    assert.strictEqual(all(layer, 'ed-wave-dot').length, 2, 'hover mode shows only the hovered lane');
+    st.hover = null; st.rowHover = 1;
+    layerApi.paint(layer, view, st);
+    assert.strictEqual(all(layer, 'ed-wave-dot').length, 1, 'row hover also counts');
+    st.rowHover = null;
+    layerApi.paint(layer, view, st);
+    assert.strictEqual(all(layer, 'ed-wave-dot').length, 0);
+  }
+
+  // pending edge, selected edge with its two ends, overflow boxes
+  {
+    const layer = make();
+    const st = quiet();
+    st.pending = { from: { x: 10, y: 20 }, to: { x: 50, y: 60 } };
+    st.selectedEdge = { d: 'M 1 2 L 3 4', from: { x: 7, y: 8 }, to: { x: 9, y: 10 } };
+    st.overflow = [{ left: 1, top: 2, width: 3, height: 4 }, { left: 5, top: 6, width: 7, height: 8 }];
+    layerApi.paint(layer, view, st);
+    const pend = all(layer, 'ed-wave-pending');
+    assert.strictEqual(pend.length, 1);
+    assert.deepStrictEqual([pend[0].attrs.x1, pend[0].attrs.y1, pend[0].attrs.x2, pend[0].attrs.y2], ['10', '20', '50', '60']);
+    assert.strictEqual(all(layer, 'ed-wave-edge-sel')[0].attrs.d, 'M 1 2 L 3 4');
+    const ends = all(layer, 'ed-wave-edge-end');
+    assert.strictEqual(ends.map(function (n) { return n.attrs['data-end']; }).sort().join(), 'from,to');
+    const to = ends.filter(function (n) { return n.attrs['data-end'] === 'to'; })[0];
+    assert.deepStrictEqual([to.attrs.cx, to.attrs.cy], ['9', '10']);
+    const ov = all(layer, 'ed-wave-overflow');
+    assert.strictEqual(ov.length, 2);
+    assert.deepStrictEqual([ov[1].attrs.x, ov[1].attrs.y, ov[1].attrs.width, ov[1].attrs.height], ['5', '6', '7', '8']);
+  }
+  console.log('wave-draw: createLayer 互動層（尺規／懸停／選取／游標／轉態點／待連線／溢出框）— OK');
+}
+
 console.log('wave-draw.test.js OK');
