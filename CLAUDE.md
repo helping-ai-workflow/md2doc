@@ -95,22 +95,40 @@ push, and say in the PR that it is unverified.
 
 ## Release Flow
 
-This repo is **auto-published to npm on tag push** via `.github/workflows/publish.yml` (trigger: `v*.*.*` tag). Workflow:
+Tests run **once per release, on the pull request**. `main` is protected: merging
+needs a PR whose `test` (CI) and `click` (browser) checks are green on a branch that
+is up to date with `main`, and nobody pushes to `main` directly. So a merge lands
+exactly the tree that was tested, and nothing re-runs the suites afterwards: the
+push to `main` triggers no workflow, and the tag job does not run `npm test`
+(before this, v3.12.1 ran `npm test` four times — PR, merge, release commit, tag —
+about 145 runner-minutes and 40 minutes between merge and npm).
+
+The version is bumped **inside the PR**, then the merge commit is tagged:
 
 ```bash
-# from a clean main with the feature already merged:
-npm version <major|minor|patch> -m "chore: release v%s"   # bumps package.json + package-lock.json, commits, annotated-tags vX.Y.Z
-git push origin main
+# on the feature branch, before merging:
+npm version <major|minor|patch> --no-git-tag-version   # package.json only (package-lock.json is gitignored)
+# CHANGELOG.md top heading: ## vX.Y.Z — YYYY-MM-DD
+git commit -am "chore: release vX.Y.Z"
+# push → PR → wait for `test` and `click` → gh pr merge <N> --merge --delete-branch
+git fetch origin && git checkout main && git pull --ff-only
+git tag -a vX.Y.Z -m "Release vX.Y.Z" <merge sha>
 git push origin vX.Y.Z
 ```
 
-After tag push, the npm registry updates in ~1–2 minutes.
+The tag triggers `.github/workflows/publish.yml`: `scripts/release-check.js` (tag =
+`package.json` version = top CHANGELOG heading, tagged commit on `origin/main`) → a
+smoke render → `npm publish`. The registry updates within a couple of minutes.
 
 **Do NOT run `npm publish` manually.** The auto-publish handles it. Manual publish risks racing the GitHub Action or publishing an out-of-sync build.
 
 **Verify locally** with `npm install -g @helping-ai-workflow/md2doc@latest && md2doc --version`.
 
-Feature branches that aren't ready to ship: just push the branch (no tag). Tag only after merge to main.
+Feature branches that aren't ready to ship: just push the branch (no version bump, no tag).
+
+If the repository ever becomes private, the free plan loses branch protection and
+the "tested once on the PR" guarantee with it — restore the `push: main` trigger in
+`ci.yml` and `browser.yml` and the `npm test` step in `publish.yml` first.
 
 ## When Touching `renderer.table`
 

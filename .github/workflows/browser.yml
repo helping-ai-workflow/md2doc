@@ -3,24 +3,13 @@ name: browser
 # Reader click-through checks (test/reader-click.test.js) in Chromium and WebKit —
 # the engine of iPhone Safari / Files / LINE previews. Runs only when something
 # that shapes the reading page can change, like tripwork's browser.yml.
+# Every pull request, no path filter: this is a required check on main, and a
+# path-filtered required check never reports on a PR that does not touch those
+# paths, which would block the merge. It runs beside the CI job (about 14 min
+# against 39), so it adds no wall-clock time.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "lib/**"
-      - "vendor/**"
-      - "test/reader-click.test.js"
-      - "test/editor-click.test.js"
-      - "package.json"
-      - ".github/workflows/browser.yml"
   pull_request:
-    paths:
-      - "lib/**"
-      - "vendor/**"
-      - "test/reader-click.test.js"
-      - "test/editor-click.test.js"
-      - "package.json"
-      - ".github/workflows/browser.yml"
+  workflow_dispatch:
 
 jobs:
   click:

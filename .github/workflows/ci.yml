@@ -1,9 +1,12 @@
 name: CI
 
+# Runs once per pull request. main is protected: a PR can only merge when this
+# check (and the browser job) is green and the branch is up to date with main,
+# so a merge lands exactly the tree that was tested. Pushes to main and the
+# release tag do not re-run the suite (v3.12.1 ran npm test four times).
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
