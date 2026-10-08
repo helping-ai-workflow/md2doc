@@ -1995,6 +1995,20 @@ check('wave close: Esc closes and keeps the change', DESKTOP, async (page) => {
   assert.deepStrictEqual(await noticeToast(page), { text: '波形已更新（1 處修改）· Ctrl+Z 整段復原', action: '整段復原' },
     'the close says what changed and how to take it back');
 }, { md: WAVE_SHELL_MD });
+// Final review M3: the canvas subscribes to the theme once per open. A subscription left
+// behind holds the closed canvas — and through its host the whole overlay and the store's
+// history — for the life of the page, one more per open.
+check('wave close: closing the editor drops its theme subscription', DESKTOP, async (page) => {
+  const count = () => page.evaluate(() => window.md2docTheme.__listenerCount());
+  const base = await count();
+  for (let i = 0; i < 3; i++) {
+    await openWave(page);
+    assert.strictEqual(await count(), base + 1, 'open #' + (i + 1) + ' subscribes once');
+    await page.keyboard.press('Escape'); await wait(600);
+    assert.strictEqual(await waveOpen(page), false, 'guard: Esc closed the editor (#' + (i + 1) + ')');
+    assert.strictEqual(await count(), base, 'close #' + (i + 1) + ' unsubscribes: the listener count is back to ' + base);
+  }
+}, { md: WAVE_SHELL_MD });
 check('wave close: Ctrl+Z right after closing reverts the whole session as one step', DESKTOP, async (page) => {
   const before = await waveBlockText(page);
   await openWave(page);
