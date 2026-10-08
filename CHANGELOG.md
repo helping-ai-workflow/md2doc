@@ -19,8 +19,8 @@ All notable changes to this project will be documented here. This project adhere
   「＋ 新增訊號」。
 - **拖曳圓點畫關聯線。** 滑到電位轉換處出現圓點，按住拖到另一點放開就建立（`~>` 曲線＋箭頭），接著直接
   打標籤；標籤框開著時按 Esc 撤銷這條線，Ctrl+Y 拿回。只點圓點不拖＝選那一拍，不會改電位。工具列的
-  「關聯線」讓所有圓點常駐，再按一次關掉。鍵盤：選一拍按 **A**，方向鍵選終點、Enter 確定（選終點時
-  只有方向鍵、Enter、Esc、T 有作用）。點線或標籤就選取：拖兩端圓點改起終點，標籤旁浮出小工具列——
+  「關聯線」讓所有圓點常駐，再按一次關掉。鍵盤：選一拍按 **A**，方向鍵選終點（Alt+←／→ 跳到上一個／下一個電位轉換處）、
+  Enter 確定（選終點時只有方向鍵、Enter、Esc、T 有作用）。點線或標籤就選取：拖兩端圓點改起終點，標籤旁浮出小工具列——
   線型（直、曲、折）× 箭頭（無、單向、雙向）、「更多」（其餘 11 種）、改標籤、刪除。
 - **單點標註。** 選一拍按 **T** 在那一點打字，存成 `"<字母> <文字>"`（引擎畫成一個標籤，不畫線）；
   選到標註時小工具列是改文字、拉成關聯線、刪除。
@@ -33,8 +33,10 @@ All notable changes to this project will be documented here. This project adhere
 - **匯出 ⌄ 選單**：複製為圖片（PNG 2 倍）、下載 PNG（2 倍）、下載 SVG、複製 WaveJSON，點了就做。匯出
   改在畫面外另畫一張乾淨的圖，一律淺色、白底，深色模式下也一樣。瀏覽器不能把圖片寫進剪貼簿時提示
   「這個瀏覽器不能複製圖片，請改用下載 PNG」。
-- **轉檔時警告溢出的標籤。** `md2doc` 轉 HTML 或 PDF 時，每個比所在段寬的資料標籤在 stderr 印一行：
-  `md2doc: <檔名>: wavedrom #<第幾張>: "<標籤>" in <訊號> is wider than its N-cycle segment; set config.hscale to K (estimated)`。
+- **轉檔時警告溢出的標籤。** `md2doc` 轉 HTML 或 PDF 時，有資料標籤比所在段寬的圖，每張在 stderr 印一行，
+  說有幾個標籤溢出、最需要加寬的是哪一個，以及讓全部放得下的倍數：
+  `md2doc: <檔名>: wavedrom #<第幾張>: N data labels are wider than their segments (worst: "<標籤>" in <訊號>); set config.hscale to K (estimated)`
+  （只有一個時是 `1 data label is wider than its segment ("<標籤>" in <訊號>)`）。同時轉 HTML 和 PDF 也只印一次。
   字寬是估計值（Helvetica 字寬表），輸出不變、exit code 仍是 0；程式裡直接呼叫 `renderMarkdown` 不印。
 - **提示列與快捷鍵卡。** 底部一行依目前狀態說下一步可以做什麼，右邊固定「? 全部快捷鍵」；按 ? 在編輯器
   中間開快捷鍵卡，分畫波形、訊號、關聯線與標註、整張圖與檔案四組，Esc 關閉。
