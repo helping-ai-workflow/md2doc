@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -488,15 +488,22 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // by field: the opening body (the seam's own copy, never the store's rebased
   // source — Rulings R16/R17), the block by id, and the identity of `lines`
   // plus the stack depth at that moment, which are what make it expire.
+  // Fix round 1 / R24: the revert pops the session's `count` entries, so the
+  // offer is made only when the stack really is `baseDepth + ops` deep — the
+  // session's entries are exactly the top `count` — and it records baseDepth.
   const offerAt = finish.indexOf('waveUndoOffer = {');
   assert.notStrictEqual(offerAt, -1, 'the close must make the whole-session undo offer');
   assert.ok(offerAt > renderAt, 'after the close render');
+  const depthGate = finish.indexOf('if (stack.depth === seam.baseDepth + seam.ops) {');
+  assert.ok(depthGate !== -1 && depthGate < offerAt,
+    'and only when the session\'s entries are exactly the top of the stack (R24)');
   assert.ok(finish.indexOf('if (seam.ops === 0) return;') !== -1 &&
     finish.indexOf('if (seam.ops === 0) return;') < offerAt,
     'and only when the session wrote something (spec: 內容最後回到原樣就不跳提示)');
   const offer = finish.slice(offerAt, finish.indexOf('};', offerAt));
   for (const field of ['blockId: seam.blockId', 'startLine: seam.startLine', 'endLine: seam.endLine',
-                       'baseSource: seam.baseSource', 'lines: lines', 'depth: stack.depth', 'count: seam.ops']) {
+                       'baseSource: seam.baseSource', 'baseDepth: seam.baseDepth', 'lines: lines',
+                       'depth: stack.depth', 'count: seam.ops']) {
     assert.ok(offer.includes(field), 'the offer carries ' + field + '. Got: ' + offer);
   }
   assert.ok(finish.includes("showWaveNotice('波形已更新（' + seam.ops + ' 處修改）· Ctrl+Z 整段復原', '整段復原',"),
@@ -692,14 +699,27 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
 }
 
 // wave redesign Task 11 (spec section 4.8) — closing keeps, and the first
-// Ctrl+Z after closing reverts the whole session as ONE ordinary commit.
+// Ctrl+Z after closing reverts the whole session as ONE user step.
 //
-// The offer's whole contract is "nothing happened to the document since the
+// Fix round 1 / Ruling R24: that step POPS the session's own entries off the
+// document stack (stack.undo × count), and Ctrl+Y re-applies them
+// (stack.redo × count). The first cut wrote the revert as an ordinary commit
+// instead, and that ping-pongs: the second Ctrl+Z popped the revert and the
+// whole drawing came back, so reaching an edit made before the session took
+// count + 3 presses (6 for three gestures). Popping keeps the stack linear and
+// the save marker honest.
+//
+// The undo offer's contract is "nothing happened to the document since the
 // close": `lines` is the SAME array (every edit, undo, redo and reload replaces
 // it), the stack is at the same depth, and no burst holds typing `lines` has
-// not seen yet. waveOfferHolds() is that predicate, pure, so it is driven here
-// rather than described; client.js's waveUndoOfferValid() / waveRedoOfferValid()
-// only feed it the live state.
+// not seen yet — waveOfferHolds(). The Ctrl+Y offer's is "the stack stands
+// where the revert left it": the depth is the session's opening depth and the
+// top of the redo branch is the very op objects the revert popped, in order —
+// waveRedoHolds(). It is a STACK question rather than an identity of `lines`
+// on purpose: an ordinary Ctrl+Z / Ctrl+Y pair over an earlier edit (T) moves
+// `lines` and comes back to the same stack, and the drawing must still come
+// back as one step after it. Both predicates are pure, so they are driven here;
+// client.js's waveUndoOfferValid() / waveRedoOfferValid() only feed them.
 {
   const closed = ['a', 'b'];
   const offer = { lines: closed, depth: 4 };
@@ -715,42 +735,69 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.strictEqual(waveOfferHolds(null, { lines: closed, depth: 4, burstOpen: false }), false,
     'no offer, nothing holds');
 
-  // The lifecycle, on a real stack: three gestures, close, the revert commit,
-  // then the Ctrl+Y that takes the revert back off.
+  const g1 = {}; const g2 = {}; const g3 = {}; const other = {};
+  const ro = { baseDepth: 2, ops: [g3, g2, g1] };
+  assert.strictEqual(waveRedoHolds(ro, { depth: 2, tail: [other, g3, g2, g1], burstOpen: false }), true,
+    'the revert\'s ops on top of the redo branch, at the opening depth: Ctrl+Y re-applies them');
+  assert.strictEqual(waveRedoHolds(ro, { depth: 2, tail: [g3, g2, {}], burstOpen: false }), false,
+    'equal-looking ops are not the same ops — identity again');
+  assert.strictEqual(waveRedoHolds(ro, { depth: 1, tail: [g3, g2, g1, other], burstOpen: false }), false,
+    'an ordinary Ctrl+Z after the revert moved the stack: not until it is redone');
+  assert.strictEqual(waveRedoHolds(ro, { depth: 2, tail: [], burstOpen: false }), false,
+    'a new edit cleared the redo branch: the session can never be re-applied');
+  assert.strictEqual(waveRedoHolds(ro, { depth: 2, tail: [g3, g2, g1], burstOpen: true }), false,
+    'typing not committed yet');
+  assert.strictEqual(waveRedoHolds(null, { depth: 2, tail: [g3, g2, g1], burstOpen: false }), false,
+    'no offer, nothing holds');
+
+  // The lifecycle, on a real stack, in the order the click check drives it:
+  // T (an edit before the session), three gestures, close, Ctrl+Z (the session),
+  // Ctrl+Z (T), Ctrl+S, Ctrl+Y (T), Ctrl+Y (the session).
   const body = (w) => "{ signal: [{ name: 'a', wave: '" + w + "' }] }";
   const st = { lines: ['# W', '', '```wavedrom', body('01'), '```', '', 'Tail.'],
                blocks: [{ id: 0, type: 'heading', startLine: 1, endLine: 1 },
                         { id: 1, type: 'code', startLine: 3, endLine: 5 },
                         { id: 2, type: 'paragraph', startLine: 7, endLine: 7 }],
                stack: new UndoStack() };
+  const t = commitRangeEdit(st, 7, 7, 'Tail.X');
+  assert.notStrictEqual(t.op, null, 'fixture: T commits');
+  st.lines = t.lines;
   const baseSource = st.lines[3];
+  const baseDepth = st.stack.depth;
   for (const w of ['0.1', '0.11', '0.111']) {
     const r = commitRangeEdit(st, 4, 4, body(w));
     assert.notStrictEqual(r.op, null, 'fixture: each gesture must really commit');
     st.lines = r.lines;
   }
   const painted = st.lines;
-  const closeDepth = st.stack.depth;
-  const tailAtClose = st.stack.redoTail();
-  st.stack.markSaved();                     // a save after closing: disk holds the drawing
-  const at = { lines: painted, depth: closeDepth };
-  assert.strictEqual(waveOfferHolds(at, { lines: st.lines, depth: st.stack.depth, burstOpen: false }), true,
-    'a save is not a change to the document: the offer survives it');
-  // Ctrl+Z: the revert, an ordinary commit over the block's body range.
-  const rev = commitRangeEdit(st, 4, 4, baseSource);
-  assert.notStrictEqual(rev.op, null, 'the revert is a real op');
-  st.lines = rev.lines;
-  assert.strictEqual(st.lines[3], baseSource, 'one commit puts the whole session back');
-  assert.strictEqual(st.stack.depth, closeDepth + 1, 'as ONE step on the stack');
-  assert.strictEqual(st.stack.isDirty(), true, 'and the file (which holds the drawing) reads unsaved');
-  // Ctrl+Y: the revert comes back off, and the redo branch is the one the close left.
-  const back = st.stack.undo(st.lines);
-  st.lines = back.lines;
-  st.stack.setRedoTail(tailAtClose);
-  assert.deepStrictEqual(st.lines, painted, 'Ctrl+Y brings the drawing back byte for byte');
-  assert.strictEqual(st.stack.depth, closeDepth, 'at the depth the close left');
-  assert.strictEqual(st.stack.isDirty(), false, 'which is what was saved, so it reads clean again');
-  assert.strictEqual(st.stack.redo(st.lines), null, 'and a second Ctrl+Y has nothing to replay');
+  assert.strictEqual(st.stack.depth, baseDepth + 3, 'the offer is made only when depth === baseDepth + ops');
+  // Ctrl+Z: pop the session's three entries as one step.
+  const popped = [];
+  for (let i = 0; i < 3; i++) { const r = st.stack.undo(st.lines); popped.push(r.op); st.lines = r.lines; }
+  assert.strictEqual(st.lines[3], baseSource, 'the block body is the opening body again');
+  assert.strictEqual(st.lines[6], 'Tail.X', 'and T is untouched');
+  assert.strictEqual(st.stack.depth, baseDepth, 'at the session\'s opening depth');
+  const redoOffer = { baseDepth: baseDepth, ops: popped };
+  assert.strictEqual(waveRedoHolds(redoOffer, { depth: st.stack.depth, tail: st.stack.redoTail(), burstOpen: false }), true,
+    'the Ctrl+Y offer holds right after the revert');
+  // Ctrl+Z again: T, not the revert (no ping-pong).
+  const u = st.stack.undo(st.lines); st.lines = u.lines;
+  assert.strictEqual(st.lines[6], 'Tail.', 'the second Ctrl+Z undoes T');
+  assert.strictEqual(st.lines[3], baseSource, 'and the drawing stays reverted');
+  st.stack.markSaved();                      // disk: neither T nor the drawing
+  assert.strictEqual(st.stack.isDirty(), false, 'fixture: saved');
+  // Ctrl+Y: T comes back, and with it the Ctrl+Y offer holds again.
+  const y = st.stack.redo(st.lines); st.lines = y.lines;
+  assert.strictEqual(st.lines[6], 'Tail.X', 'Ctrl+Y redoes T');
+  assert.strictEqual(waveRedoHolds(redoOffer, { depth: st.stack.depth, tail: st.stack.redoTail(), burstOpen: false }), true,
+    'an ordinary undo and redo of T leave the session\'s ops where the revert put them');
+  // Ctrl+Y: the session, as one step.
+  for (let i = 0; i < 3; i++) st.lines = st.stack.redo(st.lines).lines;
+  assert.deepStrictEqual(st.lines, painted, 'the whole drawing is back, byte for byte');
+  assert.strictEqual(st.stack.isDirty(), true,
+    'and the file reads unsaved — disk holds neither T nor the drawing (the first cut\'s ' +
+    'setRedoTail left this reading clean)');
+  assert.strictEqual(st.stack.redo(st.lines), null, 'nothing left to redo');
 }
 
 // fix 3 — a save marks the bytes it SENT.
@@ -1494,19 +1541,23 @@ function countInCode(source, needle) {
 // or grew an unreviewed commit site", and nothing more.
 {
   const undoCalls = countInCode(src, 'stack.undo(lines)');
-  // MIGRATED by wave redesign Task 11 (2 -> 3), with the reason: the third is
-  // a GESTURE, not a rollback. redoWaveSession() is the Ctrl+Y that takes the
-  // whole-session revert (undoWaveSession()'s one ordinary commit) back off
-  // the stack — spec 4.8's 「可再被 Ctrl+Y 取消」 — the same call undo() makes
-  // for the same reason. Its own failure path reverses it with stack.redo(),
-  // the mirror of redo()'s. Rollbacks of a COMMIT still go through
-  // rollbackFailedRender() only.
-  assert.strictEqual(undoCalls, 3,
-    'stack.undo(lines) may appear on exactly three CODE lines in client.js — inside ' +
+  // MIGRATED by wave redesign Task 11 (2 -> 3), then by its fix round 1 /
+  // Ruling R24 (3 -> 4), with the reasons. Neither new line rolls back a
+  // COMMIT; both are the whole-session undo after closing the wave editor,
+  // which is an UNDO (pop) rather than a commit since R24:
+  //   * undoWaveSession() — the gesture itself: it pops the session's
+  //     `count` entries, as undo() pops one. Its failure path re-applies them
+  //     with stack.redo(), the mirror of undo()'s.
+  //   * redoWaveSession() — its failure path, reversing the `count` redos it
+  //     made, the mirror of redo()'s.
+  // Rollbacks of a COMMIT still go through rollbackFailedRender() only.
+  assert.strictEqual(undoCalls, 4,
+    'stack.undo(lines) may appear on exactly four CODE lines in client.js — inside ' +
     'undo() (the gesture itself), inside redo()\'s failure path (reversing a ' +
-    'redo) and inside redoWaveSession() (Ctrl+Y taking the whole-session revert back ' +
-    'off). Every OTHER rollback must go through rollbackFailedRender(), which ' +
-    'declines when the commit pushed nothing; found ' + undoCalls);
+    'redo), inside undoWaveSession() (the whole-session undo popping the session) and ' +
+    'inside redoWaveSession()\'s failure path (reversing its redos). Every OTHER ' +
+    'rollback must go through rollbackFailedRender(), which declines when the ' +
+    'commit pushed nothing; found ' + undoCalls);
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
   // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
   // S2 Task 4 the eighth (convertListItemAway, which commits its own spliced
@@ -1611,8 +1662,13 @@ function countInCode(source, needle) {
   // (+1). redoWaveSession() adds none: it commits nothing (it takes that
   // commit back off with stack.undo(), counted above). 1 declaration + 20
   // call sites = 21.
-  assert.strictEqual(helperCalls, 21,
-    'the helper must be DECLARED once and used at all twenty ' +
+  // MIGRATED by Task 11 fix round 1 / Ruling R24 (21 -> 20): undoWaveSession()
+  // no longer commits — it pops the session's own entries with stack.undo()
+  // (counted above) and re-applies them with stack.redo() if its render
+  // fails — so it is not a commit-then-render site any more (-1). Nothing else
+  // changed. 1 declaration + 19 call sites = 20.
+  assert.strictEqual(helperCalls, 20,
+    'the helper must be DECLARED once and used at all nineteen ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2443,19 +2499,39 @@ function countInCode(source, needle) {
   const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'editor', 'wave-ui.js'), 'utf8');
   assert.ok(ui.includes("opts.onClose('commit');"), 'wave-ui.js closes with \'commit\' on every route');
   // undo(): the offer is asked before the document stack is touched, after the
-  // two discard stashes (each of those is newer than any close), and it is
-  // spent whether or not it held. redo(): the matching Ctrl+Y offer.
+  // two discard stashes (each of those is newer than any close) AND after
+  // switchAwayFrom() has committed whatever editor is open — Ruling R25: that
+  // commit replaces `lines`, so typing still sitting in a raw editor expires
+  // the offer instead of being outranked by it. It is spent whether or not it
+  // held. redo(): the matching Ctrl+Y offer, same order.
   const undoFn = src.slice(src.indexOf('async function undo() {'), src.indexOf('async function redo() {'));
   const offerAt = undoFn.indexOf('waveUndoOfferValid()');
+  const switchAt = undoFn.indexOf('if (!(await switchAwayFrom())) return;');
   assert.ok(offerAt !== -1, 'undo() asks the whole-session offer');
   assert.ok(undoFn.indexOf('restoreDiscardedRawEdit()') < offerAt, 'after the raw-editor stash');
-  assert.ok(offerAt < undoFn.indexOf('stack.undo(lines)'), 'before it undoes a single op');
+  assert.ok(switchAt !== -1 && switchAt < offerAt, 'after switchAwayFrom() has committed any open editor (R25)');
+  assert.ok(offerAt < undoFn.indexOf('const r = stack.undo(lines);'), 'before it undoes a single op');
   assert.ok(undoFn.includes('waveUndoOffer = null;'), 'and the offer is spent by the Ctrl+Z that asks it');
+  assert.ok(undoFn.includes("if (done !== 'missing') return;"),
+    'a block that can no longer be found falls through to an ordinary undo');
   const redoAt = src.indexOf('async function redo() {');
   const redoFn = src.slice(redoAt, src.indexOf('\n  }\n', redoAt));
   const redoOfferAt = redoFn.indexOf('waveRedoOfferValid()');
-  assert.ok(redoOfferAt !== -1 && redoOfferAt < redoFn.indexOf('stack.redo(lines)'),
+  const redoSwitchAt = redoFn.indexOf('if (!(await switchAwayFrom())) return;');
+  assert.ok(redoOfferAt !== -1 && redoOfferAt < redoFn.indexOf('const r = stack.redo(lines);'),
     'redo() asks the Ctrl+Y offer before it redoes a single op');
+  assert.ok(redoSwitchAt !== -1 && redoSwitchAt < redoOfferAt, 'and after switchAwayFrom() (R25)');
+  // R24: the pop model never rewrites the redo branch (the first cut's
+  // setRedoTail() left the file reading clean over an unsaved drawing), and a
+  // missing block says so rather than spending the Ctrl+Z silently.
+  const sessFns = src.slice(src.indexOf('async function undoWaveSession'), src.indexOf('// Test-only seam, the same shape'));
+  assert.ok(sessFns.length > 0 && !sessFns.includes('setRedoTail'), 'the whole-session undo / redo never call setRedoTail()');
+  const missing = sessFns.slice(sessFns.indexOf('if (!b) {'), sessFns.indexOf("return 'missing';"));
+  assert.ok(missing.includes('showNotice('), 'a block that is gone is said, not swallowed');
+  const rvalid = src.slice(src.indexOf('function waveRedoOfferValid()'));
+  assert.ok(rvalid.slice(0, rvalid.indexOf('\n  }\n')).includes(
+    'waveRedoHolds(waveRedoOffer, { depth: stack.depth, tail: stack.redoTail(), burstOpen: burstHasUncommittedEdit() })'),
+    'waveRedoOfferValid() feeds the pure predicate the live depth, redo branch and burst state');
   const valid = src.slice(src.indexOf('function waveUndoOfferValid()'));
   assert.ok(valid.slice(0, valid.indexOf('\n  }\n')).includes(
     'waveOfferHolds(waveUndoOffer, { lines: lines, depth: stack.depth, burstOpen: burstHasUncommittedEdit() })'),

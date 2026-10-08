@@ -2158,6 +2158,69 @@ check('wave help: the notice toast never covers the hint bar', { width: 1366, he
   assert.strictEqual(r.middleInBar, true, 'the middle of the hint bar is the hint bar, not the toast ' + JSON.stringify(r));
   assert.strictEqual(r.helpOnTop, true, '「? 全部快捷鍵」 takes a press ' + JSON.stringify(r));
 }, { md: WAVE_SHELL_MD });
+check('wave close: the whole-session undo is one step either way, and the stack stays linear', DESKTOP, async (page) => {
+  // T: an ordinary edit made BEFORE the session.
+  const tail = page.locator('.ed-block[data-block-type="paragraph"]', { hasText: 'Tail.' });
+  await tail.click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await wait(100);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(800);
+  await page.keyboard.press('Escape'); await wait(200);
+  const hasT = () => page.evaluate(() => document.body.textContent.includes('Tail.X'));
+  assert.strictEqual(await hasT(), true, 'guard: T landed');
+  const before = await waveBlockText(page);
+  await openWave(page);
+  await paintCell(page, '1', 1, 1);
+  await paintCell(page, 'x', 1, 3);
+  await paintCell(page, '1', 1, 4);
+  const painted = await sourceNow(page);
+  await page.locator('.ed-wave-close').click(); await wait(1000);
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), before, 'Ctrl+Z: the original drawing');
+  assert.strictEqual(await hasT(), true, 'and T is still there');
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await hasT(), false, 'Ctrl+Z again: T is undone');
+  assert.strictEqual(await waveBlockText(page), before, 'and the drawing stays reverted (no ping-pong)');
+  // Disk now holds neither T nor the drawing; from here every redo is unsaved work.
+  await page.keyboard.press('Control+s'); await wait(900);
+  assert.strictEqual(await page.evaluate(() => window.__edTestWaveState().dirty), false, 'guard: saved');
+  await page.keyboard.press('Control+y'); await wait(1000);
+  assert.strictEqual(await hasT(), true, 'Ctrl+Y: T is back');
+  assert.strictEqual(await waveBlockText(page), before, 'and only T');
+  await page.keyboard.press('Control+y'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), painted, 'Ctrl+Y again: the whole drawing, as one step');
+  assert.strictEqual(await hasT(), true, 'T stays');
+  assert.strictEqual(await page.evaluate(() => window.__edTestWaveState().dirty), true,
+    'the file reads unsaved: disk holds neither T nor the drawing');
+}, { md: WAVE_SHELL_MD });
+check('wave close: an open raw editor\'s typing is committed before the whole-session undo is asked', DESKTOP, async (page) => {
+  await openWave(page);
+  await paintCell(page, '1', 1, 1);
+  await paintCell(page, 'x', 1, 3);
+  const painted = await sourceNow(page);
+  await page.locator('.ed-wave-close').click(); await wait(1000);
+  assert.strictEqual((await noticeToast(page) || {}).text, '波形已更新（2 處修改）· Ctrl+Z 整段復原', 'guard: the offer was made');
+  const para = page.locator('.ed-block[data-block-type="paragraph"]').last();
+  await para.hover(); await wait(200);
+  await para.locator('.ed-handle').click(); await wait(300);
+  await page.evaluate(() => [...document.querySelectorAll('.ed-handle-menu-btn')].find((b) => b.textContent.trim() === 'MD 原始碼').click());
+  await page.waitForSelector('textarea.ed-raw');
+  await page.locator('textarea.ed-raw').press('End'); await page.keyboard.type(' RAW'); await wait(100);
+  await page.locator('.ed-toolbar [data-ed-tb="undo"]').click(); await wait(1200);
+  assert.strictEqual(await waveBlockText(page), painted,
+    '↶ with uncommitted raw typing: the typing is the newer change, so the drawing stays');
+}, { md: WAVE_SHELL_MD });
+check('wave help: a paint drag has its own hint, and Esc cancels it', DESKTOP, async (page) => {
+  await openWave(page);
+  const a = await cellPress(page, 1, 1);
+  const b = await cellPress(page, 1, 3);
+  const lanes0 = await sourceNow(page);
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 4 }); await wait(150);
+  assert.strictEqual(await hintText(page), '放開就塗上這一段；Esc 取消', 'mid-drag');
+  await page.keyboard.press('Escape'); await wait(150);
+  await page.mouse.up(); await wait(300);
+  assert.strictEqual(await waveOpen(page), true, 'Esc cancelled the drag, not the editor');
+  assert.strictEqual(await sourceNow(page), lanes0, 'and nothing was painted');
+}, { md: WAVE_SHELL_MD });
 check('wave menus: arrow keys move within a menu', DESKTOP, async (page) => {
   await openWave(page);
   await page.locator('[data-focus-key="ed-wave-export-menu"]').click(); await wait(200);
