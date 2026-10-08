@@ -982,6 +982,47 @@ check('wave lanes: menu actions', DESKTOP, async (page) => {
   assert.deepStrictEqual(await signalNow(page), [a, b, d], '刪除');
   await undo();
 }, { md: WAVE_LANES_MD });
+// Final review I3 (Ruling R22 extended to every popover with text fields): what is typed in
+// 週期與相位… is written when Esc or a press outside closes it — in BOTH engines. WebKit fires
+// no `change` for a focused field taken out of the page, so before the fix it lost the text
+// while Chromium wrote it.
+check('wave lanes: 週期與相位 keeps typed text when Esc or an outside press closes it', DESKTOP, async (page) => {
+  await openWave(page);
+  const base = await signalNow(page);
+  const [a, b, c, d] = base;
+  const popOpen = () => page.evaluate(() => !!document.querySelector('.ed-wave-overlay .ed-wave-period-pop'));
+  await laneAction(page, 1, 'ed-wave-lane-period');
+  assert.strictEqual(await popOpen(), true, 'guard: 週期與相位… is open');
+  await page.keyboard.type('2'); await wait(100);
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.strictEqual(await popOpen(), false, 'Esc closes the panel');
+  assert.deepStrictEqual(await signalNow(page), [a, Object.assign({}, b, { period: 2 }), c, d],
+    'Esc keeps the typed period (written once, as a number)');
+  await laneAction(page, 1, 'ed-wave-lane-period');
+  await page.locator('[data-focus-key="ed-wave-lane-phase-input"]').click(); await wait(100);
+  await page.keyboard.type('0.5'); await wait(100);
+  const title = await page.locator('.ed-wave-overlay .ed-wave-title').boundingBox();
+  await page.mouse.click(title.x + 5, title.y + 5); await wait(300);
+  assert.strictEqual(await popOpen(), false, 'the outside press closes the panel');
+  assert.deepStrictEqual(await signalNow(page), [a, Object.assign({}, b, { period: 2, phase: 0.5 }), c, d],
+    'the outside press keeps the typed phase');
+  // Two gestures, one store step each: the close wrote once, not once per close path.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [a, Object.assign({}, b, { period: 2 }), c, d], 'one undo takes the phase back');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), base, 'a second undo takes the period back');
+  // Mid-composition the field's text is the IME's, not a value: the close does not write it.
+  await laneAction(page, 1, 'ed-wave-lane-period');
+  await page.evaluate(() => {
+    document.querySelector('[data-focus-key="ed-wave-lane-period-input"]')
+      .dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+  });
+  await page.keyboard.type('7'); await wait(100);
+  await page.mouse.click(title.x + 5, title.y + 5); await wait(300);
+  assert.strictEqual(await popOpen(), false, 'guard: the outside press closes the panel');
+  assert.deepStrictEqual(await signalNow(page), base, 'nothing typed mid-composition is written by the close');
+}, { md: WAVE_LANES_MD });
 check('wave lanes: 和下一條組成群組 then 下移 are both written back', DESKTOP, async (page) => {
   // Ruling R16: the editor keeps one store for the session, and each landed write-back
   // becomes its new base, so a second structural gesture is planned on its own instead of
