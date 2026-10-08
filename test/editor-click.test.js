@@ -1888,6 +1888,316 @@ check('wave export: json copy', DESKTOP, async (page) => {
   }
 }, { md: WAVE_CANVAS_MD });
 
+// ── wave close / help (Task 11, spec 4.8): closing keeps, Ctrl+Z reverts the session,
+// layered Esc, the hint bar and the shortcut card ──
+/** The wavedrom block's fence BODY in the DOCUMENT (client.js `lines`), not the editor's
+ *  store: the same text `__edWaveSourceProbe()` reports while the editor is open. */
+function waveBlockText(page) {
+  return page.evaluate(() => {
+    const b = [...document.querySelectorAll('.ed-block')].find((x) => x.querySelector('.wavedrom-diagram, [id^="WaveDrom_Display_"]'));
+    if (!b) return null;
+    const s = window.__edTestBlockSpan(Number(b.getAttribute('data-block-id')));
+    return s === null ? null : s.text.split('\n').slice(1, -1).join('\n');
+  });
+}
+const waveOpen = (page) => page.evaluate(() => !!document.querySelector('.ed-wave-overlay'));
+/** The notice toast as plain values, or null. */
+function noticeToast(page) {
+  return page.evaluate(() => {
+    const n = document.querySelector('.ed-conflict[data-level="notice"]');
+    if (!n) return null;
+    const b = n.querySelector('button:not(.ed-msg-x)');
+    return { text: n.querySelector('.ed-msg-text').textContent, action: b ? b.textContent : null };
+  });
+}
+/** Pick `brushKey` on the toolbar and click lane `lane` cycle `cycle` (a paint). */
+async function paintCell(page, brushKey, lane, cycle) {
+  await page.locator('[data-focus-key="brush-' + brushKey + '"]').click(); await wait(100);
+  const p = await cellPress(page, lane, cycle);
+  await page.mouse.click(p.x, p.y); await wait(250);
+}
+const hintText = (page) => page.evaluate(() => {
+  const t = document.querySelector('.ed-wave-overlay .ed-wave-hint-text');
+  return t ? t.textContent : null;
+});
+/** The shortcut card as plain values, or null when it is not on screen. */
+function shortcutCard(page) {
+  return page.evaluate(() => {
+    const c = document.querySelector('.ed-wave-overlay .ed-wave-shortcuts');
+    if (!c || c.getClientRects().length === 0) return null;
+    const r = c.getBoundingClientRect();
+    const p = document.querySelector('.ed-wave-panel').getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return {
+      groups: [...c.querySelectorAll('.ed-wave-shortcut-group')].map((g) => ({
+        title: g.querySelector('.ed-wave-shortcut-title').textContent,
+        keys: [...g.querySelectorAll('kbd')].map((k) => k.textContent),
+      })),
+      dx: Math.abs((r.left + r.width / 2) - (p.left + p.width / 2)),
+      dy: Math.abs((r.top + r.height / 2) - (p.top + p.height / 2)),
+      onTop: !!hit && c.contains(hit),
+      focusIn: c.contains(document.activeElement),
+    };
+  });
+}
+check('wave close: Esc closes and keeps the change', DESKTOP, async (page) => {
+  const before = await waveBlockText(page);
+  await openWave(page);
+  await paintCell(page, '1', 1, 2);
+  const written = await sourceNow(page);
+  assert.notStrictEqual(written, before, 'guard: the paint changed the block');
+  // The click left one cell selected and the keyboard on the canvas: nothing to peel, so Esc closes.
+  await page.keyboard.press('Escape'); await wait(1000);
+  assert.strictEqual(await waveOpen(page), false, 'Esc closed the editor');
+  assert.strictEqual(await waveBlockText(page), written, 'and the change stayed in the document');
+  assert.strictEqual(await page.evaluate(() => window.__edTestWaveState().dirty), true, 'the file reads unsaved');
+  assert.deepStrictEqual(await noticeToast(page), { text: '波形已更新（1 處修改）· Ctrl+Z 整段復原', action: '整段復原' },
+    'the close says what changed and how to take it back');
+}, { md: WAVE_SHELL_MD });
+check('wave close: Ctrl+Z right after closing reverts the whole session as one step', DESKTOP, async (page) => {
+  const before = await waveBlockText(page);
+  await openWave(page);
+  await paintCell(page, '1', 1, 1);
+  await paintCell(page, 'x', 1, 3);
+  await paintCell(page, '1', 1, 4);
+  assert.strictEqual(await page.evaluate(() => window.__edTestWaveState().seam.ops), 3, 'guard: three gestures were written');
+  const painted = await sourceNow(page);
+  await page.locator('.ed-wave-close').click(); await wait(1000);
+  assert.strictEqual(await waveOpen(page), false, 'guard: ✕ closed it');
+  assert.strictEqual(await waveBlockText(page), painted, 'guard: the drawing is in the document');
+  assert.strictEqual((await noticeToast(page) || {}).text, '波形已更新（3 處修改）· Ctrl+Z 整段復原');
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), before, 'ONE Ctrl+Z puts the whole session back');
+  assert.strictEqual((await noticeToast(page) || {}).text, '已退回這次的波形修改');
+  await page.keyboard.press('Control+y'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), painted, 'Ctrl+Y brings the session back');
+  await page.keyboard.press('Control+y'); await wait(800);
+  assert.strictEqual(await waveBlockText(page), painted, 'a second Ctrl+Y has nothing left to redo');
+  // Back at the closed state, the offer stands again: Ctrl+Z reverts the session once more.
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), before, 'Ctrl+Z after Ctrl+Y reverts the session again');
+}, { md: WAVE_SHELL_MD });
+check('wave close: the toast button reverts the whole session too', DESKTOP, async (page) => {
+  const before = await waveBlockText(page);
+  await openWave(page);
+  await paintCell(page, '1', 1, 1);
+  await paintCell(page, 'x', 1, 3);
+  await page.locator('[data-focus-key="ed-wave-done"]').click(); await wait(1000);
+  const btn = await page.evaluate(() => {
+    const b = [...document.querySelectorAll('.ed-conflict[data-level="notice"] button')].find((x) => x.textContent === '整段復原');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    return { x, y, onTop: document.elementFromPoint(x, y) === b };
+  });
+  assert.ok(btn !== null && btn.onTop, 'the toast offers 整段復原 and it takes a press ' + JSON.stringify(btn));
+  await page.mouse.click(btn.x, btn.y); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), before, '整段復原 puts the whole session back');
+}, { md: WAVE_SHELL_MD });
+check('wave close: an edit elsewhere disables the whole-session undo', DESKTOP, async (page) => {
+  await openWave(page);
+  await paintCell(page, '1', 1, 1);
+  const one = await sourceNow(page);
+  await paintCell(page, 'x', 1, 3);
+  const two = await sourceNow(page);
+  await page.locator('.ed-wave-close').click(); await wait(1000);
+  assert.strictEqual((await noticeToast(page) || {}).text, '波形已更新（2 處修改）· Ctrl+Z 整段復原', 'guard: the offer was made');
+  // Typing in another block is the next change to the document.
+  const tail = page.locator('.ed-block[data-block-type="paragraph"]', { hasText: 'Tail.' });
+  await tail.click(); await page.keyboard.press('End'); await page.keyboard.type('X'); await wait(100);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(800);
+  assert.strictEqual(await page.evaluate(() => document.body.textContent.includes('Tail.X')), true, 'guard: the typing landed');
+  await page.keyboard.press('Escape'); await wait(200);
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await page.evaluate(() => document.body.textContent.includes('Tail.X')), false, 'Ctrl+Z takes back only the typing');
+  assert.strictEqual(await waveBlockText(page), two, 'and leaves the waveform alone');
+  await page.keyboard.press('Control+z'); await wait(1000);
+  assert.strictEqual(await waveBlockText(page), one, 'from there Ctrl+Z steps back one gesture at a time');
+}, { md: WAVE_SHELL_MD });
+check('wave close: Esc peels layers before closing', DESKTOP, async (page) => {
+  await openWave(page);
+  const pops = () => page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-pop').length);
+  const esc = async (what) => {
+    await page.keyboard.press('Escape'); await wait(200);
+    assert.strictEqual(await waveOpen(page), true, 'Esc on ' + what + ' leaves the editor open');
+  };
+  for (const key of ['ed-wave-settings', 'ed-wave-brush-more', 'ed-wave-signal-menu', 'ed-wave-export-menu']) {
+    await page.locator('[data-focus-key="' + key + '"]').click(); await wait(200);
+    assert.strictEqual(await pops(), 1, 'guard: ' + key + ' opened its popover');
+    await esc(key);
+    assert.strictEqual(await pops(), 0, 'Esc closes ' + key + '\'s popover');
+    assert.strictEqual(await focusKey(page), key, 'and the keyboard goes back to ' + key);
+  }
+  // A run of cycles: its toolbar, and the 電位 grid on it.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowRight'); await wait(200);
+  assert.ok((await rangeBar(page)) !== null, 'guard: the run raised its toolbar');
+  await page.locator('[data-focus-key="ed-wave-range-level"]').click(); await wait(200);
+  assert.strictEqual(await pops(), 1, 'guard: 電位 opened its grid');
+  await esc('the 電位 grid');
+  assert.strictEqual(await pops(), 0, 'Esc closes the 電位 grid first');
+  assert.ok((await rangeBar(page)) !== null, 'and leaves the range toolbar');
+  await esc('the range toolbar');
+  assert.strictEqual(await rangeBar(page), null, 'Esc drops the range toolbar');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-lane-range'), '1,1', 'the cursor cell stays selected');
+  assert.strictEqual(await focusKey(page), 'canvas', 'with the keyboard on the canvas');
+  // The shortcut card.
+  await page.keyboard.press('?'); await wait(200);
+  assert.ok((await shortcutCard(page)) !== null, 'guard: ? opened the card');
+  await esc('the shortcut card');
+  assert.strictEqual(await shortcutCard(page), null, 'Esc closes the card');
+  // A pick started with A, then the resident dots.
+  await page.keyboard.press('a'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', 'guard: A started a pick');
+  await esc('a pick');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'idle', 'Esc drops the pick');
+  await page.locator('[data-focus-key="ed-wave-edge-arm"]').click(); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-dots'), 'all', 'guard: 關聯線 keeps the dots up');
+  await esc('the resident dots');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-dots'), 'near', 'Esc turns them off');
+  // Nothing left: Esc closes.
+  await page.keyboard.press('Escape'); await wait(600);
+  assert.strictEqual(await waveOpen(page), false, 'with nothing open, Esc closes the editor');
+}, { md: WAVE_RANGE_MD });
+check('wave help: ? opens the shortcut card and Esc closes it', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('?'); await wait(200);
+  const card = await shortcutCard(page);
+  assert.ok(card !== null, '? on the canvas opens the shortcut card');
+  assert.deepStrictEqual(card.groups.map((g) => g.title), ['畫波形', '訊號', '關聯線與標註', '整張圖與檔案'], 'four groups (spec 4.8)');
+  const keys = (i) => card.groups[i].keys.join(' ');
+  for (const k of ['Shift+←→', 'Enter', 'Ctrl+Z', 'Ctrl+Y', 'Ctrl+C', 'Ctrl+V']) {
+    assert.ok(keys(0).includes(k), '畫波形 lists ' + k + ' (Ruling R14 for Ctrl+C / Ctrl+V): ' + keys(0));
+  }
+  for (const k of ['F2', 'Ctrl+D', 'Alt+↑↓', 'Del']) assert.ok(keys(1).includes(k), '訊號 lists ' + k + ': ' + keys(1));
+  for (const k of ['A', 'T', 'Alt+←→']) assert.ok(card.groups[2].keys.includes(k), '關聯線與標註 lists ' + k + ': ' + keys(2));
+  for (const k of ['Ctrl+S', 'Esc', '?']) assert.ok(card.groups[3].keys.includes(k), '整張圖與檔案 lists ' + k + ': ' + keys(3));
+  assert.ok(card.dx <= 2 && card.dy <= 2, 'the card sits in the middle of the editor ' + JSON.stringify(card));
+  assert.strictEqual(card.onTop, true, 'nothing covers it');
+  assert.strictEqual(card.focusIn, true, 'the keyboard is in the card');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await shortcutCard(page), null, 'Esc closes the card');
+  assert.strictEqual(await waveOpen(page), true, 'and only the card');
+  assert.strictEqual(await focusKey(page), 'canvas', 'the keyboard goes back to the canvas');
+  // The hint bar's 「? 全部快捷鍵」 opens the same card; Esc gives the keyboard back to it.
+  const help = await page.evaluate(() => {
+    const b = document.querySelector('.ed-wave-overlay .ed-wave-hint .ed-wave-hint-help');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    return { x, y, text: b.textContent, onTop: document.elementFromPoint(x, y) === b };
+  });
+  assert.ok(help !== null && help.onTop, 'the hint bar has its help button and it takes a press ' + JSON.stringify(help));
+  assert.strictEqual(help.text, '? 全部快捷鍵');
+  await page.mouse.click(help.x, help.y); await wait(200);
+  assert.ok((await shortcutCard(page)) !== null, 'the help button opens the card');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await shortcutCard(page), null, 'Esc closes it');
+  assert.strictEqual(await focusKey(page), 'ed-wave-hint-help', 'and the keyboard is back on the help button');
+  // Not while composing, and not in a text field.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.evaluate(() => {
+    const layer = document.querySelector('.ed-wave-overlay .ed-wave-layer');
+    layer.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true, isComposing: true }));
+  });
+  await wait(150);
+  assert.strictEqual(await shortcutCard(page), null, '? while composing opens nothing');
+  await page.locator('[data-focus-key="ed-wave-settings"]').click(); await wait(200);
+  await page.keyboard.type('?'); await wait(150);
+  assert.strictEqual(await shortcutCard(page), null, '? typed in a text field opens nothing');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-focus-key="ed-wave-set-head"]').value), '?', 'it is typed');
+}, { md: WAVE_SHELL_MD });
+check('wave help: hint follows the selection', DESKTOP, async (page) => {
+  await openWave(page);
+  assert.strictEqual(await hintText(page), '點一拍改電位、按住拖曳塗一段', 'nothing selected');
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('ArrowDown'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-cursor'), '1,0', 'guard: the cursor is on bus cycle 0 (x)');
+  assert.strictEqual(await hintText(page), 'Shift+←→ 選一段 · 按電位字元改電位', 'an ordinary cell');
+  await page.keyboard.press('ArrowRight'); await wait(150);
+  assert.strictEqual(await hintText(page), 'Enter 改標籤 · Shift+←→ 選一段', 'a data cell (3 of x3.4.5x)');
+  await page.keyboard.press('ArrowRight'); await wait(150);
+  assert.strictEqual(await hintText(page), 'Enter 改標籤 · Shift+←→ 選一段', 'the cell continuing that data value');
+  await page.keyboard.press('Shift+ArrowRight'); await wait(150);
+  assert.strictEqual(await hintText(page), '用浮動工具列改這一段 · Shift+←→ 調整範圍 · Esc 取消選取', 'a run');
+  await page.keyboard.press('Escape'); await wait(150);
+  await page.keyboard.press('a'); await wait(150);
+  assert.strictEqual(await hintText(page), '方向鍵選終點（Alt+←→ 跳到轉換處）、Enter 建立；Esc 取消', 'picking an end');
+  await page.keyboard.press('Escape'); await wait(150);
+  // The help button sits at the right end of the bar, clear of the sentence.
+  const g = await page.evaluate(() => {
+    const bar = document.querySelector('.ed-wave-overlay .ed-wave-hint').getBoundingClientRect();
+    const t = document.querySelector('.ed-wave-overlay .ed-wave-hint-text').getBoundingClientRect();
+    const b = document.querySelector('.ed-wave-overlay .ed-wave-hint-help').getBoundingClientRect();
+    return { barRight: bar.right, helpRight: b.right, textRight: t.right, helpLeft: b.left };
+  });
+  assert.ok(g.barRight - g.helpRight <= 16, 'the help button is at the right end ' + JSON.stringify(g));
+  assert.ok(g.textRight <= g.helpLeft, 'the sentence never runs under it ' + JSON.stringify(g));
+}, { md: WAVE_DATA_MD });
+check('wave help: the notice toast never covers the hint bar', { width: 1366, height: 768 }, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="ed-wave-cycle-delete"]').click(); await wait(250);
+  const r = await page.evaluate(() => {
+    const toast = document.querySelector('.ed-conflict[data-level="notice"]');
+    const bar = document.querySelector('.ed-wave-overlay .ed-wave-hint');
+    const help = bar.querySelector('.ed-wave-hint-help');
+    if (!toast) return { toast: false };
+    const t = toast.getBoundingClientRect(); const h = bar.getBoundingClientRect();
+    const at = (x, y) => document.elementFromPoint(x, y);
+    const mid = at(h.left + h.width / 2, h.top + h.height / 2);
+    let helpOnTop = null;
+    if (help) { const b = help.getBoundingClientRect(); helpOnTop = at(b.left + b.width / 2, b.top + b.height / 2) === help; }
+    return { toast: true, text: toast.querySelector('.ed-msg-text').textContent,
+      toastBottom: t.bottom, barTop: h.top, middleInBar: !!mid && bar.contains(mid), helpOnTop };
+  });
+  assert.strictEqual(r.toast, true, 'guard: a notice is up');
+  assert.strictEqual(r.text, '先選一段 cycle 再刪', 'guard: it is the refusal');
+  assert.ok(r.toastBottom <= r.barTop, 'the toast sits above the hint bar ' + JSON.stringify(r));
+  assert.strictEqual(r.middleInBar, true, 'the middle of the hint bar is the hint bar, not the toast ' + JSON.stringify(r));
+  assert.strictEqual(r.helpOnTop, true, '「? 全部快捷鍵」 takes a press ' + JSON.stringify(r));
+}, { md: WAVE_SHELL_MD });
+check('wave menus: arrow keys move within a menu', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="ed-wave-export-menu"]').click(); await wait(200);
+  assert.strictEqual(await focusKey(page), 'ed-wave-export-copyimg', 'guard: the menu opens on its first item');
+  const steps = [['ArrowDown', 'ed-wave-export-png'], ['ArrowDown', 'ed-wave-export-svg'], ['End', 'ed-wave-export-json'],
+    ['ArrowDown', 'ed-wave-export-copyimg'], ['ArrowUp', 'ed-wave-export-json'], ['Home', 'ed-wave-export-copyimg']];
+  for (const [key, want] of steps) {
+    await page.keyboard.press(key); await wait(60);
+    assert.strictEqual(await focusKey(page), want, key + ' in the 匯出 menu');
+  }
+  assert.strictEqual(await waveOpen(page), true, 'the keys moved focus and nothing else');
+  await page.keyboard.press('Escape'); await wait(150);
+  await page.locator('[data-focus-key="ed-wave-signal-menu"]').click(); await wait(200);
+  assert.strictEqual(await focusKey(page), 'ed-wave-signal-add', 'guard: 訊號 opens on 新增訊號');
+  await page.keyboard.press('ArrowDown'); await wait(60);
+  assert.strictEqual(await focusKey(page), 'ed-wave-signal-blank', 'ArrowDown in the 訊號 menu');
+  await page.keyboard.press('ArrowDown'); await wait(60);
+  assert.strictEqual(await focusKey(page), 'ed-wave-signal-add', 'and it wraps');
+}, { md: WAVE_SHELL_MD });
+// Four lanes, so wherever the title pushes the drawing, the press still lands on some lane.
+const WAVE_FLUSH_MD = waveDoc({ signal: [{ name: 'clk', wave: 'p.....' }, { name: 'a', wave: '01.0..' },
+  { name: 'b', wave: '0.....' }, { name: 'c', wave: '0.....' }] });
+check('wave settings: a press that closes the popover and writes a field does not paint', DESKTOP, async (page) => {
+  await openWave(page);
+  const lanes0 = JSON.stringify((await docNow(page)).signal);
+  await openSettings(page);
+  // 標題 has the keyboard; the text is typed but not written yet (no Enter).
+  await page.keyboard.type('Title'); await wait(100);
+  // A press on lane c cycle 4 (the brush, 1, would change any lane there) closes the popover,
+  // which writes the title, and a title moves the whole drawing down under the pointer.
+  const p = await cellPress(page, 3, 4);
+  await page.mouse.click(p.x, p.y); await wait(400);
+  const doc = await docNow(page);
+  assert.strictEqual(await settingsPop(page), null, 'the press closed the popover');
+  assert.strictEqual(doc.head && doc.head.text, 'Title', 'and wrote what was typed');
+  const moved = await page.evaluate(() => window.__edWaveCellPoint(3, 4));
+  assert.ok(moved.y > p.y + 10, 'guard: the title moved the drawing under the pointer ' + JSON.stringify([p.y, moved.y]));
+  assert.strictEqual(JSON.stringify(doc.signal), lanes0, 'that same press painted nothing');
+}, { md: WAVE_FLUSH_MD });
+
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
   const r = await page.evaluate(() => {

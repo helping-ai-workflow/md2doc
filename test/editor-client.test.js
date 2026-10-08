@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -392,7 +392,7 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.ok(!src.includes(needle), `client.js must NOT reference the retired ${needle}`);
 }
 
-// -- v3.4.0 batch3 Task 7: the Reload gate, and the arithmetic under Escape --
+// -- v3.4.0 batch3 Task 7: the Reload gate, and the arithmetic under the net-zero unwind --
 //
 // Task 6 MEASURED the hole this closes: with the wave editor open over a real
 // paint, `document.title` was 'doc', the file on disk was byte-identical, and
@@ -425,13 +425,16 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // that makes it legitimate: it is a restore BY VALUE of the snapshot taken at
   // session open, and it only ever runs alongside the pops that take the same
   // ops off the stack. A `lines =` here without the discardTop() beside it
-  // would be a document rewind the history never heard about.
+  // would be a document rewind the history never heard about. (Since wave
+  // redesign Task 11 its only caller is the net-zero unwind in
+  // writeWaveGestureBack(): a session whose drawing has come back to the bytes
+  // it opened over takes its own ops off again. Closing never unwinds.)
   const unwind = src.slice(src.indexOf('function unwindWaveOps'),
                            src.indexOf('function settleWaveBlocks'));
   assert.ok(unwind.length > 0, 'unwindWaveOps() must exist');
   const unwindAssigns = (unwind.match(/^\s*lines = .*$/gm) || []).map((l) => l.trim());
   assert.deepStrictEqual(unwindAssigns, ['lines = seam.baseLines;'],
-    'the discard may only put back the snapshot it took. Got ' +
+    'the unwind may only put back the snapshot it took. Got ' +
     JSON.stringify(unwindAssigns));
   assert.ok(unwind.includes('stack.discardTop(lines)'),
     'and it must pop the ops it is reversing');
@@ -445,7 +448,7 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // BEHAVIOUR is driven below against a real UndoStack, including from the
   // negative baseline the old arithmetic could not see.
   assert.ok(unwind.includes('if (!waveDiscardIsSafe(stack, seam)) return false;'),
-    'the discard must ask waveDiscardIsSafe() and nothing else');
+    'the unwind must ask waveDiscardIsSafe() and nothing else');
   assert.ok(!unwind.includes('dirtyDepth'),
     'and it must not re-derive the answer from a distance that can be negative');
 
@@ -454,9 +457,11 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   // settle has to happen BEFORE the render rather than on its failure branch,
   // so it also covers the window in which the overlay is re-opened while the
   // settling render is still in flight.
-  const finish = src.slice(src.indexOf('async function finishWaveSession'),
-                           src.indexOf('async function restoreDiscardedWaveEdit'));
-  assert.ok(finish.length > 0, 'finishWaveSession() must exist');
+  const finishAt = src.indexOf('async function finishWaveSession');
+  const finishEnd = src.indexOf('async function undoWaveSession');
+  assert.ok(finishAt !== -1 && finishEnd > finishAt,
+    'finishWaveSession() must exist, followed by undoWaveSession() (wave redesign Task 11)');
+  const finish = src.slice(finishAt, finishEnd);
   const settleAt = finish.indexOf('settleWaveBlocks(seam);');
   const renderAt = finish.indexOf('await safeRerenderAll(');
   assert.notStrictEqual(settleAt, -1,
@@ -465,15 +470,38 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   assert.notStrictEqual(renderAt, -1, 'and it must still render');
   assert.ok(settleAt < renderAt,
     'and the settle must come BEFORE the render, not on its failure branch');
-  // And the third and last `lines =` in the whole wave segment: the revert
-  // commit the Escape branch falls back to when a save landed inside the
-  // session. Same rule as the other two — it is commitRangeEdit()'s own result
-  // and nothing else, so the history hears about every byte this feature moves.
-  const finishAssigns = (finish.match(/^\s*(?:if \(result\.op !== null\) )?lines = .*$/gm) || [])
+  // MIGRATED by wave redesign Task 11 (spec section 4.8): closing ALWAYS keeps.
+  // This used to pin the one `lines =` of the Escape branch's revert commit;
+  // that branch is gone with the discard it implemented, so the close writes
+  // no `lines` at all — everything the session drew is already in the
+  // document, gesture by gesture, and the close only renders it.
+  const finishAssigns = (finish.match(/^\s*(?:if \(.*\) )?lines = .*$/gm) || [])
     .map((l) => l.trim());
-  assert.deepStrictEqual(finishAssigns, ['if (result.op !== null) lines = result.lines;'],
-    'the session close may only write `lines` through commitRangeEdit(). Got ' +
+  assert.deepStrictEqual(finishAssigns, [],
+    'closing the wave editor must not write `lines` — it keeps what the session wrote. Got ' +
     JSON.stringify(finishAssigns));
+  assert.ok(!finish.includes("'escape'"),
+    'and it has no Escape branch: Esc, ✕ and 完成 all only close (spec 4.8)');
+  // The undo offer (spec 4.8: 關閉後立刻 Ctrl+Z＝整段退回). Made only by a close
+  // that wrote something, AFTER the close render (an offer that could be used
+  // while the close render is still in flight would race it), and pinned field
+  // by field: the opening body (the seam's own copy, never the store's rebased
+  // source — Rulings R16/R17), the block by id, and the identity of `lines`
+  // plus the stack depth at that moment, which are what make it expire.
+  const offerAt = finish.indexOf('waveUndoOffer = {');
+  assert.notStrictEqual(offerAt, -1, 'the close must make the whole-session undo offer');
+  assert.ok(offerAt > renderAt, 'after the close render');
+  assert.ok(finish.indexOf('if (seam.ops === 0) return;') !== -1 &&
+    finish.indexOf('if (seam.ops === 0) return;') < offerAt,
+    'and only when the session wrote something (spec: 內容最後回到原樣就不跳提示)');
+  const offer = finish.slice(offerAt, finish.indexOf('};', offerAt));
+  for (const field of ['blockId: seam.blockId', 'startLine: seam.startLine', 'endLine: seam.endLine',
+                       'baseSource: seam.baseSource', 'lines: lines', 'depth: stack.depth', 'count: seam.ops']) {
+    assert.ok(offer.includes(field), 'the offer carries ' + field + '. Got: ' + offer);
+  }
+  assert.ok(finish.includes("showWaveNotice('波形已更新（' + seam.ops + ' 處修改）· Ctrl+Z 整段復原', '整段復原',"),
+    'the close says how many gestures it kept and offers 整段復原, through the notice that never ' +
+    'replaces a red card (Ruling R11)');
 
   // fix 2 / R2 — `switchAwayFrom()` answers false when it could NOT resolve what
   // was open (a commit whose render failed), and an editor then stays live
@@ -509,13 +537,17 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
     'the one kind of unsaved work `stack.dirtyDepth` cannot see. Got: ' + dirtyBody);
 }
 
-// The arithmetic Escape depends on, driven rather than asserted about.
+// The arithmetic the net-zero unwind depends on, driven rather than asserted
+// about.
 //
-// The wave editor commits on every gesture, so by the time Escape is pressed
-// the session is N ops deep on the document stack. Escape must leave BOTH the
-// bytes and the dirty depth exactly where the session found them — a revert
-// COMMIT would restore the bytes and leave the depth at N+1, i.e. a ● and an
-// unload prompt over a document that is byte-identical to what it was.
+// The wave editor commits on every gesture, so a session is N ops deep on the
+// document stack. When its drawing comes back to the exact bytes it opened over
+// (paint, then the overlay's own undo), writeWaveGestureBack() takes the N ops
+// back off. That has to leave BOTH the bytes and the dirty depth exactly where
+// the session found them — a revert COMMIT would restore the bytes and leave
+// the depth at N+1, i.e. a ● and an unload prompt over a document that is
+// byte-identical to what it was. (Until wave redesign Task 11 the Escape
+// discard took the same road; closing now always keeps, see below.)
 {
   const st = { lines: ['# W', '', '```wavedrom', "{ signal: [{ name: 'a', wave: '01' }] }", '```'],
                blocks: [{ id: 0, type: 'heading', startLine: 1, endLine: 1 },
@@ -532,29 +564,27 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   }
   assert.strictEqual(st.stack.dirtyDepth, 3, '三個手勢就是三筆 op');
   assert.notDeepStrictEqual(st.lines, baseLines, 'fixture: the document really moved');
-  // …and Escape takes all three back off.
+  // …and the unwind takes all three back off.
   for (let i = 0; i < 3; i++) st.lines = st.stack.discardTop(st.lines).lines;
   assert.deepStrictEqual(st.lines, baseLines,
-    'Escape must put the bytes back exactly. Got ' + JSON.stringify(st.lines));
+    'the unwind must put the bytes back exactly. Got ' + JSON.stringify(st.lines));
   assert.strictEqual(st.stack.dirtyDepth, baseDepth,
-    'Escape must put the DIRTY DEPTH back too — discardTop() leaves no redo entry, ' +
+    'the unwind must put the DIRTY DEPTH back too — discardTop() leaves no redo entry, ' +
     'which is what separates it from a revert commit');
   assert.strictEqual(st.stack.undo(st.lines), null,
     'and nothing of the session may be left on the stack for a later Ctrl+Z');
   // The half that separates discardTop() from undo(), and the ONLY half that
   // does: undo() also lands the bytes and the depth back at base here, so a
-  // test that stopped one line above would pass against an Escape built out of
+  // test that stopped one line above would pass against an unwind built out of
   // undo() — driven, not reasoned about. What undo() leaves behind is a REDO
-  // tail, and a Ctrl+Y over it would resurrect the very session the user just
-  // threw away (and then double-apply it against the Ctrl+Z restore, which
-  // commits the drawing again).
+  // tail, and a Ctrl+Y over it would replay gestures whose net effect was
+  // nothing.
   assert.strictEqual(st.stack.redo(st.lines), null,
-    'Escape must leave nothing to REDO either — a discarded wave session may ' +
-    'not come back through Ctrl+Y');
+    'the unwind must leave nothing to REDO either');
 }
 
 // fix 1 / F1 — the case the block above cannot express, and the reason the
-// Escape branch has two halves.
+// unwind asks waveDiscardIsSafe() before it pops.
 //
 // Ctrl+S is the ONE gesture the wave modal deliberately does not swallow, and
 // `markSaved()` sets `_savedDepth` to an ABSOLUTE index. Popping below that
@@ -562,11 +592,13 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
 // looks wrong — and the next few ordinary commits then walk it back up THROUGH
 // zero, at which point documentIsDirty() answers false over a document that
 // differs from disk and the conflict banner's Reload destroys it without a
-// dialog. MEASURED end to end on the real page before this fix.
+// dialog. MEASURED end to end on the real page before this fix (then on the
+// Escape discard, which wave redesign Task 11 retired).
 //
 // Both halves are DRIVEN here: first that the blind pop really does go clean
-// (so the branch is guarding something real), then that the revert-commit
-// answer never can.
+// (so the guard is guarding something real), then that a revert COMMIT — what
+// the whole-session undo after closing is (spec 4.8: 以一般 commit 寫回) — never
+// can.
 {
   const body = (w) => "{ signal: [{ name: 'a', wave: '" + w + "' }] }";
   const fresh = () => ({
@@ -605,7 +637,7 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   //
   // MIGRATED by fix 2. This block used to end by asserting that two ordinary
   // edits after a blind pop made `dirtyDepth` read exactly 0 — the measured
-  // data-loss path, pinned as the thing the branch existed to avoid. That
+  // data-loss path, pinned as the thing the guard existed to avoid. That
   // number is no longer reachable: `UndoStack` now invalidates the save marker
   // the moment a push lands below it, because the branch that produced the
   // saved bytes has been replaced and no undo/redo can get back to it. The
@@ -634,7 +666,8 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
     }
   }
 
-  // THE ANSWER — a revert COMMIT when a save landed inside the session.
+  // A revert COMMIT when a save landed inside the session — the shape of the
+  // whole-session undo after closing (spec section 6: session 中按過 Ctrl+S).
   {
     const st = fresh();
     const baseLines = st.lines;
@@ -656,6 +689,68 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
         'edit ' + i + ' must not be able to make the document read clean');
     }
   }
+}
+
+// wave redesign Task 11 (spec section 4.8) — closing keeps, and the first
+// Ctrl+Z after closing reverts the whole session as ONE ordinary commit.
+//
+// The offer's whole contract is "nothing happened to the document since the
+// close": `lines` is the SAME array (every edit, undo, redo and reload replaces
+// it), the stack is at the same depth, and no burst holds typing `lines` has
+// not seen yet. waveOfferHolds() is that predicate, pure, so it is driven here
+// rather than described; client.js's waveUndoOfferValid() / waveRedoOfferValid()
+// only feed it the live state.
+{
+  const closed = ['a', 'b'];
+  const offer = { lines: closed, depth: 4 };
+  assert.strictEqual(waveOfferHolds(offer, { lines: closed, depth: 4, burstOpen: false }), true,
+    'the document as the close left it: the offer stands');
+  assert.strictEqual(waveOfferHolds(offer, { lines: closed.slice(), depth: 4, burstOpen: false }), false,
+    'the SAME bytes in another array is not the same document — identity is the contract ' +
+    '(an edit and its undo land back on equal bytes, and that is still "something happened")');
+  assert.strictEqual(waveOfferHolds(offer, { lines: closed, depth: 5, burstOpen: false }), false,
+    'a different stack depth: something was pushed or popped');
+  assert.strictEqual(waveOfferHolds(offer, { lines: closed, depth: 4, burstOpen: true }), false,
+    'typing in a block that has not committed yet is a change too');
+  assert.strictEqual(waveOfferHolds(null, { lines: closed, depth: 4, burstOpen: false }), false,
+    'no offer, nothing holds');
+
+  // The lifecycle, on a real stack: three gestures, close, the revert commit,
+  // then the Ctrl+Y that takes the revert back off.
+  const body = (w) => "{ signal: [{ name: 'a', wave: '" + w + "' }] }";
+  const st = { lines: ['# W', '', '```wavedrom', body('01'), '```', '', 'Tail.'],
+               blocks: [{ id: 0, type: 'heading', startLine: 1, endLine: 1 },
+                        { id: 1, type: 'code', startLine: 3, endLine: 5 },
+                        { id: 2, type: 'paragraph', startLine: 7, endLine: 7 }],
+               stack: new UndoStack() };
+  const baseSource = st.lines[3];
+  for (const w of ['0.1', '0.11', '0.111']) {
+    const r = commitRangeEdit(st, 4, 4, body(w));
+    assert.notStrictEqual(r.op, null, 'fixture: each gesture must really commit');
+    st.lines = r.lines;
+  }
+  const painted = st.lines;
+  const closeDepth = st.stack.depth;
+  const tailAtClose = st.stack.redoTail();
+  st.stack.markSaved();                     // a save after closing: disk holds the drawing
+  const at = { lines: painted, depth: closeDepth };
+  assert.strictEqual(waveOfferHolds(at, { lines: st.lines, depth: st.stack.depth, burstOpen: false }), true,
+    'a save is not a change to the document: the offer survives it');
+  // Ctrl+Z: the revert, an ordinary commit over the block's body range.
+  const rev = commitRangeEdit(st, 4, 4, baseSource);
+  assert.notStrictEqual(rev.op, null, 'the revert is a real op');
+  st.lines = rev.lines;
+  assert.strictEqual(st.lines[3], baseSource, 'one commit puts the whole session back');
+  assert.strictEqual(st.stack.depth, closeDepth + 1, 'as ONE step on the stack');
+  assert.strictEqual(st.stack.isDirty(), true, 'and the file (which holds the drawing) reads unsaved');
+  // Ctrl+Y: the revert comes back off, and the redo branch is the one the close left.
+  const back = st.stack.undo(st.lines);
+  st.lines = back.lines;
+  st.stack.setRedoTail(tailAtClose);
+  assert.deepStrictEqual(st.lines, painted, 'Ctrl+Y brings the drawing back byte for byte');
+  assert.strictEqual(st.stack.depth, closeDepth, 'at the depth the close left');
+  assert.strictEqual(st.stack.isDirty(), false, 'which is what was saved, so it reads clean again');
+  assert.strictEqual(st.stack.redo(st.lines), null, 'and a second Ctrl+Y has nothing to replay');
 }
 
 // fix 3 — a save marks the bytes it SENT.
@@ -748,7 +843,9 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   stack.markSaved();
   stack.push(anOp()); seam.ops++;
 
-  // 7. Escape. THE CONTROL FIRST: the arithmetic this replaces says yes.
+  // 7. The session is asked whether its ops may be popped (the net-zero unwind;
+  //    the Escape discard asked the same until wave redesign Task 11).
+  //    THE CONTROL FIRST: the arithmetic this replaces says yes.
   assert.strictEqual(stack.dirtyDepth, seam.baseDirtyDepth + seam.ops,
     'control: the OLD predicate reads `1 === -1 + 2` on this stack and answers ' +
     '"no save landed" — a save very much landed. If this control ever stops ' +
@@ -790,7 +887,7 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
   const plainSeam = { baseDepth: plain.depth, ops: 0 };
   for (let i = 0; i < 3; i++) { plain.push(anOp()); plainSeam.ops++; }
   assert.strictEqual(waveDiscardIsSafe(plain, plainSeam), true,
-    'the common case must still be poppable, or Escape stops putting the dirty ' +
+    'the common case must still be poppable, or the net-zero unwind stops putting the dirty ' +
     'dot out over a byte-identical document');
 }
 
@@ -1397,10 +1494,18 @@ function countInCode(source, needle) {
 // or grew an unreviewed commit site", and nothing more.
 {
   const undoCalls = countInCode(src, 'stack.undo(lines)');
-  assert.strictEqual(undoCalls, 2,
-    'stack.undo(lines) may appear on exactly two CODE lines in client.js — inside ' +
-    'undo() (the gesture itself) and inside redo()\'s failure path (reversing a ' +
-    'redo). Every OTHER rollback must go through rollbackFailedRender(), which ' +
+  // MIGRATED by wave redesign Task 11 (2 -> 3), with the reason: the third is
+  // a GESTURE, not a rollback. redoWaveSession() is the Ctrl+Y that takes the
+  // whole-session revert (undoWaveSession()'s one ordinary commit) back off
+  // the stack — spec 4.8's 「可再被 Ctrl+Y 取消」 — the same call undo() makes
+  // for the same reason. Its own failure path reverses it with stack.redo(),
+  // the mirror of redo()'s. Rollbacks of a COMMIT still go through
+  // rollbackFailedRender() only.
+  assert.strictEqual(undoCalls, 3,
+    'stack.undo(lines) may appear on exactly three CODE lines in client.js — inside ' +
+    'undo() (the gesture itself), inside redo()\'s failure path (reversing a ' +
+    'redo) and inside redoWaveSession() (Ctrl+Y taking the whole-session revert back ' +
+    'off). Every OTHER rollback must go through rollbackFailedRender(), which ' +
     'declines when the commit pushed nothing; found ' + undoCalls);
   const helperCalls = countInCode(src, 'rollbackFailedRender(');
   // S2 Task 2 added the seventh commit-then-render site (convertBlockViaMenu),
@@ -1497,6 +1602,15 @@ function countInCode(source, needle) {
   //   * tabSpanAcrossLists()       — Tab / Shift+Tab over the same shapes
   //   * moveSpanAcrossLists()      — the ⠿ drops the seam gates refused
   // 1 declaration + 20 call sites = 21.
+  // MIGRATED by wave redesign Task 11 (21 -> 21), and checked rather than
+  // assumed, because the total hides a swap: restoreDiscardedWaveEdit() is
+  // gone with the Escape discard it reversed (-1), and undoWaveSession() — the
+  // first Ctrl+Z after closing the wave editor, which commits the opening body
+  // over the block's CURRENT range and renders — is a genuinely new
+  // commit-then-render site that owns that range and its rollback outright
+  // (+1). redoWaveSession() adds none: it commits nothing (it takes that
+  // commit back off with stack.undo(), counted above). 1 declaration + 20
+  // call sites = 21.
   assert.strictEqual(helperCalls, 21,
     'the helper must be DECLARED once and used at all twenty ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
@@ -2303,7 +2417,11 @@ function countInCode(source, needle) {
   const fs = require('fs');
   const path = require('path');
   const RETIRED = ['ed-wave-side', 'ed-wave-section', 'ed-wave-file-close', 'ed-wave-file-discard',
-    'ed-wave-escape-hint', 'renderPreview', 'renderSource', 'expandSide'];
+    'ed-wave-escape-hint', 'renderPreview', 'renderSource', 'expandSide',
+    // wave redesign Task 11 (spec 4.8): closing always keeps, so the Escape
+    // reason, the discard stash and its restore are gone (spec section 8 names
+    // discardedWaveEdit for this guard).
+    'discardedWaveEdit', 'DiscardedWaveEdit', "'escape'"];
   for (const rel of ['wave-ui.js', 'wave-panels.js']) {
     const text = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', rel), 'utf8');
     assert.ok(text.length > 1000, 'guard: read ' + rel);
@@ -2312,6 +2430,41 @@ function countInCode(source, needle) {
     }
   }
   console.log('editor-client: the wave side rail stays retired — OK');
+}
+
+// wave redesign Task 11 (spec 4.8): client.js keeps none of the Escape discard
+// either — its stash, the stash's two helpers, or the Escape close reason. Same
+// bare-substring rule as above, so a comment that names them trips it too.
+{
+  for (const needle of ['discardedWaveEdit', 'DiscardedWaveEdit', "'escape'"]) {
+    assert.ok(!src.includes(needle), 'client.js must NOT reference the retired ' + needle);
+  }
+  // The wave editor reports exactly one close reason.
+  const ui = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'editor', 'wave-ui.js'), 'utf8');
+  assert.ok(ui.includes("opts.onClose('commit');"), 'wave-ui.js closes with \'commit\' on every route');
+  // undo(): the offer is asked before the document stack is touched, after the
+  // two discard stashes (each of those is newer than any close), and it is
+  // spent whether or not it held. redo(): the matching Ctrl+Y offer.
+  const undoFn = src.slice(src.indexOf('async function undo() {'), src.indexOf('async function redo() {'));
+  const offerAt = undoFn.indexOf('waveUndoOfferValid()');
+  assert.ok(offerAt !== -1, 'undo() asks the whole-session offer');
+  assert.ok(undoFn.indexOf('restoreDiscardedRawEdit()') < offerAt, 'after the raw-editor stash');
+  assert.ok(offerAt < undoFn.indexOf('stack.undo(lines)'), 'before it undoes a single op');
+  assert.ok(undoFn.includes('waveUndoOffer = null;'), 'and the offer is spent by the Ctrl+Z that asks it');
+  const redoAt = src.indexOf('async function redo() {');
+  const redoFn = src.slice(redoAt, src.indexOf('\n  }\n', redoAt));
+  const redoOfferAt = redoFn.indexOf('waveRedoOfferValid()');
+  assert.ok(redoOfferAt !== -1 && redoOfferAt < redoFn.indexOf('stack.redo(lines)'),
+    'redo() asks the Ctrl+Y offer before it redoes a single op');
+  const valid = src.slice(src.indexOf('function waveUndoOfferValid()'));
+  assert.ok(valid.slice(0, valid.indexOf('\n  }\n')).includes(
+    'waveOfferHolds(waveUndoOffer, { lines: lines, depth: stack.depth, burstOpen: burstHasUncommittedEdit() })'),
+    'waveUndoOfferValid() feeds the pure predicate the live lines, depth and burst state');
+  // A new session takes over: neither offer survives an open.
+  const openFn = src.slice(src.indexOf('async function openWaveEditor'), src.indexOf('function writeWaveGestureBack'));
+  assert.ok(openFn.includes('waveUndoOffer = null;') && openFn.includes('waveRedoOffer = null;'),
+    'opening the wave editor drops both offers');
+  console.log('editor-client: closing the wave editor keeps, and Ctrl+Z reverts the session — OK');
 }
 
 console.log('editor-client.test.js OK');
