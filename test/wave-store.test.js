@@ -1716,6 +1716,25 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
     assert.deepStrictEqual(laneShape(s.doc), [['t4', 'a'], 'x', ['g2', 'b'], 'd']);
   });
 
+  // Fix round 3（Ruling R18）：寫回過的位元組也要再過一次讀回比對。一條只凍結了外層
+  // 的 lane（裡面的陣列呼叫端還握著）會原封不動地被收進堆疊，之後被改掉——
+  // 記下來的位元組就不再是這份文件；這時要退回兩個規劃，不能照抄。
+  row('寫回過的位元組讀回來不再是這份文件時，不照抄（R18）', function () {
+    const src = "{signal: [{name: 'a', wave: '01'}, {name: 'b', wave: '01'}]}";
+    const s = S.createStore(src);
+    const inner = ['x'];
+    gesture(s, '淺凍結的 lane', () => s.apply('evil', (d) => Object.assign({}, d,
+      { signal: [Object.freeze({ name: 'a', wave: '01', data: inner }), d.signal[1]] })));
+    gesture(s, '改 b', paint(s, 1));
+    assert.strictEqual(s.undo(), true);
+    inner[0] = 'MUTATED';
+    const p = s.toPatch();
+    if (p.ok === true) {
+      const back = C.parseSource(p.text);
+      assert.deepStrictEqual(clone(back.doc), clone(s.doc), 'ok 的 patch 一定讀得回這份文件');
+    }
+  });
+
   assert.deepStrictEqual(failures, [], 'T33 有幾條 undo 沒寫回去：\n  ' + failures.join('\n  '));
 }
 
