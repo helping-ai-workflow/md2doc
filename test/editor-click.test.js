@@ -416,13 +416,13 @@ check('wave shell: Tab cycles through the toolbar and the canvas', DESKTOP, asyn
   }
   assert.strictEqual(seen[seen.length - 1], 'ed-wave-close', 'the walk comes back to ✕ ' + JSON.stringify(seen));
 }, { md: WAVE_SHELL_MD });
-check('wave shell: transition dots only while edge arming', DESKTOP, async (page) => {
+check('wave shell: no dots on open, every dot while 關聯線 is on', DESKTOP, async (page) => {
   await openWave(page);
   const dots = () => page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length);
   assert.strictEqual(await dots(), 0, 'no dots on open');
   await page.locator('[data-focus-key="ed-wave-edge-arm"]').click(); await wait(200);
   const n = await dots();
-  assert.ok(n > 0, 'arming shows the dots: ' + n);
+  assert.ok(n > 0, '關聯線 keeps every dot shown: ' + n);
 }, { md: WAVE_SHELL_MD });
 check('wave shell: the cursor mark sits on the clicked cell', DESKTOP, async (page) => {
   await openWave(page);
