@@ -341,18 +341,10 @@ check('redraw budget', async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
   const r = await page.evaluate((doc) => {
     const { res, canvas } = window.__wc(doc);
-    const times = [];
-    for (let i = 0; i < 20; i++) {
-      const t0 = performance.now();
-      canvas.render(doc);
-      times.push(performance.now() - t0);
-    }
-    times.sort((a, b) => a - b);
     return {
       res, dark: window.md2docTheme.isDark(),
       recoloured: canvas.svg.hasAttribute('data-md2doc-recoloured'),
       lanes: canvas.layout.lanes.length, cycles: canvas.layout.cycles,
-      median: (times[9] + times[10]) / 2, min: times[0], max: times[19],
     };
   }, bigDoc());
   assert.deepStrictEqual(r.res, { ok: true });
@@ -363,9 +355,32 @@ check('redraw budget', async (page) => {
   // runner gets twice that, so the check still catches a real regression
   // without flaking on a slow machine.
   const budget = process.env.CI ? 32 : 16;
-  console.log('     render median ' + r.median.toFixed(2) + 'ms (min ' + r.min.toFixed(2) +
-    ', max ' + r.max.toFixed(2) + '), budget ' + budget + 'ms' + (process.env.CI ? ' (CI)' : ''));
-  assert.ok(r.median < budget, 'median ' + r.median.toFixed(2) + 'ms over the ' + budget + 'ms budget');
+  // Ruling R6b: one 20-render median can land over budget when the machine
+  // is busy (reproduced on the untouched base), so an over-budget median is
+  // re-measured up to 2 more times on the same canvas and the check passes
+  // if any median meets the budget. Every median is printed, so a run that
+  // only passed on a re-measure is visible in the log.
+  const medians = [];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const m = await page.evaluate((doc) => {
+      const canvas = window.__wcCanvas;
+      const times = [];
+      for (let i = 0; i < 20; i++) {
+        const t0 = performance.now();
+        canvas.render(doc);
+        times.push(performance.now() - t0);
+      }
+      times.sort((a, b) => a - b);
+      return { median: (times[9] + times[10]) / 2, min: times[0], max: times[19] };
+    }, bigDoc());
+    medians.push(m.median);
+    console.log('     render median ' + m.median.toFixed(2) + 'ms (min ' + m.min.toFixed(2) +
+      ', max ' + m.max.toFixed(2) + '), budget ' + budget + 'ms' + (process.env.CI ? ' (CI)' : '') +
+      ', measurement ' + (attempt + 1) + '/3');
+    if (m.median < budget) break;
+  }
+  assert.ok(medians.some((m) => m < budget), 'every median over the ' + budget + 'ms budget: ' +
+    medians.map((m) => m.toFixed(2) + 'ms').join(', '));
 });
 
 (async () => {
