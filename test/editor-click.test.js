@@ -1344,6 +1344,52 @@ check('wave edges: a click on a dot selects that cycle and draws nothing', DESKT
   await page.mouse.down(); await page.mouse.move(a.x + 3, a.y + 2, { steps: 3 }); await page.mouse.up(); await wait(300);
   assert.deepStrictEqual(await edgesNow(page), [], 'a drop back on the start draws nothing');
 }, { md: WAVE_EDGES_MD });
+// Final review I2 (spec 4.5「選一拍後浮動工具列」): a cycle selected WITHOUT painting — a click on
+// a transition dot (Ruling R19) — raises the range toolbar for that one cycle, so a mouse can add
+// a note or start an edge there without changing the waveform. A click that paints keeps having
+// no toolbar ('wave draw: click paints one cycle and selects it').
+check('wave edges: a dot click raises the range toolbar for that cycle, and 標註 there paints nothing', DESKTOP, async (page) => {
+  await openWave(page);
+  const dotClick = async () => {
+    await hoverDot(page, 2, 4);
+    await page.mouse.down(); await page.mouse.up(); await wait(300);
+    assert.strictEqual(await overlayAttr(page, 'data-wave-cursor'), '2,4', 'guard: the dot\'s cycle is selected');
+  };
+  await dotClick();
+  const bar = await rangeBar(page);
+  assert.ok(bar !== null, 'the dot click raises the range toolbar');
+  assert.ok(bar.keys.includes('ed-wave-range-edge') && bar.keys.includes('ed-wave-range-note'),
+    'with its 關聯線 and 標註 ' + JSON.stringify(bar.keys));
+  assert.ok(bar.deleteText.includes('1'), 'for one cycle: ' + bar.deleteText);
+  sameRect(await selectionVs(page, 2, 4, 4), 'the selection is that one cycle');
+  // 關聯線 from there picks an end, starting on the dot's cycle.
+  await page.locator('[data-focus-key="ed-wave-range-edge"]').click(); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', '關聯線 starts an edge');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edge-pending'), '2,4', 'from the dot\'s cycle');
+  await page.keyboard.press('Escape'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'idle', 'guard: Esc drops the pick');
+  // Esc peels the toolbar before it would close the editor.
+  await dotClick();
+  assert.ok((await rangeBar(page)) !== null, 'guard: the toolbar is up again');
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await rangeBar(page), null, 'Esc takes the one-cycle toolbar down');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-wave-overlay')), true, 'and leaves the editor open');
+  // 標註 opens the note field at that cell; the note is written, the wave is not.
+  await dotClick();
+  await page.locator('[data-focus-key="ed-wave-range-note"]').click(); await wait(150);
+  assert.deepStrictEqual(await edgeField(page), { kind: 'note', value: '', focused: true }, '標註 opens the note field');
+  await page.keyboard.type('note'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A note'], 'a point note');
+  assert.strictEqual(await nodeOf(page, 'b'), '....A', 'anchored on lane b cycle 4, the dot\'s cycle');
+  assert.strictEqual((await laneNow(page, 'b')).wave, '01..0.', 'and nothing was painted');
+  // A click that paints still raises no toolbar for its one cycle.
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const p = await cellPress(page, 1, 1);
+  await page.mouse.click(p.x, p.y); await wait(300);
+  assert.strictEqual((await laneNow(page, 'a')).wave, '011.0.', 'guard: the click painted cycle 1');
+  assert.strictEqual(await rangeBar(page), null, 'a painted cycle has no toolbar');
+}, { md: WAVE_EDGES_MD });
 check('wave edges: press inside a cell still paints', DESKTOP, async (page) => {
   await openWave(page);
   await page.locator('[data-focus-key="brush-x"]').click(); await wait(100);
