@@ -427,6 +427,42 @@ function makeDrawer() {
     assert.strictEqual(ov.length, 2);
     assert.deepStrictEqual([ov[1].attrs.x, ov[1].attrs.y, ov[1].attrs.width, ov[1].attrs.height], ['5', '6', '7', '8']);
   }
+  // Task 9: the edges' hit targets, in paint order — the line under the
+  // dots (an anchor an edge uses still starts a drag from its dot), the
+  // label boxes and a self-loop's ring over them, the selected edge's end
+  // rings over everything that takes a press.
+  {
+    const layer = make();
+    const st = quiet();
+    st.dots = 'all';
+    st.edgeHits = [{ index: 2, d: 'M 0,0 c 1,0 2,3 4,3', transform: 'matrix(1.5,0,0,1.5,10,20)', width: 7 }];
+    st.labelHits = [{ index: 2, x: 30, y: 40, width: 20, height: 16 }];
+    st.loopHits = [{ index: 5, x: 70, y: 80 }];
+    st.selectedEdge = { d: 'M 0,0 1,1', transform: 'matrix(1.5,0,0,1.5,10,20)', from: { x: 1, y: 2 }, to: { x: 3, y: 4 } };
+    layerApi.paint(layer, view, st);
+    const kids = layer.children;
+    const pos = function (cls) { return kids.findIndex(function (n) { return (n.attrs.class || '').split(' ').indexOf(cls) !== -1; }); };
+    const line = all(layer, 'ed-wave-edge-hit').filter(function (n) { return n.tag === 'path'; });
+    assert.strictEqual(line.length, 1, 'one line hit per drawn edge');
+    assert.deepStrictEqual([line[0].attrs['data-edge-index'], line[0].attrs.d, line[0].attrs.transform, line[0].attrs['stroke-width']],
+      ['2', 'M 0,0 c 1,0 2,3 4,3', 'matrix(1.5,0,0,1.5,10,20)', '7'], 'the engine path, mapped by its matrix');
+    const label = all(layer, 'ed-wave-edge-label-hit');
+    assert.deepStrictEqual([label[0].attrs['data-edge-index'], label[0].attrs.x, label[0].attrs.width], ['2', '30', '20']);
+    assert.strictEqual(all(layer, 'ed-wave-edge-loop-hit')[0].attrs['data-edge-index'], '5');
+    assert.ok(pos('ed-wave-edge-hit') < pos('ed-wave-dot'), 'the line is under the dots');
+    assert.ok(pos('ed-wave-dot') < pos('ed-wave-edge-label-hit'), 'a label box is over them');
+    assert.ok(pos('ed-wave-edge-label-hit') < pos('ed-wave-edge-loop-hit'), 'a self-loop ring over the labels');
+    assert.ok(pos('ed-wave-edge-loop-hit') < pos('ed-wave-edge-end-hit'), 'the end rings on top');
+    const rings = all(layer, 'ed-wave-edge-end-hit');
+    assert.deepStrictEqual(rings.map(function (n) { return n.attrs['data-end'] + '@' + n.attrs.cx + ',' + n.attrs.cy; }),
+      ['from@1,2', 'to@3,4'], 'each end has a ring centred on it');
+    assert.strictEqual(all(layer, 'ed-wave-edge-sel')[0].attrs.transform, 'matrix(1.5,0,0,1.5,10,20)');
+    st.selectedEdge = null;
+    st.selectedNote = { x: 1, y: 2, width: 3, height: 4 };
+    layerApi.paint(layer, view, st);
+    assert.strictEqual(all(layer, 'ed-wave-note-sel').length, 1, 'a selected note is outlined');
+    assert.strictEqual(all(layer, 'ed-wave-edge-end-hit').length, 0, 'and has no end handles');
+  }
   // Task 8: a group's row hover spans its rows; the lane drag's drop line
   {
     const layer = make();

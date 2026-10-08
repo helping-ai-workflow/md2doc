@@ -602,11 +602,21 @@ check('wave draw: range toolbar buttons', DESKTOP, async (page) => {
   await page.keyboard.press('Control+v'); await wait(300);
   assert.strictEqual(await a(), '01xz1xz01xz', 'Ctrl+V on the canvas pastes the copied cycles in front of the selection');
   await undo();
-  // A and T are Task 9's (Ruling R12): present, and they write nothing yet.
+  // 關聯線 (A) and 標註 (T), Task 9: an edge picked from the run's live end, a note field there.
+  const ov = (k) => page.evaluate((k) => document.querySelector('.ed-wave-overlay').getAttribute(k), k);
   await selectRun(page, 1, 1, 3);
   await page.locator('[data-focus-key="ed-wave-range-edge"]').click(); await wait(150);
+  assert.strictEqual(await ov('data-wave-edgemode'), 'picking', '關聯線 starts an edge');
+  assert.strictEqual(await ov('data-wave-edge-pending'), '1,3', 'from the cell the run ends on');
+  await page.keyboard.press('Escape'); await wait(150);
+  assert.strictEqual(await ov('data-wave-edgemode'), 'idle', 'Esc drops it');
+  await selectRun(page, 1, 1, 3);
   await page.locator('[data-focus-key="ed-wave-range-note"]').click(); await wait(150);
-  assert.strictEqual(await a(), '01xz01xz', 'A and T change nothing until Task 9');
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.ed-wave-edge-input') || {}).getAttribute
+    ? document.querySelector('.ed-wave-edge-input').getAttribute('data-kind') : null), 'note', '標註 opens the note field');
+  await page.keyboard.press('Escape'); await wait(150);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-wave-edge-input').length), 0, 'Esc closes it');
+  assert.strictEqual(await a(), '01xz01xz', 'neither wrote anything');
 }, { md: WAVE_RANGE_MD });
 check('wave draw: data label edits in place', DESKTOP, async (page) => {
   await openWave(page);
@@ -1137,6 +1147,349 @@ check('wave lanes: add lane button', DESKTOP, async (page) => {
   assert.deepStrictEqual(await signalNow(page), base.concat([{ name: '', wave: 'x' }]), 'a new signal at the end');
   assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes')), '5');
 }, { md: WAVE_LANES_MD });
+
+// ── wave edges (Task 9): edges and point notes on the engine canvas (spec 4.5) ──
+const waveDoc = (doc) => '# W\n\n\x60\x60\x60wavedrom\n' + JSON.stringify(doc) + '\n\x60\x60\x60\n\nTail.\n';
+// Transitions: clk [0], a [0, 2, 4], b [0, 1, 4]. Lane a already carries a
+// hand-written lowercase anchor `a` on cell 0.
+const WAVE_EDGES_MD = waveDoc({ signal: [{ name: 'clk', wave: 'p.....' },
+  { name: 'a', wave: '0.1.0.', node: 'a' }, { name: 'b', wave: '01..0.' }] });
+// One existing edge, a (lane a cell 2) to b (lane b cell 4), labelled.
+const WAVE_EDGE_SEL_MD = waveDoc({ signal: [{ name: 'clk', wave: 'p.....' },
+  { name: 'a', wave: '0.1.0.', node: '..a' }, { name: 'b', wave: '01..0.', node: '....b' }], edge: ['a~>b lbl'] });
+/** The block's document as it is written back right now (the codec's reader). */
+async function docNow(page) {
+  const r = await page.evaluate(() => {
+    const p = window.__md2docWave['wave-codec.js'].parseSource(window.__edWaveSourceProbe());
+    return p.ok ? JSON.stringify(p.doc) : null;
+  });
+  assert.ok(r !== null, 'the block reads back as WaveJSON');
+  return JSON.parse(r);
+}
+const edgesNow = async (page) => (await docNow(page)).edge || [];
+const laneNow = async (page, name) => (await docNow(page)).signal.find((l) => l && l.name === name);
+const nodeOf = async (page, name) => (await laneNow(page, name)).node;
+const overlayAttr = (page, k) => page.evaluate((k) => document.querySelector('.ed-wave-overlay').getAttribute(k), k);
+/** Anchor (lane, cell) in client px, from the canvas's own geometry. */
+async function anchorPoint(page, lane, cell) {
+  const a = await page.evaluate(([l, c]) => (typeof window.__edWaveAnchorPoint === 'function'
+    ? window.__edWaveAnchorPoint(l, c) : null), [lane, cell]);
+  assert.ok(a !== null, 'guard: anchor ' + lane + ',' + cell + ' has a point on screen');
+  return a;
+}
+/** What a press at (x, y) would hit: the dot's "lane,cell", an edge hit's index, or the layer. */
+function hitAt(page, x, y) {
+  return page.evaluate(([x, y]) => {
+    const t = document.elementFromPoint(x, y);
+    if (!t || !t.closest) return null;
+    const dot = t.closest('.ed-wave-dot');
+    if (dot) return 'dot:' + dot.getAttribute('data-lane') + ',' + dot.getAttribute('data-cell');
+    const end = t.closest('.ed-wave-edge-end-hit, .ed-wave-edge-end');
+    if (end) return 'end:' + end.getAttribute('data-end');
+    const e = t.closest('.ed-wave-edge-hit');
+    if (e) return 'edge:' + e.getAttribute('data-edge-index');
+    return t.closest('.ed-wave-layer') ? 'layer' : 'other';
+  }, [x, y]);
+}
+/** Hover the anchor of (lane, cell): a transition shows its dot there, and a press hits it. */
+async function hoverDot(page, lane, cell) {
+  const a = await anchorPoint(page, lane, cell);
+  await page.mouse.move(a.x, a.y, { steps: 3 }); await wait(150);
+  assert.strictEqual(await hitAt(page, a.x, a.y), 'dot:' + lane + ',' + cell,
+    'hovering the transition at ' + lane + ',' + cell + ' brings up its dot and a press there hits it');
+  return a;
+}
+/** Press the dot at (lane, cell) and drag to client point `to`, releasing there. */
+async function dragFromDot(page, lane, cell, to) {
+  await hoverDot(page, lane, cell);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 }); await wait(120);
+  const mid = await page.evaluate(() => ({ dots: document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length,
+    pending: !!document.querySelector('.ed-wave-overlay .ed-wave-pending') }));
+  await page.mouse.up(); await wait(300);
+  return mid;
+}
+/** The inline edge-label / note field, as plain values. */
+function edgeField(page) {
+  return page.evaluate(() => {
+    const f = document.querySelector('.ed-wave-overlay .ed-wave-edge-input');
+    return f ? { kind: f.getAttribute('data-kind'), value: f.value, focused: document.activeElement === f } : null;
+  });
+}
+/** The floating edge / note toolbar, as plain values. */
+function edgeBar(page) {
+  return page.evaluate(() => {
+    const bar = document.querySelector('.ed-wave-overlay .ed-wave-edge-bar');
+    if (!bar || bar.getClientRects().length === 0) return null;
+    const r = bar.getBoundingClientRect();
+    return { keys: [...bar.querySelectorAll(':scope > [data-focus-key], :scope > .ed-wave-edge-group > [data-focus-key]')]
+      .map((b) => b.getAttribute('data-focus-key')),
+    pressed: [...bar.querySelectorAll('[aria-pressed="true"]')].map((b) => b.getAttribute('data-focus-key')),
+    left: r.left, top: r.top, bottom: r.bottom };
+  });
+}
+/** The centre of the engine's label box for edge `a~>b` (the g right after its path). */
+function engineLabelBox(page, id) {
+  return page.evaluate((id) => {
+    const path = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] path[id="' + id + '"]');
+    const g = path && path.nextElementSibling;
+    const rect = g && g.querySelector('rect');
+    if (!rect) return null;
+    const r = rect.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, right: r.right, top: r.top, bottom: r.bottom };
+  }, id);
+}
+/** Click the label of edge `id` and assert that selects edge `index`. */
+async function selectEdgeByLabel(page, id, index) {
+  const box = await engineLabelBox(page, id);
+  assert.ok(box !== null, 'guard: the engine drew the label of ' + id);
+  await page.mouse.move(box.x, box.y, { steps: 2 }); await wait(100);
+  assert.strictEqual(await hitAt(page, box.x, box.y), 'edge:' + index, 'a press on the label hits the edge');
+  await page.mouse.click(box.x, box.y); await wait(250);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-selected-edge'), String(index), 'the press selects it');
+  return box;
+}
+check('wave edges: drag from a dot creates a curve and opens the label', DESKTOP, async (page) => {
+  await openWave(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length), 0,
+    'guard: no dot before the pointer is near a transition');
+  const to = await anchorPoint(page, 2, 4);
+  const mid = await dragFromDot(page, 1, 2, to);
+  assert.ok(mid.dots > 3, 'while dragging every transition shows its dot ' + JSON.stringify(mid));
+  assert.strictEqual(mid.pending, true, 'and a line follows the drag');
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'one new curve with an arrow, default ~>');
+  assert.strictEqual(await nodeOf(page, 'a'), 'a.A', 'the start anchor on lane a cell 2');
+  assert.strictEqual(await nodeOf(page, 'b'), '....B', 'the end anchor on lane b cell 4');
+  const f = await edgeField(page);
+  assert.deepStrictEqual(f, { kind: 'label', value: '', focused: true }, 'the label field opens with the keyboard in it');
+  await page.keyboard.type('setup'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B setup'], 'Enter writes the label');
+  assert.strictEqual(await edgeField(page), null, 'the field closes');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: Esc in the new label removes the edge, Ctrl+Y brings it back', DESKTOP, async (page) => {
+  await openWave(page);
+  await dragFromDot(page, 1, 2, await anchorPoint(page, 2, 4));
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'guard: the edge is in the document');
+  assert.ok((await edgeField(page)) !== null, 'guard: its label field is open');
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], 'Esc takes the new edge back off');
+  assert.strictEqual(await nodeOf(page, 'a'), 'a', 'and its anchors; the old lowercase one stays');
+  assert.strictEqual(await edgeField(page), null, 'the field is gone');
+  assert.strictEqual(!!(await page.$('.ed-wave-overlay')), true, 'the editor stays open');
+  await page.keyboard.press('Control+y'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'Ctrl+Y brings the edge back');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: drop off any dot lands on that cycle start', DESKTOP, async (page) => {
+  await openWave(page);
+  // Lane b cycle 2 is a continuation (01..0.): no dot there.
+  const c = await page.evaluate(() => window.__edWaveCellPoint(2, 2));
+  await hoverDot(page, 1, 2);
+  await page.mouse.down();
+  await page.mouse.move(c.x, c.y, { steps: 8 }); await wait(120);
+  assert.strictEqual(await hitAt(page, c.x, c.y), 'layer', 'guard: the drop point is off every dot');
+  await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B']);
+  assert.strictEqual(await nodeOf(page, 'b'), '..B', 'the end lands on the start of the cycle under the pointer');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: a click on a dot selects that cycle and draws nothing', DESKTOP, async (page) => {
+  await openWave(page);
+  const a = await hoverDot(page, 2, 4);
+  await page.mouse.down(); await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], 'no edge');
+  assert.strictEqual(await edgeField(page), null, 'no field');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-cursor'), '2,4', 'the dot\'s cycle is selected');
+  assert.strictEqual((await laneNow(page, 'b')).wave, '01..0.', 'and nothing was painted');
+  // Dropped back on its own start: the same, a cancel.
+  await page.mouse.down(); await page.mouse.move(a.x + 3, a.y + 2, { steps: 3 }); await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], 'a drop back on the start draws nothing');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: press inside a cell still paints', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-x"]').click(); await wait(100);
+  const p = await page.evaluate(() => window.__edWaveCellPoint(2, 2));
+  const q = await page.evaluate(() => window.__edWaveCellPoint(2, 3));
+  await page.mouse.move(p.x, p.y, { steps: 3 }); await wait(120);
+  assert.strictEqual(await hitAt(page, p.x, p.y), 'layer', 'guard: the press is outside every dot\'s ring');
+  await page.mouse.down(); await page.mouse.move(q.x, q.y, { steps: 5 }); await page.mouse.up(); await wait(300);
+  assert.strictEqual((await laneNow(page, 'b')).wave, '01x.0.', 'the drag paints cycles 2-3');
+  assert.deepStrictEqual(await edgesNow(page), [], 'and draws no edge');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: toolbar line x head buttons map to the nine shapes', DESKTOP, async (page) => {
+  await openWave(page);
+  // Selected by its LINE (the 6a regression): a point a quarter of the way along the engine's path.
+  const p = await page.evaluate(() => {
+    const path = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] path[id="gmark_a_b"]');
+    const q = path.getPointAtLength(path.getTotalLength() * 0.25);
+    const m = path.getScreenCTM();
+    return { x: m.a * q.x + m.c * q.y + m.e, y: m.b * q.x + m.d * q.y + m.f };
+  });
+  await page.mouse.move(p.x, p.y, { steps: 2 }); await wait(100);
+  assert.strictEqual(await hitAt(page, p.x, p.y), 'edge:0', 'guard: a press on the line hits the edge');
+  await page.mouse.click(p.x, p.y); await wait(250);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-selected-edge'), '0', 'a press on the line selects the edge');
+  const bar = await edgeBar(page);
+  assert.ok(bar !== null, 'the edge toolbar floats up');
+  assert.deepStrictEqual(bar.keys, ['ed-wave-edge-line-straight', 'ed-wave-edge-line-curve', 'ed-wave-edge-line-elbow',
+    'ed-wave-edge-head-none', 'ed-wave-edge-head-end', 'ed-wave-edge-head-both',
+    'ed-wave-edge-more', 'ed-wave-edge-label', 'ed-wave-edge-delete'], 'line x head, more, label, delete (spec 4.5)');
+  assert.deepStrictEqual(bar.pressed, ['ed-wave-edge-line-curve', 'ed-wave-edge-head-end'], '~> reads as curve + one arrow');
+  const label = await engineLabelBox(page, 'gmark_a_b');
+  assert.ok(bar.left >= label.right - 1, 'the toolbar sits right of the label ' + JSON.stringify({ bar, label }));
+  const steps = [['line-straight', 'head-none', '-'], [null, 'head-end', '->'], [null, 'head-both', '<->'],
+    ['line-curve', null, '<~>'], [null, 'head-none', '~'], [null, 'head-end', '~>'],
+    ['line-elbow', null, '-|>'], [null, 'head-none', '-|'], [null, 'head-both', '<-|>']];
+  const seen = new Set();
+  for (const [line, head, shape] of steps) {
+    if (line) { await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-edge-' + line + '"]').click(); await wait(200); }
+    if (head) { await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-edge-' + head + '"]').click(); await wait(200); }
+    assert.deepStrictEqual(await edgesNow(page), ['a' + shape + 'b lbl'], (line || '') + ' ' + (head || '') + ' gives ' + shape);
+    seen.add(shape);
+  }
+  assert.strictEqual(seen.size, 9, 'all nine line x head shapes');
+  await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-edge-more"]').click(); await wait(150);
+  const more = await page.evaluate(() => [...document.querySelectorAll('.ed-wave-overlay .ed-wave-edge-more-list [data-shape]')]
+    .map((b) => b.getAttribute('data-shape')));
+  assert.deepStrictEqual(more.slice().sort(), ['+', '-|-', '-|->', '-~', '-~>', '<-|->', '<-~>', '|-', '|->', '~-', '~->'].sort(),
+    '更多 lists the other eleven shapes');
+  await page.locator('.ed-wave-edge-more-list [data-shape="-|-"]').click(); await wait(250);
+  assert.deepStrictEqual(await edgesNow(page), ['a-|-b lbl'], 'a shape from 更多');
+}, { md: WAVE_EDGE_SEL_MD });
+check('wave edges: drag an end moves it', DESKTOP, async (page) => {
+  await openWave(page);
+  await selectEdgeByLabel(page, 'gmark_a_b', 0);
+  const end = await page.evaluate(() => {
+    const c = document.querySelector('.ed-wave-overlay .ed-wave-edge-end[data-end="to"]');
+    if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  assert.ok(end !== null, 'the selected edge shows its end handles');
+  await page.mouse.move(end.x, end.y, { steps: 2 }); await wait(100);
+  assert.strictEqual(await hitAt(page, end.x, end.y), 'end:to', 'guard: a press there takes the end');
+  const to = await anchorPoint(page, 2, 1);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 }); await wait(120);
+  const dots = await page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length);
+  assert.ok(dots > 3, 'dragging an end shows every dot: ' + dots);
+  assert.deepStrictEqual(await edgesNow(page), ['a~>b lbl'], 'nothing is written mid-drag');
+  await page.mouse.up(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['a~>b lbl'], 'the entry keeps its letters');
+  assert.strictEqual(await nodeOf(page, 'b'), '.b', 'the anchor moved to lane b cycle 1');
+  assert.strictEqual(await nodeOf(page, 'a'), '..a', 'the other end stayed');
+}, { md: WAVE_EDGE_SEL_MD });
+check('wave edges: delete', DESKTOP, async (page) => {
+  await openWave(page);
+  await selectEdgeByLabel(page, 'gmark_a_b', 0);
+  await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-edge-delete"]').click(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], '刪除 removes the edge');
+  assert.strictEqual(await nodeOf(page, 'b'), undefined, 'and the anchors nothing else uses');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-selected-edge'), '', 'nothing is selected');
+  assert.strictEqual(await edgeBar(page), null, 'the toolbar goes');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['a~>b lbl'], 'guard: Ctrl+Z brings it back');
+  await selectEdgeByLabel(page, 'gmark_a_b', 0);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute('data-focus-key')), 'canvas',
+    'guard: the keyboard is on the canvas');
+  const wave = (await laneNow(page, 'a')).wave;
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], 'Del deletes the selected edge');
+  assert.strictEqual((await laneNow(page, 'a')).wave, wave, 'and no cycles');
+}, { md: WAVE_EDGE_SEL_MD });
+check('wave edges: A then arrow then Enter creates an edge from the keyboard', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowRight');
+  await wait(100);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-cursor'), '1,2', 'guard: the cursor is on lane a cycle 2');
+  await page.keyboard.press('A'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', 'A starts an edge from the cursor');
+  assert.ok(await page.evaluate(() => document.querySelectorAll('.ed-wave-overlay .ed-wave-dot').length) > 3, 'with every dot shown');
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowRight');
+  await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edge-pending'), '1,2', 'the start is marked while the arrows pick the end');
+  assert.strictEqual(!!(await page.$('.ed-wave-overlay .ed-wave-pending')), true, 'a line shows where it will go');
+  assert.deepStrictEqual(await edgesNow(page), [], 'nothing is written before Enter');
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'Enter creates it');
+  assert.strictEqual(await nodeOf(page, 'b'), '....B');
+  assert.deepStrictEqual(await edgeField(page), { kind: 'label', value: '', focused: true }, 'and opens its label');
+  await page.keyboard.press('Enter'); await wait(250);
+  assert.strictEqual(await edgeField(page), null, 'an empty Enter closes the field');
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'the edge stays, unlabelled');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'idle');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: T adds a point note', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowRight');
+  await wait(100);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-cursor'), '2,2', 'guard: lane b cycle 2');
+  await page.keyboard.press('T'); await wait(150);
+  assert.deepStrictEqual(await edgeField(page), { kind: 'note', value: '', focused: true }, 'T opens the note field there');
+  await page.keyboard.type('量測'); await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A 量測'], 'a point note: <letter> <text>');
+  assert.strictEqual(await nodeOf(page, 'b'), '..A', 'its anchor on lane b cycle 2');
+  // Its toolbar: 改文字 / 拉成關聯線 / 刪除.
+  await selectEdgeByLabel(page, 'gmark_A_A', 0);
+  const bar = await edgeBar(page);
+  assert.ok(bar !== null, 'a selected note has its toolbar');
+  assert.deepStrictEqual(bar.keys, ['ed-wave-note-text', 'ed-wave-note-to-edge', 'ed-wave-note-delete']);
+  await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-note-to-edge"]').click(); await wait(200);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', '拉成關聯線 starts an edge from the note');
+  for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B 量測'], 'the note becomes an edge that keeps its text');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A 量測'], 'guard: Ctrl+Z gives the note back');
+  await selectEdgeByLabel(page, 'gmark_A_A', 0);
+  await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-note-delete"]').click(); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], '刪除 removes the note');
+  assert.strictEqual(await nodeOf(page, 'b'), undefined, 'and its anchor');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: new anchors are uppercase, existing lowercase untouched', DESKTOP, async (page) => {
+  await openWave(page);
+  await dragFromDot(page, 1, 0, await anchorPoint(page, 2, 1));
+  assert.deepStrictEqual(await edgesNow(page), ['a~>A'], 'the existing lowercase a is reused, the new anchor is A');
+  assert.strictEqual(await nodeOf(page, 'a'), 'a', 'lane a keeps its node string byte for byte');
+  assert.strictEqual(await nodeOf(page, 'b'), '.A');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: an unlabelled self-loop is selectable at its anchor', DESKTOP, async (page) => {
+  // A zero-length path has no hit area at all; a ring at its anchor stands in for it.
+  await openWave(page);
+  const a = await anchorPoint(page, 1, 2);
+  await page.mouse.move(a.x, a.y, { steps: 3 }); await wait(150);
+  assert.strictEqual(await hitAt(page, a.x, a.y), 'edge:0', 'a press on the anchor hits the self-loop');
+  await page.mouse.click(a.x, a.y); await wait(250);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-selected-edge'), '0', 'it selects it');
+  assert.strictEqual(await hitAt(page, a.x, a.y), 'end:to', 'selected, its end handle takes the press');
+  assert.ok((await edgeBar(page)) !== null, 'with its toolbar');
+  await page.keyboard.press('Delete'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), [], 'and Del deletes it');
+}, { md: waveDoc({ signal: [{ name: 'clk', wave: 'p.....' }, { name: 'a', wave: '0.1.0.', node: '..a' }], edge: ['a~>a'] }) });
+check('wave edges: IME composition does not commit the edge label', DESKTOP, async (page) => {
+  await openWave(page);
+  await dragFromDot(page, 1, 2, await anchorPoint(page, 2, 4));
+  assert.deepStrictEqual(await edgeField(page), { kind: 'label', value: '', focused: true }, 'guard: the label field is open');
+  const during = await page.evaluate(() => {
+    const input = document.querySelector('.ed-wave-edge-input');
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+    input.value = '組字';
+    for (const key of ['Enter', 'Escape', 'Tab']) {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, isComposing: true }));
+    }
+    return { field: document.querySelector('.ed-wave-edge-input') === input, focused: document.activeElement === input };
+  });
+  assert.deepStrictEqual(during, { field: true, focused: true }, 'Enter / Esc / Tab while composing leave the field alone');
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'the composing Esc did not take the edge back, Enter wrote nothing');
+  await page.evaluate(() => {
+    document.querySelector('.ed-wave-edge-input').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '組字' }));
+  });
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B 組字'], 'the Enter after composition commits');
+}, { md: WAVE_EDGES_MD });
 
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
