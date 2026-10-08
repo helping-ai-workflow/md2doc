@@ -380,11 +380,16 @@ console.log('Task 9 — inference guardrails OK');
         + 'maps entries to files by name, and an entry it cannot parse would drop out of '
         + 'both directions of the comparison below and take its file with it');
     const inScript = entries.map((e) => e.replace(/^node /, '')).sort();
-    // Suites that deliberately do not run under `npm test`: reader-click needs
-    // Playwright browsers, so it runs through `npm run test:browser` and
+    // Suites that deliberately do not run under `npm test`: reader-click,
+    // editor-click and wave-canvas need Playwright browsers, which CI's `test`
+    // job does not install, so they run through `npm run test:browser` and
     // .github/workflows/browser.yml. Each one must still be run by its named
     // script, so exempting a file never lets it go unrun.
-    const OUT_OF_BAND = { 'test/reader-click.test.js': 'test:browser', 'test/editor-click.test.js': 'test:browser' };
+    const OUT_OF_BAND = {
+        'test/reader-click.test.js': 'test:browser',
+        'test/editor-click.test.js': 'test:browser',
+        'test/wave-canvas.test.js': 'test:browser',
+    };
     Object.keys(OUT_OF_BAND).forEach((file) => {
         const script = pkg.scripts[OUT_OF_BAND[file]];
         const parts = String(script || '').split('&&').map((x) => x.trim());
