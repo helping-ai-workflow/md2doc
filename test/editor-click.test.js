@@ -541,6 +541,55 @@ check('wave draw: drag paints a run', DESKTOP, async (page) => {
   assert.ok(bar.bottom <= run.top + 0.5 || bar.top >= run.bottom - 0.5, 'the toolbar does not cover the run ' + JSON.stringify({ bar, run }));
   for (const c of [1, 2, 3]) await cellPress(page, 1, c);
 }, { md: WAVE_DRAW_MD });
+// Final review I1 (spec 3.2「拖曳塗色時每跨進一格重畫一次」): while the button is down the ENGINE
+// canvas already shows the painted run — drawn from a document that is never committed — and the
+// release writes it once. Esc mid-drag puts the drawing back and writes nothing.
+check('wave draw: a paint drag redraws the engine canvas live and writes once on release', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  /** Lane a as the engine drew it, the source as written back, and the gesture count. */
+  const state = () => page.evaluate(() => {
+    const svg = document.querySelector('.ed-wave-stage svg[id^="svgcontent"]');
+    const lane = svg && svg.querySelector('g[id^="wavelane_draw_1_"]');
+    return { lane: lane ? lane.innerHTML : null, src: window.__edWaveSourceProbe(),
+      gestures: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-gestures') };
+  });
+  const before = await state();
+  assert.ok(before.lane !== null && before.lane.length > 0, 'guard: lane a is drawn by the engine');
+  const a = await cellPress(page, 1, 1);
+  const b = await cellPress(page, 1, 3);
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 6 }); await wait(200);
+  const mid = await state();
+  assert.notStrictEqual(mid.lane, before.lane, 'mid-drag, the engine has already redrawn lane a');
+  assert.strictEqual(mid.src, before.src, 'and nothing is written yet');
+  assert.strictEqual(mid.gestures, before.gestures, 'nor counted as a gesture');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-canvas')), 'ok');
+  // The pointer is still read against the drawing on screen: the run's end cell still takes it.
+  await cellPress(page, 1, 3);
+  await page.mouse.up(); await wait(300);
+  const after = await state();
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '01..0', 'the release writes the run');
+  assert.strictEqual(after.lane, mid.lane, 'what the drag showed is exactly what was committed');
+  assert.strictEqual(Number(after.gestures), Number(before.gestures) + 1, 'one gesture, one write-back');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'a')).wave, '0....', 'one undo takes the whole run back');
+  assert.strictEqual((await state()).lane, before.lane, 'and the drawing with it');
+  // Esc mid-drag: the drawing goes back and the release writes nothing.
+  const base = await state();
+  await page.mouse.move(a.x, a.y); await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 6 }); await wait(200);
+  assert.notStrictEqual((await state()).lane, base.lane, 'guard: the second drag is drawn live too');
+  await page.keyboard.press('Escape'); await wait(200);
+  const cancelled = await state();
+  assert.strictEqual(cancelled.lane, base.lane, 'Esc redraws the committed document');
+  await page.mouse.up(); await wait(300);
+  const released = await state();
+  assert.strictEqual(released.src, base.src, 'the release after Esc writes nothing');
+  assert.strictEqual(released.gestures, base.gestures, 'and counts no gesture');
+  assert.strictEqual(released.lane, base.lane, 'and the drawing stays as it was');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-wave-overlay')), true, 'Esc took the drag, not the editor');
+}, { md: WAVE_DRAW_MD });
 check('wave draw: ruler plus inserts a cycle at that boundary', DESKTOP, async (page) => {
   await openWave(page);
   // The boundary between cycles 1 and 2, at the height of the ruler numbers.
