@@ -198,7 +198,7 @@ check('wave canvas: a click paints the cycle under the pointer', DESKTOP, async 
   assert.strictEqual(m[1][0], '0', 'cycle 0 is untouched: ' + m[1]);
 }, { md: '# W\n\n\x60\x60\x60wavedrom\n{"signal":[{"name":"clk","wave":"p...."},{"name":"a","wave":"0...."}]}\n\x60\x60\x60\n\nTail.\n' });
 check('wave canvas: SVG export is the engine drawing at the engine size', DESKTOP, async (page) => {
-  // Ruling R3: export reads the canvas's engine svg until Task 10. The
+  // Task 10: export comes from a clean offscreen render, not the canvas. The
   // canvas is drawn at 1.5x; the exported file must be the engine's own
   // size (width/height = viewBox) and carry the skin it draws with.
   await openWave(page);
@@ -1566,6 +1566,327 @@ check('wave edges: IME composition does not commit the edge label', DESKTOP, asy
   await page.keyboard.press('Enter'); await wait(300);
   assert.deepStrictEqual(await edgesNow(page), ['A~>B 組字'], 'the Enter after composition commits');
 }, { md: WAVE_EDGES_MD });
+
+// ── wave settings and export (Task 10, spec 4.6 W6) ──
+const WAVE_SETTINGS_MD = waveDoc({ signal: [{ name: 'clk', wave: 'p.....' }, { name: 'a', wave: '01.0..' }] });
+// One label wider than its segment: `3.` is two cycles (80 engine units), FFFFFFFFFFFF is ~108 wide.
+const WAVE_OVERFLOW_MD = waveDoc({ signal: [{ name: 'clk', wave: 'p......' },
+  { name: 'bus', wave: 'x.3.x..', data: ['FFFFFFFFFFFF'] }] });
+const SET_ADVANCED_KEYS = ['ed-wave-set-head-tick', 'ed-wave-set-head-tock', 'ed-wave-set-head-every',
+  'ed-wave-set-foot-text', 'ed-wave-set-foot-tick', 'ed-wave-set-foot-tock', 'ed-wave-set-foot-every'];
+const focusKey = (page) => page.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-focus-key'));
+/** The settings popover as plain values: which fields are on screen, their values, the pressed scale. */
+function settingsPop(page) {
+  return page.evaluate(() => {
+    const p = document.querySelector('.ed-wave-overlay .ed-wave-settings-pop');
+    if (!p) return null;
+    const shown = (el) => !!el && el.getClientRects().length > 0;
+    const fields = {};
+    for (const el of p.querySelectorAll('input, textarea')) {
+      fields[el.getAttribute('data-focus-key')] = { value: el.value, shown: shown(el) };
+    }
+    const pressed = [...p.querySelectorAll('[data-focus-key^="ed-wave-set-scale-"]')]
+      .filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.getAttribute('data-focus-key'));
+    const fix = p.querySelector('[data-focus-key="ed-wave-set-fix"]');
+    const card = p.querySelector('.ed-wave-set-overflow');
+    const adv = p.querySelector('[data-focus-key="ed-wave-set-advanced"]');
+    return { fields, pressed, fix: shown(fix) ? fix.textContent : null,
+      card: shown(card) ? card.textContent : null, advanced: adv ? adv.getAttribute('aria-expanded') : null };
+  });
+}
+async function openSettings(page) {
+  await page.locator('[data-focus-key="ed-wave-settings"]').click(); await wait(200);
+  const s = await settingsPop(page);
+  assert.ok(s !== null, 'guard: ⚙ opens the settings popover');
+  return s;
+}
+/** Type `value` into the settings field `key` and press Enter. */
+async function setField(page, key, value) {
+  const f = page.locator('.ed-wave-settings-pop [data-focus-key="' + key + '"]');
+  await f.fill(value); await f.press('Enter'); await wait(250);
+}
+check('wave settings: every field writes its key', DESKTOP, async (page) => {
+  await openWave(page);
+  const s0 = await openSettings(page);
+  assert.strictEqual(await focusKey(page), 'ed-wave-set-head', 'the keyboard lands on 標題');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-focus-key="ed-wave-settings"]').getAttribute('aria-expanded')), 'true');
+  assert.strictEqual(s0.fields['ed-wave-set-head'].shown, true, '標題 is on the top level');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-focus-key="ed-wave-set-head"]').tagName), 'TEXTAREA', '標題 is a multi-line box');
+  assert.deepStrictEqual(s0.pressed, ['ed-wave-set-scale-1'], 'no hscale reads as 1×');
+  assert.strictEqual(s0.advanced, 'false', '進階 starts folded');
+  for (const k of SET_ADVANCED_KEYS) assert.strictEqual(s0.fields[k].shown, false, k + ' is folded under 進階');
+  assert.strictEqual(s0.card, null, 'no overflow card when every label fits');
+  // Tab walks the top level in order.
+  const walk = [];
+  for (let i = 0; i < 5; i++) { await page.keyboard.press('Tab'); await wait(30); walk.push(await focusKey(page)); }
+  assert.deepStrictEqual(walk, ['ed-wave-set-scale-1', 'ed-wave-set-scale-2', 'ed-wave-set-scale-3', 'ed-wave-set-scale-4',
+    'ed-wave-set-advanced'], 'Tab order of the top level');
+
+  await setField(page, 'ed-wave-set-head', 'Title');
+  assert.deepStrictEqual((await docNow(page)).head, { text: 'Title' }, '標題 writes head.text');
+  await page.locator('[data-focus-key="ed-wave-set-scale-3"]').click(); await wait(250);
+  assert.deepStrictEqual((await docNow(page)).config, { hscale: 3 }, '3× writes config.hscale = 3');
+  assert.deepStrictEqual((await settingsPop(page)).pressed, ['ed-wave-set-scale-3'], '3× is the pressed one');
+  await page.locator('[data-focus-key="ed-wave-set-scale-1"]').click(); await wait(250);
+  assert.strictEqual((await docNow(page)).config, undefined, '1× deletes hscale (and the emptied config)');
+
+  await page.locator('[data-focus-key="ed-wave-set-advanced"]').click(); await wait(150);
+  const s1 = await settingsPop(page);
+  assert.strictEqual(s1.advanced, 'true', '進階 unfolds');
+  for (const k of SET_ADVANCED_KEYS) assert.strictEqual(s1.fields[k].shown, true, k + ' is on screen under 進階');
+  await page.locator('[data-focus-key="ed-wave-set-advanced"]').focus();
+  const walk2 = [];
+  for (let i = 0; i < SET_ADVANCED_KEYS.length; i++) { await page.keyboard.press('Tab'); await wait(30); walk2.push(await focusKey(page)); }
+  assert.deepStrictEqual(walk2, SET_ADVANCED_KEYS, 'Tab order under 進階');
+
+  const values = [['ed-wave-set-head-tick', '0'], ['ed-wave-set-head-tock', '1'], ['ed-wave-set-head-every', '2'],
+    ['ed-wave-set-foot-text', 'Foot'], ['ed-wave-set-foot-tick', '5'], ['ed-wave-set-foot-tock', 'a b c'],
+    ['ed-wave-set-foot-every', '3']];
+  for (const [k, v] of values) await setField(page, k, v);
+  await page.locator('[data-focus-key="ed-wave-set-scale-2"]').click(); await wait(250);
+  const doc = await docNow(page);
+  assert.deepStrictEqual(doc, {
+    signal: [{ name: 'clk', wave: 'p.....' }, { name: 'a', wave: '01.0..' }],
+    head: { text: 'Title', tick: 0, tock: 1, every: 2 },
+    foot: { text: 'Foot', tick: 5, tock: 'a b c', every: 3 },
+    config: { hscale: 2 },
+  }, 'every field wrote its own key; a numeral is a number (the engine adds the hbounds offset to tick/tock)');
+  assert.strictEqual(await patchState(page), 'ok', 'every settings write is written back');
+
+  // Clearing a field deletes the key, never writes '' (the engine reads '' as a 0-based ruler).
+  await setField(page, 'ed-wave-set-foot-every', '');
+  const foot = (await docNow(page)).foot;
+  assert.deepStrictEqual(foot, { text: 'Foot', tick: 5, tock: 'a b c' }, 'a cleared field deletes its key');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(foot, 'every'), false, 'no empty string left behind');
+
+  // IME: the Enter that picks a candidate is not a commit.
+  const during = await page.evaluate(() => {
+    const t = document.querySelector('[data-focus-key="ed-wave-set-head"]');
+    t.focus();
+    t.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }));
+    t.value = '組字';
+    for (const key of ['Enter', 'Escape', 'Tab']) {
+      t.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, isComposing: true }));
+    }
+    return { open: !!document.querySelector('.ed-wave-settings-pop'), focused: document.activeElement === t };
+  });
+  assert.deepStrictEqual(during, { open: true, focused: true }, 'Enter / Esc / Tab while composing leave the popover alone');
+  assert.strictEqual((await docNow(page)).head.text, 'Title', 'nothing written mid-composition');
+  await page.evaluate(() => {
+    document.querySelector('[data-focus-key="ed-wave-set-head"]').dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '組字' }));
+  });
+  await page.keyboard.press('Enter'); await wait(250);
+  assert.strictEqual((await docNow(page)).head.text, '組字', 'the Enter after composition commits');
+
+  // What is typed counts even when the popover closes by a press elsewhere.
+  await page.locator('[data-focus-key="ed-wave-set-foot-text"]').fill('Foot 2'); await wait(50);
+  const title = await page.locator('.ed-wave-title').boundingBox();
+  await page.mouse.click(title.x + 5, title.y + title.height / 2); await wait(250);
+  assert.strictEqual(await settingsPop(page), null, 'a press outside closes the popover');
+  assert.strictEqual((await docNow(page)).foot.text, 'Foot 2', 'the typed value was written when it closed');
+
+  // Esc closes the popover only, and the keyboard goes back to ⚙.
+  await openSettings(page);
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await settingsPop(page), null, 'Esc closes the popover');
+  assert.strictEqual(!!(await page.$('.ed-wave-overlay')), true, 'and not the editor');
+  assert.strictEqual(await focusKey(page), 'ed-wave-settings', 'the keyboard is back on ⚙');
+  const s2 = await openSettings(page);
+  assert.strictEqual(s2.fields['ed-wave-set-head'].value, '組字', 'the popover shows the document');
+  assert.strictEqual(s2.fields['ed-wave-set-foot-tick'].value, '5', 'a number reads back as its numeral');
+}, { md: WAVE_SETTINGS_MD });
+/** The overflow marks on the canvas and the chip beside them, as plain values. */
+function overflowMarks(page) {
+  return page.evaluate(() => {
+    const ov = document.querySelector('.ed-wave-overlay');
+    const chip = ov.querySelector('.ed-wave-overflow-chip');
+    let c = null;
+    if (chip && chip.getClientRects().length > 0) {
+      const r = chip.getBoundingClientRect();
+      const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+      const top = document.elementFromPoint(x, y);
+      c = { text: chip.textContent, x, y, onTop: top === chip || (!!top && chip.contains(top)) };
+    }
+    return { marks: ov.querySelectorAll('.ed-wave-overflow').length, chip: c };
+  });
+}
+check('wave settings: overflow chip and one-click fix', DESKTOP, async (page) => {
+  await openWave(page);
+  const m0 = await overflowMarks(page);
+  assert.strictEqual(m0.marks, 1, 'the one label wider than its segment is marked');
+  assert.ok(m0.chip !== null && m0.chip.text.includes('改每拍 2×'), 'a chip beside it offers 2× ' + JSON.stringify(m0));
+  assert.strictEqual(m0.chip.onTop, true, 'the chip takes a press');
+  const s = await openSettings(page);
+  assert.ok(s.card !== null && s.card.includes('1 個資料標籤比它那一段寬'), 'the popover says how many labels overflow ' + JSON.stringify(s));
+  assert.strictEqual(s.fix, '改成每拍 2×', 'and offers the smallest scale that fits');
+  const walk = [];
+  await page.locator('[data-focus-key="ed-wave-set-scale-4"]').focus();
+  for (let i = 0; i < 2; i++) { await page.keyboard.press('Tab'); await wait(30); walk.push(await focusKey(page)); }
+  assert.deepStrictEqual(walk, ['ed-wave-set-fix', 'ed-wave-set-advanced'], 'the fix sits between 4× and 進階 in Tab order');
+  await page.locator('[data-focus-key="ed-wave-set-fix"]').click(); await wait(300);
+  assert.deepStrictEqual((await docNow(page)).config, { hscale: 2 }, 'the fix writes config.hscale = 2');
+  const m1 = await overflowMarks(page);
+  assert.deepStrictEqual(m1, { marks: 0, chip: null }, 'after the re-render nothing is marked and the chip is gone');
+  const s1 = await settingsPop(page);
+  assert.ok(s1 !== null, 'the popover stays open');
+  assert.strictEqual(s1.card, null, 'its overflow card is gone');
+  assert.deepStrictEqual(s1.pressed, ['ed-wave-set-scale-2'], '2× is pressed now');
+  assert.strictEqual(await focusKey(page), 'ed-wave-set-scale-2', 'the keyboard lands on the scale the fix chose');
+  // The chip on the canvas does the same.
+  await page.keyboard.press('Escape'); await wait(150);
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.strictEqual((await docNow(page)).config, undefined, 'guard: undone');
+  const m2 = await overflowMarks(page);
+  assert.ok(m2.chip !== null && m2.chip.onTop, 'guard: the chip is back');
+  await page.mouse.click(m2.chip.x, m2.chip.y); await wait(300);
+  assert.deepStrictEqual((await docNow(page)).config, { hscale: 2 }, 'the chip writes config.hscale = 2');
+  assert.deepStrictEqual(await overflowMarks(page), { marks: 0, chip: null }, 'and the marks go');
+}, { md: WAVE_OVERFLOW_MD });
+check('wave settings: a scale above 4x is offered and says the drawing will shrink', DESKTOP, async (page) => {
+  await openWave(page);
+  const s = await openSettings(page);
+  assert.ok(s.card !== null && s.card.includes('需要每拍 6×') && s.card.includes('縮小'), 'K > 4 says so ' + JSON.stringify(s));
+  assert.strictEqual(s.fix, '改成每拍 6×', 'the button is still there');
+  await page.locator('[data-focus-key="ed-wave-set-fix"]').click(); await wait(300);
+  assert.deepStrictEqual((await docNow(page)).config, { hscale: 6 }, 'and it writes 6');
+  assert.deepStrictEqual((await settingsPop(page)).pressed, [], 'no 1×–4× button is pressed at 6×');
+}, { md: waveDoc({ signal: [{ name: 'bus', wave: '3x..', data: ['F'.repeat(24)] }] }) });
+
+/** Pick `key` from the 匯出 menu; resolves with the download when one is expected. */
+async function exportPick(page, key, download) {
+  await page.locator('[data-focus-key="ed-wave-export-menu"]').click(); await wait(150);
+  if (!download) { await page.locator('[data-focus-key="' + key + '"]').click(); await wait(400); return null; }
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-focus-key="' + key + '"]').click()]);
+  return dl;
+}
+function svgSize(text) {
+  const root = /<svg\b[^>]*>/.exec(text)[0];
+  const attr = (k) => { const m = new RegExp('\\s' + k + '="([^"]*)"').exec(root); return m ? Number(m[1]) : null; };
+  return { w: attr('width'), h: attr('height') };
+}
+/** IHDR width/height of a PNG: bytes 16–23, big-endian. */
+function pngSize(buf) {
+  assert.strictEqual(buf.slice(1, 4).toString('latin1'), 'PNG', 'the file is a PNG');
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+}
+/** The canvas's engine svg at the engine's own size (its viewBox). */
+async function engineViewBox(page) {
+  const vb = await page.evaluate(() => {
+    const svg = document.querySelector('.ed-wave-stage svg[id^="svgcontent"]');
+    return svg ? svg.getAttribute('viewBox') : null;
+  });
+  const n = vb.split(/[\s,]+/).map(Number);
+  return { w: n[2], h: n[3] };
+}
+/** Share of a PNG's pixels that are dark (luminance < 0.25), decoded by the page. */
+function darkShare(page, buf) {
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; });
+    const cv = document.createElement('canvas'); cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const cx = cv.getContext('2d'); cx.drawImage(img, 0, 0);
+    const px = cx.getImageData(0, 0, cv.width, cv.height).data;
+    let dark = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      const l = (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+      if (l < 0.25) dark++;
+    }
+    return dark / (px.length / 4);
+  }, buf.toString('base64'));
+}
+check('wave export: the menu lists the four exports and says they are light', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="ed-wave-export-menu"]').click(); await wait(150);
+  const m = await page.evaluate(() => {
+    const p = document.querySelector('.ed-wave-overlay .ed-wave-export-pop');
+    if (!p) return null;
+    return { keys: [...p.querySelectorAll('.ed-wave-menu-item')].map((b) => b.getAttribute('data-focus-key')),
+      labels: [...p.querySelectorAll('.ed-wave-menu-label')].map((b) => b.textContent),
+      note: (p.querySelector('.ed-wave-export-note') || { textContent: null }).textContent,
+      focus: document.activeElement.getAttribute('data-focus-key') };
+  });
+  assert.deepStrictEqual(m, { keys: ['ed-wave-export-copyimg', 'ed-wave-export-png', 'ed-wave-export-svg', 'ed-wave-export-json'],
+    labels: ['複製為圖片', '下載 PNG', '下載 SVG', '複製 WaveJSON'], note: '匯出一律是淺色、白底', focus: 'ed-wave-export-copyimg' });
+}, { md: WAVE_CANVAS_MD });
+check('wave export: dark mode exports a light svg', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  await openWave(page);
+  const dark = await page.evaluate(() => {
+    const t = document.querySelector('.ed-wave-stage svg[id^="svgcontent"] [style*="important"]');
+    return !!t;
+  });
+  assert.strictEqual(dark, true, 'guard: the canvas itself is recoloured');
+  const dl = await exportPick(page, 'ed-wave-export-svg', true);
+  const text = fs.readFileSync(await dl.path(), 'utf8');
+  assert.strictEqual(text.includes('!important'), false, 'no dark recolour in the exported svg');
+  assert.ok(/<style[\s>]/.test(text) && /<defs[\s>]/.test(text), 'it carries the skin\'s own style and defs');
+  assert.ok(text.includes('>A<') && text.includes(LONG_NAME), 'it is this diagram');
+  const png = fs.readFileSync(await (await exportPick(page, 'ed-wave-export-png', true)).path());
+  const share = await darkShare(page, png);
+  assert.ok(share > 0.02, 'the PNG is drawn dark-on-white like a light page (dark pixel share ' + share.toFixed(4) + ')');
+  assert.strictEqual(await page.evaluate(() => document.documentElement.getAttribute('data-md2doc-theme')), 'dark', 'guard: still dark');
+}, { md: WAVE_CANVAS_MD, ctx: { acceptDownloads: true } });
+check('wave export: png is 2x', DESKTOP, async (page) => {
+  await openWave(page);
+  const vb = await engineViewBox(page);
+  const svg = svgSize(fs.readFileSync(await (await exportPick(page, 'ed-wave-export-svg', true)).path(), 'utf8'));
+  assert.deepStrictEqual(svg, vb, 'the clean render is the engine size');
+  const dl = await exportPick(page, 'ed-wave-export-png', true);
+  assert.ok(/-wave-\d+\.png$/.test(dl.suggestedFilename()), 'png filename ' + dl.suggestedFilename());
+  const png = pngSize(fs.readFileSync(await dl.path()));
+  assert.deepStrictEqual(png, { w: svg.w * 2, h: svg.h * 2 }, 'decoded size is twice the engine svg');
+}, { md: WAVE_CANVAS_MD, ctx: { acceptDownloads: true } });
+check('wave export: copy image', DESKTOP, async (page) => {
+  const engine = page.context().browser().browserType().name();
+  // Chromium lets a test read the clipboard back; WebKit has no such permission.
+  if (engine === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openWave(page);
+  const vb = await engineViewBox(page);
+  await exportPick(page, 'ed-wave-export-copyimg', false);
+  // The write settles once the PNG is made and the browser has taken it (measured
+  // in Chromium: over a second). Settle on the status changing, then read it.
+  for (let i = 0; i < 50 && (await overlayAttr(page, 'data-wave-status')) === null; i++) await wait(100);
+  const notice = () => page.evaluate(() => {
+    const n = document.querySelector('.ed-conflict[data-level="notice"] .ed-msg-text');
+    return n ? n.textContent : null;
+  });
+  assert.strictEqual(await notice(), '已複製圖片（PNG，2 倍大小）',
+    'the copy says it worked (status: ' + await overlayAttr(page, 'data-wave-status') + ')');
+  if (engine === 'chromium') {
+    const got = await page.evaluate(async () => {
+      const items = await navigator.clipboard.read();
+      const item = items.find((i) => i.types.includes('image/png'));
+      if (!item) return null;
+      const bytes = new Uint8Array(await (await item.getType('image/png')).arrayBuffer());
+      return Array.from(bytes.slice(0, 24));
+    });
+    assert.ok(got !== null, 'the clipboard holds a PNG');
+    assert.deepStrictEqual(pngSize(Buffer.from(got)), { w: vb.w * 2, h: vb.h * 2 }, 'at twice the engine size');
+  }
+  // A browser without ClipboardItem: a notice, not a throw.
+  await page.evaluate(() => { window.ClipboardItem = undefined; });
+  await exportPick(page, 'ed-wave-export-copyimg', false);
+  assert.strictEqual(await notice(), '這個瀏覽器不能複製圖片，請改用下載 PNG', 'unsupported says what to do instead');
+}, { md: WAVE_CANVAS_MD });
+check('wave export: json copy', DESKTOP, async (page) => {
+  const engine = page.context().browser().browserType().name();
+  if (engine === 'chromium') await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await openWave(page);
+  await page.evaluate(() => {
+    const clip = navigator.clipboard;
+    const real = clip.writeText.bind(clip);
+    window.__copied = [];
+    clip.writeText = (t) => { window.__copied.push(t); return real(t); };
+  });
+  await exportPick(page, 'ed-wave-export-json', false);
+  const r = await page.evaluate(() => ({ copied: window.__copied, source: window.__edWaveSourceProbe(),
+    notice: (document.querySelector('.ed-conflict[data-level="notice"] .ed-msg-text') || { textContent: null }).textContent }));
+  assert.deepStrictEqual(r.copied, [r.source], 'the block\'s WaveJSON, exactly as written back, is what is copied');
+  assert.strictEqual(r.notice, 'WaveJSON 已複製到剪貼簿');
+  if (engine === 'chromium') {
+    assert.strictEqual(await page.evaluate(() => navigator.clipboard.readText()), r.source, 'and it is on the clipboard');
+  }
+}, { md: WAVE_CANVAS_MD });
 
 check('theme api: md2docTheme.recolourSvg recolours a detached wave svg with the given label backing', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
