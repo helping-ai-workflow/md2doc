@@ -2478,7 +2478,9 @@ function countInCode(source, needle) {
     // reason, the discard stash and its restore are gone (spec section 8 names
     // discardedWaveEdit for this guard).
     'discardedWaveEdit', 'DiscardedWaveEdit', "'escape'"];
-  for (const rel of ['wave-ui.js', 'wave-panels.js']) {
+  // wave-canvas.js joined in the final review's fix pass (M6): its comment
+  // still sent readers to the deleted preview panel's renderPreview.
+  for (const rel of ['wave-ui.js', 'wave-panels.js', 'wave-canvas.js']) {
     const text = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', rel), 'utf8');
     assert.ok(text.length > 1000, 'guard: read ' + rel);
     for (const needle of RETIRED) {
