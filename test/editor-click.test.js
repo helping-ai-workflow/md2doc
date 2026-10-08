@@ -305,7 +305,7 @@ check('wave shell: a notice never replaces an error card', DESKTOP, async (page)
   await page.keyboard.press('Control+s'); await wait(900);
   const card = await page.evaluate(() => (document.querySelector('.ed-conflict[data-level="error"] .ed-msg-text') || {}).textContent || null);
   assert.ok(card !== null && card.includes('無法儲存'), 'guard: the failed save raised the error card ' + card);
-  // A refusal that changes nothing: Alt+→ while the edge gesture is not armed.
+  // A refusal that changes nothing: Alt+→ while no dots are up (no A pick, 關聯線 off).
   await page.locator('.ed-wave-overlay .ed-wave-layer').focus();
   await page.keyboard.press('Alt+ArrowRight'); await wait(200);
   const r = await page.evaluate(() => ({
@@ -313,7 +313,7 @@ check('wave shell: a notice never replaces an error card', DESKTOP, async (page)
     status: document.querySelector('.ed-wave-overlay').getAttribute('data-wave-status'),
   }));
   assert.deepStrictEqual(r.banners, ['error:' + card], 'the error card is still the one on screen ' + JSON.stringify(r));
-  assert.strictEqual(r.status, '先按「關聯線」武裝，Alt+←／→ 才有轉態點可以跳', 'the editor still records the notice');
+  assert.strictEqual(r.status, '先按 A 從游標拉關聯線，或按「關聯線」讓圓點一直顯示，Alt+←／→ 才有轉態點可以跳', 'the editor still records the notice');
 }, { md: WAVE_SHELL_MD });
 check('wave shell: canvas is the engine drawing', DESKTOP, async (page) => {
   await openWave(page);
@@ -1469,6 +1469,82 @@ check('wave edges: an unlabelled self-loop is selectable at its anchor', DESKTOP
   await page.keyboard.press('Delete'); await wait(300);
   assert.deepStrictEqual(await edgesNow(page), [], 'and Del deletes it');
 }, { md: waveDoc({ signal: [{ name: 'clk', wave: 'p.....' }, { name: 'a', wave: '0.1.0.', node: '..a' }], edge: ['a~>a'] }) });
+const PICK_NOTICE = '正在選關聯線的終點：方向鍵移動、Enter 確定、Esc 取消';
+check('wave edges: a same-lane edge\'s toolbar never covers its ends', DESKTOP, async (page) => {
+  await openWave(page);
+  await selectEdgeByLabel(page, 'gmark_a_b', 0);
+  const ends = () => page.evaluate(() => [...document.querySelectorAll('.ed-wave-overlay .ed-wave-edge-end-hit')].map((c) => {
+    const r = c.getBoundingClientRect();
+    return { end: c.getAttribute('data-end'), x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }));
+  const pts = await ends();
+  assert.strictEqual(pts.length, 2, 'guard: both end rings are drawn');
+  assert.ok((await edgeBar(page)) !== null, 'guard: the toolbar is up');
+  for (const p of pts) assert.strictEqual(await hitAt(page, p.x, p.y), 'end:' + p.end, '更多 folded: the ' + p.end + ' end takes a press');
+  await page.locator('.ed-wave-edge-bar [data-focus-key="ed-wave-edge-more"]').click(); await wait(200);
+  assert.ok(await page.evaluate(() => !document.querySelector('.ed-wave-edge-more-list').hidden), 'guard: 更多 is open');
+  for (const p of await ends()) assert.strictEqual(await hitAt(page, p.x, p.y), 'end:' + p.end, '更多 open: the ' + p.end + ' end takes a press');
+}, { md: waveDoc({ signal: [{ name: 'clk', wave: 'p.......' }, { name: 'a', wave: '0.1.0.1.', node: '..a...b' }], edge: ['a~>b lbl'] }) });
+check('wave edges: picking an end is modal', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('A'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edge-pending'), '1,4', 'guard: the start is lane a cycle 4');
+  for (let i = 0; i < 3; i++) await page.keyboard.press('ArrowLeft');
+  await wait(100);
+  const before = await docNow(page);
+  for (const key of [' ', 'Delete', 'Backspace', '1', 'x', 'Control+v', 'Control+z', 'Alt+ArrowUp']) {
+    await page.keyboard.press(key); await wait(120);
+    assert.deepStrictEqual(await docNow(page), before, key + ' while picking changes nothing');
+    assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', key + ' leaves the pick standing');
+  }
+  assert.strictEqual(await overlayAttr(page, 'data-wave-status'), PICK_NOTICE, 'a swallowed key says what the keys do now');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edge-pending'), '1,4', 'the start has not moved');
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B']);
+  assert.strictEqual(await nodeOf(page, 'a'), 'aB..A', 'both anchors exactly where they were marked');
+  // T while picking ends the pick and opens the note field.
+  await page.keyboard.press('Enter'); await wait(200);
+  await page.keyboard.press('A'); await wait(150);
+  await page.keyboard.press('T'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'idle', 'T ends the pick');
+  assert.strictEqual((await edgeField(page) || {}).kind, 'note', 'and opens the note field');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: a toolbar press while picking ends the pick first', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('A'); await wait(150);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', 'guard: picking');
+  await page.locator('[data-focus-key="ed-wave-cycle-insert"]').click(); await wait(300);
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'idle', 'the press ends the pick');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edge-pending'), '', 'nothing is pending');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-cycles'), '7', 'and the button still does its job');
+}, { md: WAVE_EDGES_MD });
+check('wave edges: a pick that adds nothing says so', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  const pick = async () => {
+    await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight'); // lane a cycle 2
+    await page.keyboard.press('A'); await wait(120);
+    await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Enter'); await wait(300);
+  };
+  await page.keyboard.press('ArrowDown');
+  await pick();
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'guard: the first pick adds the edge');
+  await page.keyboard.press('Enter'); await wait(200);
+  await page.keyboard.press('ArrowUp');
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowLeft');
+  await pick();
+  assert.deepStrictEqual(await edgesNow(page), ['A~>B'], 'the same edge again is not added');
+  assert.strictEqual(await overlayAttr(page, 'data-wave-edgemode'), 'picking', 'the pick stays');
+  const status = await overlayAttr(page, 'data-wave-status');
+  assert.ok(status.includes('沒有加上關聯線'), 'and says why it added nothing: ' + status);
+}, { md: WAVE_EDGES_MD });
 check('wave edges: IME composition does not commit the edge label', DESKTOP, async (page) => {
   await openWave(page);
   await dragFromDot(page, 1, 2, await anchorPoint(page, 2, 4));
