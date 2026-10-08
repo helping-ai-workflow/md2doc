@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.13.0 — 2026-10-08
+## v3.13.0 — 2026-10-09
 
 ### Added — 波形編輯器重做：看到的就是輸出
 
