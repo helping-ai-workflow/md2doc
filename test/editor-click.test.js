@@ -972,6 +972,30 @@ check('wave lanes: menu actions', DESKTOP, async (page) => {
   assert.deepStrictEqual(await signalNow(page), [a, b, d], '刪除');
   await undo();
 }, { md: WAVE_LANES_MD });
+check('wave lanes: 和下一條組成群組 then 下移 are both written back', DESKTOP, async (page) => {
+  // Ruling R16: the editor keeps one store for the session, and each landed write-back
+  // becomes its new base, so a second structural gesture is planned on its own instead of
+  // together with the first (which used to refuse every two-step group flow).
+  await openWave(page);
+  const [a, b, c, d] = await signalNow(page);
+  const J = JSON.stringify;
+  await laneAction(page, 1, 'ed-wave-lane-group');
+  await expectWritten(page, '和下一條組成群組');
+  await page.keyboard.type('grp'); await page.keyboard.press('Enter'); await wait(300);
+  await expectWritten(page, '改名');
+  assert.strictEqual(await sourceNow(page), J({ signal: [a, ['grp', b, c], d] }), 'the group and its name are in the source');
+  await page.locator('.ed-wave-overlay [data-focus-key="group-grip-signal.1"]').focus(); await wait(100);
+  await page.keyboard.press('Alt+ArrowDown'); await wait(300);
+  await expectWritten(page, '下移');
+  assert.deepStrictEqual(await signalNow(page), [a, d, ['grp', b, c]], '下移 is written back after the group was');
+  // The move carries the group's own bytes, comma and all (a legal trailing comma).
+  assert.strictEqual(await sourceNow(page),
+    '{"signal":[' + J(a) + ',' + J(d) + ', ["grp",' + J(b) + ',' + J(c) + '],]}', 'the written source');
+  // Undo is the one reverse gesture against the new base, and it lands too.
+  await page.keyboard.press('Control+z'); await wait(300);
+  await expectWritten(page, 'undo 下移');
+  assert.deepStrictEqual(await signalNow(page), [a, ['grp', b, c], d], 'undo puts the group back');
+}, { md: WAVE_LANES_MD });
 check('wave lanes: Del deletes the signal whose name has the keyboard', DESKTOP, async (page) => {
   await openWave(page);
   const [a, b, c, d] = await signalNow(page);

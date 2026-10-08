@@ -3291,6 +3291,54 @@ const RSRC = [
     assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
     assert.strictEqual(out.text, "{signal: [{name: 'b'}, ['inner', {name: 'c'}], {name: 'd'}]}");
   });
+  // Fix round 1：[ 與標題之間、標題與逗號之間的註解一個都不能刪——只刪 [、標題的值與它的逗號
+  const keepsComments = function (src, want, what) {
+    const out = C.patchSource(src, C.parseSource(src), [{ op: 'unwrap', path: ['signal', 0] }]);
+    assert.strictEqual(out.ok, true, what + '：Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, want, what + '：Got\n' + out.text);
+  };
+  row('unwrap：標題與逗號之間的區塊註解留著', function () {
+    keepsComments('{signal: [["g" /*t*/, {name:"b",wave:"01"}], {name:"d",wave:"01"}]}',
+      '{signal: [ /*t*/ {name:"b",wave:"01"}, {name:"d",wave:"01"}]}', '"g" /*t*/,');
+  });
+  row('unwrap：[ 與標題之間的區塊註解留著', function () {
+    keepsComments('{signal: [[ /*lead*/ "g", {name:"b",wave:"01"}], {name:"d",wave:"01"}]}',
+      '{signal: [ /*lead*/ {name:"b",wave:"01"}, {name:"d",wave:"01"}]}', '[ /*lead*/ "g",');
+  });
+  row('unwrap：多行，[ 後面的行註解留著，標題那行整行拿掉', function () {
+    keepsComments([
+      '{signal: [',
+      '  [ // the bus',
+      '    "g",',
+      '    {name:"b",wave:"01"},',
+      '  ],',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), [
+      '{signal: [',
+      '  // the bus',
+      '    {name:"b",wave:"01"},',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), '[ // the bus');
+  });
+  row('unwrap：標題自己一行、旁邊有註解：[ 那行整行拿掉，註解留在標題原本的位置', function () {
+    keepsComments([
+      '{signal: [',
+      '  [',
+      '    "g", // title',
+      '    {name:"b",wave:"01"},',
+      '  ],',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), [
+      '{signal: [',
+      '    // title',
+      '    {name:"b",wave:"01"},',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), '"g", // title');
+  });
   row('unwrap 的拒絕', function () {
     const r = C.parseSource(GSRC);
     const bad = function (edit, why) {

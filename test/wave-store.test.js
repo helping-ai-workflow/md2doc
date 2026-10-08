@@ -1428,6 +1428,170 @@ const clone = function (doc) { return JSON.parse(JSON.stringify(doc)); };
 }
 
 // ---------------------------------------------------------------------------
+// T17（Task 8b fix round 1，Ruling R16）：每次寫回成功之後，store 換底到寫出去的那份
+// 文字（store.rebase(text)），所以下一個 toPatch 只看到「這一個手勢」。編輯器整個
+// session 只有一個 store，以前每個手勢都拿「開啟時的原文」比，兩步的群組操作
+// （組成群組→下移、下移→解散…）一律被拒絕。isDirty 仍然量「開啟時的原文」。
+// ---------------------------------------------------------------------------
+{
+  const geometry = require('../lib/editor/wave-geometry.js');
+  const panelsOver = function (s) {
+    return require('../lib/editor/wave-panels.js').createPanels({
+      d: null, overlay: null, codec: C, geometry: geometry,
+      actions: { commit: function (name, fn) { return s.apply(name, fn); } },
+    });
+  };
+  // 照編輯器的節奏跑：一個手勢、一次 toPatch、寫回成功就換底
+  const gesture = function (s, what, act) {
+    assert.strictEqual(act(), true, what + '：guard: 這個手勢有改到東西');
+    const p = s.toPatch();
+    assert.strictEqual(p.ok, true, what + '：必須寫得回去。Got ' + JSON.stringify(p));
+    const back = C.parseSource(p.text);
+    assert.deepStrictEqual(clone(back.doc), clone(s.doc), what + '：讀回來就是 store 的文件');
+    assert.strictEqual(s.rebase(p.text), true, what + '：寫回成功之後換底');
+    return p.text;
+  };
+  const failures = [];
+  const row = function (name, fn) {
+    try {
+      fn();
+    } catch (err) {
+      failures.push(name + ' — ' + String(err.message).split('\n')[0]);
+    }
+  };
+  const LSRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  // about b',
+    '  { name: "b", wave: "01" },   // lane b',
+    '  { name: "c", wave: "01" },   // lane c',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n');
+  const TWOG = JSON.stringify({ signal: [{ name: 'x', wave: '01..' },
+    ['g1', { name: 'a', wave: '01..' }], ['g2', { name: 'b', wave: '1.0.' }, { name: 'c', wave: '0.1.' }],
+    { name: 'd', wave: '0...' }] });
+  const SIX = JSON.stringify({ signal: ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => ({ name: n, wave: '01' })) });
+
+  row('組成群組 → 下移（多行，逐字）', function () {
+    const s = S.createStore(LSRC);
+    gesture(s, '組成群組', () => s.apply('group-lanes', (d) => C.groupLanes(d, [1, 2], '')));
+    const text = gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    assert.strictEqual(text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      '  ["",',
+      '  // about b',
+      '  { name: "b", wave: "01" },   // lane b',
+      '  { name: "c", wave: "01" }],   // lane c',
+      ']}',
+    ].join('\n'), '組成群組 → 下移 的最後輸出。Got\n' + text);
+  });
+  row('組成群組 → 改名 → 下移', function () {
+    const s = S.createStore(LSRC);
+    gesture(s, '組成群組', () => s.apply('group-lanes', (d) => C.groupLanes(d, [1, 2], '')));
+    gesture(s, '改名', () => panelsOver(s).commitGroupTitle(['signal', 1], 'grp'));
+    const text = gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    assert.ok(text.includes('["grp",') && text.includes('// about b') && text.includes('// lane d'), text);
+  });
+  row('組成群組 → 上移', function () {
+    const s = S.createStore(LSRC);
+    gesture(s, '組成群組', () => s.apply('group-lanes', (d) => C.groupLanes(d, [1, 2], '')));
+    gesture(s, '上移', () => panelsOver(s).commitGroupMove(['signal', 1], -1));
+    assert.deepStrictEqual(laneShape(s.doc), [['', 'b', 'c'], 'a', 'd']);
+  });
+  row('群組改名 → 下移', function () {
+    const s = S.createStore(GSRC);
+    gesture(s, '改名', () => panelsOver(s).commitGroupTitle(['signal', 1], 'bus'));
+    const text = gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    assert.strictEqual(text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      '  ["bus",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      ']}',
+    ].join('\n'), '群組改名 → 下移。Got\n' + text);
+  });
+  row('下移 → 解散', function () {
+    const s = S.createStore(GSRC);
+    gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    const text = gesture(s, '解散', () => s.apply('ungroup', (d) => C.ungroupLanes(d, 2)));
+    assert.strictEqual(text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      ']}',
+    ].join('\n'), '下移 → 解散。Got\n' + text);
+  });
+  row('解散 → 搬一條 lane', function () {
+    const s = S.createStore(GSRC);
+    gesture(s, '解散', () => s.apply('ungroup', (d) => C.ungroupLanes(d, 1)));
+    gesture(s, '搬 d 上去', () => s.apply('move', (d) => C.moveLane(d, 3, 2)));
+    assert.deepStrictEqual(laneShape(s.doc), ['a', 'b', 'd', 'c']);
+  });
+  row('解散 g1 → 解散 g2', function () {
+    const s = S.createStore(TWOG);
+    gesture(s, '解散 g1', () => s.apply('ungroup', (d) => C.ungroupLanes(d, 1)));
+    const text = gesture(s, '解散 g2', () => s.apply('ungroup', (d) => C.ungroupLanes(d, 2)));
+    assert.strictEqual(text, JSON.stringify({ signal: [{ name: 'x', wave: '01..' }, { name: 'a', wave: '01..' },
+      { name: 'b', wave: '1.0.' }, { name: 'c', wave: '0.1.' }, { name: 'd', wave: '0...' }] }));
+  });
+  row('組成群組(a,b) → 組成群組(d,e)', function () {
+    const s = S.createStore(SIX);
+    gesture(s, '組成群組 a,b', () => s.apply('group-lanes', (d) => C.groupLanes(d, [0, 1], '')));
+    gesture(s, '組成群組 d,e', () => s.apply('group-lanes', (d) => C.groupLanes(d, [3, 4], '')));
+    assert.deepStrictEqual(laneShape(s.doc), [['', 'a', 'b'], 'c', ['', 'd', 'e'], 'f']);
+  });
+  row('組成群組 → 刪一條無關的 lane', function () {
+    const s = S.createStore(SIX);
+    gesture(s, '組成群組', () => s.apply('group-lanes', (d) => C.groupLanes(d, [0, 1], '')));
+    gesture(s, '刪 f', () => s.apply('remove', (d) => C.removeLane(d, 5)));
+    assert.deepStrictEqual(laneShape(s.doc), [['', 'a', 'b'], 'c', 'd', 'e']);
+  });
+  row('換底之後 undo：寫回的是反向的那一個手勢，回到原文逐字', function () {
+    const s = S.createStore(GSRC);
+    gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    assert.strictEqual(s.isDirty(), true, '寫回之後相對開啟時的原文是髒的');
+    const text = gesture(s, 'undo', () => s.undo());
+    assert.strictEqual(text, GSRC, 'undo 寫回的是原文。Got\n' + text);
+    assert.strictEqual(s.isDirty(), false, '回到開啟時的樣子就不髒，即使中間寫回過');
+    const again = gesture(s, 'redo', () => s.redo());
+    assert.deepStrictEqual(laneShape(C.parseSource(again).doc), ['a', 'd', ['grp', 'b', 'c']]);
+    assert.strictEqual(s.isDirty(), true);
+  });
+  // client.js 的「session 回到開啟時的位元組就把自己的 op 收回去」靠的是逐字相同。
+  // 一行的群組下移會留下尾逗號，反向的那一個手勢補不回來；所以 undo 回到開啟時的
+  // 文件時，寫回的就是開啟時的原文本身。
+  row('undo 回到開啟時的文件：寫回開啟時的原文，逐字', function () {
+    const src = "{signal: [{name: 'a', wave: '01'}, ['grp', {name: 'b', wave: '01'}, " +
+      "{name: 'c', wave: '01'}], {name: 'd', wave: '01'}]}";
+    const s = S.createStore(src);
+    const moved = gesture(s, '下移', () => panelsOver(s).commitGroupMove(['signal', 1], 1));
+    assert.ok(moved.endsWith('],]}'), 'guard: 搬家留下了尾逗號 ' + moved);
+    assert.strictEqual(gesture(s, 'undo', () => s.undo()), src);
+    assert.strictEqual(s.isDirty(), false);
+  });
+  row('換底只收「就是現在這份文件」的文字；拒絕之後底不動', function () {
+    const s = S.createStore(GSRC);
+    assert.strictEqual(s.apply('paint', (d) => C.setCell(d, 0, 0, '1')), true);
+    assert.strictEqual(s.rebase(GSRC), false, '不是現在這份文件的文字不能拿來換底');
+    assert.strictEqual(s.rebase('{ not wavejson'), false, '讀不回來的文字不能拿來換底');
+    const p = s.toPatch();
+    assert.strictEqual(p.ok, true);
+    assert.strictEqual(p.text, GSRC.replace('{ name: "a", wave: "01" }', '{ name: "a", wave: "11" }'),
+      '底還是原文，所以 patch 照舊只改那一格');
+  });
+
+  assert.deepStrictEqual(failures, [], 'T17 有幾條流程沒寫回去：\n  ' + failures.join('\n  '));
+}
+
+// ---------------------------------------------------------------------------
 // T15：守衛要有牙齒 —— 不碰 DOM、不執行字串。
 // 清單跟 wave-codec.test.js 同一份，只少掉 `require(`（本檔正當地 require codec）。
 // 樣式與咬痕 copy 自 test/wave-geometry.test.js：散文讓路給守衛，不是反過來。
