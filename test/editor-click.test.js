@@ -55,6 +55,40 @@ function contrast(a, b) { const x = lum(a), y = lum(b); return (Math.max(x, y) +
 const checks = [];
 function check(name, viewport, fn, opts) { checks.push({ name, viewport, fn, opts: opts || {} }); }
 
+// `/api/render` requests in flight per page, counted in node from the page's
+// own request events. The runner installs the listeners before goto, so a
+// render the page starts on its own is never missed.
+const renderCounters = new WeakMap();
+function trackRenders(page) {
+  const c = { n: 0 };
+  renderCounters.set(page, c);
+  const isRender = (r) => { try { return new URL(r.url()).pathname === '/api/render'; } catch (e) { return false; } };
+  page.on('request', (r) => { if (isRender(r)) c.n++; });
+  page.on('requestfinished', (r) => { if (isRender(r)) c.n--; });
+  page.on('requestfailed', (r) => { if (isRender(r)) c.n--; });
+}
+// Waits until no `/api/render` is outstanding, then lets the page run one
+// macrotask and two frames — the landing render's own continuation, and any
+// replay it schedules. Repeats while that settling started another render (a
+// replayed Enter is a new commit). Throws with the count, never a bare timeout.
+async function renderIdle(page) {
+  const c = renderCounters.get(page);
+  const deadline = Date.now() + 20000;
+  for (;;) {
+    while (c.n > 0) {
+      if (Date.now() > deadline) throw new Error('renderIdle: ' + c.n + ' /api/render still outstanding after 20s');
+      await wait(25);
+    }
+    await page.evaluate(() => new Promise((r) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(r)), 0)));
+    if (c.n === 0) return;
+  }
+}
+// Holds every `/api/render` for `ms` before letting it through: the window in
+// which a commit is in flight, made wide enough that no keystroke can miss it.
+async function delayRender(page, ms) {
+  await page.route('**/api/render', async (route) => { await wait(ms); await route.continue(); });
+}
+
 check('theme: the edit page has a theme toggle and it turns the toolbar dark', DESKTOP, async (page) => {
   const btn = page.locator('#md2doc-theme-toggle');
   assert.ok(await btn.isVisible(), 'toggle visible in edit mode');
@@ -2956,11 +2990,7 @@ check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, asy
 check('loose lists: Enter starts a new item that keeps the spacing', DESKTOP, async (page, boot) => {
   await liText(page, 'bravo').click(); await page.keyboard.press('End');
   await page.keyboard.press('Enter');
-  // Wait for the caret to land in the new, empty item. Keys typed while
-  // Enter's commit re-renders are lost — on a tight list too (measured), a
-  // pre-existing race this check is not about.
-  await page.waitForFunction(() => { const li = document.activeElement && document.activeElement.closest('.ed-block[data-block-type="li"]'); return !!li && li.textContent.trim() === ''; }, null, { timeout: 3000 });
-  await page.keyboard.type('new'); await wait(200);
+  await page.keyboard.type('new'); await renderIdle(page);
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
   assert.strictEqual(await noticeText(page), null, 'no refusal');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
@@ -2973,6 +3003,120 @@ check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n  - charlie\n');
 }, { md: LOOSE_MD });
 
+// ── enter-type (v3.13.1 T1): keys typed while a list commit renders ──
+// None of these waits between the structural key and the first character:
+// that gap is exactly what a person typing at speed leaves. `delayRender`
+// widens the commit's in-flight window to 800 ms so every keystroke is
+// guaranteed to fall inside it.
+const TIGHT_MD = '# D\n\n- alpha\n- bravo\n- charlie\n';
+async function commitAndRead(page, boot) {
+  await renderIdle(page);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await renderIdle(page);
+  return saveAndRead(page, boot);
+}
+check('enter-type: tight list, type right after Enter', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: loose list, type right after Enter', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LOOSE_MD });
+check('enter-type: a mid-item split puts the typed text before the tail', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click();
+  const placed = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-li-text')].find((e) => e.textContent === 'bravo');
+    const n = s && s.firstChild;
+    if (!n || n.nodeType !== 3) return false;
+    getSelection().setBaseAndExtent(n, 3, n, 3);
+    return true;
+  });
+  assert.strictEqual(placed, true, 'guard: caret placed after "bra"');
+  await page.keyboard.press('Enter'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bra\n- Xvo\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: two Enters and two words with no waits', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('x');
+  await page.keyboard.press('Enter'); await page.keyboard.type('y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n- y\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: Tab then type lands in the indented item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Tab'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - bravoZ\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+const BIG_PARAS = [];
+for (let i = 0; i < 400; i++) BIG_PARAS.push('Para ' + i + ' ' + 'lorem ipsum dolor sit amet '.repeat(6));
+const BIG_LIST_MD = '# D\n\n' + BIG_PARAS.join('\n\n') + '\n\n- alpha\n- bravo\n- charlie\n';
+check('enter-type: a large document without an artificial delay', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  const disk = await commitAndRead(page, boot);
+  const want = BIG_LIST_MD.replace('- bravo\n', '- bravo\n- new\n');
+  const tailAt = (s) => s.slice(s.lastIndexOf('Para 399 '));
+  assert.strictEqual(tailAt(disk), tailAt(want));
+  assert.strictEqual(disk.length, want.length, 'nothing else in the file moved');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BIG_LIST_MD });
+check('enter-type: an IME character composed during the render lands in the new item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '你' });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- 你\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD, engines: ['chromium'] });
+check('enter-type: a failed render still shows the buffered characters', DESKTOP, async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+  assert.ok(texts.indexOf('new') !== -1, 'the buffered characters are on screen: ' + JSON.stringify(texts));
+}, { md: TIGHT_MD });
+// A composition's text is in the DOM before compositionend can hold it. A
+// failed render keeps that DOM, so unless the guard takes it back out, the
+// replay shows it a second time.
+check('enter-type: a character composed during a failed render shows once', DESKTOP, async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '你' });
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+  assert.deepStrictEqual(texts, ['alpha', 'bravo', '你', 'charlie']);
+}, { md: TIGHT_MD, engines: ['chromium'] });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -2982,12 +3126,14 @@ check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
     try {
       for (const c of checks) {
         if (only && !c.name.includes(only)) continue;
+        if (c.opts.engines && c.opts.engines.indexOf(engine) === -1) continue;
         ran++;
         const boot = await bootEditor(c.opts.md, c.opts.srv);
         const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.opts.ctx));
         const page = await context.newPage();
         const errs = [];
         page.on('pageerror', (e) => errs.push(String(e)));
+        trackRenders(page);
         try {
           await page.goto(boot.url, { waitUntil: 'load' });
           await page.waitForSelector('.ed-toolbar');
