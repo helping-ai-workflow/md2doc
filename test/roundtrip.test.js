@@ -8,7 +8,8 @@ const { createEditorServer } = require('../lib/editor/server.js');
 const { commitEdit, commitRangeEdit } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { serializeTable } = require('../lib/editor/table-md.js');
-const { serializeInline } = require('../lib/editor/inline-md.js');
+const { serializeInline, escapeText, escapeBlockStarts } = require('../lib/editor/inline-md.js');
+const { marked } = require('marked');
 const { serializeBlocks } = require('../lib/editor/list-md.js');
 
 // minimal element stub — same pattern as test/table-md.test.js /
@@ -60,6 +61,20 @@ function post(port, p, body) {
       res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(buf || '{}') }));
     });
     r.on('error', reject); r.write(data); r.end();
+  });
+}
+
+// v3.13.1 T2 (F-1): text that reads as a block marker, escaped the way a
+// paragraph commit escapes it, comes back from marked as ONE paragraph whose
+// text is exactly what was typed.
+{
+  const htmlEscaped = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  ['## Title', '- item', '> q', '1. x', '---', '| a | b |'].forEach((s) => {
+    const out = escapeBlockStarts(escapeText(s));
+    const toks = marked.lexer(out);
+    assert.strictEqual(toks.length, 1, 'one token for ' + JSON.stringify(out));
+    assert.strictEqual(toks[0].type, 'paragraph', 'a paragraph for ' + JSON.stringify(out));
+    assert.strictEqual(marked.parse(out), '<p>' + htmlEscaped(s) + '</p>\n', 'the typed text for ' + JSON.stringify(out));
   });
 }
 

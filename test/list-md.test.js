@@ -1206,5 +1206,17 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
 }
 
+// ── v3.13.1 T2 (F-1): an item whose text begins with a block marker is
+//    written escaped; a bystander replayed from source is untouched. ────────
+{
+  const r = serializeBlocks([
+    liBlock({ id: '0', indent: 0 }, text('## x')),
+    liBlock({ id: '1', indent: 0 }, text('-5 dBm')),
+  ], { carryOver: { 1: ['- -5 dBm'] } });
+  assert.strictEqual(r.md, '- \\## x\n- -5 dBm', 'got:\n' + JSON.stringify(r.md));
+  // The tree serializer (serializeList) escapes the same way.
+  assert.strictEqual(serializeList(ul(li('> q'), li('1. x'))).md, '- \\> q\n- 1\\. x');
+}
+
 
 console.log('list-md.test.js OK');

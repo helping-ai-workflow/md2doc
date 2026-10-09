@@ -3117,6 +3117,68 @@ check('enter-type: a character composed during a failed render shows once', DESK
   assert.deepStrictEqual(texts, ['alpha', 'bravo', '你', 'charlie']);
 }, { md: TIGHT_MD, engines: ['chromium'] });
 
+// ── f1 (v3.13.1 T2): a block marker typed at the start of a paragraph or
+// list-item line is saved escaped, so the block stays what it was ──
+const BASE_MD = '# D\n\nAlpha.\n\nOmega.\n';
+// Clicks the surface (.ed-wys-armed or .ed-wys-cell) whose textContent is
+// exactly `text`, then puts a collapsed caret `offset` characters in — the
+// click opens the burst, the caret is placed afterwards. Same shape as
+// focusText() in test/editor-cell-range.test.js.
+async function focusSurface(page, text, offset) {
+  const sel = await page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((el) => el.textContent === t);
+    if (!s) return null;
+    s.setAttribute('data-f1-probe', '1');
+    return '[data-f1-probe="1"]';
+  }, text);
+  assert.ok(sel, 'focusSurface: no surface with text ' + JSON.stringify(text));
+  await page.click(sel); await wait(150);
+  const placed = await page.evaluate((off) => {
+    const s = document.querySelector('[data-f1-probe="1"]');
+    s.removeAttribute('data-f1-probe');
+    const walker = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = off;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (left <= n.data.length) { getSelection().setBaseAndExtent(n, left, n, left); return true; }
+      left -= n.data.length;
+    }
+    return false;
+  }, offset);
+  assert.strictEqual(placed, true, 'focusSurface: offset ' + offset + ' is inside ' + JSON.stringify(text));
+}
+check('f1: "## " at a paragraph start saves escaped and stays a paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0);
+  await page.keyboard.type('## ');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await renderIdle(page);
+  const type = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === '## Alpha.');
+    const b = s && s.closest('.ed-block');
+    return b ? b.getAttribute('data-block-type') : null;
+  });
+  assert.strictEqual(type, 'paragraph', 'the block reads "## Alpha." and is still a paragraph');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n\\## Alpha.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BASE_MD });
+check('f1: "> " at a list item start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 0);
+  await page.keyboard.type('> ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- \\> bravo\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\n- bravo\n' });
+check('f1: "1. " at a paragraph start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0);
+  await page.keyboard.type('1. ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1\\. Alpha.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BASE_MD });
+check('f1: an already escaped paragraph is byte-stable after an unrelated edit', DESKTOP, async (page, boot) => {
+  await focusSurface(page, '## Alpha.', 9);
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n\\## Alpha.X\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\n\\## Alpha.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
