@@ -23,12 +23,14 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
-Two helpers outside `lib/md2doc.js` since v3.10.0:
+Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the last two since v3.13.0):
 
 | File | Purpose | Anchor |
 |---|---|---|
 | `lib/highlight.js` | Fenced-code syntax colour at render time (highlight.js core + the registered languages); `renderer.code` calls it | `function highlightCode(` |
 | `lib/editor/icons.js` | The Lucide icons the editor draws (UMD: `window.md2docIcons`, injected by `lib/editor/server.js`) | `function svg(name, size)` |
+| `lib/editor/wave-canvas.js` | The wave editor's canvas, drawn by the WaveDrom engine itself (`RenderWaveForm` at scale 1.5, dark recolour via `window.md2docTheme.recolourSvg`), plus the client-coordinate bridge the interaction layer uses (`cellAt`, `boundaryAt`, `cellRectClient`, `anchorClient`, `labelBoxes`, `overflow`). Injected by `lib/editor/server.js` as `window.__md2docWave['wave-canvas.js']`; tested by `test/wave-canvas.test.js` (Playwright, in `test:browser`) | `function createCanvas(opts)` |
+| `lib/wave-overflow.js` | Data-label width estimate (Helvetica AFM table) and the labels wider than their segment: the CLI's stderr overflow warning (`renderMarkdown`'s `warnWaveOverflow` option) and the editor's 「改每拍 K×」 suggestion. In the browser it lands at `window.__md2docWave['wave-overflow.js']` (the server's CommonJS shim) | `function overflowOf(doc)` |
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
@@ -58,7 +60,7 @@ first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
@@ -298,10 +300,18 @@ comparison knows none of that, and it **lies in both directions**:
 - **False green.** Two boxes overlapping proves nothing when the top one carries
   `pointer-events: none` — it never intercepts at all.
 
-Related, and measured here: **SVG paint order is document order.** `renderCanvas` draws
-every lane before it draws the edges, so an invisible 10px `.ed-wave-edge-hit` stroke
-sits on top of every bus label underneath it — no matter which `if` the hit-testing code
-happens to run first. A fix that only reorders the checks does nothing.
+Related, and measured here: **SVG paint order is document order.** In v3.5–v3.12 the
+editor's own `renderCanvas` drew every lane before it drew the edges, so an invisible
+10px `.ed-wave-edge-hit` stroke sat on top of every bus label underneath it — no matter
+which `if` the hit-testing code happened to run first. A fix that only reorders the
+checks does nothing. Since v3.13.0 the same rule decides it one level up: the WaveDrom
+engine draws the waveform, names and labels (`lib/editor/wave-canvas.js`) and the
+editor's interaction layer (`createLayer` in `wave-draw.js`) sits over the whole engine
+svg, so `elementFromPoint` on an engine-drawn label or name always returns the layer.
+Those two are hit geometrically instead (`labelHitAt` / `nameHitAt` in `wave-ui.js`,
+from `canvas.labelBoxes()` and the measured lane tops) — the one sanctioned exception to
+the rule above; everything the layer draws itself (dots, ⠿, edge hits, handles) is still
+hit through `elementFromPoint`.
 
 And: **a zero-length path has no hit area at all** (butt cap, no `stroke-linecap`).
 A self-loop edge degenerates to exactly that, which is why it needs its handle to stay
@@ -396,6 +406,12 @@ in that lib), **350** structural. The 352 / 348 above stay as the v3.5.0–v3.9 
 **Measured at v3.12.0** (after `renderer.code` split its fenced-code output into a `pre`
 literal plus a wrapper literal for the copy button): **356** every backtick byte, **4** `` \` ``
 escapes (one line, 4913 in that lib), **352** structural.
+
+**Measured at v3.13.0** (`lib/md2doc.js` as last changed in `642d1a5`, unchanged at the
+release commit; Task 3 of the wave redesign added one template literal for the CLI's
+overflow warning): **358** every backtick byte, **4** `` \` `` escapes (one line, 4782 in
+that lib), **354** structural. Counted with node, a backslash directly before the backtick
+counting as an escape.
 
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader

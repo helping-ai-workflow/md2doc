@@ -541,7 +541,10 @@ assert.strictEqual(st.dirtyDepth, -1, 'undo past save point re-dirties');
       // finishWaveSession()'s escape path verbatim — real `waveDiscardIsSafe`,
       // real `discardTop` loop, real `setRedoTail`, real revert commit — as one
       // atomic gesture, because the overlay owns the keyboard for its whole
-      // life and no other gesture can interleave with it.
+      // life and no other gesture can interleave with it. (Wave redesign Task
+      // 11 retired that Escape path — closing now always keeps — but the same
+      // waveDiscardIsSafe / discardTop / setRedoTail moves are still the
+      // net-zero unwind's, so the model stays in the alphabet.)
       G.waveEsc = (w) => {
         const seam = { baseDepth: w.stack.depth, ops: 0 };
         const baseLines = w.lines, baseTail = w.stack.redoTail();

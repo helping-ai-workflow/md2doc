@@ -2502,16 +2502,16 @@ const RSRC = [
 
   const atEdge = C.ensureNode(doc2, 0, 3); // 最後一格仍合法
   assert.notStrictEqual(atEdge.doc, doc2);
-  assert.strictEqual(atEdge.letter, 'a');
-  assert.deepStrictEqual(C.nodesOf(atEdge.doc).a, { at: 0, cell: 3 },
+  assert.strictEqual(atEdge.letter, 'A'); // P1 Task 2：池子改大寫優先
+  assert.deepStrictEqual(C.nodesOf(atEdge.doc).A, { at: 0, cell: 3 },
     '最後一格仍要能正常配字母');
 
   // pool 前段字母已被占用時必須跳過去，拿第一個還沒被用過的，不能撞名。
   const taken = C.parseSource(
-    '{signal:[{name:"x",wave:"0123",node:"a.b."}]}').doc; // a@0, b@2；cell3 空
+    '{signal:[{name:"x",wave:"0123",node:"A.B."}]}').doc; // A@0, B@2；cell3 空
   const picked = C.ensureNode(taken, 0, 3);
-  assert.strictEqual(picked.letter, 'c',
-    'a/b 已被占用時要跳過去拿第一個空字母，不可撞名');
+  assert.strictEqual(picked.letter, 'C',
+    'A/B 已被占用時要跳過去拿第一個空字母，不可撞名');
 
   console.log('wave-codec: node 字母配置與清理（cell 座標系）— OK');
 }
@@ -3113,6 +3113,299 @@ const RSRC = [
   }
 
   console.log('wave-codec: setBannerField — OK');
+}
+
+// ── P1 Task 2: 單點標註、大寫優先字母池 ─────────────────────────────────
+{
+  assert.deepStrictEqual(C.parseNote('e re-arm window'), { letter: 'e', text: 're-arm window' });
+  assert.strictEqual(C.parseNote('a~>b x'), null, '有形狀的是關聯線，不是標註');
+  assert.strictEqual(C.parseNote('ab text'), null, '第一個 token 長度不是 1');
+  assert.strictEqual(C.parseEdge('e re-arm window'), null, 'parseEdge 仍拒絕單字元 head');
+  assert.strictEqual(C.formatNote({ letter: 'E', text: '  x ' }), 'E x');
+  assert.strictEqual(C.formatNote({ letter: 'E', text: '  ' }), null);
+
+  const base = C.parseSource('{signal:[{name:"a",wave:"0101"}]}').doc;
+  const added = C.addNote(base, 0, 1, 'x');
+  assert.strictEqual(added.signal[0].node, '.A', '新字母是大寫 A');
+  assert.strictEqual(added.edge[added.edge.length - 1], 'A x');
+  assert.deepStrictEqual(C.notesOf(added), [{ index: 0, letter: 'A', text: 'x' }]);
+
+  const upd = C.updateNote(added, 0, 'y');
+  assert.strictEqual(upd.edge[0], 'A y');
+
+  const removed = C.removeNote(added, 0);
+  assert.ok(removed.signal[0].node === undefined || removed.signal[0].node.indexOf('A') === -1,
+    '標註移除後字母從 node 消失');
+  assert.deepStrictEqual(C.notesOf(removed), []);
+
+  const lower = C.parseSource('{signal:[{name:"a",wave:"0101",node:"ab.."}]}').doc;
+  const e = C.ensureNode(lower, 0, 3);
+  assert.strictEqual(e.letter, 'A');
+  assert.strictEqual(e.doc.signal[0].node, 'ab.A', '既有小寫不變');
+
+  const ui = require('../lib/editor/wave-ui.js');
+  for (const k of ui.SHORTCUT_KEYS) {
+    assert.strictEqual(ui.BRUSHES.indexOf(k), -1, 'SHORTCUT_KEYS 不得與 BRUSHES 相交：' + k);
+  }
+  assert.deepStrictEqual(ui.SHORTCUT_KEYS, ['a', 'A', 't', 'T', '?']);
+  console.log('wave-codec: 單點標註與大寫優先字母池 — OK');
+}
+
+// ── wave redesign P1 Task 8b：wrap / unwrap，以及把整個群組當一個元素 move ──
+// 群組的三個結構變更各自是一個局部 edit：成員的位元組（縮排、旁邊的註解、單行或
+// 多行的寫法）一個都不動，只動群組自己的語法——標題、[ 與 ]、必要的逗號。
+{
+  const failures = [];
+  const row = function (name, fn) {
+    try {
+      fn();
+    } catch (err) {
+      failures.push(name + ' — ' + String(err.message).split('\n')[0]);
+    }
+  };
+  const FLATSRC = [
+    '{ signal: [',
+    '  { name: "a", wave: "01" },   // lane a',
+    '  // about b',
+    '  { name: "b", wave: "01" },   // lane b',
+    '  { name: "c", wave: "01" },   // lane c',
+    '  { name: "d", wave: "01" },   // lane d',
+    ']}',
+  ].join('\n');
+  const ONE = "{signal: [{name: 'a', wave: '01'}, ['grp', {name: 'b', wave: '01'}, " +
+    "{name: 'c', wave: '01'}], {name: 'd', wave: '01'}]}";
+  const ONEFLAT = "{signal: [{name: 'a', wave: '01'}, {name: 'b', wave: '01'}, " +
+    "{name: 'c', wave: '01'}, {name: 'd', wave: '01'}]}";
+
+  row('wrap：多行，標題自己一行、跟鄰居同縮排，b 上面的註解跟 b 進群組', function () {
+    const r = C.parseSource(FLATSRC);
+    const out = C.patchSource(FLATSRC, r, [{ op: 'wrap', path: ['signal', 1], count: 2, title: 'grp' }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  ["grp",',
+      '  // about b',
+      '  { name: "b", wave: "01" },   // lane b',
+      '  { name: "c", wave: "01" }],   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'));
+  });
+  row('wrap：一行，標題同一行、引號照來源', function () {
+    const r = C.parseSource(ONEFLAT);
+    const out = C.patchSource(ONEFLAT, r, [{ op: 'wrap', path: ['signal', 1], count: 2, title: 'grp' }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, ONE);
+  });
+  row('wrap：緊湊 JSON 的一行，標題後面跟鄰居一樣不留空白', function () {
+    const src = '{"signal":[{"name":"a"},{"name":"b"},{"name":"c"}]}';
+    const out = C.patchSource(src, C.parseSource(src), [{ op: 'wrap', path: ['signal', 0], count: 2, title: 'g' }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, '{"signal":[["g",{"name":"a"},{"name":"b"}],{"name":"c"}]}');
+  });
+  row('wrap：沒有標題的群組只多一個 [', function () {
+    const r = C.parseSource(ONEFLAT);
+    const out = C.patchSource(ONEFLAT, r, [{ op: 'wrap', path: ['signal', 3], count: 1 }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, ONEFLAT.replace("{name: 'd', wave: '01'}", "[{name: 'd', wave: '01'}]"));
+  });
+  row('wrap：可以把一個群組連同旁邊的 lane 包進新群組（巢狀）', function () {
+    const r = C.parseSource(ONE);
+    const out = C.patchSource(ONE, r, [{ op: 'wrap', path: ['signal', 1], count: 2, title: 'o' }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), ['a', ['o', ['grp', 'b', 'c'], 'd']]);
+  });
+  row('wrap 的拒絕', function () {
+    const r = C.parseSource(GSRC);
+    const bad = function (edit, why) {
+      const out = C.patchSource(GSRC, r, [edit]);
+      assert.strictEqual(out.ok, false, why + '：必須拒絕。Got ' + JSON.stringify(out));
+      assert.strictEqual(typeof out.reason, 'string');
+    };
+    bad({ op: 'wrap', path: ['signal'], count: 1, title: 'x' }, '路徑不是陣列元素');
+    bad({ op: 'wrap', path: ['signal', 0, 'name'], count: 1, title: 'x' }, '路徑結尾是 key');
+    bad({ op: 'wrap', path: ['signal', 0], count: 0, title: 'x' }, 'count 0');
+    bad({ op: 'wrap', path: ['signal', 0], count: 1.5, title: 'x' }, 'count 不是整數');
+    bad({ op: 'wrap', path: ['signal', 2], count: 2, title: 'x' }, '超出陣列尾端');
+    bad({ op: 'wrap', path: ['signal', 9], count: 1, title: 'x' }, '起點不在陣列裡');
+    bad({ op: 'wrap', path: ['signal', 1, 0], count: 2, title: 'x' }, '把群組的標題包進去');
+    bad({ op: 'wrap', path: ['signal', 0], count: 1, title: 5 }, '標題不是字串');
+    bad({ op: 'wrap', path: ['nope', 0], count: 1, title: 'x' }, '沒有這個陣列');
+  });
+
+  row('unwrap：多行，標題那行與收尾那行整行拿掉，成員原封不動', function () {
+    const r = C.parseSource(GSRC);
+    const out = C.patchSource(GSRC, r, [{ op: 'unwrap', path: ['signal', 1] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  { name: "d", wave: "01" },   // lane d',
+      ']}',
+    ].join('\n'));
+  });
+  row('unwrap：一行，跟從來沒有群組過的那一行逐字相同', function () {
+    const r = C.parseSource(ONE);
+    const out = C.patchSource(ONE, r, [{ op: 'unwrap', path: ['signal', 1] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, ONEFLAT);
+  });
+  row('unwrap：wrap 的反操作，往返逐字回到原文', function () {
+    const r = C.parseSource(FLATSRC);
+    const wrapped = C.patchSource(FLATSRC, r, [{ op: 'wrap', path: ['signal', 1], count: 2, title: 'grp' }]);
+    const r2 = C.parseSource(wrapped.text);
+    const back = C.patchSource(wrapped.text, r2, [{ op: 'unwrap', path: ['signal', 1] }]);
+    assert.strictEqual(back.ok, true, 'Got ' + JSON.stringify(back));
+    assert.strictEqual(back.text, FLATSRC);
+  });
+  row('unwrap：群組是陣列最後一個、成員有尾逗號、群組沒有', function () {
+    const src = [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },',
+      '  ["grp",   // the bus',
+      '    { name: "b", wave: "01" },',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ]',
+      ']}',
+    ].join('\n');
+    const r = C.parseSource(src);
+    const out = C.patchSource(src, r, [{ op: 'unwrap', path: ['signal', 1] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    // 標題旁邊的註解不會被刪：它留在原地，自己一行
+    assert.strictEqual(out.text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },',
+      '  // the bus',
+      '    { name: "b", wave: "01" },',
+      '    { name: "c", wave: "01" },   // lane c',
+      ']}',
+    ].join('\n'));
+  });
+  row('unwrap：巢狀，只拆那一層，裡面的子群組原封不動', function () {
+    const src = "{signal: [['outer', {name: 'b'}, ['inner', {name: 'c'}]], {name: 'd'}]}";
+    const r = C.parseSource(src);
+    const out = C.patchSource(src, r, [{ op: 'unwrap', path: ['signal', 0] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, "{signal: [{name: 'b'}, ['inner', {name: 'c'}], {name: 'd'}]}");
+  });
+  // Fix round 1：[ 與標題之間、標題與逗號之間的註解一個都不能刪——只刪 [、標題的值與它的逗號
+  const keepsComments = function (src, want, what) {
+    const out = C.patchSource(src, C.parseSource(src), [{ op: 'unwrap', path: ['signal', 0] }]);
+    assert.strictEqual(out.ok, true, what + '：Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, want, what + '：Got\n' + out.text);
+  };
+  row('unwrap：標題與逗號之間的區塊註解留著', function () {
+    keepsComments('{signal: [["g" /*t*/, {name:"b",wave:"01"}], {name:"d",wave:"01"}]}',
+      '{signal: [ /*t*/ {name:"b",wave:"01"}, {name:"d",wave:"01"}]}', '"g" /*t*/,');
+  });
+  row('unwrap：[ 與標題之間的區塊註解留著', function () {
+    keepsComments('{signal: [[ /*lead*/ "g", {name:"b",wave:"01"}], {name:"d",wave:"01"}]}',
+      '{signal: [ /*lead*/ {name:"b",wave:"01"}, {name:"d",wave:"01"}]}', '[ /*lead*/ "g",');
+  });
+  row('unwrap：多行，[ 後面的行註解留著，標題那行整行拿掉', function () {
+    keepsComments([
+      '{signal: [',
+      '  [ // the bus',
+      '    "g",',
+      '    {name:"b",wave:"01"},',
+      '  ],',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), [
+      '{signal: [',
+      '  // the bus',
+      '    {name:"b",wave:"01"},',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), '[ // the bus');
+  });
+  row('unwrap：標題自己一行、旁邊有註解：[ 那行整行拿掉，註解留在標題原本的位置', function () {
+    keepsComments([
+      '{signal: [',
+      '  [',
+      '    "g", // title',
+      '    {name:"b",wave:"01"},',
+      '  ],',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), [
+      '{signal: [',
+      '    // title',
+      '    {name:"b",wave:"01"},',
+      '  {name:"d",wave:"01"}',
+      ']}',
+    ].join('\n'), '"g", // title');
+  });
+  row('unwrap 的拒絕', function () {
+    const r = C.parseSource(GSRC);
+    const bad = function (edit, why) {
+      const out = C.patchSource(GSRC, r, [edit]);
+      assert.strictEqual(out.ok, false, why + '：必須拒絕。Got ' + JSON.stringify(out));
+      assert.strictEqual(typeof out.reason, 'string');
+    };
+    bad({ op: 'unwrap', path: ['signal', 0] }, '那是一條 lane，不是群組');
+    bad({ op: 'unwrap', path: ['signal'] }, 'signal 本身不是陣列裡的元素');
+    bad({ op: 'unwrap', path: [] }, '整份文件');
+    bad({ op: 'unwrap', path: ['signal', 1, 'x'] }, '路徑結尾是 key');
+    bad({ op: 'unwrap', path: ['signal', 9] }, '沒有這個元素');
+    const empty = '{signal: [{name: "a"}, ["g"]]}';
+    assert.strictEqual(C.patchSource(empty, C.parseSource(empty),
+      [{ op: 'unwrap', path: ['signal', 1] }]).ok, false, '沒有成員的群組沒有東西可以攤開');
+  });
+
+  row('move：整個群組是一個元素，標題與成員的位元組一起搬', function () {
+    const r = C.parseSource(GSRC);
+    const out = C.patchSource(GSRC, r, [{ op: 'move', path: ['signal', 1], to: ['signal', 3] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.strictEqual(out.text, [
+      '{ signal: [',
+      '  { name: "a", wave: "01" },   // lane a',
+      '  { name: "d", wave: "01" },   // lane d',
+      '  ["grp",',
+      '    { name: "b", wave: "01" },   // lane b',
+      '    { name: "c", wave: "01" },   // lane c',
+      '  ],',
+      ']}',
+    ].join('\n'));
+  });
+
+  // 配方（lanePath 註解裡那份地圖的新三條），一樣在帶 group 的 fixture 上跑
+  row('配方：groupLanes ↔ wrap', function () {
+    const r = C.parseSource(RSRC);
+    // 配方只對「同一層、彼此相鄰的 lane」成立。選取若把一個子群組整個吃掉，
+    // groupLanes 會把那個子群組攤平進新群組（上面 v3.5.0 Task 12 那段釘住的），
+    // 那是 wrap 加上 unwrap 兩步，不是這一條配方。
+    assert.deepStrictEqual(laneShape(C.groupLanes(r.doc, [1, 2], 'T')), ['a', ['T', undefined, 'c'], 'd'],
+      'guard: 吃光 grp 的選取會攤平 grp（標題 grp 不見了）');
+    const want = C.groupLanes(r.doc, [1], 'T');
+    const out = C.patchSource(RSRC, r, [{ op: 'wrap', path: C.lanePath(r.doc, 1), count: 1, title: 'T' }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), laneShape(want));
+    assert.deepStrictEqual(laneShape(want), ['a', ['grp', ['T', undefined], 'c'], 'd'], 'guard: 巢狀的新群組');
+    assert.ok(out.text.includes('// 沒有名字，而且在 group 裡面'), '註解要留著');
+  });
+  row('配方：ungroupLanes ↔ unwrap', function () {
+    const r = C.parseSource(RSRC);
+    const want = C.ungroupLanes(r.doc, 2);
+    const out = C.patchSource(RSRC, r, [{ op: 'unwrap', path: C.lanePath(r.doc, 2).slice(0, -1) }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc), laneShape(want));
+    assert.ok(out.text.includes('// lane c'), '註解要留著');
+  });
+  row('配方：群組換位 ↔ move 那個群組元素', function () {
+    const r = C.parseSource(RSRC);
+    const groupPath = C.lanePath(r.doc, 1).slice(0, -1);   // ['signal', 1]
+    const out = C.patchSource(RSRC, r, [{ op: 'move', path: groupPath, to: ['signal', 0] }]);
+    assert.strictEqual(out.ok, true, 'Got ' + JSON.stringify(out));
+    assert.deepStrictEqual(laneShape(C.parseSource(out.text).doc),
+      [['grp', undefined, 'c'], 'a', 'd']);
+  });
+
+  assert.deepStrictEqual(failures, [], 'Task 8b 的 codec edit 有幾條沒過：\n  ' + failures.join('\n  '));
+  console.log('wave-codec: wrap / unwrap / 群組 move — OK');
 }
 
 console.log('wave-codec.test.js OK');

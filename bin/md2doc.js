@@ -273,11 +273,17 @@ function main() {
 
     const pairs = resolveOutputs(args);
     const outputs = [];
+    // Each (input, format) pair renders in its own child, and each child would
+    // print the input's wavedrom overflow warnings: only the first child per
+    // input prints them, so --html --pdf does not say everything twice.
+    const warned = new Set();
     for (const { input, output } of pairs) {
         const stdio = args.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit';
         const childArgs = [LIB, input, output];
         if (args.bakeSvg) childArgs.push('--bake-svg');
         if (args.lang) childArgs.push('--lang=' + args.lang);
+        if (warned.has(input)) childArgs.push('--no-wave-warn');
+        warned.add(input);
         const r = spawnSync(process.execPath, childArgs, { stdio });
         if (r.status !== 0) {
             process.stderr.write('error: render failed for ' + input + ' (exit ' + r.status + ')\n');
