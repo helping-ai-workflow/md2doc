@@ -627,7 +627,9 @@ console.log('md2doc dot WASM test passed');
   const later = { codespan: 'Use the `<svg>` element.\n\n<svg width="20" height="10"><text>x</text></svg>\n',
     codespanBlock: 'Use the `<svg>` element.\n\n<svg width="20" height="10">\n<text>x</text>\n</svg>\n',
     unclosedTypo: '<svg width="5"><circle r="2"/>\n\npara\n\n<svg width="20" height="10"><text>x</text></svg>\n',
-    looseListCode: '- write `<svg viewBox="0 0 1 1">`\n\n- b\n\n<svg width="20" height="10"><text>x</text></svg>\n' };
+    looseListCode: '- write `<svg viewBox="0 0 1 1">`\n\n- b\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    // Fix round 3: an html comment naming <svg> opens nothing.
+    commentBlock: '<!-- <svg> -->\n\n<svg width="20" height="10">\n<text>x</text>\n</svg>\n' };
   for (const [k, md] of Object.entries(later)) assert.match(await body(md), /class="inline-svg"><svg width="20"/, k + ': the later svg keeps its plate');
   const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
   assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
