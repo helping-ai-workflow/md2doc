@@ -899,14 +899,53 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
   // Fix round 2: a diagram that has no geometry while the theme flips (display:none)
   // pairs each text with its own node's shape instead of falling back to #e3e3e3.
   check(label + ': dark fills: a diagram hidden while toggling still pairs text with its node', vp, async (page) => {
-    await gotoTheme(page, d10()); await wait(400);
-    await page.evaluate(() => { document.querySelector('.content .graphviz').style.display = 'none'; });
+    await gotoTheme(page, d10()); await wait(1200);
+    const lightAll = await leafContrast(page);
+    await page.evaluate(() => { document.querySelectorAll('.content .graphviz').forEach((g) => { g.style.display = 'none'; }); });
     await page.click('#md2doc-theme-toggle'); await wait(600);
-    await page.evaluate(() => { document.querySelector('.content .graphviz').style.display = ''; });
+    await page.evaluate(() => { document.querySelectorAll('.content .graphviz').forEach((g) => { g.style.display = ''; }); });
+    await wait(300);
     const dark = await pairs(page);
+    // Fix round 3: a multi-cell table node must not pair every cell's text with its
+    // first cell. These rows passed at base (old rule) and must still pass hidden.
+    const darkAll = await leafContrast(page);
+    const rows = ['BODYDEF', 'BODYWHITE', 'BODYLG', 'BODY2', 'HTMLC'];
+    const short = rows.filter((k) => !darkAll[k] || darkAll[k].ratio < Math.min(4.5, lightAll[k].ratio))
+      .map((k) => k + ' light ' + JSON.stringify(lightAll[k]) + ' dark ' + JSON.stringify(darkAll[k]));
+    assert.deepStrictEqual(short, [], 'hidden table rows below min(4.5, light contrast)');
     assert.strictEqual(dark.MID888.text, 'rgb(34, 34, 34)', 'MID888 keeps #222 on its #888 node ' + JSON.stringify(dark.MID888));
     assert.ok(dark.MID888.ratio >= 4.49, 'MID888 ' + JSON.stringify(dark.MID888));
     assert.strictEqual(dark.LIGHT.text, 'rgb(227, 227, 227)', 'LIGHT ' + JSON.stringify(dark.LIGHT));
+  });
+  // Fix round 3: the toggle reads its geometry before the theme flips, so no getBBox
+  // runs in the click once the dark attribute is set (that read forces a layout of
+  // the whole restyled page) — on the first toggle (light-drawn mermaid with an
+  // author-styled node) and on a later one (the cached live dark mermaid is swapped in).
+  check(label + ': dark fills: the toggle reads no diagram geometry after the theme flips', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const darkClick = () => page.evaluate(() => {
+      const st = { post: 0, pre: 0 };
+      const o = SVGGraphicsElement.prototype.getBBox;
+      SVGGraphicsElement.prototype.getBBox = function () {
+        if (document.documentElement.getAttribute('data-md2doc-theme') === 'dark') st.post++; else st.pre++;
+        return o.apply(this, arguments);
+      };
+      try { document.getElementById('md2doc-theme-toggle').click(); } finally { SVGGraphicsElement.prototype.getBBox = o; }
+      return Object.assign(st, { dark: document.documentElement.getAttribute('data-md2doc-theme') === 'dark' });
+    });
+    const first = await darkClick();
+    assert.strictEqual(first.dark, true, 'guard: dark after the first click');
+    assert.ok(first.pre > 0, 'guard: geometry was read before the flip ' + JSON.stringify(first));
+    assert.strictEqual(first.post, 0, 'first toggle: getBBox after the flip ' + JSON.stringify(first));
+    await wait(3000);
+    assert.strictEqual((await mermaidMid(page)).live, true, 'guard: the live dark mermaid is drawn');
+    await page.click('#md2doc-theme-toggle'); await wait(800);
+    const second = await darkClick();
+    assert.strictEqual(second.dark, true, 'guard: dark after the second click');
+    assert.strictEqual(second.post, 0, 'later toggle: getBBox after the flip ' + JSON.stringify(second));
+    await wait(600);
+    const m = await mermaidMid(page);
+    assert.deepStrictEqual([m.live, m.color], [true, 'rgb(34, 34, 34)'], 'the swapped-in live label still keeps #222 ' + JSON.stringify(m));
   });
 }
 // R7 甲: a Markdown-native inline svg sits on a white plate in dark, inked #1f2328.
