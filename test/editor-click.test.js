@@ -3506,6 +3506,44 @@ check('f1: an already escaped paragraph is byte-stable after an unrelated edit',
   assert.strictEqual(await noticeText(page), null, 'no notice');
 }, { md: '# D\n\n\\## Alpha.\n' });
 
+// ── baseline (v3.13.1 T3–T7): WebKit coverage for editor behaviour the
+// release does not change. These are guards: green by design on both engines.
+// ── T3: undo/redo of a text edit, Shift+Enter ──
+check('baseline history: Ctrl+Z inside the burst reverts the typing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await page.evaluate(() => ([...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent.indexOf('Alpha') === 0) || {}).textContent), 'Alpha.');
+  assert.strictEqual(await commitAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('baseline history: Ctrl+Z / Ctrl+Y after the commit, then the toolbar buttons', DESKTOP, async (page, boot) => {
+  const WITH = '# D\n\nAlpha.X\n\nOmega.\n';
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), WITH, 'guard: committed');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'Ctrl+Z');
+  await page.keyboard.press('Control+y'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), WITH, 'Ctrl+Y');
+  await page.click('[data-ed-tb="undo"]'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'toolbar undo');
+  await page.click('[data-ed-tb="redo"]'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), WITH, 'toolbar redo');
+}, { md: BASE_MD });
+check('baseline history: Shift+Enter in a paragraph is a <br> inside the same block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 2);
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAl<br>Zpha.\n\nOmega.\n');
+  await page.reload(); await page.waitForSelector('.ed-toolbar'); await wait(400);
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    blocks: document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length,
+    brs: document.querySelectorAll('.content p br').length,
+  })), { blocks: 2, brs: 1 });
+}, { md: BASE_MD });
+
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
