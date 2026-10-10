@@ -761,19 +761,64 @@ const D10_MD = ['# D10 fills', '', '## 1. Graphviz', '',
   '  blue [label="BLUE", fillcolor="#4a90d9", fontcolor="#111111"];',
   '  light [label="LIGHT", fillcolor="#e0e0e0"];',
   '  mid -> light; mid2 -> blue; }', '\x60\x60\x60', '',
+  // Fix round 1: a text sits on whatever shape is painted under it, not on its
+  // node's first shape — register tables (a polygon per cell), a white node in a
+  // filled cluster, saturated author text on a toned fill.
+  '\x60\x60\x60dot', 'digraph { node [shape=plaintext];',
+  '  reg1 [label=<<table border="0" cellborder="1" cellspacing="0"><tr><td bgcolor="#4a90d9">REGHDR</td></tr><tr><td>BODYDEF</td></tr>' +
+    '<tr><td bgcolor="white">BODYWHITE</td></tr><tr><td bgcolor="lightgrey">BODYLG</td></tr></table>>];',
+  '  reg2 [label=<<table border="0" cellborder="1" cellspacing="0"><tr><td bgcolor="#888888">HDR888</td></tr><tr><td>BODY2</td></tr></table>>];',
+  '  htm [label=<<table bgcolor="#888888"><tr><td><font color="#222222">HTMLT</font></td><td bgcolor="#e0e0e0"><font color="#222222">HTMLC</font></td></tr></table>>];',
+  '  amber [shape=box, style=filled, label="AMBERBLUE", fillcolor="#ffd54f", fontcolor="#1565c0"];',
+  '  greyblue [shape=box, style=filled, label="GREYBLUE", fillcolor="#c0c0c0", fontcolor="#0000cc"];',
+  '  subgraph cluster_x { label="CLUS"; style=filled; fillcolor="#888888"; fontcolor="#222222"; inner [shape=box, style=filled, label="INNER", fillcolor="#ffffff"]; }',
+  '  reg1 -> reg2 -> htm; amber -> greyblue -> inner; }', '\x60\x60\x60', '',
   '## 2. Mermaid', '',
-  '\x60\x60\x60mermaid', 'graph LR', '  A[MIDM] --> B[Plain]', '  style A fill:#888888,color:#222222', '\x60\x60\x60', ''];
+  '\x60\x60\x60mermaid', 'graph LR', '  A[MIDM] --> B[Plain]', '  C((MCIRC)) --> F[MBOX]', '  style A fill:#888888,color:#222222',
+  '  style C fill:#888888,color:#222222', '  style F fill:#ffd54f,color:#1565c0', '\x60\x60\x60', ''];
 let d10Url = null;
 const d10 = () => d10Url || (d10Url = fixtureUrl('d10', D10_MD));
-// WCAG ratio of each graphviz node's text against its own shape (the body
-// background where the shape is transparent), read as plain values.
+// Every graphviz and mermaid text, measured the way the browser paints it: the
+// first filled svg shape under the text's centre (elementsFromPoint, after
+// scrolling it into view), the body where there is none. Plain values only.
+function leafContrast(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function parse(s) { const n = (String(s).match(/[\d.]+/g) || []).map(Number); return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const leaves = [];
+    document.querySelectorAll('.content .graphviz svg text, .content .mermaid svg text').forEach((t) => { if (t.textContent.trim()) leaves.push([t, 'fill']); });
+    document.querySelectorAll('.content .mermaid svg foreignObject *').forEach((e) => {
+      if ([].some.call(e.childNodes, (c) => c.nodeType === 3 && c.textContent.trim())) leaves.push([e, 'color']);
+    });
+    const out = {};
+    for (const [el, prop] of leaves) {
+      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      const r = el.getBoundingClientRect();
+      let under = null; let by = 'body';
+      for (const s of document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)) {
+        if (s === el || el.contains(s) || s.contains(el)) continue;
+        if (s.namespaceURI !== 'http://www.w3.org/2000/svg' || !/^(polygon|ellipse|path|rect|circle)$/i.test(s.tagName)) continue;
+        const fl = parse(getComputedStyle(s).fill);
+        if (fl && fl[3] > 0) { under = fl; by = s.tagName; break; }
+      }
+      if (!under) under = parse(getComputedStyle(document.body).backgroundColor);
+      const own = getComputedStyle(el)[prop]; const a = lum(parse(own)); const b = lum(under);
+      out[el.textContent.trim()] = { own, under: 'rgb(' + under.slice(0, 3).join(', ') + ')', by,
+        ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+    }
+    return out;
+  });
+}
+// WCAG ratio of each node's text in the FIRST graphviz block against its own
+// shape (the body background where the shape is transparent), as plain values.
 function pairs(page) {
   return page.evaluate(() => {
     function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
     function parse(s) { const n = (s.match(/[\d.]+/g) || []).map(Number); return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
     function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
     const out = {};
-    document.querySelectorAll('.content .graphviz svg g.node').forEach((g) => {
+    document.querySelector('.content .graphviz svg').querySelectorAll('g.node').forEach((g) => {
       const t = g.querySelector('text'); const s = g.querySelector('polygon');
       const text = getComputedStyle(t).fill; const shape = getComputedStyle(s).fill;
       let under = parse(shape);
@@ -823,6 +868,22 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     assert.strictEqual(dark && dark.live, true, 'guard: the live dark render is shown ' + JSON.stringify(dark));
     assert.strictEqual(dark.fill, 'rgb(136, 136, 136)', 'guard: the author fill is untouched ' + JSON.stringify(dark));
     assert.strictEqual(dark.color, 'rgb(34, 34, 34)', 'label keeps #222 ' + JSON.stringify(dark));
+  });
+  check(label + ': dark fills: every diagram text keeps min(4.5, its light contrast) on what is painted under it', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const light = await leafContrast(page);
+    const want = ['MID888', 'MID777', 'BLUE', 'LIGHT', 'REGHDR', 'BODYDEF', 'BODYWHITE', 'BODYLG', 'HDR888', 'BODY2', 'HTMLT', 'HTMLC',
+      'AMBERBLUE', 'GREYBLUE', 'CLUS', 'INNER', 'MIDM', 'Plain', 'MCIRC', 'MBOX'];
+    assert.deepStrictEqual(want.filter((k) => !light[k]), [], 'guard: every fixture text is measured ' + JSON.stringify(Object.keys(light)));
+    const before = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    await page.click('#md2doc-theme-toggle'); await wait(3000);
+    const dark = await leafContrast(page);
+    const short = Object.keys(light).filter((k) => !dark[k] || dark[k].ratio < Math.min(4.5, light[k].ratio))
+      .map((k) => k + ' light ' + JSON.stringify(light[k]) + ' dark ' + JSON.stringify(dark[k]));
+    assert.deepStrictEqual(short, [], 'texts below min(4.5, light contrast) in dark');
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    assert.deepStrictEqual(after, before, 'every graphviz style attribute restored');
   });
 }
 // R7 甲: a Markdown-native inline svg sits on a white plate in dark, inked #1f2328.
