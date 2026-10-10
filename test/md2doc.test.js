@@ -685,5 +685,23 @@ console.log('md2doc dot WASM test passed');
   assert.deepStrictEqual(await index(lists), [
     'L alpha item codeline inside after code tail x i1 lead bq inside after bq words i2 lead a c after table words i3 lead sub after sub words more after sub',
   ]);
+  // Fix round 2: the edit page shows the same search box and reads the same
+  // section index, so edit mode must index each list item once, in the edit
+  // DOM's order. That order is the reader's, except that a nested list is
+  // drawn after its parent item's whole block (a paragraph that follows the
+  // nested list in the source is drawn before it).
+  const both = async (md) => [(await index(md))[0], await (async () => {
+    const { html } = await renderMarkdown(md, fake, { editMode: true });
+    const m = html.match(/<script id="reader-section-data" type="application\/json">([\s\S]*?)<\/script>/);
+    return JSON.parse(m[1])[0].searchText;
+  })()];
+  assert.deepStrictEqual(await both('## T\n\n- tight x\n- tight y\n  - sub\n'),
+    ['T tight x tight y sub', 'T tight x tight y sub'], 'tight list with a nested item');
+  assert.deepStrictEqual(await both('## T\n\n- loose one\n\n- loose two\n'),
+    ['T loose one loose two', 'T loose one loose two'], 'loose list');
+  assert.deepStrictEqual(await both('## T\n\n- [ ] task a\n- [x] **task** b\n\n1. ord\n   ```\n   code x\n   ```\n   after\n'),
+    ['T task a task b ord code x after', 'T task a task b ord code x after'], 'task items and an item with a code block');
+  assert.deepStrictEqual(await both('## T\n\n- lead\n\n  - sub\n\n  tailpara\n'),
+    ['T lead sub tailpara', 'T lead tailpara sub'], 'a paragraph after a nested list (edit draws the nested list after the item)');
   console.log('md2doc section index test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
