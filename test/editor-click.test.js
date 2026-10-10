@@ -3570,16 +3570,35 @@ check('baseline paste: HTML becomes a markdown block below', DESKTOP, async (pag
 }, { md: BASE_MD });
 check('baseline paste: Ctrl+Shift+V pastes the plain flavour verbatim', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
-  // The real key press also asks the browser for a native paste of whatever
-  // the browser-wide clipboard holds (earlier checks leave text there), which
-  // would land in the file as well. A capture listener swallows that trusted
-  // event only; the synthetic one below (isTrusted false) goes through.
-  await page.evaluate(() => window.addEventListener('paste', (e) => { if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); } }, true));
+  // The user path: a real Ctrl+C puts both flavours on the clipboard (a
+  // temporary capture-phase copy listener supplies them, so the clipboard does
+  // not depend on earlier checks), then a real Ctrl+Shift+V arms the plain
+  // paste and the browser's native paste consumes it.
+  await page.evaluate(() => {
+    window.__seedCopy = (e) => {
+      e.clipboardData.setData('text/plain', 'PASTED<b>RICH</b>TEXT');
+      e.clipboardData.setData('text/html', '<b>evil</b>');
+      e.preventDefault(); e.stopImmediatePropagation();
+    };
+    window.addEventListener('copy', window.__seedCopy, true);
+  });
+  await page.keyboard.press('Control+c');
+  await page.evaluate(() => window.removeEventListener('copy', window.__seedCopy, true));
   await page.keyboard.press('Control+Shift+V');
-  await clipboardEvent(page, 'paste', 'PASTED<b>RICH</b>TEXT', '<b>evil</b>');
+  await renderIdle(page);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.PASTED&lt;b>RICH&lt;/b>TEXT\n\nOmega.\n');
 }, { md: BASE_MD });
 
+// Chromium and WebKit strip text/html from a native Ctrl+Shift+V paste, so the
+// check above cannot tell plainOnly from a normal paste. This one arms with the
+// keydown the product listens to (dispatched, so no native paste follows and
+// consumes the arming) and then pastes both flavours synthetically.
+check('baseline paste: an armed plain paste ignores the html flavour', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, bubbles: true })));
+  await clipboardEvent(page, 'paste', 'PASTED<b>RICH</b>TEXT', '<b>evil</b>');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.PASTED&lt;b>RICH&lt;/b>TEXT\n\nOmega.\n');
+}, { md: BASE_MD });
 
 // ── T5: inline formatting ──
 async function selectInSurface(page, text, from, to) {
@@ -3643,6 +3662,7 @@ async function shiftClickCell(page, text) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }, text);
   assert.ok(p, 'shiftClickCell: no cell with text ' + JSON.stringify(text));
+  assert.strictEqual(await page.evaluate((q) => { const e = document.elementFromPoint(q.x, q.y); return !!(e && e.closest('.ed-wys-cell')); }, p), true, 'shiftClickCell: the press point is on a cell');
   await page.keyboard.down('Shift'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Shift');
   await renderIdle(page);
 }
@@ -3665,9 +3685,7 @@ check('baseline table: ArrowDown and ArrowUp move between rows', DESKTOP, async 
   await page.keyboard.press('ArrowUp');
   await page.keyboard.type('Y');
   const t = mdTable(await commitAndRead(page, boot));
-  assert.ok(t[2][0].includes('Z'), 'row 2 col 0: ' + JSON.stringify(t));
-  assert.ok(t[1][1].includes('Y'), 'row 1 col 1: ' + JSON.stringify(t));
-  assert.deepStrictEqual([t[0], t[1][0], t[2][1]], [['A', 'B'], 'a1', 'b2'], 'other cells: ' + JSON.stringify(t));
+  assert.deepStrictEqual(t, [['A', 'B'], ['a1', 'Yb1'], ['Za2', 'b2']]);
 }, { md: TBL2_MD });
 check('baseline table: a cell range copies as TSV and HTML', DESKTOP, async (page) => {
   await focusSurface(page, 'a1', 0);
