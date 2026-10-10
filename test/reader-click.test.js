@@ -130,6 +130,11 @@ const SECTION_TEXT_URL = fixtureUrl('section-text', [
   'Para after code block.', '',
   '\x60\x60\x60math', '\\alpha + \\beta', '\x60\x60\x60', '',
   'hard line one  ', 'hard line two after a br.', '',
+  // Fix round 1: a list item's text after its block child (a code block, a
+  // nested list) is indexed where it reads, not ahead of the child.
+  '- alpha item', '  \x60\x60\x60', '  codeline inside', '  \x60\x60\x60', '  after code tail', '',
+  'Between lists.', '',
+  '- loose first', '', '  - nested bee', '', '  loose tail words', '',
   '## 2. Next', '', filler(2, 6), '',
 ]);
 
@@ -569,6 +574,9 @@ check('search: math, a fenced code block and a hard break are marked wherever th
     ['line one hard', 1], // across a hard break
     ['inside blockquote. para after', 0], // a code block sits between them on both sides
     ['oneh', 0], // a hard break reads as a space, never as nothing
+    ['codeline inside after code tail', 1], // a list item's text after its code block
+    ['alpha item after code tail', 0], // the code block sits between them on both sides
+    ['nested bee loose tail words', 1], // a loose item's paragraph after its nested list
   ];
   const problems = [];
   for (const [q, n] of cases) {
@@ -588,6 +596,33 @@ check('search: math, a fenced code block and a hard break are marked wherever th
     }
   }
   assert.deepStrictEqual(problems, []);
+});
+// Fix round 1: a display formula's mark is a direct child of main.content, so
+// the zoom/resize anchor could pin the mark itself; clearing the search then
+// removed the anchor, and the next resize lost the reading position.
+check('search: clearing a display-formula hit keeps the resize anchor', DESKTOP, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  const formulaTop = () => page.evaluate(() => {
+    const ann = Array.from(document.querySelectorAll('annotation')).find((a) => a.textContent.trim() === 'E = mc^2');
+    return ann.closest('.katex').getBoundingClientRect().top;
+  });
+  await searchFor(page, 'e = mc^2');
+  const marked = await page.evaluate(() => {
+    const m = document.querySelector('main.content mark.search-hit.is-selected');
+    return m ? m.parentElement.tagName + '>' + m.className : null;
+  });
+  assert.strictEqual(marked, 'MAIN>search-hit is-selected search-hit-math search-hit-block', 'the display formula is marked as a block child of the column');
+  // Put the marked formula on the anchor line (80px), let the scroll capture it, then clear.
+  await page.evaluate(() => {
+    const ann = Array.from(document.querySelectorAll('annotation')).find((a) => a.textContent.trim() === 'E = mc^2');
+    window.scrollTo(0, window.scrollY + ann.closest('.katex').getBoundingClientRect().top - 70);
+  });
+  await wait(300);
+  await page.click('#doc-search-clear'); await wait(300);
+  const top0 = await formulaTop();
+  await page.setViewportSize({ width: 900, height: 900 }); await wait(500);
+  const top1 = await formulaTop();
+  assert.ok(Math.abs(top1 - top0) <= 1, 'the formula stays put across the resize: ' + top0.toFixed(1) + ' -> ' + top1.toFixed(1));
 });
 check('phone: a math hit from the drawer lands on screen', PHONE, async (page) => {
   await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);

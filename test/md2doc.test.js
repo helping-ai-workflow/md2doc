@@ -671,5 +671,19 @@ console.log('md2doc dot WASM test passed');
   assert.deepStrictEqual(await index(md), [
     'S Inline x^2 + y here. E = mc^2 \\alpha const reg_a = 1; // if (a<b && c>d) hard one hard two raw quoted <b> line loose a loose b mid done nested after',
   ]);
+  // Fix round 1: a list item's text is indexed in reading order with its block
+  // children (code, blockquote, table, nested list), and a loose item's
+  // paragraphs after a nested list are indexed at all.
+  const lists = [
+    '## L', '',
+    '- alpha item', '  ```', '  codeline inside', '  ```', '  after code tail', '',
+    'x', '',
+    '- i1 lead', '', '  > bq inside', '', '  after bq words', '',
+    '- i2 lead', '', '  | a |', '  |---|', '  | c |', '', '  after table words', '',
+    '- i3 lead', '', '  - sub', '', '  after sub words', '', '  more after sub', '',
+  ].join('\n');
+  assert.deepStrictEqual(await index(lists), [
+    'L alpha item codeline inside after code tail x i1 lead bq inside after bq words i2 lead a c after table words i3 lead sub after sub words more after sub',
+  ]);
   console.log('md2doc section index test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
