@@ -88,6 +88,56 @@ function fixtureUrl(name, mdLines) {
   return 'file://' + htmlFile;
 }
 
+// ── Follow-up fixture (v3.13.1): the main fixture's shape, plus phrases that
+// cross text nodes (a heading's number span, inline code, a soft line break,
+// bold) and three short trailing sections ─────────────────────────────────────
+const FOLLOWUP_MD = ['# Reader Fixture Spec', ''];
+for (let s = 1; s <= 8; s++) {
+  FOLLOWUP_MD.push('## ' + s + '. Section ' + s, '', filler(s, 4), '');
+  if (s === 5) FOLLOWUP_MD.push('The zebrafinch handshake is defined here.', '');
+  FOLLOWUP_MD.push('### ' + s + '.1 Child of ' + s, '', filler(s + '.1', 3), '');
+  if (s === 4) {
+    FOLLOWUP_MD.push('### 4.2 Assumptions', '', 'The link partner keeps its clock.', '');
+    FOLLOWUP_MD.push('A `rcv_v` beat crosses an inline code boundary.', '');
+    FOLLOWUP_MD.push('alpha line', 'bravo line wraps by a soft break.', '');
+    FOLLOWUP_MD.push('Words **bold kiwi** run on.', '');
+  }
+}
+FOLLOWUP_MD.push('## 9. Short nine', '', 'One line.', '', '## 10. Short ten', '', 'One line.', '', '## 11. Short eleven', '', 'One line.', '');
+const FOLLOWUP_URL = fixtureUrl('followup', FOLLOWUP_MD);
+// Search across nodes, its own file so FOLLOWUP_MD stays as Tasks 11–13 expect:
+// a phrase whose only separator is a whitespace-only text node between two
+// inline elements, and one multi-node phrase found in two different sections.
+const SEARCH_NODES_URL = fixtureUrl('search-nodes', [
+  '# Search Nodes', '',
+  '## 1. First', '', filler(1, 2), '',
+  'Run **bold** *italic* here.', '',
+  'The `tx_ready` flag rises.', '',
+  '## 2. Second', '', filler(2, 6), '',
+  'Later the `tx_ready` flag falls.', '',
+  '## 3. Third', '', filler(3, 6), '',
+]);
+// T9b: the shapes whose text the results list and the in-text marks used to
+// read differently — inline and display math (list: TeX; DOM: MathML + glyphs),
+// a fenced code block (never indexed) and a hard break (words fused).
+const SECTION_TEXT_URL = fixtureUrl('section-text', [
+  '# Section Text', '',
+  '## 1. Shapes', '', filler(1, 2), '',
+  'Inline math $x^2 + y$ inside sentence.', '',
+  '$$', 'E = mc^2', '$$', '',
+  '> quoted line inside blockquote.', '',
+  '\x60\x60\x60js', 'const codeblock = 42; // code comment words', '\x60\x60\x60', '',
+  'Para after code block.', '',
+  '\x60\x60\x60math', '\\alpha + \\beta', '\x60\x60\x60', '',
+  'hard line one  ', 'hard line two after a br.', '',
+  // Fix round 1: a list item's text after its block child (a code block, a
+  // nested list) is indexed where it reads, not ahead of the child.
+  '- alpha item', '  \x60\x60\x60', '  codeline inside', '  \x60\x60\x60', '  after code tail', '',
+  'Between lists.', '',
+  '- loose first', '', '  - nested bee', '', '  loose tail words', '',
+  '## 2. Next', '', filler(2, 6), '',
+]);
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -140,7 +190,10 @@ async function focusRing(page) {
 }
 
 const checks = [];
-function check(name, viewport, fn, ctx) { checks.push({ name, viewport, fn, ctx }); }
+// opts.engines: run only on these engines. opts.launch: launch options for a
+// browser of the check's own (launched and closed around it), e.g. to turn the
+// classic scrollbars back on that the default headless launch hides.
+function check(name, viewport, fn, ctx, opts) { checks.push({ name, viewport, fn, ctx, opts: opts || {} }); }
 
 // ── Desktop ─────────────────────────────────────────────────────────────────
 check('desktop: TOC links jump and light exactly one blue row, path bold', DESKTOP, async (page) => {
@@ -336,6 +389,252 @@ check('phone: search from the drawer; picking a result closes it and shows the h
   assert.ok(hit.top >= 44 && hit.bottom <= PHONE.height, 'hit visible below the bar: ' + JSON.stringify(hit));
 });
 
+// ── Search marks across text nodes (R2) ─────────────────────────────────────
+// A phrase that crosses a heading's .sec span, inline code, a soft line break or
+// bold used to get no mark at all, and the reader fell back to the heading.
+// Plain values only: the joined mark text, the mark count, and whether the
+// first mark is fully inside the viewport.
+async function selectedMarks(page) {
+  return page.evaluate(() => {
+    const marks = Array.from(document.querySelectorAll('mark.search-hit.is-selected'));
+    let onScreen = false;
+    if (marks.length) {
+      const r = marks[0].getBoundingClientRect();
+      onScreen = r.width > 0 && r.height > 0 && r.left >= -0.5 && r.top >= -0.5 &&
+        r.right <= window.innerWidth + 0.5 && r.bottom <= window.innerHeight + 0.5;
+    }
+    return {
+      text: marks.map((m) => m.textContent).join('').replace(/\s+/g, ' ').toLowerCase(),
+      count: marks.length,
+      onScreen,
+      top: marks.length ? Math.round(marks[0].getBoundingClientRect().top) : null,
+    };
+  });
+}
+async function searchFor(page, q) {
+  await page.fill('#doc-search-input', q);
+  await page.press('#doc-search-input', 'Enter');
+  await wait(300);
+  return selectedMarks(page);
+}
+check('search: a phrase across a heading number and its title', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const r = await searchFor(page, '4.2 assumptions');
+  assert.strictEqual(r.text, '4.2 assumptions', 'joined mark text, count=' + r.count);
+  assert.ok(r.count >= 1, 'at least one mark, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+});
+check('search: a phrase across inline code, a soft break and bold', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  for (const q of ['a rcv_v beat', 'alpha line bravo', 'words bold kiwi']) {
+    const r = await searchFor(page, q);
+    assert.strictEqual(r.text, q, q + ': joined mark text, count=' + r.count);
+    assert.strictEqual(r.onScreen, true, q + ': first mark on screen, top=' + r.top);
+  }
+});
+check('search: multi-node hits clear cleanly after next/prev', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const q = 'a rcv_v beat';
+  // Marks must exist before the clear, or a clean innerHTML proves nothing.
+  const first = await searchFor(page, q);
+  assert.strictEqual(first.text, q, 'searched: joined mark text, count=' + first.count);
+  assert.ok(first.count > 1, 'the hit spans several marks, count=' + first.count);
+  await page.click('#search-next'); await wait(300);
+  const next = await selectedMarks(page);
+  assert.strictEqual(next.text, q, 'after next: joined mark text, count=' + next.count);
+  assert.ok(next.count > 1, 'after next: several marks, count=' + next.count);
+  await page.click('#search-prev'); await wait(300);
+  const prev = await selectedMarks(page);
+  assert.strictEqual(prev.text, q, 'after prev: joined mark text, count=' + prev.count);
+  assert.ok(prev.count > 1, 'after prev: several marks, count=' + prev.count);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+check('phone: a multi-node search from the drawer lands on screen', PHONE, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(350);
+  await searchFor(page, 'a rcv_v beat');
+  await page.click('.search-result-item >> nth=0'); await wait(400);
+  const r = await selectedMarks(page);
+  assert.strictEqual(r.text, 'a rcv_v beat', 'joined mark text, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  assert.ok(r.top >= 44, 'first mark below the bar, top=' + r.top);
+});
+check('search: a space that is its own text node between inline elements', DESKTOP, async (page) => {
+  await page.goto(SEARCH_NODES_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const r = await searchFor(page, 'bold italic');
+  assert.strictEqual(r.text, 'bold italic', 'joined mark text, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+check('search: next/prev move a multi-node hit between two sections, then clear', DESKTOP, async (page) => {
+  await page.goto(SEARCH_NODES_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const q = 'the tx_ready flag';
+  // Which paragraph holds the selected hit, how many marks the whole page has,
+  // and the result counter, as plain values.
+  const where = () => page.evaluate(() => {
+    const m = document.querySelector('mark.search-hit.is-selected');
+    return {
+      block: m ? m.closest('p').textContent : null,
+      allMarks: document.querySelectorAll('main.content mark').length, // the results list has snippet marks of its own
+      status: document.getElementById('search-result-count').textContent.trim(),
+    };
+  });
+  const FIRST = 'The tx_ready flag rises.';
+  const SECOND = 'Later the tx_ready flag falls.';
+  const first = await searchFor(page, q);
+  assert.strictEqual(first.text, q, 'searched: joined mark text, count=' + first.count);
+  assert.strictEqual(first.count, 3, 'searched: one mark per node');
+  const w1 = await where();
+  assert.strictEqual(w1.block, FIRST, 'searched: the hit is in section 1');
+  assert.strictEqual(w1.allMarks, 3, 'searched: only this hit is marked');
+  const n = Number(w1.status.split('/')[1]);
+  assert.strictEqual(w1.status, '1/' + n);
+  assert.ok(n >= 2, 'the phrase is found in two sections, n=' + n);
+  await page.click('#search-next'); await wait(300);
+  const next = await selectedMarks(page);
+  const w2 = await where();
+  assert.strictEqual(next.text, q, 'after next: joined mark text, count=' + next.count);
+  assert.strictEqual(w2.status, '2/' + n);
+  assert.strictEqual(w2.block, SECOND, 'after next: the hit moved to section 2');
+  assert.strictEqual(w2.allMarks, 3, 'after next: the old hit is unmarked');
+  assert.strictEqual(next.onScreen, true, 'after next: first mark on screen, top=' + next.top);
+  await page.click('#search-prev'); await wait(300);
+  const prev = await selectedMarks(page);
+  const w3 = await where();
+  assert.strictEqual(prev.text, q, 'after prev: joined mark text, count=' + prev.count);
+  assert.strictEqual(w3.status, '1/' + n);
+  assert.strictEqual(w3.block, FIRST, 'after prev: the hit is back in section 1');
+  assert.strictEqual(w3.allMarks, 3, 'after prev: the old hit is unmarked');
+  assert.strictEqual(prev.onScreen, true, 'after prev: first mark on screen, top=' + prev.top);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+
+// T9b: the selected marks as a reader reads them. A formula reads as its TeX
+// source (the rule the results list and the marks now share; its mark wraps the
+// whole formula). Two consecutive marks in different blocks, or with a <br>
+// between them, read with a space: the space a line or block break stands for
+// is in no text node, so no mark can carry it. Plain values only.
+async function markReading(page) {
+  return page.evaluate(() => {
+    const BLOCK = 'p, li, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote, dt, dd, figcaption';
+    const blockOf = (m) => m.querySelector('.katex-display') || m.closest(BLOCK);
+    const marks = Array.from(document.querySelectorAll('main.content mark.search-hit.is-selected'));
+    let reading = '';
+    marks.forEach((m, i) => {
+      if (i) {
+        const gap = document.createRange();
+        gap.setStartAfter(marks[i - 1]);
+        gap.setEndBefore(m);
+        if (gap.cloneContents().querySelector('br') || blockOf(marks[i - 1]) !== blockOf(m)) reading += ' ';
+      }
+      const tex = m.querySelector('annotation[encoding="application/x-tex"]');
+      reading += tex ? tex.textContent : m.textContent;
+    });
+    let onScreen = false;
+    let top = null;
+    if (marks.length) {
+      const r = marks[0].getBoundingClientRect();
+      onScreen = r.width > 0 && r.height > 0 && r.left >= -0.5 && r.top >= -0.5 &&
+        r.right <= window.innerWidth + 0.5 && r.bottom <= window.innerHeight + 0.5;
+      top = Math.round(r.top);
+    }
+    return {
+      reading: reading.replace(/\s+/g, ' ').trim().toLowerCase(),
+      count: marks.length,
+      onScreen,
+      top,
+      status: document.getElementById('search-result-count').textContent.trim(),
+    };
+  });
+}
+check('search: math, a fenced code block and a hard break are marked wherever the list finds them', DESKTOP, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  // [query, results the list must report]. Collected, not thrown one by one,
+  // so a red run names every shape that disagrees.
+  const cases = [
+    ['math x^2 + y inside', 1], // inline math, read as its TeX
+    ['inside sentence. e = mc^2', 1], // into display math
+    ['\\alpha + \\beta', 1], // a math fence
+    ['const codeblock = 42', 1], // a name that only a code block holds
+    ['inside blockquote. const codeblock', 1], // into a code block
+    ['code comment words para after', 1], // out of a code block
+    ['line one hard', 1], // across a hard break
+    ['inside blockquote. para after', 0], // a code block sits between them on both sides
+    ['oneh', 0], // a hard break reads as a space, never as nothing
+    ['codeline inside after code tail', 1], // a list item's text after its code block
+    ['alpha item after code tail', 0], // the code block sits between them on both sides
+    ['nested bee loose tail words', 1], // a loose item's paragraph after its nested list
+  ];
+  const problems = [];
+  for (const [q, n] of cases) {
+    await searchFor(page, q);
+    let r = await markReading(page);
+    const results = r.status === '0' ? 0 : Number(r.status.split('/')[1]);
+    if (results !== n) problems.push(q + ': ' + results + ' results, want ' + n);
+    for (let i = 0; i < results; i++) {
+      if (i) { await page.click('#search-next'); await wait(300); r = await markReading(page); }
+      if (r.reading !== q) problems.push(q + ' #' + (i + 1) + ': marks read ' + JSON.stringify(r.reading) + ', count=' + r.count);
+      else if (!r.onScreen) problems.push(q + ' #' + (i + 1) + ': first mark off screen, top=' + r.top);
+    }
+    await page.click('#doc-search-clear'); await wait(200);
+    const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('main.content mark').length }));
+    if (after.marks !== 0 || after.html !== before) {
+      problems.push(q + ': after clear ' + after.marks + ' marks, innerHTML ' + (after.html === before ? 'restored' : 'changed (lengths ' + before.length + ' / ' + after.html.length + ')'));
+    }
+  }
+  assert.deepStrictEqual(problems, []);
+});
+// Fix round 1: a display formula's mark is a direct child of main.content, so
+// the zoom/resize anchor could pin the mark itself; clearing the search then
+// removed the anchor, and the next resize lost the reading position.
+check('search: clearing a display-formula hit keeps the resize anchor', DESKTOP, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  const formulaTop = () => page.evaluate(() => {
+    const ann = Array.from(document.querySelectorAll('annotation')).find((a) => a.textContent.trim() === 'E = mc^2');
+    return ann.closest('.katex').getBoundingClientRect().top;
+  });
+  await searchFor(page, 'e = mc^2');
+  const marked = await page.evaluate(() => {
+    const m = document.querySelector('main.content mark.search-hit.is-selected');
+    return m ? m.parentElement.tagName + '>' + m.className : null;
+  });
+  assert.strictEqual(marked, 'MAIN>search-hit is-selected search-hit-math search-hit-block', 'the display formula is marked as a block child of the column');
+  // Put the marked formula on the anchor line (80px), let the scroll capture it, then clear.
+  await page.evaluate(() => {
+    const ann = Array.from(document.querySelectorAll('annotation')).find((a) => a.textContent.trim() === 'E = mc^2');
+    window.scrollTo(0, window.scrollY + ann.closest('.katex').getBoundingClientRect().top - 70);
+  });
+  await wait(300);
+  await page.click('#doc-search-clear'); await wait(300);
+  const top0 = await formulaTop();
+  await page.setViewportSize({ width: 900, height: 900 }); await wait(500);
+  const top1 = await formulaTop();
+  assert.ok(Math.abs(top1 - top0) <= 1, 'the formula stays put across the resize: ' + top0.toFixed(1) + ' -> ' + top1.toFixed(1));
+});
+check('phone: a math hit from the drawer lands on screen', PHONE, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(350);
+  await searchFor(page, 'math x^2 + y inside');
+  await page.click('.search-result-item >> nth=0'); await wait(400);
+  const r = await markReading(page);
+  assert.strictEqual(r.reading, 'math x^2 + y inside', 'marks read as the query, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  assert.ok(r.top >= 44, 'first mark below the bar, top=' + r.top);
+});
+
 // Tab (keyboard modality, so :focus-visible matches) until the focused element
 // satisfies `sel`; returns false when it is not reached within `max` presses.
 async function tabUntil(page, sel, max) {
@@ -471,20 +770,43 @@ check('desktop: blocked storage keeps the page light and the toggle still works'
   assert.strictEqual((await themeState(page)).attr, 'dark');
   assert.deepStrictEqual(errs, []);
 });
+// ── R8 (v3.13.1): contrast with alpha. The older checks took rgba(0,0,0,0.8) as opaque black.
+// Injected as a string so every check shares one definition of "colour as drawn".
+const CONTRAST_ALPHA_JS = `(() => {
+  function rgba(s) { const n = (s.match(/[\\d.]+/g) || []).map(Number); return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+  function over(fg, bg) { const a = fg[3]; return [fg[0] * a + bg[0] * (1 - a), fg[1] * a + bg[1] * (1 - a), fg[2] * a + bg[2] * (1 - a), 1]; }
+  function bgOf(el) {
+    const layers = [];
+    for (let e = el; e; e = e.parentElement) {
+      const c = rgba(getComputedStyle(e).backgroundColor);
+      if (c[3] === 0) continue;
+      layers.push(c);
+      if (c[3] === 1) break;
+    }
+    let base = [255, 255, 255, 1];
+    if (layers.length && layers[layers.length - 1][3] === 1) base = layers.pop();
+    while (layers.length) base = over(layers.pop(), base);
+    return base;
+  }
+  function lum(c) { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+  function ratio(fgCss, el) {
+    const bg = bgOf(el); const fg = over(rgba(fgCss), bg);
+    const x = lum(fg), y = lum(bg);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
+  window.__c = { rgba, over, bgOf, ratio };
+})();`;
 check('desktop: dark text meets WCAG AA where it is actually drawn', DESKTOP, async (page) => {
   await gotoTheme(page);
   await page.click('#md2doc-theme-toggle'); await wait(500);
   const on = await themeState(page);
   assert.deepStrictEqual([on.attr, on.bg], ['dark', 'rgb(27, 27, 29)'], 'dark is actually on before measuring');
   await page.fill('#doc-search-input', 'zebrafinch'); await page.press('#doc-search-input', 'Enter'); await wait(400);
+  await page.addScriptTag({ content: CONTRAST_ALPHA_JS });
   const pairs = await page.evaluate(() => {
-    function rgb(s) { return s.match(/[\d.]+/g).slice(0, 3).map(Number); }
-    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); } }
-    function ratio(a, b) { const x = lum(rgb(a)), y = lum(rgb(b)); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
-    function bgOf(e) { for (; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; const n = c.match(/[\d.]+/g) || []; if (c !== 'transparent' && !(n.length > 3 && +n[3] < 1)) return c; } return 'rgb(255, 255, 255)'; }
     const sel = { body: '.content p', code: '.content :not(pre) > code', link: '.content a', toc: '.toc-list a', active: '.toc a.is-active', mark: 'mark.search-hit.is-selected', snippet: '.search-result-snippet' };
     const out = {};
-    for (const k in sel) { const e = document.querySelector(sel[k]); if (e) out[k] = +ratio(getComputedStyle(e).color, bgOf(e)).toFixed(2); }
+    for (const k in sel) { const e = document.querySelector(sel[k]); if (e) out[k] = +window.__c.ratio(getComputedStyle(e).color, e).toFixed(2); }
     return out;
   });
   for (const k of ['body', 'code', 'link', 'toc', 'active', 'mark', 'snippet']) {
@@ -504,6 +826,20 @@ check('phone: the toggle sits at the right end of the top bar, not floating', PH
   assert.deepStrictEqual(r, { inBar: true, centreInBar: true, hit: true, rightGap: 12, count: 1 });
   await page.click('#md2doc-theme-toggle'); await wait(300);
   assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+check('phone: top bar text meets WCAG AA in light and dark, alpha included', PHONE, async (page) => {
+  await gotoTheme(page);
+  await page.addScriptTag({ content: CONTRAST_ALPHA_JS });
+  // Self-test: black at 0.8 alpha over white is #333, ratio 12.63. An alpha-blind helper reads 21.
+  const self = await page.evaluate(() => { const d = document.createElement('div'); d.style.background = '#fff'; document.body.appendChild(d); const r = window.__c.ratio('rgba(0, 0, 0, 0.8)', d); d.remove(); return +r.toFixed(2); });
+  assert.strictEqual(self, 12.63, 'helper blends alpha');
+  const ids = ['sidebar-toggle', 'mobile-bar-title', 'md2doc-theme-toggle'];
+  const measure = () => page.evaluate((list) => list.map((id) => { const e = document.getElementById(id); return { id, ratio: +window.__c.ratio(getComputedStyle(e).color, e).toFixed(2) }; }), ids);
+  const light = await measure();
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.strictEqual((await themeState(page)).attr, 'dark', 'dark is on before measuring');
+  const dark = await measure();
+  for (const r of light.concat(dark)) assert.ok(r.ratio >= 4.5, r.id + ' ' + r.ratio + ' ' + JSON.stringify({ light, dark }));
 });
 check('desktop: resizing across 1080px moves the toggle between bubble and bar', DESKTOP, async (page) => {
   await gotoTheme(page);
@@ -586,6 +922,261 @@ check('desktop: graphviz follows dark and restores its own colours exactly', DES
   const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
   assert.deepStrictEqual(after, before, 'every style attribute restored');
 });
+// ── R8 (v3.13.1): print restore for graphviz and WaveDrom, like the mermaid one above.
+// GUARD: pins existing behaviour, expected green when written (R3); can-fail evidence is in the task report.
+async function printState(page) {
+  return page.evaluate(() => {
+    const gv = document.querySelector('.content .graphviz svg');
+    const wd = document.querySelector('[id^="WaveDrom_Display_"] svg');
+    return { gvText: getComputedStyle(gv.querySelector('g.node text')).fill, gvEdge: getComputedStyle(gv.querySelector('g.edge path')).stroke,
+      gvFlag: gv.hasAttribute('data-md2doc-recoloured'), wdText: getComputedStyle(wd.querySelector('text')).fill, wdFlag: wd.hasAttribute('data-md2doc-recoloured'),
+      styles: [].slice.call(gv.querySelectorAll('*')).concat([].slice.call(wd.querySelectorAll('*'))).map((e) => e.getAttribute('style')) };
+  });
+}
+check('desktop: printing while dark shows light graphviz and WaveDrom, then restores dark', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(1200);
+  const light = await printState(page);
+  await page.click('#md2doc-theme-toggle'); await wait(1500);
+  const dark = await printState(page);
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  const printing = await printState(page);
+  assert.deepStrictEqual(printing, light, 'light while printing');
+  assert.deepStrictEqual({ gvText: light.gvText, gvEdge: light.gvEdge, gvFlag: light.gvFlag, wdText: light.wdText, wdFlag: light.wdFlag }, { gvText: 'rgb(0, 0, 0)', gvEdge: 'rgb(0, 0, 0)', gvFlag: false, wdText: 'rgb(0, 65, 196)', wdFlag: false });
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  const back = await printState(page);
+  assert.deepStrictEqual(back, dark, 'dark again after print');
+  assert.strictEqual(dark.wdText, 'rgb(160, 186, 238)');
+  assert.strictEqual(dark.gvText, 'rgb(227, 227, 227)');
+});
+// ── R7 (v3.13.1): a text picks between its author colour and the dark rule's
+// replacement, whichever reads better on the FINAL dark fill of its own shape.
+// One fixture, shared with the inline-svg plate check below (which appends a line).
+const D10_MD = ['# D10 fills', '', '## 1. Graphviz', '',
+  '\x60\x60\x60dot', 'digraph { node [shape=box, style=filled];',
+  '  mid [label="MID888", fillcolor="#888888", fontcolor="#222222"];',
+  '  mid2 [label="MID777", fillcolor="#777777", fontcolor="#000000"];',
+  '  blue [label="BLUE", fillcolor="#4a90d9", fontcolor="#111111"];',
+  '  light [label="LIGHT", fillcolor="#e0e0e0"];',
+  '  mid -> light; mid2 -> blue; }', '\x60\x60\x60', '',
+  // Fix round 1: a text sits on whatever shape is painted under it, not on its
+  // node's first shape — register tables (a polygon per cell), a white node in a
+  // filled cluster, saturated author text on a toned fill.
+  '\x60\x60\x60dot', 'digraph { node [shape=plaintext];',
+  '  reg1 [label=<<table border="0" cellborder="1" cellspacing="0"><tr><td bgcolor="#4a90d9">REGHDR</td></tr><tr><td>BODYDEF</td></tr>' +
+    '<tr><td bgcolor="white">BODYWHITE</td></tr><tr><td bgcolor="lightgrey">BODYLG</td></tr></table>>];',
+  '  reg2 [label=<<table border="0" cellborder="1" cellspacing="0"><tr><td bgcolor="#888888">HDR888</td></tr><tr><td>BODY2</td></tr></table>>];',
+  '  htm [label=<<table bgcolor="#888888"><tr><td><font color="#222222">HTMLT</font></td><td bgcolor="#e0e0e0"><font color="#222222">HTMLC</font></td></tr></table>>];',
+  '  amber [shape=box, style=filled, label="AMBERBLUE", fillcolor="#ffd54f", fontcolor="#1565c0"];',
+  '  greyblue [shape=box, style=filled, label="GREYBLUE", fillcolor="#c0c0c0", fontcolor="#0000cc"];',
+  '  subgraph cluster_x { label="CLUS"; style=filled; fillcolor="#888888"; fontcolor="#222222"; inner [shape=box, style=filled, label="INNER", fillcolor="#ffffff"]; }',
+  // Fix round 2: semi-transparent fills (graphviz #RRGGBBAA → fill-opacity) are composited.
+  '  alpha [shape=box, style=filled, label="ALPHA", fillcolor="#88888833", fontcolor="#222222"];',
+  '  alpha2 [shape=box, style=filled, label="ALPHA2", fillcolor="#4a90d940", fontcolor="#111111"];',
+  '  talpha [label=<<table border="0" cellborder="1" cellspacing="0"><tr><td bgcolor="#88888833">TALPHA</td></tr></table>>];',
+  '  reg1 -> reg2 -> htm; amber -> greyblue -> inner; alpha -> alpha2 -> talpha; }', '\x60\x60\x60', '',
+  '## 2. Mermaid', '',
+  '\x60\x60\x60mermaid', 'graph LR', '  A[MIDM] --> B[Plain]', '  C((MCIRC)) --> F[MBOX]', '  style A fill:#888888,color:#222222',
+  '  style C fill:#888888,color:#222222', '  style F fill:#ffd54f,color:#1565c0', '\x60\x60\x60', ''];
+let d10Url = null;
+const d10 = () => d10Url || (d10Url = fixtureUrl('d10', D10_MD));
+// Every graphviz and mermaid text, measured the way the browser paints it: the
+// filled svg shapes under the text's centre (elementsFromPoint, after scrolling
+// it into view), each with its alpha (fill alpha x fill-opacity x opacity),
+// composited down to the first opaque one or the body. Plain values only.
+function leafContrast(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function parse(s) { const n = (String(s).match(/[\d.]+/g) || []).map(Number); return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const leaves = [];
+    document.querySelectorAll('.content .graphviz svg text, .content .mermaid svg text').forEach((t) => { if (t.textContent.trim()) leaves.push([t, 'fill']); });
+    document.querySelectorAll('.content .mermaid svg foreignObject *').forEach((e) => {
+      if ([].some.call(e.childNodes, (c) => c.nodeType === 3 && c.textContent.trim())) leaves.push([e, 'color']);
+    });
+    const out = {};
+    for (const [el, prop] of leaves) {
+      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+      const r = el.getBoundingClientRect();
+      const layers = []; let by = 'body';
+      for (const s of document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)) {
+        if (s === el || el.contains(s) || s.contains(el)) continue;
+        if (s.namespaceURI !== 'http://www.w3.org/2000/svg' || !/^(polygon|ellipse|path|rect|circle)$/i.test(s.tagName)) continue;
+        const cs = getComputedStyle(s); const fl = parse(cs.fill);
+        if (!fl) continue;
+        let a = fl[3] * Number(cs.fillOpacity) * Number(cs.opacity);
+        for (let p = s.parentElement; p && p.tagName.toLowerCase() !== 'svg'; p = p.parentElement) a *= Number(getComputedStyle(p).opacity);
+        if (a <= 0) continue;
+        layers.push([fl, a]); by = (by === 'body' ? '' : by + '<') + s.tagName + (a < 1 ? '@' + a.toFixed(2) : '');
+        if (a >= 1) break;
+      }
+      let under = parse(getComputedStyle(document.body).backgroundColor).slice(0, 3);
+      for (let i = layers.length - 1; i >= 0; i--) { const [c, a] = layers[i]; under = under.map((v, j) => c[j] * a + v * (1 - a)); }
+      const own = getComputedStyle(el)[prop]; const a = lum(parse(own)); const b = lum(under);
+      out[el.textContent.trim()] = { own, under: 'rgb(' + under.map(Math.round).join(', ') + ')', by,
+        ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+    }
+    return out;
+  });
+}
+// WCAG ratio of each node's text in the FIRST graphviz block against its own
+// shape (the body background where the shape is transparent), as plain values.
+function pairs(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function parse(s) { const n = (s.match(/[\d.]+/g) || []).map(Number); return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const out = {};
+    document.querySelector('.content .graphviz svg').querySelectorAll('g.node').forEach((g) => {
+      const t = g.querySelector('text'); const s = g.querySelector('polygon');
+      const text = getComputedStyle(t).fill; const shape = getComputedStyle(s).fill;
+      let under = parse(shape);
+      if (!under || under[3] === 0) under = parse(getComputedStyle(document.body).backgroundColor);
+      const a = lum(parse(text)); const b = lum(under);
+      out[t.textContent.trim()] = { text, shape, ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+    });
+    return out;
+  });
+}
+function mermaidMid(page) {
+  return page.evaluate(() => {
+    const n = [].find.call(document.querySelectorAll('.content .mermaid svg g.node'), (g) => /MIDM/.test(g.textContent));
+    if (!n) return null;
+    const label = [].find.call(n.querySelectorAll('foreignObject *'), (e) => [].some.call(e.childNodes, (c) => c.nodeType === 3 && /MIDM/.test(c.textContent)));
+    const shape = [].find.call(n.querySelectorAll('polygon, ellipse, path, rect'), (e) => !e.closest('foreignObject'));
+    return { color: label ? getComputedStyle(label).color : null, fill: shape ? getComputedStyle(shape).fill : null,
+      live: n.ownerSVGElement.hasAttribute('data-md2doc-live') };
+  });
+}
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': dark fills: author text on a mid fill keeps its contrast', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(400);
+    const light = await pairs(page);
+    assert.deepStrictEqual(Object.keys(light).sort(), ['BLUE', 'LIGHT', 'MID777', 'MID888'], 'guard: four graphviz nodes ' + JSON.stringify(light));
+    const before = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const dark = await pairs(page);
+    const pin = { MID888: 'rgb(34, 34, 34)', MID777: 'rgb(0, 0, 0)', BLUE: 'rgb(17, 17, 17)' };
+    for (const k of Object.keys(pin)) {
+      assert.ok(dark[k].ratio >= Math.min(4.5, light[k].ratio), k + ' dark ' + JSON.stringify(dark[k]) + ' light ' + JSON.stringify(light[k]));
+      assert.strictEqual(dark[k].text, pin[k], k + ' keeps its author text colour ' + JSON.stringify(dark[k]));
+    }
+    // #e0e0e0 (L≈0.745) is toned dark, not made transparent: the author's black loses to #e3e3e3.
+    assert.strictEqual(dark.LIGHT.text, 'rgb(227, 227, 227)', 'LIGHT ' + JSON.stringify(dark.LIGHT));
+    assert.ok(dark.LIGHT.ratio >= 4.5, 'LIGHT ' + JSON.stringify(dark.LIGHT));
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    assert.deepStrictEqual(after, before, 'every style attribute restored');
+  });
+  check(label + ': dark fills: a live mermaid label on a mid fill keeps its author colour', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const light = await mermaidMid(page);
+    assert.deepStrictEqual(light && [light.color, light.fill], ['rgb(34, 34, 34)', 'rgb(136, 136, 136)'], 'guard: measured light label/fill ' + JSON.stringify(light));
+    await page.click('#md2doc-theme-toggle'); await wait(3000);
+    const dark = await mermaidMid(page);
+    assert.strictEqual(dark && dark.live, true, 'guard: the live dark render is shown ' + JSON.stringify(dark));
+    assert.strictEqual(dark.fill, 'rgb(136, 136, 136)', 'guard: the author fill is untouched ' + JSON.stringify(dark));
+    assert.strictEqual(dark.color, 'rgb(34, 34, 34)', 'label keeps #222 ' + JSON.stringify(dark));
+  });
+  check(label + ': dark fills: every diagram text keeps min(4.5, its light contrast) on what is painted under it', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const light = await leafContrast(page);
+    const want = ['MID888', 'MID777', 'BLUE', 'LIGHT', 'REGHDR', 'BODYDEF', 'BODYWHITE', 'BODYLG', 'HDR888', 'BODY2', 'HTMLT', 'HTMLC',
+      'AMBERBLUE', 'GREYBLUE', 'CLUS', 'INNER', 'ALPHA', 'ALPHA2', 'TALPHA', 'MIDM', 'Plain', 'MCIRC', 'MBOX'];
+    assert.deepStrictEqual(want.filter((k) => !light[k]), [], 'guard: every fixture text is measured ' + JSON.stringify(Object.keys(light)));
+    const before = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    await page.click('#md2doc-theme-toggle'); await wait(3000);
+    const dark = await leafContrast(page);
+    const short = Object.keys(light).filter((k) => !dark[k] || dark[k].ratio < Math.min(4.5, light[k].ratio))
+      .map((k) => k + ' light ' + JSON.stringify(light[k]) + ' dark ' + JSON.stringify(dark[k]));
+    assert.deepStrictEqual(short, [], 'texts below min(4.5, light contrast) in dark');
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    assert.deepStrictEqual(after, before, 'every graphviz style attribute restored');
+  });
+  // Fix round 2: a diagram that has no geometry while the theme flips (display:none)
+  // pairs each text with its own node's shape instead of falling back to #e3e3e3.
+  check(label + ': dark fills: a diagram hidden while toggling still pairs text with its node', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const lightAll = await leafContrast(page);
+    await page.evaluate(() => { document.querySelectorAll('.content .graphviz').forEach((g) => { g.style.display = 'none'; }); });
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    await page.evaluate(() => { document.querySelectorAll('.content .graphviz').forEach((g) => { g.style.display = ''; }); });
+    await wait(300);
+    const dark = await pairs(page);
+    // Fix round 3: a multi-cell table node must not pair every cell's text with its
+    // first cell. These rows passed at base (old rule) and must still pass hidden.
+    const darkAll = await leafContrast(page);
+    const rows = ['BODYDEF', 'BODYWHITE', 'BODYLG', 'BODY2', 'HTMLC'];
+    const short = rows.filter((k) => !darkAll[k] || darkAll[k].ratio < Math.min(4.5, lightAll[k].ratio))
+      .map((k) => k + ' light ' + JSON.stringify(lightAll[k]) + ' dark ' + JSON.stringify(darkAll[k]));
+    assert.deepStrictEqual(short, [], 'hidden table rows below min(4.5, light contrast)');
+    assert.strictEqual(dark.MID888.text, 'rgb(34, 34, 34)', 'MID888 keeps #222 on its #888 node ' + JSON.stringify(dark.MID888));
+    assert.ok(dark.MID888.ratio >= 4.49, 'MID888 ' + JSON.stringify(dark.MID888));
+    assert.strictEqual(dark.LIGHT.text, 'rgb(227, 227, 227)', 'LIGHT ' + JSON.stringify(dark.LIGHT));
+  });
+  // Fix round 3: the toggle reads its geometry before the theme flips, so no getBBox
+  // runs in the click once the dark attribute is set (that read forces a layout of
+  // the whole restyled page) — on the first toggle (light-drawn mermaid with an
+  // author-styled node) and on a later one (the cached live dark mermaid is swapped in).
+  check(label + ': dark fills: the toggle reads no diagram geometry after the theme flips', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const darkClick = () => page.evaluate(() => {
+      const st = { post: 0, pre: 0 };
+      const o = SVGGraphicsElement.prototype.getBBox;
+      SVGGraphicsElement.prototype.getBBox = function () {
+        if (document.documentElement.getAttribute('data-md2doc-theme') === 'dark') st.post++; else st.pre++;
+        return o.apply(this, arguments);
+      };
+      try { document.getElementById('md2doc-theme-toggle').click(); } finally { SVGGraphicsElement.prototype.getBBox = o; }
+      return Object.assign(st, { dark: document.documentElement.getAttribute('data-md2doc-theme') === 'dark' });
+    });
+    const first = await darkClick();
+    assert.strictEqual(first.dark, true, 'guard: dark after the first click');
+    assert.ok(first.pre > 0, 'guard: geometry was read before the flip ' + JSON.stringify(first));
+    assert.strictEqual(first.post, 0, 'first toggle: getBBox after the flip ' + JSON.stringify(first));
+    await wait(3000);
+    assert.strictEqual((await mermaidMid(page)).live, true, 'guard: the live dark mermaid is drawn');
+    await page.click('#md2doc-theme-toggle'); await wait(800);
+    const second = await darkClick();
+    assert.strictEqual(second.dark, true, 'guard: dark after the second click');
+    assert.strictEqual(second.post, 0, 'later toggle: getBBox after the flip ' + JSON.stringify(second));
+    await wait(600);
+    const m = await mermaidMid(page);
+    assert.deepStrictEqual([m.live, m.color], [true, 'rgb(34, 34, 34)'], 'the swapped-in live label still keeps #222 ' + JSON.stringify(m));
+  });
+}
+// R7 甲: a Markdown-native inline svg sits on a white plate in dark, inked #1f2328.
+const INLINE_SVG = '<svg id="inl" width="200" height="60" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="198" height="58" fill="none" stroke="#000"/>' +
+  '<text id="inltext" x="10" y="35" font-size="16">INLINE SVG</text><circle id="inldot" cx="180" cy="30" r="10" fill="currentColor"/></svg>';
+let d10InlineUrl = null;
+const d10Inline = () => d10InlineUrl || (d10InlineUrl = fixtureUrl('d10-inline', D10_MD.concat(['## 3. Inline', '', INLINE_SVG, ''])));
+function inlineState(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function lum(s) { const c = s.match(/[\d.]+/g).slice(0, 3).map(Number); return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const s = document.getElementById('inl'); const cs = getComputedStyle(s);
+    const text = getComputedStyle(document.getElementById('inltext')).fill;
+    const a = lum(text); const b = lum(cs.backgroundColor);
+    return { wrapped: !!s.parentElement && s.parentElement.classList.contains('inline-svg'),
+      backgroundColor: cs.backgroundColor, boxShadow: cs.boxShadow, color: cs.color,
+      dot: getComputedStyle(document.getElementById('inldot')).fill, text,
+      ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+  });
+}
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': dark fills: inline svg sits on a white plate in dark only', vp, async (page) => {
+    await gotoTheme(page, d10Inline());
+    const light = await inlineState(page);
+    assert.strictEqual(light.wrapped, true, 'the native svg is wrapped in .inline-svg ' + JSON.stringify(light));
+    assert.deepStrictEqual([light.backgroundColor, light.boxShadow], ['rgba(0, 0, 0, 0)', 'none'], 'light: no plate ' + JSON.stringify(light));
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    const dark = await inlineState(page);
+    assert.strictEqual(dark.backgroundColor, 'rgb(255, 255, 255)', 'dark: white plate ' + JSON.stringify(dark));
+    assert.strictEqual(dark.color, 'rgb(31, 35, 40)', 'dark: plate ink #1f2328 ' + JSON.stringify(dark));
+    assert.strictEqual(dark.dot, 'rgb(31, 35, 40)', 'dark: currentColor follows the plate ink ' + JSON.stringify(dark));
+    assert.ok(dark.ratio >= 4.5, 'dark: the text reads on the plate ' + JSON.stringify(dark));
+  });
+}
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);
@@ -1129,6 +1720,331 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
   assert.ok((await overflowX(page)) <= 0, 'no sideways page scroll');
 }, { hasTouch: true, isMobile: true });
 
+// ── Scroll anchoring vs a newer scroll (R1, R9) ─────────────────────────────
+// The zoom/resize anchor is captured in the frame after a scroll. A column
+// change whose reflow is held in the same task as a scroll (or before that
+// scroll's event has dispatched) used to restore the OLD anchor and pull the
+// page back over the newer scroll.
+check('anchor: a scroll issued in the same task as a column change survives', DESKTOP, async (page) => {
+  const t = await page.evaluate(() => {
+    document.body.toggleAttribute('data-toc-collapsed');
+    const y = document.getElementById('6-section-6').getBoundingClientRect().top + scrollY;
+    window.scrollTo(0, y);
+    return Math.round(scrollY);
+  });
+  assert.ok(t > 1000, 'the scroll target is far down the page, t=' + t);
+  await wait(400);
+  const y = await page.evaluate(() => Math.round(scrollY));
+  assert.ok(Math.abs(y - t) <= 2, 'scrollY stays at the target ' + t + ', got ' + y);
+});
+// <=1080 px opens the TOC as a drawer; with classic (non-overlay) scrollbars the
+// drawer hides the page scrollbar, so closing it on a TOC click narrows the
+// column by 15 px in the same task as the jump.
+check('anchor: a TOC jump from the drawer survives classic scrollbars', { width: 900, height: 800 }, async (page) => {
+  for (const id of ['6-section-6', '3-1-child-of-3', '7-1-child-of-7']) {
+    await page.goto(URL, { waitUntil: 'load' });
+    await wait(400);
+    const sb = await page.evaluate(() => innerWidth - document.documentElement.clientWidth);
+    assert.strictEqual(sb, 15, 'classic 15 px page scrollbar present');
+    await page.click('#sidebar-toggle');
+    await wait(400);
+    await page.click('#toc-expand-all');
+    await page.click('.toc-list a[href="#' + id + '"]');
+    await wait(600);
+    const r = await page.evaluate((i) => ({ top: Math.round(document.getElementById(i).getBoundingClientRect().top), y: Math.round(scrollY) }), id);
+    assert.ok(r.top >= 44 && r.top <= 130, id + ' heading lands below the bar, top=' + r.top + ' scrollY=' + r.y);
+  }
+}, undefined, { engines: ['chromium'], launch: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
+
+// ── Chapters of a multi-H1 TOC (R3, user decision B) ───────────────────────
+// Two or more H1s that the TOC keeps as its top level are chapters: a rule and
+// a gap set each one apart from the one above. Font weight does not change.
+const CHAPTERS_MD = [];
+for (let c = 1; c <= 3; c++) {
+  CHAPTERS_MD.push('# ' + c + ' Chapter ' + c, '', filler('c' + c, 1), '');
+  for (let s = 1; s <= 3; s++) CHAPTERS_MD.push('## ' + c + '.' + s + ' Section ' + c + '.' + s, '', filler(c + '.' + s, 1), '');
+}
+const CHAPTERS_URL = fixtureUrl('chapters', CHAPTERS_MD);
+async function chapterRows(page) {
+  return page.evaluate(() => {
+    const lis = [...document.querySelectorAll('nav.toc > .toc-list-level-1 > .toc-item')];
+    return { n: lis.length, gap: Math.round(lis[1].querySelector('a').getBoundingClientRect().top - lis[0].getBoundingClientRect().bottom),
+      border: getComputedStyle(lis[1]).borderTopWidth + ' ' + getComputedStyle(lis[1]).borderTopColor,
+      firstBorder: getComputedStyle(lis[0]).borderTopWidth,
+      weight: getComputedStyle(lis[2].querySelector('a')).fontWeight };
+  });
+}
+check('desktop: multi-H1 chapters are separated, weight unchanged', DESKTOP, async (page) => {
+  await page.goto(CHAPTERS_URL, { waitUntil: 'load' }); await wait(400);
+  // Read before anything scrolls to chapter 3: an active row's ancestors are bold by design.
+  const r = await chapterRows(page);
+  assert.strictEqual(r.n, 3, 'three chapter rows');
+  assert.ok(r.gap >= 16, 'gap between chapter 1 and chapter 2 >= 16 px, got ' + r.gap);
+  assert.strictEqual(r.border, '1px rgb(216, 222, 228)', 'rule above chapter 2');
+  assert.strictEqual(r.firstBorder, '0px', 'no rule above the first chapter');
+  assert.strictEqual(r.weight, '400', 'chapter rows keep their weight');
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  const d = await chapterRows(page);
+  assert.strictEqual(d.border, '1px rgb(56, 57, 60)', 'dark: the rule follows token rule-2');
+});
+check('phone: multi-H1 chapters are separated in the drawer, weight unchanged', PHONE, async (page) => {
+  await page.goto(CHAPTERS_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(400);
+  const r = await chapterRows(page);
+  assert.strictEqual(r.n, 3, 'three chapter rows');
+  assert.ok(r.gap >= 16, 'gap between chapter 1 and chapter 2 >= 16 px, got ' + r.gap);
+  assert.strictEqual(r.border, '1px rgb(216, 222, 228)', 'rule above chapter 2');
+  assert.strictEqual(r.firstBorder, '0px', 'no rule above the first chapter');
+  assert.strictEqual(r.weight, '400', 'chapter rows keep their weight');
+}, { hasTouch: true, isMobile: true });
+// Guard (green by design): a flattened single-H1 TOC is untouched.
+check('desktop: a single-H1 TOC has no chapter separators', DESKTOP, async (page) => {
+  const r = await page.evaluate(() => ({
+    marked: document.querySelector('nav.toc').hasAttribute('data-toc-chapters'),
+    rows: [...document.querySelectorAll('nav.toc > .toc-list-level-1 > .toc-item')].map((li) => getComputedStyle(li).borderTopWidth + ' ' + getComputedStyle(li).marginTop),
+  }));
+  assert.strictEqual(r.marked, false, 'no data-toc-chapters');
+  assert.ok(r.rows.length > 1, 'several top-level rows, got ' + r.rows.length);
+  assert.deepStrictEqual(r.rows.filter((v) => v !== '0px 0px'), [], 'every top-level row: no rule, no margin');
+});
+
+// ── The reading line on resizes (R4) ──────────────────────────────────────
+// The rule the runtime follows, minus the click pin: the last heading with a
+// TOC row whose top is at or above 35% of the viewport, else the first one.
+async function readingLine(page) {
+  return page.evaluate(() => {
+    const line = window.innerHeight * 0.35;
+    const rows = new Set([...document.querySelectorAll('.toc a[href^="#"]')].map((a) => a.getAttribute('href').slice(1)));
+    let first = null;
+    let expected = null;
+    for (const h of document.querySelectorAll('[data-reader-heading]')) {
+      if (!rows.has(h.id)) continue;
+      if (!first) first = h.id;
+      if (h.getBoundingClientRect().top <= line) expected = h.id; else break;
+    }
+    return { expected: expected || first, active: window.__readerState.activeSectionId };
+  });
+}
+async function scrollHeadingTo(page, id, top) {
+  await page.evaluate(([i, t]) => window.scrollBy(0, document.getElementById(i).getBoundingClientRect().top - t), [id, top]);
+}
+check('reading line: a height-only resize moves the highlight', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await scrollHeadingTo(page, '6-1-child-of-6', 270); await wait(400);
+  await page.setViewportSize({ width: 1440, height: 500 }); await wait(500);
+  const r = await readingLine(page);
+  assert.strictEqual(r.expected, '6-section-6', 'the shorter viewport puts the line above 6.1, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+// A column change with no window resize and no scroll: at 1250 px the
+// collapse widens the column enough to rewrap section 1's paragraphs, so 1.1
+// moves up (621 -> 522 px when measured) while scrollY stays 0 and no scroll
+// event fires. The viewport height puts the reading line 12 px above 1.1
+// before the click, so only a pass run from the column ResizeObserver moves
+// the highlight onto 1.1.
+check('reading line: collapsing the sidebar recomputes the highlight', DESKTOP, async (page) => {
+  await page.setViewportSize({ width: 1250, height: 900 });
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const t = await topOf(page, '1-1-child-of-1');
+  await page.setViewportSize({ width: 1250, height: Math.floor((t - 12) / 0.35) });
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await readingLine(page);
+  const t0 = await topOf(page, '1-1-child-of-1');
+  assert.notStrictEqual(before.expected, '1-1-child-of-1', 'the line starts above 1.1, top=' + t0 + ' ' + JSON.stringify(before));
+  await page.click('#toc-collapse-toggle'); await wait(600);
+  const r = await readingLine(page);
+  const t1 = await topOf(page, '1-1-child-of-1');
+  const y = await page.evaluate(() => Math.round(scrollY));
+  assert.strictEqual(y, 0, 'no scroll happened');
+  assert.ok(t1 < t0 - 20, 'the wider column pulled 1.1 up, ' + Math.round(t0) + ' -> ' + Math.round(t1));
+  assert.strictEqual(r.expected, '1-1-child-of-1', 'the line now sits below 1.1, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+
+// ── Short tail sections keep a clicked row lit (R5) ───────────────────────
+// The last sections are too short to reach the reading line even at the
+// bottom of the page, so a click on one of them used to light 8.1 instead.
+const SHORT_TAIL = ['9-short-nine', '10-short-ten', '11-short-eleven'];
+for (const [label, viewport, ctx] of [['desktop', DESKTOP, undefined], ['phone', PHONE, { hasTouch: true, isMobile: true }]]) {
+  check('short tail: ' + label + ' click on each of the last short sections lights its row', viewport, async (page) => {
+    for (const id of SHORT_TAIL) {
+      await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+      if (label === 'phone') { await page.click('#sidebar-toggle'); await wait(350); }
+      await page.click('#toc-expand-all');
+      await page.click('.toc-list a[href="#' + id + '"]'); await wait(600);
+      const rows = await activeRows(page);
+      assert.deepStrictEqual(rows.map((r) => r.href), ['#' + id], id + ': the clicked row is the one lit, got ' + JSON.stringify(rows.map((r) => r.href)));
+    }
+  }, ctx);
+}
+// Guard (green by design): only a click pins; a plain scroll to the bottom
+// leaves the highlight on the reading line, not on the last row.
+check('short tail: a plain scroll to the bottom does not light the last row', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, '11-short-eleven', 'the line is not on the last row, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+
+// ── The search freeze ends on a TOC click or a user scroll (R6, R6b) ──────
+// Selecting a search result freezes the highlight on the hit's section so the
+// jump does not move it. A TOC click, or a wheel / touch scroll in the content,
+// is the reader moving on; a wheel over the sidebar (the results list) is not,
+// and neither is a programmatic scroll.
+async function frozenOnZebrafinch(page) {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.fill('#doc-search-input', 'zebrafinch');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  return page.evaluate(() => window.__readerState.activeSectionId);
+}
+check('frozen: a TOC click moves the highlight', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  assert.notStrictEqual(frozenAt, '2-section-2', 'the search froze somewhere else, frozenAt=' + frozenAt);
+  await page.click('#toc-expand-all');
+  await page.click('.toc-list a[href="#2-section-2"]'); await wait(600);
+  const rows = await activeRows(page);
+  assert.deepStrictEqual(rows.map((r) => r.href), ['#2-section-2'], 'the clicked row is lit, got ' + JSON.stringify(rows.map((r) => r.href)));
+});
+check('frozen: a wheel in the content follows the reading line again', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  // The visible middle of the content column (its box is far taller than the viewport).
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('main.content'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is over the content, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 1500); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the wheel moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+});
+// Guard (green by design): a wheel over the results list, then a programmatic
+// scroll, leaves the highlight frozen.
+check('frozen: a wheel over the results list keeps it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const pt = await page.$eval('#search-results-list', (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.min(r.height, 40) / 2) }; });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('#search-results-list'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is over the results list, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 300); await wait(200);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+check('frozen: a touchmove in the content unfreezes', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  await page.evaluate(() => document.querySelector('main.content p').dispatchEvent(new Event('touchmove', { bubbles: true })));
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+});
+
+// Keyboard scrolling is scrolling (R17): with focus on the page, a scroll key
+// ends the freeze like a wheel does. Inside the sidebar or an editable field
+// the same keys are the reader working that control, and keep it.
+for (const [key, times] of [['PageDown', 3], ['Space', 3], ['End', 1], ['ArrowDown', 20]]) {
+  check('frozen: ' + (/^[AEIOU]/.test(key) ? 'an ' : 'a ') + key + ' in the content follows the reading line', DESKTOP, async (page) => {
+    const frozenAt = await frozenOnZebrafinch(page);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    const focus = await page.evaluate(() => document.activeElement.tagName);
+    assert.strictEqual(focus, 'BODY', 'focus is on the page');
+    for (let i = 0; i < times; i++) { await page.keyboard.press(key); await wait(120); }
+    await wait(500);
+    const r = await readingLine(page);
+    assert.notStrictEqual(r.expected, frozenAt, key + ' moved the line off the frozen section, ' + JSON.stringify(r));
+    assert.strictEqual(r.active, r.expected, key + ': the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+  });
+}
+// Guard (green by design): the same keys typed into the search box are not a page scroll.
+check('frozen: scroll keys inside the search box keep it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const focus = await page.evaluate(() => document.activeElement.id);
+  assert.strictEqual(focus, 'doc-search-input', 'focus stays in the search box');
+  for (const key of ['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', 'Home', 'End', 'Space']) { await page.keyboard.press(key); await wait(80); }
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// A sideways wheel (a wide table's swipe) and ctrl+wheel (zoom) do not scroll
+// the page, so they keep the freeze.
+check('frozen: a sideways wheel or a ctrl+wheel keeps it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(120, 0); await wait(200);
+  await page.evaluate(() => document.querySelector('main.content p').dispatchEvent(new WheelEvent('wheel', { deltaY: 120, ctrlKey: true, bubbles: true })));
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// The lightbox is a layer of its own: a wheel there zooms the picture.
+check('frozen: a wheel in the lightbox keeps it frozen', DESKTOP, async (page) => {
+  await page.click('main.content .graphviz svg'); await wait(300);
+  const open = await page.evaluate(() => { const b = document.querySelector('.lightbox'); return !!b && !b.hidden; });
+  assert.strictEqual(open, true, 'lightbox open');
+  await page.fill('#doc-search-input', 'zebrafinch');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  const frozenAt = await page.evaluate(() => window.__readerState.activeSectionId);
+  const pt = await page.$eval('.lightbox-stage', (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('.lightbox'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is in the lightbox, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 120); await wait(300);
+  await page.keyboard.press('Escape'); await wait(300);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// The freeze also stopped the TOC from opening the hit's path. When the reader
+// scrolls away but stays in the hit's (nested) section, the active id does not
+// change, so the row must still be revealed and centred on the way out.
+check('frozen: after a small wheel inside a nested hit the row is revealed and centred', TRACK_VIEW, async (page) => {
+  await page.goto(TRACK_URL, { waitUntil: 'load' }); await wait(500);
+  // Paragraph 2, so the centred hit leaves 20.3's heading well above the line:
+  // the line is in the hit's section before the wheel as well as after it.
+  await page.fill('#doc-search-input', 'paragraph 2 of section 20.3');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  const frozenAt = await page.evaluate(() => window.__readerState.activeSectionId);
+  assert.strictEqual(frozenAt, '20-3-sub-20-3', 'frozen on the nested hit');
+  const r0 = await readingLine(page);
+  assert.strictEqual(r0.expected, frozenAt, 'the line is in the hit section before the wheel, ' + JSON.stringify(r0));
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 40); await wait(600);
+  const r = await readingLine(page);
+  assert.strictEqual(r.expected, frozenAt, 'still in the hit section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'active row unchanged, ' + JSON.stringify(r));
+  const row = await page.evaluate(() => {
+    const a = document.querySelector('.toc a.is-active');
+    const sc = document.querySelector('.toc > .toc-list');
+    const br = sc.getBoundingClientRect();
+    const rr = a.getBoundingClientRect();
+    const closed = a.closest('details:not([open])');
+    return { href: a.getAttribute('href'), underClosed: !!closed && closed.querySelector('summary a') !== a, h: Math.round(rr.height),
+      inBox: rr.top >= br.top - 1 && rr.bottom <= br.bottom + 1,
+      mid: +(((rr.top + rr.bottom) / 2 - br.top) / sc.clientHeight).toFixed(2),
+      atEdge: sc.scrollTop <= 1 || sc.scrollTop >= sc.scrollHeight - sc.clientHeight - 1 };
+  });
+  assert.strictEqual(row.underClosed, false, 'the row is not inside a closed section, ' + JSON.stringify(row));
+  assert.strictEqual(row.inBox, true, 'the row is inside the TOC box, ' + JSON.stringify(row));
+  assert.strictEqual(row.atEdge, false, 'the TOC can centre this row, ' + JSON.stringify(row));
+  assert.ok(row.mid >= 0.2 && row.mid <= 0.6, 'the row is centred, ' + JSON.stringify(row));
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -1139,8 +2055,10 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
     try {
       for (const c of checks) {
         if (only && !c.name.includes(only)) continue;
+        if (c.opts.engines && !c.opts.engines.includes(engine)) continue;
         ran++;
-        const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.ctx));
+        const own = c.opts.launch ? await playwright[engine].launch(c.opts.launch) : null;
+        const context = await (own || browser).newContext(Object.assign({ viewport: c.viewport }, c.ctx));
         const page = await context.newPage();
         try {
           await page.goto(URL, { waitUntil: 'load' });
@@ -1152,6 +2070,7 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
           console.log('FAIL [' + engine + '] ' + c.name + '\n     ' + (e && e.message));
         } finally {
           await context.close();
+          if (own) await own.close();
         }
       }
     } finally {

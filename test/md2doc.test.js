@@ -585,3 +585,123 @@ console.log('md2doc dot WASM test passed');
   assert.ok(!edit.html.includes('class="code-copy"') && !edit.html.includes('class="code-block"'), 'edit mode emits no copy button or wrapper');
   console.log('md2doc code copy button render test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (R3, user decision B): a TOC whose top level is two or more H1
+// chapters carries data-toc-chapters, so CSS can set the chapters apart. A
+// single-H1 document is flattened (its H2s become the top level) and gets no
+// marker; neither does a lone H1 or a document with no H1.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'chapters.md');
+  const marked = async (md) => /<nav class="toc"[^>]*data-toc-chapters/.test((await renderMarkdown(md, fake, {})).html);
+  assert.strictEqual(await marked('# A\n\npara\n\n## A.1\n\nx\n\n# B\n\ny\n'), true, 'two H1 chapters: marker present');
+  assert.strictEqual(await marked('# Title\n\n## One\n\nx\n\n## Two\n\ny\n'), false, 'single H1 flattened: no marker');
+  assert.strictEqual(await marked('# Only\n\npara\n'), false, 'lone H1: no marker');
+  assert.strictEqual(await marked('## One\n\nx\n\n## Two\n\ny\n'), false, 'no H1: no marker');
+  console.log('md2doc TOC chapter marker test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (R7 甲): a Markdown-native inline <svg> is wrapped in .inline-svg so
+// dark mode can give it a white plate. Decided at BLOCK level: marked lexes the
+// one-line form as a paragraph of html/text tokens (the <text> content is a text
+// token), so the rule reads the block's own trimmed source, not its token types.
+// An svg inside prose is left alone, and so is edit mode (reader output only).
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'inline-svg.md');
+  const body = async (md, opts) => (await renderMarkdown(md, fake, opts || {})).bodyHtml;
+  assert.match(await body('<svg width="20" height="10"><text>x</text></svg>\n'), /<p class="inline-svg"><svg/, 'one-line svg paragraph is wrapped');
+  assert.match(await body('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /<div class="inline-svg"><svg/, 'block html svg is wrapped');
+  assert.doesNotMatch(await body('Text <svg width="5"><circle r="2"/></svg> after\n'), /inline-svg/, 'svg in prose is not wrapped');
+  assert.doesNotMatch(await body('<svg width="5"></svg> and <svg width="6"></svg>\n'), /inline-svg/, 'prose between two svgs is not wrapped');
+  // Fix round 1: an svg nested in an outer svg that a blank line split into
+  // several blocks is not wrapped (a <div>/<p> there closes the outer svg early);
+  // once the outer svg is closed, the next svg-only block is wrapped again.
+  const nested = await body('<svg width="40" height="40">\n<rect width="5" height="5"/>\n\n<svg x="10" width="10" height="10">\n<circle r="3"/>\n</svg>\n\n</svg>\n\n' +
+    '<svg width="20" height="10"><text>z</text></svg>\n');
+  assert.ok(!/<div class="inline-svg"><svg x="10"/.test(nested) && !/<p class="inline-svg"><svg x="10"/.test(nested), 'nested svg is not wrapped: ' + nested);
+  assert.match(nested, /<p class="inline-svg"><svg width="20"/, 'the svg after the closed outer one is wrapped: ' + nested);
+  // Fix round 2: only real html counts as an open svg. A code span naming <svg>,
+  // or an svg left unclosed inside a paragraph (its </p> ends the svg in the
+  // browser too), must not cost every later svg its plate.
+  const later = { codespan: 'Use the `<svg>` element.\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    codespanBlock: 'Use the `<svg>` element.\n\n<svg width="20" height="10">\n<text>x</text>\n</svg>\n',
+    unclosedTypo: '<svg width="5"><circle r="2"/>\n\npara\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    looseListCode: '- write `<svg viewBox="0 0 1 1">`\n\n- b\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    // Fix round 3: an html comment naming <svg> opens nothing.
+    commentBlock: '<!-- <svg> -->\n\n<svg width="20" height="10">\n<text>x</text>\n</svg>\n' };
+  for (const [k, md] of Object.entries(later)) assert.match(await body(md), /class="inline-svg"><svg width="20"/, k + ': the later svg keeps its plate');
+  const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
+  assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
+  assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
+  assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
+    /inline-svg/, 'edit mode emits no inline-svg wrapper');
+  console.log('md2doc inline svg wrapper test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (T9b): the search list's section index reads a section the way the
+// reader's in-text marks do. Math is its TeX source (inline, display and a
+// math fence); a fenced code block is indexed as written (no tag stripping:
+// `a<b && c>d` is code, not a tag); a hard break and a literal <br> are a
+// space; each block is indexed once (a blockquote's or a loose list item's
+// paragraphs used to appear twice); an image's alt text and diagram sources
+// are not text on the page and are not indexed.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'section-text.md');
+  const index = async (md) => {
+    const { html } = await renderMarkdown(md, fake, {});
+    const m = html.match(/<script id="reader-section-data" type="application\/json">([\s\S]*?)<\/script>/);
+    return JSON.parse(m[1]).map((s) => s.searchText);
+  };
+  const md = [
+    '## S', '',
+    'Inline $x^2 + y$ here.', '',
+    '$$', 'E = mc^2', '$$', '',
+    '```math', '\\alpha', '```', '',
+    '```js', 'const reg_a = 1; // if (a<b && c>d)', '```', '',
+    'hard one  ', 'hard two<br>raw', '',
+    '> quoted `<b>` line', '',
+    '- loose a', '', '- loose b', '',
+    'mid', '',
+    '- [x] done', '  - nested', '',
+    '![alt text](x.png) after', '',
+    '```mermaid', 'graph TD; Q-->R', '```', '',
+  ].join('\n');
+  assert.deepStrictEqual(await index(md), [
+    'S Inline x^2 + y here. E = mc^2 \\alpha const reg_a = 1; // if (a<b && c>d) hard one hard two raw quoted <b> line loose a loose b mid done nested after',
+  ]);
+  // Fix round 1: a list item's text is indexed in reading order with its block
+  // children (code, blockquote, table, nested list), and a loose item's
+  // paragraphs after a nested list are indexed at all.
+  const lists = [
+    '## L', '',
+    '- alpha item', '  ```', '  codeline inside', '  ```', '  after code tail', '',
+    'x', '',
+    '- i1 lead', '', '  > bq inside', '', '  after bq words', '',
+    '- i2 lead', '', '  | a |', '  |---|', '  | c |', '', '  after table words', '',
+    '- i3 lead', '', '  - sub', '', '  after sub words', '', '  more after sub', '',
+  ].join('\n');
+  assert.deepStrictEqual(await index(lists), [
+    'L alpha item codeline inside after code tail x i1 lead bq inside after bq words i2 lead a c after table words i3 lead sub after sub words more after sub',
+  ]);
+  // Fix round 2: the edit page shows the same search box and reads the same
+  // section index, so edit mode must index each list item once, in the edit
+  // DOM's order. That order is the reader's, except that a nested list is
+  // drawn after its parent item's whole block (a paragraph that follows the
+  // nested list in the source is drawn before it).
+  const both = async (md) => [(await index(md))[0], await (async () => {
+    const { html } = await renderMarkdown(md, fake, { editMode: true });
+    const m = html.match(/<script id="reader-section-data" type="application\/json">([\s\S]*?)<\/script>/);
+    return JSON.parse(m[1])[0].searchText;
+  })()];
+  assert.deepStrictEqual(await both('## T\n\n- tight x\n- tight y\n  - sub\n'),
+    ['T tight x tight y sub', 'T tight x tight y sub'], 'tight list with a nested item');
+  assert.deepStrictEqual(await both('## T\n\n- loose one\n\n- loose two\n'),
+    ['T loose one loose two', 'T loose one loose two'], 'loose list');
+  assert.deepStrictEqual(await both('## T\n\n- [ ] task a\n- [x] **task** b\n\n1. ord\n   ```\n   code x\n   ```\n   after\n'),
+    ['T task a task b ord code x after', 'T task a task b ord code x after'], 'task items and an item with a code block');
+  assert.deepStrictEqual(await both('## T\n\n- lead\n\n  - sub\n\n  tailpara\n'),
+    ['T lead sub tailpara', 'T lead tailpara sub'], 'a paragraph after a nested list (edit draws the nested list after the item)');
+  console.log('md2doc section index test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

@@ -54,6 +54,18 @@ const monotonicMs = () => performance.now();
 // end of this file, which need a real referenced file on disk to rewrite from
 // outside the editor. Every existing call site passes one argument and is
 // unaffected.
+// Resize, then let three frames pass so the resize (and the reader's
+// zoom/resize scroll anchoring it triggers) has settled before the test
+// scrolls. A resize event that landed after the test's own scroll used to let
+// the anchor pull the page back (R1/R9); the product now ignores a stale
+// anchor, and this wait keeps the test from racing the resize itself.
+async function setViewportSettled(page, vp) {
+  await page.setViewport(vp);
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  }));
+}
+
 async function boot(mdText, extraFiles, srvOpts) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-journey-'));
   const mdPath = path.join(dir, 'doc.md');
@@ -1791,7 +1803,7 @@ async function main() {
     // not whether the viewport is wide enough to reach it — toolbar
     // reachability is a layout question tracked separately, not an implicit
     // precondition of this matrix. 1000px gives every button clear margin.
-    await ctx.page.setViewport({ width: 1000, height: 600 });
+    await setViewportSettled(ctx.page, { width: 1000, height: 600 });
     // window.prompt() blocks the page until something answers it, and
     // applyLinkToggle() opens one — measured: without this handler the
     // 'link' row hangs until puppeteer's protocolTimeout kills the run.
@@ -2802,7 +2814,7 @@ async function main() {
     const NF3_MD = '# H\n\nAlpha paragraph.\n\n- alpha item\n' +
       '- bravo item\n\n  second para\n\nTail para two.\n';
     const ctx = await newPage(NF3_MD);
-    await ctx.page.setViewport({ width: 1000, height: 700 });
+    await setViewportSettled(ctx.page, { width: 1000, height: 700 });
     await primeOneCommit(ctx);
     await installPatchSpy(ctx);
     const aId = await ctx.page.evaluate(() => {
@@ -3108,7 +3120,7 @@ async function main() {
   // ── live × 3：.ed-toolbar / .ed-toolbar-status（寬視窗）─────────────
   {
     const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     for (const sel of ['.ed-toolbar', '.ed-toolbar-status']) {
       const before = await overlayState(ctx.page, sel);
       assertRaised(before, sel);
@@ -3136,7 +3148,7 @@ async function main() {
   {
     const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
     for (const w of [800, 1400]) {
-      await ctx.page.setViewport({ width: w, height: 800 });
+      await setViewportSettled(ctx.page, { width: w, height: 800 });
       await new Promise((r) => setTimeout(r, 250));
       const s = await overlayState(ctx.page, '.sidebar-toggle');
       assert.ok(isGone(s),
@@ -3189,7 +3201,7 @@ async function main() {
     const widths = [1400, 1081, 1080, 800];
     const bands = {};
     for (const w of widths) {
-      await ctx.page.setViewport({ width: w, height: 800 });
+      await setViewportSettled(ctx.page, { width: w, height: 800 });
       await new Promise((r) => setTimeout(r, 250));
       bands[w] = await ctx.page.evaluate(() => {
         const pl = document.querySelector('.page-layout');
@@ -3220,7 +3232,7 @@ async function main() {
   // ── T11-2: edit mode 下側欄必須有辦法打開 ────────────────────────────
   for (const w of [1080, 800]) {
     const ctx = await newPage('# Doc\n\n## Sub\n\nAlpha.\n');
-    await ctx.page.setViewport({ width: w, height: 900 });
+    await setViewportSettled(ctx.page, { width: w, height: 900 });
     await new Promise((r) => setTimeout(r, 200));
     const hit = await ctx.page.evaluate(() => {
       const t = document.querySelector('.sidebar-toggle');
@@ -3273,7 +3285,7 @@ async function main() {
   // 它們必須留著 —— scrim 是關掉抽屜的唯一點擊目標。
   {
     const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 800, height: 800 });
+    await setViewportSettled(ctx.page, { width: 800, height: 800 });
     await new Promise((r) => setTimeout(r, 250));
     // .sidebar-toggle 在 edit 模式下被 .ed-toolbar（z-index 101 > 100）蓋住，
     // 滑鼠點不到它 —— 實測 elementFromPoint 回的是 .ed-toolbar-btn。這裡要測
@@ -3314,7 +3326,7 @@ async function main() {
   // which drives the real input pipeline the lock is meant to stop.
   {
     const ctx = await newPage('# H\n\n## Sub\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 800, height: 800 });
+    await setViewportSettled(ctx.page, { width: 800, height: 800 });
     await new Promise((r) => setTimeout(r, 250));
 
     // Precondition: the same PageDown must move the page BEFORE the drawer
@@ -3408,7 +3420,7 @@ async function main() {
       'base64');
     fs.writeFileSync(path.join(path.dirname(b.mdPath), 'one.png'), png);
     const ctx = Object.assign({ page: await browser.newPage() }, b);
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     await ctx.page.goto(b.url, { waitUntil: 'networkidle2' });
     await ctx.page.click('.content img');
     await new Promise((r) => setTimeout(r, 500));
@@ -3443,7 +3455,7 @@ async function main() {
     const ctx = await newPage('# Doc\n\n![x](data:image/png;base64,'
       + 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)\n\n'
       + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
 
     // Precondition (Ruling T12-1): the same PageDown must move the page
     // BEFORE the lightbox opens. Without this, a fixture that stopped being
@@ -3491,7 +3503,7 @@ async function main() {
   // 可能讓它過期。升起方式：把 server 關掉再逼一次 render。
   {
     const ctx = await newPage('# H\n\nAlpha paragraph.\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await ctx.page.keyboard.type(' X');
     ctx.srv.close();
@@ -3513,7 +3525,7 @@ async function main() {
   {
     // grip：把游標移到表頭儲存格中央。
     const ctx = await newPage(V3_TABLE_MD);
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     const ts = await centreTable(ctx.page);
     const cell = await ctx.page.evaluate((t) => {
       const r = document.querySelector(t + ' table').tHead.rows[0].cells[1].getBoundingClientRect();
@@ -3547,7 +3559,7 @@ async function main() {
     // ＋ 泡泡：只在距離表格邊界 TB_EDGE_PX(10) 內才升起 —— 欄泡泡在表格
     // 【上緣】、對齊某個表頭儲存格的【右緣】。移到儲存格中央是升不起來的。
     const ctx = await newPage(V3_TABLE_MD);
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     const ts = await centreTable(ctx.page);
     const p = await ctx.page.evaluate((t) => {
       const tb = document.querySelector(t + ' table');
@@ -3588,7 +3600,7 @@ async function main() {
   // 按下去之後看得到的選單項目是「刪除列」。
   {
     const ctx = await newPage(V3_TABLE_MD);
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     const ts = await centreTable(ctx.page);
     const bodyRows = await ctx.page.evaluate((t) => {
       const tb = document.querySelector(t + ' table');
@@ -3669,7 +3681,7 @@ async function main() {
   // ── gone：.ed-toolbar-menu（H▾ 下拉）────────────────────────────────
   {
     const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
-    await ctx.page.setViewport({ width: 1400, height: 800 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
     await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
     await pressClick(ctx.page, '[data-ed-tb="headings"]', 80);
     await ctx.page.waitForSelector('.ed-toolbar-menu', { timeout: 4000 });
@@ -3703,7 +3715,7 @@ async function main() {
   {
     const headings = Array.from({ length: 30 }, (_, i) => '## Section ' + i + '\n\nBody ' + i + '.\n').join('\n');
     const ctx = await newPage('# H\n\n' + headings);
-    await ctx.page.setViewport({ width: 800, height: 700 });
+    await setViewportSettled(ctx.page, { width: 800, height: 700 });
     await new Promise((r) => setTimeout(r, 300));
     // 讓工具列瞄準一個 block，H▾ 才會是 enabled。用 focus() 而不是滑鼠點擊：
     // 800px 下 .ed-toolbar 蓋著文件頂端，滑鼠點擊會打到工具列自己。
@@ -3760,7 +3772,7 @@ async function main() {
   {
     for (const dy of [60, 3000]) {
       const ctx = await newPage(V3_TABLE_MD);
-      await ctx.page.setViewport({ width: 1400, height: 800 });
+      await setViewportSettled(ctx.page, { width: 1400, height: 800 });
       await ctx.page.evaluate(() => {
         const el = document.querySelector('.ed-block[data-block-id="5"] .ed-wys-armed');
         el.scrollIntoView({ block: 'center' });
@@ -3841,7 +3853,7 @@ async function main() {
     ];
     for (const d of drags) {
       const ctx = await newPage(V3_TABLE_MD);
-      await ctx.page.setViewport({ width: 1400, height: 800 });
+      await setViewportSettled(ctx.page, { width: 1400, height: 800 });
       const start = await d.raise(ctx.page);
       await ctx.page.mouse.move(start.x, start.y);
       await ctx.page.mouse.down();
@@ -4308,7 +4320,7 @@ async function main() {
   {
     const ctx = await newPage('# Doc\n\nAnchor para.\n\n' +
       '| A | B |\n| --- | --- |\n| a1 | b1 |\n| a2 | b2 |\n\nTail para.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     const TSEL = '.ed-block[data-block-type="table"]';
     await ctx.page.click(TSEL + ' .ed-wys-cell');
     await ctx.page.keyboard.press('End');
@@ -6445,7 +6457,7 @@ async function main() {
   // .ed-toolbar-status 自己的註解記下的驅動量測守著，不在這一列。
   for (const w of [820, 640, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
-    await ctx.page.setViewport({ width: w, height: 900 });
+    await setViewportSettled(ctx.page, { width: w, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 200));
     const shape = await ctx.page.evaluate(() => {
@@ -6526,7 +6538,7 @@ async function main() {
   // 取樣點 Math.round(max/2) 離 1 與 max - 1 都夠遠（不是薄冰）。1400 仍釘 0。
   for (const w of [1400, 420]) {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
-    await ctx.page.setViewport({ width: w, height: 900 });
+    await setViewportSettled(ctx.page, { width: w, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 200));
     const seen = await ctx.page.evaluate(async () => {
@@ -6572,12 +6584,12 @@ async function main() {
   // 監聽器能把它熄掉 —— 拿掉那個監聽器這一列就紅。
   {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
-    await ctx.page.setViewport({ width: 420, height: 900 });
+    await setViewportSettled(ctx.page, { width: 420, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 200));
     const before = await ctx.page.evaluate(
       () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-overflow'));
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     await new Promise((r) => setTimeout(r, 300));
     const after = await ctx.page.evaluate(
       () => document.querySelector('.ed-toolbar').getAttribute('data-ed-tb-overflow'));
@@ -6636,7 +6648,7 @@ async function main() {
   // 帶了 Alt 但不是 F10 的鍵也不得進去。
   {
     const ctx = await newPage(F12_MD);
-    await ctx.page.setViewport({ width: 420, height: 900 });
+    await setViewportSettled(ctx.page, { width: 420, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 200));
     await ctx.page.keyboard.type(' typed');
@@ -6714,7 +6726,7 @@ async function main() {
   // 底下），而不只是「屬性寫對了」。
   {
     const ctx = await newPage(F12_MD);
-    await ctx.page.setViewport({ width: 420, height: 900 });
+    await setViewportSettled(ctx.page, { width: 420, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 200));
     await f12Enter(ctx.page);
@@ -6861,7 +6873,11 @@ async function main() {
     assert.deepStrictEqual({ at: afterClick.at, cursors: afterClick.cursors },
       { at: null, cursors: [] },
       '點到別的地方就是交還鍵盤，游標必須收掉，got ' + JSON.stringify(afterClick));
-    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph.A\n\nBBravo paragraph.\n',
+    // v3.13.1 R11: a click into another block keeps its caret where it was
+    // clicked (it used to be reset to the block's start, which is what the
+    // old 'BBravo paragraph.' here pinned). page.click presses the centre of
+    // the full-width block, right of the short text, so 'B' lands at the end.
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph.A\n\nBravo paragraph.B\n',
       '逛過工具列再去第三個地方打字，兩邊的字都必須落到磁碟上，got ' +
       JSON.stringify(disk));
     assert.strictEqual(ctx.errs.length, 0,
@@ -7217,7 +7233,7 @@ async function main() {
   {
     const filler = Array.from({ length: 40 }, (_, i) => 'Filler ' + i + '.').join('\n\n');
     const ctx = await newPage('# Doc\n\n' + filler + '\n');
-    await ctx.page.setViewport({ width: 1400, height: 700 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 700 });
     await ctx.page.evaluate(() => window.scrollTo(0, 0));
     const target = await ctx.page.evaluate(() => {
       const bs = Array.from(document.querySelectorAll('.ed-block'));
@@ -7280,7 +7296,7 @@ async function main() {
   // 單獨就該打平的那一格。
   {
     const ctx = await newPage('## Alpha heading\n\nbravo two\n');
-    await ctx.page.setViewport({ width: 1400, height: 200 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 200 });
     await ctx.page.click('.ed-block[data-block-id="0"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 150));
     await pressClick(ctx.page, '[data-ed-tb="headings"]', 80);
@@ -7328,7 +7344,7 @@ async function main() {
     const teRows = Array.from({ length: 20 }, (_, i) => '| r' + i + 'a | r' + i + 'b |').join('\n');
     const ctx = await newPage('# Doc\n\n| A | B |\n| --- | --- |\n' + teRows + '\n');
     const H = 700;
-    await ctx.page.setViewport({ width: 1400, height: H });
+    await setViewportSettled(ctx.page, { width: 1400, height: H });
     const rowInfo = await ctx.page.evaluate((h) => {
       const table = document.querySelector('.ed-block[data-block-type="table"] table');
       const trs = Array.from(table.querySelectorAll('tbody tr'));
@@ -7391,7 +7407,7 @@ async function main() {
   // INERT 會停用一顆本來會動的按鈕。
   {
     const ctx = await newPage('# Doc\n\nAlpha **bold text** and *ital* and plain words.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 250));
     // 這個 fixture 的段落 childNodes 是 ['Alpha ', <strong>bold text</strong>,
@@ -7630,7 +7646,7 @@ async function main() {
   // 重畫路徑真的是分開的。
   {
     const ctx = await newPage('# Doc\n\nAlpha **bold text** and plain words.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 250));
     const readB = () => ctx.page.evaluate(() => {
@@ -8017,7 +8033,7 @@ async function main() {
     // 正中心。
     {
       const ctx = await newPage(F7_MD);
-      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      await setViewportSettled(ctx.page, { width: 1400, height: 1000 });
       const g = await ctx.page.evaluate(() => {
         const tb = document.querySelector('.ed-block[data-block-type="table"] table');
         return { left: tb.getBoundingClientRect().left,
@@ -8041,7 +8057,7 @@ async function main() {
     // 所以起點壓在 top + TB_EDGE_PX，再直直往上伸手到泡泡正中心。
     {
       const ctx = await newPage(F7_MD);
-      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      await setViewportSettled(ctx.page, { width: 1400, height: 1000 });
       const g = await ctx.page.evaluate(() => {
         const tb = document.querySelector('.ed-block[data-block-type="table"] table');
         return { top: tb.getBoundingClientRect().top,
@@ -8066,7 +8082,7 @@ async function main() {
     // 是 grip」。指標經過那裡時泡泡同樣不得消失。
     {
       const ctx = await newPage(F7_MD);
-      await ctx.page.setViewport({ width: 1400, height: 1000 });
+      await setViewportSettled(ctx.page, { width: 1400, height: 1000 });
       const g = await ctx.page.evaluate(() => {
         const tb = document.querySelector('.ed-block[data-block-type="table"] table');
         return { left: tb.getBoundingClientRect().left,
@@ -8106,7 +8122,7 @@ async function main() {
   // when the pointer leaves the bubble again.
   {
     const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n| c3 | c4 |\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     const headerCellPt = await ctx.page.evaluate(() => {
       const table = document.querySelector('.ed-block[data-block-type="table"] table');
       const th = table.tHead.rows[0].cells[0];
@@ -8934,7 +8950,7 @@ async function main() {
   // toolbar's own band to be on top OF.
   {
     const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
     const BUTTON_IDS = [
       'save', 'undo', 'redo', 'headings', 'quote', 'code', 'list', 'ordered-list',
       'check', 'bold', 'italic', 'strike', 'inline-code', 'link', 'outdent',
@@ -9010,7 +9026,7 @@ async function main() {
   // present) while the banner covered it — a real regression this row pins.
   {
     const ctx = await newPage('# H\n\nAlpha paragraph.\n\nBravo paragraph.\n');
-    await ctx.page.setViewport({ width: 1400, height: 900 });
+    await setViewportSettled(ctx.page, { width: 1400, height: 900 });
 
     // Arm the block and type into it FIRST (uncommitted) so committing
     // later needs no second click on the block — a second click would
@@ -9187,6 +9203,21 @@ async function main() {
     const TWO_IN_ONE_MD = '# Doc\n\n![a](a.drawio) ![b](b.drawio)\n\nTail para two.\n';
     const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
+    // T17 (v3.13.1): a row that waits for a CHANGE polls for it instead of sleeping
+    // a fixed beat (measured latency 3.9-10.9 s: the heartbeat phase plus the bake).
+    // Calls read() every 100 ms until it returns `want` or budgetMs passes, and
+    // returns the LAST plain value read; the caller asserts on it, so a miss prints
+    // the real value instead of a timeout. Rows that assert nothing CHANGED keep the
+    // fixed sleep: a poll for "still unchanged" returns at once and proves nothing.
+    async function pollUntil(read, want, budgetMs) {
+      const t0 = Date.now();
+      let v = await read();
+      while (v !== want && Date.now() - t0 < budgetMs) {
+        await new Promise((r) => setTimeout(r, 100));
+        v = await read();
+      }
+      return v;
+    }
     // Scoped to these rows only (re-review G10). They sit still for a real
     // heartbeat (two of them for two). Originally an `idleTimeoutMs`
     // override, because the old ping-driven idle timer's 30s default was
@@ -9338,8 +9369,7 @@ async function main() {
       assert.strictEqual(before, 'SINGLE_BOX',
         'F1 前提失敗：初始頁面必須已經烤出原始的 .drawio 內容');
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'F1：開著文件、完全不編輯、外部改掉 .drawio —— 這條主路徑必須真的更新畫面');
       assert.strictEqual(ctx.errs.length, 0, 'F1：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -9356,8 +9386,9 @@ async function main() {
       assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
       await recordBanners(ctx.page);
       rewriteDrawio(ctx, FLOW_ARCH);
+      const attr = await pollUntil(() => pagesAttr(ctx.page), 'Flow|Architecture', 30000);
+      // Intentional full-beat settle (R6): the assertions below are stability claims, and stability needs a window.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const attr = await pagesAttr(ctx.page);
       assert.strictEqual(attr, 'Flow|Architecture',
         '(c) 前提失敗：重烤必須真的套用到畫面上（否則「還在同一頁」只是因為什麼都沒發生）');
       const kept = await shownPage(ctx.page);
@@ -9382,8 +9413,7 @@ async function main() {
       assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
       await recordBanners(ctx.page);
       rewriteDrawio(ctx, ARCH_TIMING);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const attr = await pagesAttr(ctx.page);
+      const attr = await pollUntil(() => pagesAttr(ctx.page), 'Architecture|Timing', 30000);
       assert.strictEqual(attr, 'Architecture|Timing',
         'B2-P1 前提失敗：重烤必須真的套用到畫面上');
       const landed = await shownPage(ctx.page);
@@ -9415,6 +9445,7 @@ async function main() {
       assert.strictEqual(beforeFocus.indexOf('ed-wys-armed') !== -1, true,
         '前提失敗：必須真的有一個 WYSIWYG 編輯面獲得焦點，got ' + beforeFocus);
       rewriteDrawio(ctx, SINGLE_V2);
+      // Fixed wait on purpose: this asserts the focus did NOT move; a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const afterFocus = await ctx.page.evaluate(() => {
         const ae = document.activeElement;
@@ -9453,6 +9484,7 @@ async function main() {
         };
       });
       rewriteDrawio(ctx, SINGLE_V2);
+      // Fixed wait on purpose: this asserts the screen did NOT change (the bailed beat); a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const midMark = await shownMark(ctx.page);
       const midCalls = await ctx.page.evaluate(() => window.__renderCalls);
@@ -9465,8 +9497,7 @@ async function main() {
       // DRAWIO_BACKOFF_BASE_MS * 2 = 20s — so the retry lands on a later tick
       // than the next one. That delay is the whole point of the backoff; what
       // this row pins is that the update is DELAYED, never dropped.
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT + 25000));
-      const finalMark = await shownMark(ctx.page);
+      const finalMark = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 45000);
       assert.strictEqual(finalMark, 'CHANGED_BOX',
         'F2：用戶端放棄了一輪之後，下一次心跳必須再報一次 stale 並且這次成功 —— ' +
         '基準線只能在用戶端確認套用之後才前進');
@@ -9517,6 +9548,7 @@ async function main() {
         'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
       // Now make the background path WANT to raise its own notice.
       rewriteDrawio(ctx, ARCH_TIMING);
+      // Fixed wait on purpose: this asserts the conflict banner is NOT replaced; a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const stillConflict = await visibleBannerText(ctx.page);
       assert.strictEqual(
@@ -9575,9 +9607,7 @@ async function main() {
       }, CODE_SEL);
 
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'G1：引用了這段標記文字的區塊不得讓整輪刷新放棄 —— 舊版會每 10 秒重跑一次 ' +
         '完整 render + headless 烘焙，而圖永遠不更新');
@@ -9615,13 +9645,12 @@ async function main() {
         boxes.forEach((b, i) => { b.closest('.ed-block').__drawioProbe = 'block' + i; });
       });
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await ctx.page.evaluate(() =>
+      const after = await pollUntil(() => ctx.page.evaluate(() =>
         Array.from(document.querySelectorAll('.drawio')).map((box) => {
           const vis = box.querySelector('.drawio-page:not([hidden])');
           const blk = box.closest('.ed-block');
           return ((vis || box).textContent || '').trim() + '/' + String(blk && blk.__drawioProbe);
-        }).join('|'));
+        }).join('|')), 'CHANGED_BOX/undefined|ARCH_BOX/block1', 30000);
       assert.strictEqual(after, 'CHANGED_BOX/undefined|ARCH_BOX/block1',
         'G4：改了 a.drawio 只能換掉 a 那個區塊（所以它的標記不見了）；' +
         'b.drawio 那個區塊必須原封不動（標記還在），got ' + after);
@@ -9652,8 +9681,7 @@ async function main() {
       assert.strictEqual(boxesPerBlock, '0|2|0',
         'H2 前提失敗：兩張圖必須落在同一個區塊裡（否則測到的是已經會過的那一種），got ' + boxesPerBlock);
       fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await bothMarks(ctx.page);
+      const after = await pollUntil(() => bothMarks(ctx.page), 'SINGLE_BOX|OTHER_CHANGED', 30000);
       assert.strictEqual(after, 'SINGLE_BOX|OTHER_CHANGED',
         'H2：同一個區塊裡的第二張圖改變時必須真的更新 —— 舊版把它當成「沒變」跳過、' +
         '然後還 ack 回去，伺服器基準線越過了一個畫面從未顯示的版本，永久且無聲，got ' + after);
@@ -9721,8 +9749,7 @@ async function main() {
       assert.strictEqual(gripsUp, 0,
         'H1：degraded 表格上滑過列不得升起任何握把 / 邊選單，got ' + gripsUp);
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'H1：表格區塊裡的 drawio 一樣要重烤 —— 這條路徑真的會整個換掉一個 table 區塊，got ' + after);
       assert.strictEqual(ctx.errs.length, 0, 'H1：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -9744,12 +9771,13 @@ async function main() {
       // (1) unrelated write: a.drawio changes, b's annotations must survive.
       await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
+      const marksNow = await pollUntil(() => bothMarks(ctx.page), 'CHANGED_BOX|OTHER_BOX', 30000);
+      // Intentional full-beat settle (R6): the assertions below are stability claims, and stability needs a window.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const kept = await ctx.page.evaluate(() =>
         document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
       assert.strictEqual(kept, 1,
         'H3：改的是別的檔案，讀者自己畫的註記必須原封不動，got ' + kept);
-      const marksNow = await bothMarks(ctx.page);
       assert.strictEqual(marksNow, 'CHANGED_BOX|OTHER_BOX',
         'H3 前提失敗：而那次改動本身仍然要套用，got ' + marksNow);
       const bannerNow = await visibleBannerText(ctx.page);
@@ -9762,8 +9790,7 @@ async function main() {
       // annotations cannot follow, and the reader is told.
       await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const marksAfter = await bothMarks(ctx.page);
+      const marksAfter = await pollUntil(() => bothMarks(ctx.page), 'CHANGED_BOX|OTHER_CHANGED', 30000);
       assert.strictEqual(marksAfter, 'CHANGED_BOX|OTHER_CHANGED',
         'H3：被註記的那張圖自己變了時仍然必須重烤，got ' + marksAfter);
       const seen2 = await seenBanners(ctx.page);

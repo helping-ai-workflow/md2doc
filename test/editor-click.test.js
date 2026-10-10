@@ -55,6 +55,40 @@ function contrast(a, b) { const x = lum(a), y = lum(b); return (Math.max(x, y) +
 const checks = [];
 function check(name, viewport, fn, opts) { checks.push({ name, viewport, fn, opts: opts || {} }); }
 
+// `/api/render` requests in flight per page, counted in node from the page's
+// own request events. The runner installs the listeners before goto, so a
+// render the page starts on its own is never missed.
+const renderCounters = new WeakMap();
+function trackRenders(page) {
+  const c = { n: 0 };
+  renderCounters.set(page, c);
+  const isRender = (r) => { try { return new URL(r.url()).pathname === '/api/render'; } catch (e) { return false; } };
+  page.on('request', (r) => { if (isRender(r)) c.n++; });
+  page.on('requestfinished', (r) => { if (isRender(r)) c.n--; });
+  page.on('requestfailed', (r) => { if (isRender(r)) c.n--; });
+}
+// Waits until no `/api/render` is outstanding, then lets the page run one
+// macrotask and two frames — the landing render's own continuation, and any
+// replay it schedules. Repeats while that settling started another render (a
+// replayed Enter is a new commit). Throws with the count, never a bare timeout.
+async function renderIdle(page) {
+  const c = renderCounters.get(page);
+  const deadline = Date.now() + 20000;
+  for (;;) {
+    while (c.n > 0) {
+      if (Date.now() > deadline) throw new Error('renderIdle: ' + c.n + ' /api/render still outstanding after 20s');
+      await wait(25);
+    }
+    await page.evaluate(() => new Promise((r) => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(r)), 0)));
+    if (c.n === 0) return;
+  }
+}
+// Holds every `/api/render` for `ms` before letting it through: the window in
+// which a commit is in flight, made wide enough that no keystroke can miss it.
+async function delayRender(page, ms) {
+  await page.route('**/api/render', async (route) => { await wait(ms); await route.continue(); });
+}
+
 check('theme: the edit page has a theme toggle and it turns the toolbar dark', DESKTOP, async (page) => {
   const btn = page.locator('#md2doc-theme-toggle');
   assert.ok(await btn.isVisible(), 'toggle visible in edit mode');
@@ -2956,11 +2990,7 @@ check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, asy
 check('loose lists: Enter starts a new item that keeps the spacing', DESKTOP, async (page, boot) => {
   await liText(page, 'bravo').click(); await page.keyboard.press('End');
   await page.keyboard.press('Enter');
-  // Wait for the caret to land in the new, empty item. Keys typed while
-  // Enter's commit re-renders are lost — on a tight list too (measured), a
-  // pre-existing race this check is not about.
-  await page.waitForFunction(() => { const li = document.activeElement && document.activeElement.closest('.ed-block[data-block-type="li"]'); return !!li && li.textContent.trim() === ''; }, null, { timeout: 3000 });
-  await page.keyboard.type('new'); await wait(200);
+  await page.keyboard.type('new'); await renderIdle(page);
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await wait(600);
   assert.strictEqual(await noticeText(page), null, 'no refusal');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
@@ -2973,6 +3003,739 @@ check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n  - charlie\n');
 }, { md: LOOSE_MD });
 
+// ── enter-type (v3.13.1 T1): keys typed while a list commit renders ──
+// None of these waits between the structural key and the first character:
+// that gap is exactly what a person typing at speed leaves. `delayRender`
+// widens the commit's in-flight window to 800 ms so every keystroke is
+// guaranteed to fall inside it.
+const TIGHT_MD = '# D\n\n- alpha\n- bravo\n- charlie\n';
+async function commitAndRead(page, boot) {
+  await renderIdle(page);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await renderIdle(page);
+  return saveAndRead(page, boot);
+}
+check('enter-type: tight list, type right after Enter', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: loose list, type right after Enter', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LOOSE_MD });
+check('enter-type: a mid-item split puts the typed text before the tail', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click();
+  const placed = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-li-text')].find((e) => e.textContent === 'bravo');
+    const n = s && s.firstChild;
+    if (!n || n.nodeType !== 3) return false;
+    getSelection().setBaseAndExtent(n, 3, n, 3);
+    return true;
+  });
+  assert.strictEqual(placed, true, 'guard: caret placed after "bra"');
+  await page.keyboard.press('Enter'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bra\n- Xvo\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: two Enters and two words with no waits', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('x');
+  await page.keyboard.press('Enter'); await page.keyboard.type('y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n- y\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+check('enter-type: Tab then type lands in the indented item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Tab'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - bravoZ\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD });
+const BIG_PARAS = [];
+for (let i = 0; i < 400; i++) BIG_PARAS.push('Para ' + i + ' ' + 'lorem ipsum dolor sit amet '.repeat(6));
+const BIG_LIST_MD = '# D\n\n' + BIG_PARAS.join('\n\n') + '\n\n- alpha\n- bravo\n- charlie\n';
+check('enter-type: a large document without an artificial delay', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  const disk = await commitAndRead(page, boot);
+  const want = BIG_LIST_MD.replace('- bravo\n', '- bravo\n- new\n');
+  const tailAt = (s) => s.slice(s.lastIndexOf('Para 399 '));
+  assert.strictEqual(tailAt(disk), tailAt(want));
+  assert.strictEqual(disk.length, want.length, 'nothing else in the file moved');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BIG_LIST_MD });
+check('enter-type: an IME character composed during the render lands in the new item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '你' });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- 你\n- charlie\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: TIGHT_MD, engines: ['chromium'] });
+check('enter-type: a failed render still shows the buffered characters', DESKTOP, async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+  assert.deepStrictEqual(texts, ['alpha', 'bravo', 'new', 'charlie'], 'the buffered characters are on screen');
+}, { md: TIGHT_MD });
+// A composition's text is in the DOM before compositionend can hold it. A
+// failed render keeps that DOM, so unless the guard takes it back out, the
+// replay shows it a second time.
+check('enter-type: a character composed during a failed render shows once', DESKTOP, async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '你' });
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+  assert.deepStrictEqual(texts, ['alpha', 'bravo', '你', 'charlie']);
+}, { md: TIGHT_MD, engines: ['chromium'] });
+
+// ── enter-type, fix round 1: held keys go where they were typed ──
+// Clicks the character at `offset` of the surface whose text is exactly
+// `text`, on its left half, so the caret lands BEFORE that character — a real
+// pointer press, which is what moves focus mid-flight.
+async function clickChar(page, text, offset) {
+  const pt = await page.evaluate(([t, o]) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((e) => e.textContent === t);
+    if (!s) return null;
+    const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = o;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (left < n.data.length) {
+        const r = document.createRange(); r.setStart(n, left); r.setEnd(n, left + 1);
+        const b = r.getBoundingClientRect();
+        return [b.left + 1, b.top + b.height / 2];
+      }
+      left -= n.data.length;
+    }
+    return null;
+  }, [text, offset]);
+  assert.ok(pt, 'clickChar: no surface with text ' + JSON.stringify(text));
+  await page.mouse.click(pt[0], pt[1]);
+}
+const LIST_PARA_MD = '# D\n\n- alpha\n- bravo\n- charlie\n\nOmega.\n';
+const P3_MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\nOmega.\n';
+const liTexts = (page) => page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+check('enter-type: keys typed after clicking another paragraph mid-render go to that paragraph', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- charlie\n\nOmcega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: a click into another paragraph mid-render keeps the caret there', DESKTOP, async (page) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'Omega.', 2);
+  await renderIdle(page);
+  const where = await page.evaluate(() => {
+    const s = getSelection();
+    const surf = s.anchorNode && (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement).closest('.ed-wys-armed');
+    return surf ? [surf.textContent, s.anchorOffset] : null;
+  });
+  assert.deepStrictEqual(where, ['Omega.', 2], 'the caret stays where the click put it');
+}, { md: LIST_PARA_MD });
+check('caret: a click mid-paragraph after editing another lands at the click', DESKTOP, async (page, boot) => {
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await renderIdle(page); await wait(300);
+  await page.keyboard.type('ZZ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('caret: keys typed right after that click land at the click', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.type('ZZ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: an arrow key mid-render moves within the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.type('ab'); await page.keyboard.press('ArrowLeft'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoacb paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+// ── fix round 2: a held key belongs to the surface, the selection and the
+// navigation it was typed after (ruling R13) ──
+const engineOf = (page) => page.context().browser().browserType().name();
+// Double-clicks the word that holds character `offset` of the surface whose
+// text is exactly `text`.
+async function dblclickChar(page, text, offset) {
+  const pt = await page.evaluate(([t, o]) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === t);
+    if (!s) return null;
+    const r = document.createRange(); r.setStart(s.firstChild, o); r.setEnd(s.firstChild, o + 1);
+    const b = r.getBoundingClientRect();
+    return [b.left + 1, b.top + b.height / 2];
+  }, [text, offset]);
+  assert.ok(pt, 'dblclickChar: no surface with text ' + JSON.stringify(text));
+  await page.mouse.dblclick(pt[0], pt[1]);
+}
+check('enter-type: a click on the next item of the same list mid-render takes the keys typed after it', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'charlie', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- chZarlie\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: a click on an earlier item of the same list mid-render takes the keys typed after it', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'alpha', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- charlie\n\nOmega.\n'.replace('- alpha', '- alZpha'));
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: a click on another item mid-render, typing after the render, lands at the click', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await clickChar(page, 'charlie', 2);
+  await renderIdle(page); await wait(300);
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n-\n- chZarlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
+check('enter-type: ArrowDown out of a just-edited paragraph, then type, lands in the next one', DESKTOP, async (page, boot) => {
+  await clickChar(page, 'Alpha para one.', 3); await page.keyboard.press('End');
+  await page.keyboard.type('1'); await page.keyboard.press('ArrowDown'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravo paragraph Ztext.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: P3_MD });
+check('enter-type: ArrowDown out of a just-edited paragraph mid-render', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 3); await page.keyboard.press('End');
+  await page.keyboard.type('1'); await page.keyboard.press('ArrowDown'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravo paragraph Ztext.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: P3_MD });
+check('enter-type: ArrowDown after typing in a new item crosses to the next item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('ab'); await renderIdle(page);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- chZarlie\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: ArrowDown held in a new item mid-render crosses to the next item on replay', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- chZarlie\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: a word double-clicked mid-render is replaced by what is typed', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('o');
+  await dblclickChar(page, 'Bravo paragraph text.', 8);
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo Q text.\n\nOmoega.\n');
+}, { md: P3_MD });
+check('enter-type: a word double-clicked mid-render is deleted by Backspace', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('o');
+  await dblclickChar(page, 'Bravo paragraph text.', 8);
+  await page.keyboard.press('Backspace');
+  // Chromium: byte-identical to the same gesture with no render in flight
+  // (measured: `Bravo` NBSP space `text.`). WebKit: with no render in flight
+  // its smart delete also removes one space (`Bravo text.`); a replayed
+  // deletion runs on a restored selection, which carries no word granularity,
+  // so it deletes the word only. Same rendering, one more space on disk.
+  const bravo = engineOf(page) === 'webkit' ? 'Bravo \u00a0text.' : 'Bravo\u00a0 text.';
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\n' + bravo + '\n\nOmoega.\n');
+}, { md: P3_MD });
+check('caret: a word double-clicked while another block renders stays selected', DESKTOP, async (page, boot) => {
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await dblclickChar(page, 'Bravo paragraph text.', 8);
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(await page.evaluate(() => String(getSelection())), 'paragraph');
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravo Q text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('caret: a drag selection made while another block renders stays selected', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  const pts = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Bravo paragraph text.');
+    const f = (o) => { const r = document.createRange(); r.setStart(s.firstChild, o); r.setEnd(s.firstChild, o + 1); const b = r.getBoundingClientRect(); return [b.left + 1, b.top + b.height / 2]; };
+    return [f(6), f(15)];
+  });
+  await page.mouse.move(pts[0][0], pts[0][1]); await page.mouse.down();
+  await page.mouse.move(pts[1][0], pts[1][1], { steps: 5 }); await page.mouse.up();
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(await page.evaluate(() => String(getSelection())), 'paragraph');
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravo Q text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a toolbar press mid-render does not take focus away from the new item', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  const bb = await page.locator('.ed-toolbar').boundingBox();
+  await page.mouse.click(bb.x + bb.width - 3, bb.y + bb.height / 2);
+  await renderIdle(page); await wait(300);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n- charlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
+check('enter-type: Ctrl+Z mid-render undoes the held typing, not the Enter under it', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('Control+z'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- c\n- charlie\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+// ── fix round 3: a later click must not move keys held before it, and a
+// failed render keeps every key where it was typed ──
+const failFirstRender = async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+};
+check('enter-type: keys typed before a second click stay where they were typed', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('xy');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoxy paragraph text.\n\nOmZega.\n');
+}, { md: P3_MD });
+check('enter-type: an item edit, then two clicks, each with keys after it', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.type('X');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('c');
+  await clickChar(page, 'alpha', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alZpha\n- bravoX\n- charlie\n\nOmcega.\n');
+}, { md: LIST_PARA_MD });
+for (const ms of [0, 800]) {
+  check('enter-type: click, type, click, type with no pauses (' + ms + ' ms render delay)', DESKTOP, async (page, boot) => {
+    if (ms) await delayRender(page, ms);
+    await clickChar(page, 'Alpha para one.', 14); await page.keyboard.type('1');
+    await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('Z');
+    await clickChar(page, 'Omega.', 2); await page.keyboard.type('Y');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one1.\n\nBravoZ paragraph text.\n\nOmYega.\n');
+  }, { md: P3_MD });
+}
+check('enter-type: a second click later in the same paragraph lands past the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('ab');
+  await clickChar(page, 'Bravo paragraph text.', 10); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoab paracgraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a second click later in the same item lands past the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'charlie', 1); await page.keyboard.type('X');
+  await clickChar(page, 'charlie', 4); await page.keyboard.type('Y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- cXharYlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
+check('enter-type: a failed render keeps keys typed after a click in the clicked paragraph', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('ZZ');
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].map((e) => e.textContent));
+  assert.deepStrictEqual(texts, ['D', 'Alpha para one.1', 'BravoZZ paragraph text.', 'Omega.']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a failed render keeps the new item\'s keys and the clicked item\'s keys apart', DESKTOP, async (page) => {
+  await failFirstRender(page);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'charlie', 2); await page.keyboard.type('Z');
+  await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'ab', 'chZarlie']);
+}, { md: LIST_PARA_MD });
+check('enter-type: Ctrl+Z mid-render drops held typing but keeps a held arrow', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Control+z'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n-\n- ccharlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
+check('enter-type: Delete during another block\'s render deletes the next character', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.press('Delete'); await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoQparagraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a word deleted mid-render stays deleted', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab cd');
+  await page.keyboard.press('Control+Backspace');
+  await page.keyboard.type('e');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab e\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: a paste mid-render is kept, in order', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.evaluate(() => {
+    const dt = new DataTransfer(); dt.setData('text/plain', 'PP');
+    document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- abPPc\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: Escape mid-render discards the held keys', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('Escape'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- c\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: one Ctrl+Z undoes a replayed word', DESKTOP, async (page) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlie'], 'guard: the word was replayed');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', '', 'charlie']);
+}, { md: TIGHT_MD });
+
+// ── f1 (v3.13.1 T2): a block marker typed at the start of a paragraph or
+// list-item line is saved escaped, so the block stays what it was ──
+const BASE_MD = '# D\n\nAlpha.\n\nOmega.\n';
+// Clicks the surface (.ed-wys-armed or .ed-wys-cell) whose textContent is
+// exactly `text`, then puts a collapsed caret `offset` characters in — the
+// click opens the burst, the caret is placed afterwards. Same shape as
+// focusText() in test/editor-cell-range.test.js.
+async function focusSurface(page, text, offset) {
+  const sel = await page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((el) => el.textContent === t);
+    if (!s) return null;
+    s.setAttribute('data-f1-probe', '1');
+    return '[data-f1-probe="1"]';
+  }, text);
+  assert.ok(sel, 'focusSurface: no surface with text ' + JSON.stringify(text));
+  await page.click(sel); await wait(150);
+  const placed = await page.evaluate((off) => {
+    const s = document.querySelector('[data-f1-probe="1"]');
+    s.removeAttribute('data-f1-probe');
+    const walker = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = off;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (left <= n.data.length) { getSelection().setBaseAndExtent(n, left, n, left); return true; }
+      left -= n.data.length;
+    }
+    return false;
+  }, offset);
+  assert.strictEqual(placed, true, 'focusSurface: offset ' + offset + ' is inside ' + JSON.stringify(text));
+}
+check('f1: "## " at a paragraph start saves escaped and stays a paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0);
+  await page.keyboard.type('## ');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await renderIdle(page);
+  const type = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === '## Alpha.');
+    const b = s && s.closest('.ed-block');
+    return b ? b.getAttribute('data-block-type') : null;
+  });
+  assert.strictEqual(type, 'paragraph', 'the block reads "## Alpha." and is still a paragraph');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n\\## Alpha.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BASE_MD });
+check('f1: "> " at a list item start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 0);
+  await page.keyboard.type('> ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- \\> bravo\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\n- bravo\n' });
+check('f1: "1. " at a paragraph start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0);
+  await page.keyboard.type('1. ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1\\. Alpha.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BASE_MD });
+check('f1: an already escaped paragraph is byte-stable after an unrelated edit', DESKTOP, async (page, boot) => {
+  await focusSurface(page, '## Alpha.', 9);
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n\\## Alpha.X\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\n\\## Alpha.\n' });
+
+// ── baseline (v3.13.1 T3–T7): WebKit coverage for editor behaviour the
+// release does not change. These are guards: green by design on both engines.
+// ── T3: undo/redo of a text edit, Shift+Enter ──
+check('baseline history: Ctrl+Z inside the burst reverts the typing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await page.evaluate(() => ([...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent.indexOf('Alpha') === 0) || {}).textContent), 'Alpha.');
+  assert.strictEqual(await commitAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('baseline history: Ctrl+Z / Ctrl+Y after the commit, then the toolbar buttons', DESKTOP, async (page, boot) => {
+  const WITH = '# D\n\nAlpha.X\n\nOmega.\n';
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), WITH, 'guard: committed');
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'Ctrl+Z');
+  await page.keyboard.press('Control+y'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), WITH, 'Ctrl+Y');
+  await page.click('[data-ed-tb="undo"]'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'toolbar undo');
+  await page.click('[data-ed-tb="redo"]'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), WITH, 'toolbar redo');
+}, { md: BASE_MD });
+check('baseline history: Shift+Enter in a paragraph is a <br> inside the same block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 2);
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAl<br>Zpha.\n\nOmega.\n');
+  await page.reload(); await page.waitForSelector('.ed-toolbar'); await wait(400);
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    blocks: document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length,
+    brs: document.querySelectorAll('.content p br').length,
+  })), { blocks: 2, brs: 1 });
+}, { md: BASE_MD });
+
+
+// ── T4: paste ──
+async function clipboardEvent(page, type, text, html) {
+  const got = await page.evaluate(([ty, t, h]) => {
+    const dt = new DataTransfer();
+    if (t !== null) dt.setData('text/plain', t);
+    if (h !== null) dt.setData('text/html', h);
+    const ev = new ClipboardEvent(ty, { clipboardData: dt, bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(ev);
+    return { plain: dt.getData('text/plain'), html: dt.getData('text/html'), prevented: ev.defaultPrevented };
+  }, [type, text === undefined ? null : text, html === undefined ? null : html]);
+  await renderIdle(page);
+  return got;
+}
+check('baseline paste: plain text lands at the caret', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await clipboardEvent(page, 'paste', 'zz', null);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.zz\n\nOmega.\n');
+}, { md: BASE_MD });
+check('baseline paste: HTML becomes a markdown block below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await clipboardEvent(page, 'paste', 'evil', '<b>evil</b>');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n**evil**\n\nOmega.\n');
+  assert.deepStrictEqual(await page.evaluate(() => [document.querySelectorAll('.content b').length, (document.querySelector('.content strong') || {}).textContent]), [0, 'evil']);
+}, { md: BASE_MD });
+check('baseline paste: Ctrl+Shift+V pastes the plain flavour verbatim', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  // The user path: a real Ctrl+C puts both flavours on the clipboard (a
+  // temporary capture-phase copy listener supplies them, so the clipboard does
+  // not depend on earlier checks), then a real Ctrl+Shift+V arms the plain
+  // paste and the browser's native paste consumes it.
+  await page.evaluate(() => {
+    window.__seedCopy = (e) => {
+      e.clipboardData.setData('text/plain', 'PASTED<b>RICH</b>TEXT');
+      e.clipboardData.setData('text/html', '<b>evil</b>');
+      e.preventDefault(); e.stopImmediatePropagation();
+    };
+    window.addEventListener('copy', window.__seedCopy, true);
+  });
+  await page.keyboard.press('Control+c');
+  await page.evaluate(() => window.removeEventListener('copy', window.__seedCopy, true));
+  await page.keyboard.press('Control+Shift+V');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.PASTED&lt;b>RICH&lt;/b>TEXT\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// Chromium and WebKit strip text/html from a native Ctrl+Shift+V paste, so the
+// check above cannot tell plainOnly from a normal paste. This one arms with the
+// keydown the product listens to (dispatched, so no native paste follows and
+// consumes the arming) and then pastes both flavours synthetically.
+check('baseline paste: an armed plain paste ignores the html flavour', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, bubbles: true })));
+  await clipboardEvent(page, 'paste', 'PASTED<b>RICH</b>TEXT', '<b>evil</b>');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.PASTED&lt;b>RICH&lt;/b>TEXT\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// ── T5: inline formatting ──
+async function selectInSurface(page, text, from, to) {
+  const sel = await page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((el) => el.textContent === t);
+    if (!s) return null;
+    s.setAttribute('data-sel-probe', '1');
+    return '[data-sel-probe="1"]';
+  }, text);
+  assert.ok(sel, 'selectInSurface: no surface with text ' + JSON.stringify(text));
+  await page.click(sel); await wait(150);
+  const ok = await page.evaluate(([a, b]) => {
+    const s = document.querySelector('[data-sel-probe="1"]');
+    s.removeAttribute('data-sel-probe');
+    const pos = (off) => {
+      const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+      let left = off;
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        if (left <= n.data.length) return [n, left];
+        left -= n.data.length;
+      }
+      return null;
+    };
+    const p = pos(a), q = pos(b);
+    if (!p || !q) return false;
+    getSelection().setBaseAndExtent(p[0], p[1], q[0], q[1]);
+    return true;
+  }, [from, to]);
+  assert.strictEqual(ok, true, 'selectInSurface: range inside ' + JSON.stringify(text));
+  await wait(150);
+}
+for (const [label, act, want] of [
+  ['toolbar bold', (p) => p.click('[data-ed-tb="bold"]'), '**Alpha**.'],
+  ['toolbar italic', (p) => p.click('[data-ed-tb="italic"]'), '*Alpha*.'],
+  ['toolbar strike', (p) => p.click('[data-ed-tb="strike"]'), '~~Alpha~~.'],
+  ['toolbar inline-code', (p) => p.click('[data-ed-tb="inline-code"]'), '`Alpha`.'],
+  ['Ctrl+B', (p) => p.keyboard.press('Control+b'), '**Alpha**.'],
+  ['Ctrl+I', (p) => p.keyboard.press('Control+i'), '*Alpha*.'],
+  ['Ctrl+U', (p) => p.keyboard.press('Control+u'), '<u>Alpha</u>.'],
+]) {
+  check('baseline format: ' + label, DESKTOP, async (page, boot) => {
+    await selectInSurface(page, 'Alpha.', 0, 5);
+    await act(page);
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\n' + want + '\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
+
+
+// ── T6: table cells ──
+const TBL2_MD = '# D\n\n| A | B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n\nafter\n';
+function mdTable(md) {
+  return md.split('\n').filter((l) => /^\|/.test(l) && !/^\|\s*:?-/.test(l))
+    .map((l) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map((s) => s.trim()));
+}
+async function shiftClickCell(page, text) {
+  const p = await page.evaluate((t) => {
+    const c = [...document.querySelectorAll('.ed-wys-cell')].find((el) => el.textContent === t);
+    if (!c) return null;
+    c.scrollIntoView({ block: 'center' });
+    const r = c.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, text);
+  assert.ok(p, 'shiftClickCell: no cell with text ' + JSON.stringify(text));
+  assert.strictEqual(await page.evaluate((q) => { const e = document.elementFromPoint(q.x, q.y); return !!(e && e.closest('.ed-wys-cell')); }, p), true, 'shiftClickCell: the press point is on a cell');
+  await page.keyboard.down('Shift'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Shift');
+  await renderIdle(page);
+}
+check('baseline table: typing in a cell', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'b1', 2);
+  await page.keyboard.type('X');
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['a1', 'b1X'], ['a2', 'b2']]);
+}, { md: TBL2_MD });
+check('baseline table: Tab selects the next whole cell and typing replaces it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 2);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type('Q');
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['a1', 'Q'], ['a2', 'b2']]);
+}, { md: TBL2_MD });
+check('baseline table: ArrowDown and ArrowUp move between rows', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 0);
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.type('Z');
+  await focusSurface(page, 'b2', 0);
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.type('Y');
+  const t = mdTable(await commitAndRead(page, boot));
+  assert.deepStrictEqual(t, [['A', 'B'], ['a1', 'Yb1'], ['Za2', 'b2']]);
+}, { md: TBL2_MD });
+check('baseline table: a cell range copies as TSV and HTML', DESKTOP, async (page) => {
+  await focusSurface(page, 'a1', 0);
+  await shiftClickCell(page, 'b2');
+  const got = await clipboardEvent(page, 'copy', null, null);
+  assert.strictEqual(got.plain, 'a1\tb1\na2\tb2');
+  assert.strictEqual(got.prevented, true);
+  assert.strictEqual(/<td>a1<\/td><td>b1<\/td>[\s\S]*<td>a2<\/td><td>b2<\/td>/.test(got.html), true, 'html: ' + got.html);
+}, { md: TBL2_MD });
+check('baseline table: a TSV paste fills from the caret cell', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 0);
+  await clipboardEvent(page, 'paste', 'x\ty\nz\tw', null);
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['x', 'y'], ['z', 'w']]);
+}, { md: TBL2_MD });
+
+// ── T7: image insertion and the raw box ──
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+check('baseline image: the toolbar inserts a picked png below the block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  const m = /^# D\n\nAlpha\.\n\n!\[\]\((assets\/dot(-\d+)?\.png)\)\n\nOmega\.\n$/.exec(disk);
+  assert.ok(m, 'file: ' + JSON.stringify(disk));
+  assert.strictEqual(fs.existsSync(path.join(path.dirname(boot.mdPath), m[1])), true, 'asset exists: ' + m[1]);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content img').length), 1);
+}, { md: BASE_MD });
+async function openRawBox(page) {
+  await gutterMenu(page, await blockByText(page, 'Alpha.'), 'MD 原始碼');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'raw box open');
+  await page.focus('textarea.ed-raw');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('Beta **b**.');
+}
+check('baseline raw: MD 原始碼 commits with Ctrl+Enter', DESKTOP, async (page, boot) => {
+  await openRawBox(page);
+  await page.keyboard.press('Control+Enter');
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nBeta **b**.\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.content strong') || {}).textContent), 'b');
+}, { md: BASE_MD });
+check('baseline raw: Esc cancels the raw box', DESKTOP, async (page, boot) => {
+  await openRawBox(page);
+  await page.keyboard.press('Escape');
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'raw box gone');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -2982,12 +3745,14 @@ check('loose lists: Tab nests an item', DESKTOP, async (page, boot) => {
     try {
       for (const c of checks) {
         if (only && !c.name.includes(only)) continue;
+        if (c.opts.engines && c.opts.engines.indexOf(engine) === -1) continue;
         ran++;
         const boot = await bootEditor(c.opts.md, c.opts.srv);
         const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.opts.ctx));
         const page = await context.newPage();
         const errs = [];
         page.on('pageerror', (e) => errs.push(String(e)));
+        trackRenders(page);
         try {
           await page.goto(boot.url, { waitUntil: 'load' });
           await page.waitForSelector('.ed-toolbar');

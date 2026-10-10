@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('assert');
 const { marked } = require('marked');
-const { serializeInline, canWysiwyg, escapeText } = require('../lib/editor/inline-md.js');
+const { serializeInline, canWysiwyg, escapeText, escapeBlockStarts } = require('../lib/editor/inline-md.js');
 
 // minimal element stub
 function el(name, attrs, ...children) {
@@ -377,6 +377,44 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
   assert.strictEqual(canWysiwyg(anchor), false, 'so the block is never rewritten in place');
   assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '' }, 'x'))).md, '[x]()',
     'an empty href is still a markdown link');
+}
+
+// v3.13.1 T2 (F-1): a block marker at the start of a line is escaped, so a
+// paragraph or item whose text begins with `## `, `- `, `> `, `1. ` (…) stays
+// that block on the next render. Input is escapeText() output.
+{
+  const rows = [
+    ['## Title', '\\## Title', 'ATX heading'],
+    ['#', '\\#', 'empty heading'],
+    ['#Title', '#Title', 'no space, not a heading'],
+    ['####### x', '####### x', 'seven #, not a heading'],
+    ['- item', '\\- item', 'bullet'],
+    ['-', '\\-', 'lone dash, setext underline'],
+    ['-5 dBm', '-5 dBm', 'not a marker; must stay byte-stable'],
+    ['+ x', '\\+ x', 'bullet'],
+    ['> q', '\\> q', 'blockquote'],
+    ['>q', '\\>q', 'blockquote needs no space'],
+    ['1. x', '1\\. x', 'ordered'],
+    ['1) x', '1\\) x', 'ordered'],
+    ['1.5 V', '1.5 V', 'not a marker'],
+    ['---', '\\---', 'thematic break'],
+    ['===', '\\===', 'setext underline'],
+    ['| a | b |', '\\| a | b |', 'pipe at line start'],
+    ['   ## x', '   \\## x', '<= 3 spaces of indent'],
+    ['a\\\n## b', 'a\\\n\\## b', 'after a hard break'],
+    ['a\n- b', 'a\n\\- b', 'lazy continuation line'],
+    ['\\## x', '\\## x', 'already escaped stays'],
+    ['Alpha ## not start', 'Alpha ## not start', 'mid-line'],
+    ['-- -', '\\-- -', 'spaced-dash thematic break'],
+    ['-- - -', '\\-- - -', 'spaced-dash thematic break'],
+    ['----  -', '\\----  -', 'spaced-dash thematic break'],
+    ['a\n-- -', 'a\n\\-- -', 'spaced-dash break after a paragraph line'],
+    ['- -- -', '\\- -- -', 'bullet rule first'],
+    ['-- x', '-- x', 'dashes then a word: not a marker'],
+  ];
+  rows.forEach(([input, want, why]) => {
+    assert.strictEqual(escapeBlockStarts(input), want, why + ': ' + JSON.stringify(input));
+  });
 }
 
 console.log('inline-md.test.js OK');
