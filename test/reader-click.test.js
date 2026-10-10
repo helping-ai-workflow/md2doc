@@ -636,20 +636,43 @@ check('desktop: blocked storage keeps the page light and the toggle still works'
   assert.strictEqual((await themeState(page)).attr, 'dark');
   assert.deepStrictEqual(errs, []);
 });
+// ── R8 (v3.13.1): contrast with alpha. The older checks took rgba(0,0,0,0.8) as opaque black.
+// Injected as a string so every check shares one definition of "colour as drawn".
+const CONTRAST_ALPHA_JS = `(() => {
+  function rgba(s) { const n = (s.match(/[\\d.]+/g) || []).map(Number); return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+  function over(fg, bg) { const a = fg[3]; return [fg[0] * a + bg[0] * (1 - a), fg[1] * a + bg[1] * (1 - a), fg[2] * a + bg[2] * (1 - a), 1]; }
+  function bgOf(el) {
+    const layers = [];
+    for (let e = el; e; e = e.parentElement) {
+      const c = rgba(getComputedStyle(e).backgroundColor);
+      if (c[3] === 0) continue;
+      layers.push(c);
+      if (c[3] === 1) break;
+    }
+    let base = [255, 255, 255, 1];
+    if (layers.length && layers[layers.length - 1][3] === 1) base = layers.pop();
+    while (layers.length) base = over(layers.pop(), base);
+    return base;
+  }
+  function lum(c) { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+  function ratio(fgCss, el) {
+    const bg = bgOf(el); const fg = over(rgba(fgCss), bg);
+    const x = lum(fg), y = lum(bg);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
+  window.__c = { rgba, over, bgOf, ratio };
+})();`;
 check('desktop: dark text meets WCAG AA where it is actually drawn', DESKTOP, async (page) => {
   await gotoTheme(page);
   await page.click('#md2doc-theme-toggle'); await wait(500);
   const on = await themeState(page);
   assert.deepStrictEqual([on.attr, on.bg], ['dark', 'rgb(27, 27, 29)'], 'dark is actually on before measuring');
   await page.fill('#doc-search-input', 'zebrafinch'); await page.press('#doc-search-input', 'Enter'); await wait(400);
+  await page.addScriptTag({ content: CONTRAST_ALPHA_JS });
   const pairs = await page.evaluate(() => {
-    function rgb(s) { return s.match(/[\d.]+/g).slice(0, 3).map(Number); }
-    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); } }
-    function ratio(a, b) { const x = lum(rgb(a)), y = lum(rgb(b)); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
-    function bgOf(e) { for (; e; e = e.parentElement) { const c = getComputedStyle(e).backgroundColor; const n = c.match(/[\d.]+/g) || []; if (c !== 'transparent' && !(n.length > 3 && +n[3] < 1)) return c; } return 'rgb(255, 255, 255)'; }
     const sel = { body: '.content p', code: '.content :not(pre) > code', link: '.content a', toc: '.toc-list a', active: '.toc a.is-active', mark: 'mark.search-hit.is-selected', snippet: '.search-result-snippet' };
     const out = {};
-    for (const k in sel) { const e = document.querySelector(sel[k]); if (e) out[k] = +ratio(getComputedStyle(e).color, bgOf(e)).toFixed(2); }
+    for (const k in sel) { const e = document.querySelector(sel[k]); if (e) out[k] = +window.__c.ratio(getComputedStyle(e).color, e).toFixed(2); }
     return out;
   });
   for (const k of ['body', 'code', 'link', 'toc', 'active', 'mark', 'snippet']) {
@@ -669,6 +692,20 @@ check('phone: the toggle sits at the right end of the top bar, not floating', PH
   assert.deepStrictEqual(r, { inBar: true, centreInBar: true, hit: true, rightGap: 12, count: 1 });
   await page.click('#md2doc-theme-toggle'); await wait(300);
   assert.strictEqual((await themeState(page)).attr, 'dark');
+});
+check('phone: top bar text meets WCAG AA in light and dark, alpha included', PHONE, async (page) => {
+  await gotoTheme(page);
+  await page.addScriptTag({ content: CONTRAST_ALPHA_JS });
+  // Self-test: black at 0.8 alpha over white is #333, ratio 12.63. An alpha-blind helper reads 21.
+  const self = await page.evaluate(() => { const d = document.createElement('div'); d.style.background = '#fff'; document.body.appendChild(d); const r = window.__c.ratio('rgba(0, 0, 0, 0.8)', d); d.remove(); return +r.toFixed(2); });
+  assert.strictEqual(self, 12.63, 'helper blends alpha');
+  const ids = ['sidebar-toggle', 'mobile-bar-title', 'md2doc-theme-toggle'];
+  const measure = () => page.evaluate((list) => list.map((id) => { const e = document.getElementById(id); return { id, ratio: +window.__c.ratio(getComputedStyle(e).color, e).toFixed(2) }; }), ids);
+  const light = await measure();
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  assert.strictEqual((await themeState(page)).attr, 'dark', 'dark is on before measuring');
+  const dark = await measure();
+  for (const r of light.concat(dark)) assert.ok(r.ratio >= 4.5, r.id + ' ' + r.ratio + ' ' + JSON.stringify({ light, dark }));
 });
 check('desktop: resizing across 1080px moves the toggle between bubble and bar', DESKTOP, async (page) => {
   await gotoTheme(page);
@@ -750,6 +787,31 @@ check('desktop: graphviz follows dark and restores its own colours exactly', DES
   assert.deepStrictEqual(await gvState(page), light);
   const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
   assert.deepStrictEqual(after, before, 'every style attribute restored');
+});
+// ── R8 (v3.13.1): print restore for graphviz and WaveDrom, like the mermaid one above.
+// GUARD: pins existing behaviour, expected green when written (R3); can-fail evidence is in the task report.
+async function printState(page) {
+  return page.evaluate(() => {
+    const gv = document.querySelector('.content .graphviz svg');
+    const wd = document.querySelector('[id^="WaveDrom_Display_"] svg');
+    return { gvText: getComputedStyle(gv.querySelector('g.node text')).fill, gvEdge: getComputedStyle(gv.querySelector('g.edge path')).stroke,
+      gvFlag: gv.hasAttribute('data-md2doc-recoloured'), wdText: getComputedStyle(wd.querySelector('text')).fill, wdFlag: wd.hasAttribute('data-md2doc-recoloured') };
+  });
+}
+check('desktop: printing while dark shows light graphviz and WaveDrom, then restores dark', DESKTOP, async (page) => {
+  await gotoTheme(page); await wait(1200);
+  const light = await printState(page);
+  await page.click('#md2doc-theme-toggle'); await wait(1500);
+  const dark = await printState(page);
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  const printing = await printState(page);
+  assert.deepStrictEqual(printing, light, 'light while printing');
+  assert.deepStrictEqual(light, { gvText: 'rgb(0, 0, 0)', gvEdge: 'rgb(0, 0, 0)', gvFlag: false, wdText: 'rgb(0, 65, 196)', wdFlag: false });
+  await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
+  const back = await printState(page);
+  assert.deepStrictEqual(back, dark, 'dark again after print');
+  assert.strictEqual(dark.wdText, 'rgb(160, 186, 238)');
+  assert.strictEqual(dark.gvText, 'rgb(227, 227, 227)');
 });
 // ── R7 (v3.13.1): a text picks between its author colour and the dark rule's
 // replacement, whichever reads better on the FINAL dark fill of its own shape.
