@@ -1410,6 +1410,32 @@ check('reading line: collapsing the sidebar recomputes the highlight', DESKTOP, 
   assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
 });
 
+// ── Short tail sections keep a clicked row lit (R5) ───────────────────────
+// The last sections are too short to reach the reading line even at the
+// bottom of the page, so a click on one of them used to light 8.1 instead.
+const SHORT_TAIL = ['9-short-nine', '10-short-ten', '11-short-eleven'];
+for (const [label, viewport, ctx] of [['desktop', DESKTOP, undefined], ['phone', PHONE, { hasTouch: true, isMobile: true }]]) {
+  check('short tail: ' + label + ' click on each of the last short sections lights its row', viewport, async (page) => {
+    for (const id of SHORT_TAIL) {
+      await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+      if (label === 'phone') { await page.click('#sidebar-toggle'); await wait(350); }
+      await page.click('#toc-expand-all');
+      await page.click('.toc-list a[href="#' + id + '"]'); await wait(600);
+      const rows = await activeRows(page);
+      assert.deepStrictEqual(rows.map((r) => r.href), ['#' + id], id + ': the clicked row is the one lit, got ' + JSON.stringify(rows.map((r) => r.href)));
+    }
+  }, ctx);
+}
+// Guard (green by design): only a click pins; a plain scroll to the bottom
+// leaves the highlight on the reading line, not on the last row.
+check('short tail: a plain scroll to the bottom does not light the last row', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, '11-short-eleven', 'the line is not on the last row, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
