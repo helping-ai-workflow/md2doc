@@ -117,6 +117,21 @@ const SEARCH_NODES_URL = fixtureUrl('search-nodes', [
   'Later the `tx_ready` flag falls.', '',
   '## 3. Third', '', filler(3, 6), '',
 ]);
+// T9b: the shapes whose text the results list and the in-text marks used to
+// read differently — inline and display math (list: TeX; DOM: MathML + glyphs),
+// a fenced code block (never indexed) and a hard break (words fused).
+const SECTION_TEXT_URL = fixtureUrl('section-text', [
+  '# Section Text', '',
+  '## 1. Shapes', '', filler(1, 2), '',
+  'Inline math $x^2 + y$ inside sentence.', '',
+  '$$', 'E = mc^2', '$$', '',
+  '> quoted line inside blockquote.', '',
+  '\x60\x60\x60js', 'const codeblock = 42; // code comment words', '\x60\x60\x60', '',
+  'Para after code block.', '',
+  '\x60\x60\x60math', '\\alpha + \\beta', '\x60\x60\x60', '',
+  'hard line one  ', 'hard line two after a br.', '',
+  '## 2. Next', '', filler(2, 6), '',
+]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -499,6 +514,90 @@ check('search: next/prev move a multi-node hit between two sections, then clear'
   const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
   assert.strictEqual(after.marks, 0, 'no mark left');
   assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+
+// T9b: the selected marks as a reader reads them. A formula reads as its TeX
+// source (the rule the results list and the marks now share; its mark wraps the
+// whole formula). Two consecutive marks in different blocks, or with a <br>
+// between them, read with a space: the space a line or block break stands for
+// is in no text node, so no mark can carry it. Plain values only.
+async function markReading(page) {
+  return page.evaluate(() => {
+    const BLOCK = 'p, li, td, th, h1, h2, h3, h4, h5, h6, pre, blockquote, dt, dd, figcaption';
+    const blockOf = (m) => m.querySelector('.katex-display') || m.closest(BLOCK);
+    const marks = Array.from(document.querySelectorAll('main.content mark.search-hit.is-selected'));
+    let reading = '';
+    marks.forEach((m, i) => {
+      if (i) {
+        const gap = document.createRange();
+        gap.setStartAfter(marks[i - 1]);
+        gap.setEndBefore(m);
+        if (gap.cloneContents().querySelector('br') || blockOf(marks[i - 1]) !== blockOf(m)) reading += ' ';
+      }
+      const tex = m.querySelector('annotation[encoding="application/x-tex"]');
+      reading += tex ? tex.textContent : m.textContent;
+    });
+    let onScreen = false;
+    let top = null;
+    if (marks.length) {
+      const r = marks[0].getBoundingClientRect();
+      onScreen = r.width > 0 && r.height > 0 && r.left >= -0.5 && r.top >= -0.5 &&
+        r.right <= window.innerWidth + 0.5 && r.bottom <= window.innerHeight + 0.5;
+      top = Math.round(r.top);
+    }
+    return {
+      reading: reading.replace(/\s+/g, ' ').trim().toLowerCase(),
+      count: marks.length,
+      onScreen,
+      top,
+      status: document.getElementById('search-result-count').textContent.trim(),
+    };
+  });
+}
+check('search: math, a fenced code block and a hard break are marked wherever the list finds them', DESKTOP, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  // [query, results the list must report]. Collected, not thrown one by one,
+  // so a red run names every shape that disagrees.
+  const cases = [
+    ['math x^2 + y inside', 1], // inline math, read as its TeX
+    ['inside sentence. e = mc^2', 1], // into display math
+    ['\\alpha + \\beta', 1], // a math fence
+    ['const codeblock = 42', 1], // a name that only a code block holds
+    ['inside blockquote. const codeblock', 1], // into a code block
+    ['code comment words para after', 1], // out of a code block
+    ['line one hard', 1], // across a hard break
+    ['inside blockquote. para after', 0], // a code block sits between them on both sides
+    ['oneh', 0], // a hard break reads as a space, never as nothing
+  ];
+  const problems = [];
+  for (const [q, n] of cases) {
+    await searchFor(page, q);
+    let r = await markReading(page);
+    const results = r.status === '0' ? 0 : Number(r.status.split('/')[1]);
+    if (results !== n) problems.push(q + ': ' + results + ' results, want ' + n);
+    for (let i = 0; i < results; i++) {
+      if (i) { await page.click('#search-next'); await wait(300); r = await markReading(page); }
+      if (r.reading !== q) problems.push(q + ' #' + (i + 1) + ': marks read ' + JSON.stringify(r.reading) + ', count=' + r.count);
+      else if (!r.onScreen) problems.push(q + ' #' + (i + 1) + ': first mark off screen, top=' + r.top);
+    }
+    await page.click('#doc-search-clear'); await wait(200);
+    const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('main.content mark').length }));
+    if (after.marks !== 0 || after.html !== before) {
+      problems.push(q + ': after clear ' + after.marks + ' marks, innerHTML ' + (after.html === before ? 'restored' : 'changed (lengths ' + before.length + ' / ' + after.html.length + ')'));
+    }
+  }
+  assert.deepStrictEqual(problems, []);
+});
+check('phone: a math hit from the drawer lands on screen', PHONE, async (page) => {
+  await page.goto(SECTION_TEXT_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(350);
+  await searchFor(page, 'math x^2 + y inside');
+  await page.click('.search-result-item >> nth=0'); await wait(400);
+  const r = await markReading(page);
+  assert.strictEqual(r.reading, 'math x^2 + y inside', 'marks read as the query, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  assert.ok(r.top >= 44, 'first mark below the bar, top=' + r.top);
 });
 
 // Tab (keyboard modality, so :focus-visible matches) until the focused element

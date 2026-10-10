@@ -638,3 +638,38 @@ console.log('md2doc dot WASM test passed');
     /inline-svg/, 'edit mode emits no inline-svg wrapper');
   console.log('md2doc inline svg wrapper test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (T9b): the search list's section index reads a section the way the
+// reader's in-text marks do. Math is its TeX source (inline, display and a
+// math fence); a fenced code block is indexed as written (no tag stripping:
+// `a<b && c>d` is code, not a tag); a hard break and a literal <br> are a
+// space; each block is indexed once (a blockquote's or a loose list item's
+// paragraphs used to appear twice); an image's alt text and diagram sources
+// are not text on the page and are not indexed.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'section-text.md');
+  const index = async (md) => {
+    const { html } = await renderMarkdown(md, fake, {});
+    const m = html.match(/<script id="reader-section-data" type="application\/json">([\s\S]*?)<\/script>/);
+    return JSON.parse(m[1]).map((s) => s.searchText);
+  };
+  const md = [
+    '## S', '',
+    'Inline $x^2 + y$ here.', '',
+    '$$', 'E = mc^2', '$$', '',
+    '```math', '\\alpha', '```', '',
+    '```js', 'const reg_a = 1; // if (a<b && c>d)', '```', '',
+    'hard one  ', 'hard two<br>raw', '',
+    '> quoted `<b>` line', '',
+    '- loose a', '', '- loose b', '',
+    'mid', '',
+    '- [x] done', '  - nested', '',
+    '![alt text](x.png) after', '',
+    '```mermaid', 'graph TD; Q-->R', '```', '',
+  ].join('\n');
+  assert.deepStrictEqual(await index(md), [
+    'S Inline x^2 + y here. E = mc^2 \\alpha const reg_a = 1; // if (a<b && c>d) hard one hard two raw quoted <b> line loose a loose b mid done nested after',
+  ]);
+  console.log('md2doc section index test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
