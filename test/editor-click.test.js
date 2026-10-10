@@ -3544,6 +3544,43 @@ check('baseline history: Shift+Enter in a paragraph is a <br> inside the same bl
 }, { md: BASE_MD });
 
 
+// ── T4: paste ──
+async function clipboardEvent(page, type, text, html) {
+  const got = await page.evaluate(([ty, t, h]) => {
+    const dt = new DataTransfer();
+    if (t !== null) dt.setData('text/plain', t);
+    if (h !== null) dt.setData('text/html', h);
+    const ev = new ClipboardEvent(ty, { clipboardData: dt, bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(ev);
+    return { plain: dt.getData('text/plain'), html: dt.getData('text/html'), prevented: ev.defaultPrevented };
+  }, [type, text === undefined ? null : text, html === undefined ? null : html]);
+  await renderIdle(page);
+  return got;
+}
+check('baseline paste: plain text lands at the caret', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await clipboardEvent(page, 'paste', 'zz', null);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.zz\n\nOmega.\n');
+}, { md: BASE_MD });
+check('baseline paste: HTML becomes a markdown block below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await clipboardEvent(page, 'paste', 'evil', '<b>evil</b>');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n**evil**\n\nOmega.\n');
+  assert.deepStrictEqual(await page.evaluate(() => [document.querySelectorAll('.content b').length, (document.querySelector('.content strong') || {}).textContent]), [0, 'evil']);
+}, { md: BASE_MD });
+check('baseline paste: Ctrl+Shift+V pastes the plain flavour verbatim', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  // The real key press also asks the browser for a native paste of whatever
+  // the browser-wide clipboard holds (earlier checks leave text there), which
+  // would land in the file as well. A capture listener swallows that trusted
+  // event only; the synthetic one below (isTrusted false) goes through.
+  await page.evaluate(() => window.addEventListener('paste', (e) => { if (e.isTrusted) { e.preventDefault(); e.stopImmediatePropagation(); } }, true));
+  await page.keyboard.press('Control+Shift+V');
+  await clipboardEvent(page, 'paste', 'PASTED<b>RICH</b>TEXT', '<b>evil</b>');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.PASTED&lt;b>RICH&lt;/b>TEXT\n\nOmega.\n');
+}, { md: BASE_MD });
+
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
