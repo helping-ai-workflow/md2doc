@@ -1361,6 +1361,16 @@ check('desktop: multi-H1 chapters are separated, weight unchanged', DESKTOP, asy
   const d = await chapterRows(page);
   assert.strictEqual(d.border, '1px rgb(56, 57, 60)', 'dark: the rule follows token rule-2');
 });
+check('phone: multi-H1 chapters are separated in the drawer, weight unchanged', PHONE, async (page) => {
+  await page.goto(CHAPTERS_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(400);
+  const r = await chapterRows(page);
+  assert.strictEqual(r.n, 3, 'three chapter rows');
+  assert.ok(r.gap >= 16, 'gap between chapter 1 and chapter 2 >= 16 px, got ' + r.gap);
+  assert.strictEqual(r.border, '1px rgb(216, 222, 228)', 'rule above chapter 2');
+  assert.strictEqual(r.firstBorder, '0px', 'no rule above the first chapter');
+  assert.strictEqual(r.weight, '400', 'chapter rows keep their weight');
+}, { hasTouch: true, isMobile: true });
 // Guard (green by design): a flattened single-H1 TOC is untouched.
 check('desktop: a single-H1 TOC has no chapter separators', DESKTOP, async (page) => {
   const r = await page.evaluate(() => ({
@@ -1400,13 +1410,28 @@ check('reading line: a height-only resize moves the highlight', DESKTOP, async (
   assert.strictEqual(r.expected, '6-section-6', 'the shorter viewport puts the line above 6.1, ' + JSON.stringify(r));
   assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
 });
-// Guard (green by design): the column ResizeObserver's anchor hold already
-// scrolls, so the scroll listener runs a pass; the explicit call keeps it so.
+// A column change with no window resize and no scroll: at 1250 px the
+// collapse widens the column enough to rewrap section 1's paragraphs, so 1.1
+// moves up (621 -> 522 px when measured) while scrollY stays 0 and no scroll
+// event fires. The viewport height puts the reading line 12 px above 1.1
+// before the click, so only a pass run from the column ResizeObserver moves
+// the highlight onto 1.1.
 check('reading line: collapsing the sidebar recomputes the highlight', DESKTOP, async (page) => {
+  await page.setViewportSize({ width: 1250, height: 900 });
   await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
-  await scrollHeadingTo(page, '6-1-child-of-6', 300); await wait(400);
-  await page.click('#toc-collapse-toggle'); await wait(500);
+  const t = await topOf(page, '1-1-child-of-1');
+  await page.setViewportSize({ width: 1250, height: Math.floor((t - 12) / 0.35) });
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await readingLine(page);
+  const t0 = await topOf(page, '1-1-child-of-1');
+  assert.notStrictEqual(before.expected, '1-1-child-of-1', 'the line starts above 1.1, top=' + t0 + ' ' + JSON.stringify(before));
+  await page.click('#toc-collapse-toggle'); await wait(600);
   const r = await readingLine(page);
+  const t1 = await topOf(page, '1-1-child-of-1');
+  const y = await page.evaluate(() => Math.round(scrollY));
+  assert.strictEqual(y, 0, 'no scroll happened');
+  assert.ok(t1 < t0 - 20, 'the wider column pulled 1.1 up, ' + Math.round(t0) + ' -> ' + Math.round(t1));
+  assert.strictEqual(r.expected, '1-1-child-of-1', 'the line now sits below 1.1, ' + JSON.stringify(r));
   assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
 });
 
@@ -1491,6 +1516,107 @@ check('frozen: a touchmove in the content unfreezes', DESKTOP, async (page) => {
   const r = await readingLine(page);
   assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
   assert.strictEqual(r.active, r.expected, 'the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+});
+
+// Keyboard scrolling is scrolling (R17): with focus on the page, a scroll key
+// ends the freeze like a wheel does. Inside the sidebar or an editable field
+// the same keys are the reader working that control, and keep it.
+for (const [key, times] of [['PageDown', 3], ['Space', 3], ['End', 1], ['ArrowDown', 20]]) {
+  check('frozen: ' + (/^[AEIOU]/.test(key) ? 'an ' : 'a ') + key + ' in the content follows the reading line', DESKTOP, async (page) => {
+    const frozenAt = await frozenOnZebrafinch(page);
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    const focus = await page.evaluate(() => document.activeElement.tagName);
+    assert.strictEqual(focus, 'BODY', 'focus is on the page');
+    for (let i = 0; i < times; i++) { await page.keyboard.press(key); await wait(120); }
+    await wait(500);
+    const r = await readingLine(page);
+    assert.notStrictEqual(r.expected, frozenAt, key + ' moved the line off the frozen section, ' + JSON.stringify(r));
+    assert.strictEqual(r.active, r.expected, key + ': the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+  });
+}
+// Guard (green by design): the same keys typed into the search box are not a page scroll.
+check('frozen: scroll keys inside the search box keep it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const focus = await page.evaluate(() => document.activeElement.id);
+  assert.strictEqual(focus, 'doc-search-input', 'focus stays in the search box');
+  for (const key of ['PageDown', 'PageUp', 'ArrowDown', 'ArrowUp', 'Home', 'End', 'Space']) { await page.keyboard.press(key); await wait(80); }
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// A sideways wheel (a wide table's swipe) and ctrl+wheel (zoom) do not scroll
+// the page, so they keep the freeze.
+check('frozen: a sideways wheel or a ctrl+wheel keeps it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(120, 0); await wait(200);
+  await page.evaluate(() => document.querySelector('main.content p').dispatchEvent(new WheelEvent('wheel', { deltaY: 120, ctrlKey: true, bubbles: true })));
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// The lightbox is a layer of its own: a wheel there zooms the picture.
+check('frozen: a wheel in the lightbox keeps it frozen', DESKTOP, async (page) => {
+  await page.click('main.content .graphviz svg'); await wait(300);
+  const open = await page.evaluate(() => { const b = document.querySelector('.lightbox'); return !!b && !b.hidden; });
+  assert.strictEqual(open, true, 'lightbox open');
+  await page.fill('#doc-search-input', 'zebrafinch');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  const frozenAt = await page.evaluate(() => window.__readerState.activeSectionId);
+  const pt = await page.$eval('.lightbox-stage', (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('.lightbox'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is in the lightbox, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 120); await wait(300);
+  await page.keyboard.press('Escape'); await wait(300);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+// The freeze also stopped the TOC from opening the hit's path. When the reader
+// scrolls away but stays in the hit's (nested) section, the active id does not
+// change, so the row must still be revealed and centred on the way out.
+check('frozen: after a small wheel inside a nested hit the row is revealed and centred', TRACK_VIEW, async (page) => {
+  await page.goto(TRACK_URL, { waitUntil: 'load' }); await wait(500);
+  // Paragraph 2, so the centred hit leaves 20.3's heading well above the line:
+  // the line is in the hit's section before the wheel as well as after it.
+  await page.fill('#doc-search-input', 'paragraph 2 of section 20.3');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  const frozenAt = await page.evaluate(() => window.__readerState.activeSectionId);
+  assert.strictEqual(frozenAt, '20-3-sub-20-3', 'frozen on the nested hit');
+  const r0 = await readingLine(page);
+  assert.strictEqual(r0.expected, frozenAt, 'the line is in the hit section before the wheel, ' + JSON.stringify(r0));
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 40); await wait(600);
+  const r = await readingLine(page);
+  assert.strictEqual(r.expected, frozenAt, 'still in the hit section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'active row unchanged, ' + JSON.stringify(r));
+  const row = await page.evaluate(() => {
+    const a = document.querySelector('.toc a.is-active');
+    const sc = document.querySelector('.toc > .toc-list');
+    const br = sc.getBoundingClientRect();
+    const rr = a.getBoundingClientRect();
+    const closed = a.closest('details:not([open])');
+    return { href: a.getAttribute('href'), underClosed: !!closed && closed.querySelector('summary a') !== a, h: Math.round(rr.height),
+      inBox: rr.top >= br.top - 1 && rr.bottom <= br.bottom + 1,
+      mid: +(((rr.top + rr.bottom) / 2 - br.top) / sc.clientHeight).toFixed(2),
+      atEdge: sc.scrollTop <= 1 || sc.scrollTop >= sc.scrollHeight - sc.clientHeight - 1 };
+  });
+  assert.strictEqual(row.underClosed, false, 'the row is not inside a closed section, ' + JSON.stringify(row));
+  assert.strictEqual(row.inBox, true, 'the row is inside the TOC box, ' + JSON.stringify(row));
+  assert.strictEqual(row.atEdge, false, 'the TOC can centre this row, ' + JSON.stringify(row));
+  assert.ok(row.mid >= 0.2 && row.mid <= 0.6, 'the row is centred, ' + JSON.stringify(row));
 });
 
 (async () => {
