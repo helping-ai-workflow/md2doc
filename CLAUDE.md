@@ -16,7 +16,7 @@ in the commit that adds this sentence, a 6242-line file.
 | `marked` setup | Subscript / superscript inline extensions + `marked-katex-extension`, installed once at require time (see the comment there for why not per-call) | 177–442 — `marked.use({` (196) |
 | `renderMarkdown()` | The one exported function. **Every row below is nested inside it**, which is why their line numbers move whenever anything above them does | 443–5932 — `async function renderMarkdown(` (443); `module.exports = { renderMarkdown };` (5933) |
 | ⤷ Asset inlining | `SRC_DIR` + `inlineImageSrc` / `inlineImagesInHtmlChunk` — local image srcs resolved against the **source markdown** and base64-inlined as `data:` URIs | 476–700 — `// ── Local image assets` (476); ends just above `let bodyHtml` (701) |
-| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 701–1265 — `const renderer = new Renderer();` (720), `function buildTocTree(` (759) |
+| ⤷ Custom renderer + TOC | `renderer.image` / `html` / `code` / `heading` / `paragraph` / `text` / `listitem` / `blockquote` / `table`, `buildTocTree`, the section index fed to search | 701–1265 — `const renderer = new Renderer();` (720), `function buildTocTree(` (759) |
 | ⤷ HTML template | The `<!DOCTYPE html>` template literal the rest of the output is assembled into | 1266–5899 — `// ── HTML template` (1266), `const html = ` + backtick (2245), closing `</html>` + backtick (5899) |
 | ⤷ `<style>` block | Embedded CSS for HTML output | 2251–3935 — `<style>` (2251) to its `</style>` (3935) |
 | ⤷ `<script>` reader runtime | Search / scroll-sync / TOC collapse / sidebar drawer / zoom-resize scroll anchoring / diagram lightbox / diagram readability floor (`applyDiagramScale`) | 3985–5897 — `<!-- Reader runtime -->` (3985) to its `</script>` (5897) |
@@ -60,11 +60,13 @@ first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`; the two IME checks run in Chromium only, `opts.engines`, because they drive composition through CDP); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
-asserts from DOM geometry, never screenshots. It is not part of `npm test`; CI runs it in
+asserts from DOM geometry, never screenshots. One check is the exception: the drawer TOC
+jump runs in Chromium only, at 900×800 with classic (space-taking) scrollbars, in its own
+browser (`opts.engines` + `opts.launch`). It is not part of `npm test`; CI runs it in
 `.github/workflows/browser.yml` when `lib/**`, `vendor/**`, the click test or `package.json` change. Any change to the reading
 view (sidebar, TOC, search, mobile bar, tables, focus, lightbox) adds or updates a click
 check in the same change and runs this suite before it is called done — the user should
@@ -384,7 +386,9 @@ exactly that: `node --check` clean, then `renderMarkdown` died at runtime with
 `wave is not defined`.
 
 So the check is not a syntax check. Either render a real document
-(`node bin/md2doc.js some.md` and confirm it exits 0 and writes the HTML), or count the
+(`node bin/md2doc.js some.md --out some.html` and confirm it exits 0 and writes the HTML —
+always pass `--out`: without it the CLI opens the platform viewer, which on WSL is a Windows
+browser on the user's desktop), or count the
 backticks in the file and confirm the total is unchanged from the previous commit — a
 correct edit to a CSS comment never changes that count.
 
