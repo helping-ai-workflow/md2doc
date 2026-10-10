@@ -614,6 +614,13 @@ console.log('md2doc dot WASM test passed');
   assert.match(await body('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /<div class="inline-svg"><svg/, 'block html svg is wrapped');
   assert.doesNotMatch(await body('Text <svg width="5"><circle r="2"/></svg> after\n'), /inline-svg/, 'svg in prose is not wrapped');
   assert.doesNotMatch(await body('<svg width="5"></svg> and <svg width="6"></svg>\n'), /inline-svg/, 'prose between two svgs is not wrapped');
+  // Fix round 1: an svg nested in an outer svg that a blank line split into
+  // several blocks is not wrapped (a <div>/<p> there closes the outer svg early);
+  // once the outer svg is closed, the next svg-only block is wrapped again.
+  const nested = await body('<svg width="40" height="40">\n<rect width="5" height="5"/>\n\n<svg x="10" width="10" height="10">\n<circle r="3"/>\n</svg>\n\n</svg>\n\n' +
+    '<svg width="20" height="10"><text>z</text></svg>\n');
+  assert.ok(!/<div class="inline-svg"><svg x="10"/.test(nested) && !/<p class="inline-svg"><svg x="10"/.test(nested), 'nested svg is not wrapped: ' + nested);
+  assert.match(nested, /<p class="inline-svg"><svg width="20"/, 'the svg after the closed outer one is wrapped: ' + nested);
   const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
   assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
   assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
