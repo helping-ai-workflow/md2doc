@@ -825,6 +825,38 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     assert.strictEqual(dark.color, 'rgb(34, 34, 34)', 'label keeps #222 ' + JSON.stringify(dark));
   });
 }
+// R7 甲: a Markdown-native inline svg sits on a white plate in dark, inked #1f2328.
+const INLINE_SVG = '<svg id="inl" width="200" height="60" xmlns="http://www.w3.org/2000/svg"><rect x="1" y="1" width="198" height="58" fill="none" stroke="#000"/>' +
+  '<text id="inltext" x="10" y="35" font-size="16">INLINE SVG</text><circle id="inldot" cx="180" cy="30" r="10" fill="currentColor"/></svg>';
+let d10InlineUrl = null;
+const d10Inline = () => d10InlineUrl || (d10InlineUrl = fixtureUrl('d10-inline', D10_MD.concat(['## 3. Inline', '', INLINE_SVG, ''])));
+function inlineState(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function lum(s) { const c = s.match(/[\d.]+/g).slice(0, 3).map(Number); return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const s = document.getElementById('inl'); const cs = getComputedStyle(s);
+    const text = getComputedStyle(document.getElementById('inltext')).fill;
+    const a = lum(text); const b = lum(cs.backgroundColor);
+    return { wrapped: !!s.parentElement && s.parentElement.classList.contains('inline-svg'),
+      backgroundColor: cs.backgroundColor, boxShadow: cs.boxShadow, color: cs.color,
+      dot: getComputedStyle(document.getElementById('inldot')).fill, text,
+      ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+  });
+}
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': dark fills: inline svg sits on a white plate in dark only', vp, async (page) => {
+    await gotoTheme(page, d10Inline());
+    const light = await inlineState(page);
+    assert.strictEqual(light.wrapped, true, 'the native svg is wrapped in .inline-svg ' + JSON.stringify(light));
+    assert.deepStrictEqual([light.backgroundColor, light.boxShadow], ['rgba(0, 0, 0, 0)', 'none'], 'light: no plate ' + JSON.stringify(light));
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    const dark = await inlineState(page);
+    assert.strictEqual(dark.backgroundColor, 'rgb(255, 255, 255)', 'dark: white plate ' + JSON.stringify(dark));
+    assert.strictEqual(dark.color, 'rgb(31, 35, 40)', 'dark: plate ink #1f2328 ' + JSON.stringify(dark));
+    assert.strictEqual(dark.dot, 'rgb(31, 35, 40)', 'dark: currentColor follows the plate ink ' + JSON.stringify(dark));
+    assert.ok(dark.ratio >= 4.5, 'dark: the text reads on the plate ' + JSON.stringify(dark));
+  });
+}
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);

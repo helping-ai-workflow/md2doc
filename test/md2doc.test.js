@@ -600,3 +600,24 @@ console.log('md2doc dot WASM test passed');
   assert.strictEqual(await marked('## One\n\nx\n\n## Two\n\ny\n'), false, 'no H1: no marker');
   console.log('md2doc TOC chapter marker test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (R7 甲): a Markdown-native inline <svg> is wrapped in .inline-svg so
+// dark mode can give it a white plate. Decided at BLOCK level: marked lexes the
+// one-line form as a paragraph of html/text tokens (the <text> content is a text
+// token), so the rule reads the block's own trimmed source, not its token types.
+// An svg inside prose is left alone, and so is edit mode (reader output only).
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'inline-svg.md');
+  const body = async (md, opts) => (await renderMarkdown(md, fake, opts || {})).bodyHtml;
+  assert.match(await body('<svg width="20" height="10"><text>x</text></svg>\n'), /<p class="inline-svg"><svg/, 'one-line svg paragraph is wrapped');
+  assert.match(await body('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /<div class="inline-svg"><svg/, 'block html svg is wrapped');
+  assert.doesNotMatch(await body('Text <svg width="5"><circle r="2"/></svg> after\n'), /inline-svg/, 'svg in prose is not wrapped');
+  assert.doesNotMatch(await body('<svg width="5"></svg> and <svg width="6"></svg>\n'), /inline-svg/, 'prose between two svgs is not wrapped');
+  const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
+  assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
+  assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
+  assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
+    /inline-svg/, 'edit mode emits no inline-svg wrapper');
+  console.log('md2doc inline svg wrapper test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
