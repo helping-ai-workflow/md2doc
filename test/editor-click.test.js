@@ -3683,6 +3683,41 @@ check('baseline table: a TSV paste fills from the caret cell', DESKTOP, async (p
   assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['x', 'y'], ['z', 'w']]);
 }, { md: TBL2_MD });
 
+// ── T7: image insertion and the raw box ──
+const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+check('baseline image: the toolbar inserts a picked png below the block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  const m = /^# D\n\nAlpha\.\n\n!\[\]\((assets\/dot(-\d+)?\.png)\)\n\nOmega\.\n$/.exec(disk);
+  assert.ok(m, 'file: ' + JSON.stringify(disk));
+  assert.strictEqual(fs.existsSync(path.join(path.dirname(boot.mdPath), m[1])), true, 'asset exists: ' + m[1]);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content img').length), 1);
+}, { md: BASE_MD });
+async function openRawBox(page) {
+  await gutterMenu(page, await blockByText(page, 'Alpha.'), 'MD 原始碼');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'raw box open');
+  await page.focus('textarea.ed-raw');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('Beta **b**.');
+}
+check('baseline raw: MD 原始碼 commits with Ctrl+Enter', DESKTOP, async (page, boot) => {
+  await openRawBox(page);
+  await page.keyboard.press('Control+Enter');
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nBeta **b**.\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('.content strong') || {}).textContent), 'b');
+}, { md: BASE_MD });
+check('baseline raw: Esc cancels the raw box', DESKTOP, async (page, boot) => {
+  await openRawBox(page);
+  await page.keyboard.press('Escape');
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'raw box gone');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
