@@ -140,7 +140,10 @@ async function focusRing(page) {
 }
 
 const checks = [];
-function check(name, viewport, fn, ctx) { checks.push({ name, viewport, fn, ctx }); }
+// opts.engines: run only on these engines. opts.launch: launch options for a
+// browser of the check's own (launched and closed around it), e.g. to turn the
+// classic scrollbars back on that the default headless launch hides.
+function check(name, viewport, fn, ctx, opts) { checks.push({ name, viewport, fn, ctx, opts: opts || {} }); }
 
 // ── Desktop ─────────────────────────────────────────────────────────────────
 check('desktop: TOC links jump and light exactly one blue row, path bold', DESKTOP, async (page) => {
@@ -1129,6 +1132,42 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
   assert.ok((await overflowX(page)) <= 0, 'no sideways page scroll');
 }, { hasTouch: true, isMobile: true });
 
+// ── Scroll anchoring vs a newer scroll (R1, R9) ─────────────────────────────
+// The zoom/resize anchor is captured in the frame after a scroll. A column
+// change whose reflow is held in the same task as a scroll (or before that
+// scroll's event has dispatched) used to restore the OLD anchor and pull the
+// page back over the newer scroll.
+check('anchor: a scroll issued in the same task as a column change survives', DESKTOP, async (page) => {
+  const t = await page.evaluate(() => {
+    document.body.toggleAttribute('data-toc-collapsed');
+    const y = document.getElementById('6-section-6').getBoundingClientRect().top + scrollY;
+    window.scrollTo(0, y);
+    return Math.round(scrollY);
+  });
+  assert.ok(t > 1000, 'the scroll target is far down the page, t=' + t);
+  await wait(400);
+  const y = await page.evaluate(() => Math.round(scrollY));
+  assert.ok(Math.abs(y - t) <= 2, 'scrollY stays at the target ' + t + ', got ' + y);
+});
+// <=1080 px opens the TOC as a drawer; with classic (non-overlay) scrollbars the
+// drawer hides the page scrollbar, so closing it on a TOC click narrows the
+// column by 15 px in the same task as the jump.
+check('anchor: a TOC jump from the drawer survives classic scrollbars', { width: 900, height: 800 }, async (page) => {
+  for (const id of ['6-section-6', '3-1-child-of-3', '7-1-child-of-7']) {
+    await page.goto(URL, { waitUntil: 'load' });
+    await wait(400);
+    const sb = await page.evaluate(() => innerWidth - document.documentElement.clientWidth);
+    assert.strictEqual(sb, 15, 'classic 15 px page scrollbar present');
+    await page.click('#sidebar-toggle');
+    await wait(400);
+    await page.click('#toc-expand-all');
+    await page.click('.toc-list a[href="#' + id + '"]');
+    await wait(600);
+    const r = await page.evaluate((i) => ({ top: Math.round(document.getElementById(i).getBoundingClientRect().top), y: Math.round(scrollY) }), id);
+    assert.ok(r.top >= 44 && r.top <= 130, id + ' heading lands below the bar, top=' + r.top + ' scrollY=' + r.y);
+  }
+}, undefined, { engines: ['chromium'], launch: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -1139,8 +1178,10 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
     try {
       for (const c of checks) {
         if (only && !c.name.includes(only)) continue;
+        if (c.opts.engines && !c.opts.engines.includes(engine)) continue;
         ran++;
-        const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.ctx));
+        const own = c.opts.launch ? await playwright[engine].launch(c.opts.launch) : null;
+        const context = await (own || browser).newContext(Object.assign({ viewport: c.viewport }, c.ctx));
         const page = await context.newPage();
         try {
           await page.goto(URL, { waitUntil: 'load' });
@@ -1152,6 +1193,7 @@ check('phone: the copy button is always shown on touch and a tap copies', PHONE,
           console.log('FAIL [' + engine + '] ' + c.name + '\n     ' + (e && e.message));
         } finally {
           await context.close();
+          if (own) await own.close();
         }
       }
     } finally {
