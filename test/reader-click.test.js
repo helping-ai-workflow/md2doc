@@ -751,6 +751,80 @@ check('desktop: graphviz follows dark and restores its own colours exactly', DES
   const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
   assert.deepStrictEqual(after, before, 'every style attribute restored');
 });
+// ── R7 (v3.13.1): a text picks between its author colour and the dark rule's
+// replacement, whichever reads better on the FINAL dark fill of its own shape.
+// One fixture, shared with the inline-svg plate check below (which appends a line).
+const D10_MD = ['# D10 fills', '', '## 1. Graphviz', '',
+  '\x60\x60\x60dot', 'digraph { node [shape=box, style=filled];',
+  '  mid [label="MID888", fillcolor="#888888", fontcolor="#222222"];',
+  '  mid2 [label="MID777", fillcolor="#777777", fontcolor="#000000"];',
+  '  blue [label="BLUE", fillcolor="#4a90d9", fontcolor="#111111"];',
+  '  light [label="LIGHT", fillcolor="#e0e0e0"];',
+  '  mid -> light; mid2 -> blue; }', '\x60\x60\x60', '',
+  '## 2. Mermaid', '',
+  '\x60\x60\x60mermaid', 'graph LR', '  A[MIDM] --> B[Plain]', '  style A fill:#888888,color:#222222', '\x60\x60\x60', ''];
+let d10Url = null;
+const d10 = () => d10Url || (d10Url = fixtureUrl('d10', D10_MD));
+// WCAG ratio of each graphviz node's text against its own shape (the body
+// background where the shape is transparent), read as plain values.
+function pairs(page) {
+  return page.evaluate(() => {
+    function f(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function parse(s) { const n = (s.match(/[\d.]+/g) || []).map(Number); return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; }
+    function lum(c) { return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); }
+    const out = {};
+    document.querySelectorAll('.content .graphviz svg g.node').forEach((g) => {
+      const t = g.querySelector('text'); const s = g.querySelector('polygon');
+      const text = getComputedStyle(t).fill; const shape = getComputedStyle(s).fill;
+      let under = parse(shape);
+      if (!under || under[3] === 0) under = parse(getComputedStyle(document.body).backgroundColor);
+      const a = lum(parse(text)); const b = lum(under);
+      out[t.textContent.trim()] = { text, shape, ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100 };
+    });
+    return out;
+  });
+}
+function mermaidMid(page) {
+  return page.evaluate(() => {
+    const n = [].find.call(document.querySelectorAll('.content .mermaid svg g.node'), (g) => /MIDM/.test(g.textContent));
+    if (!n) return null;
+    const label = [].find.call(n.querySelectorAll('foreignObject *'), (e) => [].some.call(e.childNodes, (c) => c.nodeType === 3 && /MIDM/.test(c.textContent)));
+    const shape = [].find.call(n.querySelectorAll('polygon, ellipse, path, rect'), (e) => !e.closest('foreignObject'));
+    return { color: label ? getComputedStyle(label).color : null, fill: shape ? getComputedStyle(shape).fill : null,
+      live: n.ownerSVGElement.hasAttribute('data-md2doc-live') };
+  });
+}
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': dark fills: author text on a mid fill keeps its contrast', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(400);
+    const light = await pairs(page);
+    assert.deepStrictEqual(Object.keys(light).sort(), ['BLUE', 'LIGHT', 'MID777', 'MID888'], 'guard: four graphviz nodes ' + JSON.stringify(light));
+    const before = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const dark = await pairs(page);
+    const pin = { MID888: 'rgb(34, 34, 34)', MID777: 'rgb(0, 0, 0)', BLUE: 'rgb(17, 17, 17)' };
+    for (const k of Object.keys(pin)) {
+      assert.ok(dark[k].ratio >= Math.min(4.5, light[k].ratio), k + ' dark ' + JSON.stringify(dark[k]) + ' light ' + JSON.stringify(light[k]));
+      assert.strictEqual(dark[k].text, pin[k], k + ' keeps its author text colour ' + JSON.stringify(dark[k]));
+    }
+    // #e0e0e0 (L≈0.745) is toned dark, not made transparent: the author's black loses to #e3e3e3.
+    assert.strictEqual(dark.LIGHT.text, 'rgb(227, 227, 227)', 'LIGHT ' + JSON.stringify(dark.LIGHT));
+    assert.ok(dark.LIGHT.ratio >= 4.5, 'LIGHT ' + JSON.stringify(dark.LIGHT));
+    await page.click('#md2doc-theme-toggle'); await wait(600);
+    const after = await page.$$eval('.content .graphviz svg *', (els) => els.map((e) => e.getAttribute('style')));
+    assert.deepStrictEqual(after, before, 'every style attribute restored');
+  });
+  check(label + ': dark fills: a live mermaid label on a mid fill keeps its author colour', vp, async (page) => {
+    await gotoTheme(page, d10()); await wait(1200);
+    const light = await mermaidMid(page);
+    assert.deepStrictEqual(light && [light.color, light.fill], ['rgb(34, 34, 34)', 'rgb(136, 136, 136)'], 'guard: measured light label/fill ' + JSON.stringify(light));
+    await page.click('#md2doc-theme-toggle'); await wait(3000);
+    const dark = await mermaidMid(page);
+    assert.strictEqual(dark && dark.live, true, 'guard: the live dark render is shown ' + JSON.stringify(dark));
+    assert.strictEqual(dark.fill, 'rgb(136, 136, 136)', 'guard: the author fill is untouched ' + JSON.stringify(dark));
+    assert.strictEqual(dark.color, 'rgb(34, 34, 34)', 'label keeps #222 ' + JSON.stringify(dark));
+  });
+}
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);
