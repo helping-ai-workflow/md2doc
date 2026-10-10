@@ -585,3 +585,18 @@ console.log('md2doc dot WASM test passed');
   assert.ok(!edit.html.includes('class="code-copy"') && !edit.html.includes('class="code-block"'), 'edit mode emits no copy button or wrapper');
   console.log('md2doc code copy button render test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.13.1 (R3, user decision B): a TOC whose top level is two or more H1
+// chapters carries data-toc-chapters, so CSS can set the chapters apart. A
+// single-H1 document is flattened (its H2s become the top level) and gets no
+// marker; neither does a lone H1 or a document with no H1.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'chapters.md');
+  const marked = async (md) => /<nav class="toc"[^>]*data-toc-chapters/.test((await renderMarkdown(md, fake, {})).html);
+  assert.strictEqual(await marked('# A\n\npara\n\n## A.1\n\nx\n\n# B\n\ny\n'), true, 'two H1 chapters: marker present');
+  assert.strictEqual(await marked('# Title\n\n## One\n\nx\n\n## Two\n\ny\n'), false, 'single H1 flattened: no marker');
+  assert.strictEqual(await marked('# Only\n\npara\n'), false, 'lone H1: no marker');
+  assert.strictEqual(await marked('## One\n\nx\n\n## Two\n\ny\n'), false, 'no H1: no marker');
+  console.log('md2doc TOC chapter marker test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

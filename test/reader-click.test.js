@@ -1330,6 +1330,48 @@ check('anchor: a TOC jump from the drawer survives classic scrollbars', { width:
   }
 }, undefined, { engines: ['chromium'], launch: { ignoreDefaultArgs: ['--hide-scrollbars'] } });
 
+// ── Chapters of a multi-H1 TOC (R3, user decision B) ───────────────────────
+// Two or more H1s that the TOC keeps as its top level are chapters: a rule and
+// a gap set each one apart from the one above. Font weight does not change.
+const CHAPTERS_MD = [];
+for (let c = 1; c <= 3; c++) {
+  CHAPTERS_MD.push('# ' + c + ' Chapter ' + c, '', filler('c' + c, 1), '');
+  for (let s = 1; s <= 3; s++) CHAPTERS_MD.push('## ' + c + '.' + s + ' Section ' + c + '.' + s, '', filler(c + '.' + s, 1), '');
+}
+const CHAPTERS_URL = fixtureUrl('chapters', CHAPTERS_MD);
+async function chapterRows(page) {
+  return page.evaluate(() => {
+    const lis = [...document.querySelectorAll('nav.toc > .toc-list-level-1 > .toc-item')];
+    return { n: lis.length, gap: Math.round(lis[1].querySelector('a').getBoundingClientRect().top - lis[0].getBoundingClientRect().bottom),
+      border: getComputedStyle(lis[1]).borderTopWidth + ' ' + getComputedStyle(lis[1]).borderTopColor,
+      firstBorder: getComputedStyle(lis[0]).borderTopWidth,
+      weight: getComputedStyle(lis[2].querySelector('a')).fontWeight };
+  });
+}
+check('desktop: multi-H1 chapters are separated, weight unchanged', DESKTOP, async (page) => {
+  await page.goto(CHAPTERS_URL, { waitUntil: 'load' }); await wait(400);
+  // Read before anything scrolls to chapter 3: an active row's ancestors are bold by design.
+  const r = await chapterRows(page);
+  assert.strictEqual(r.n, 3, 'three chapter rows');
+  assert.ok(r.gap >= 16, 'gap between chapter 1 and chapter 2 >= 16 px, got ' + r.gap);
+  assert.strictEqual(r.border, '1px rgb(216, 222, 228)', 'rule above chapter 2');
+  assert.strictEqual(r.firstBorder, '0px', 'no rule above the first chapter');
+  assert.strictEqual(r.weight, '400', 'chapter rows keep their weight');
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  const d = await chapterRows(page);
+  assert.strictEqual(d.border, '1px rgb(56, 57, 60)', 'dark: the rule follows token rule-2');
+});
+// Guard (green by design): a flattened single-H1 TOC is untouched.
+check('desktop: a single-H1 TOC has no chapter separators', DESKTOP, async (page) => {
+  const r = await page.evaluate(() => ({
+    marked: document.querySelector('nav.toc').hasAttribute('data-toc-chapters'),
+    rows: [...document.querySelectorAll('nav.toc > .toc-list-level-1 > .toc-item')].map((li) => getComputedStyle(li).borderTopWidth + ' ' + getComputedStyle(li).marginTop),
+  }));
+  assert.strictEqual(r.marked, false, 'no data-toc-chapters');
+  assert.ok(r.rows.length > 1, 'several top-level rows, got ' + r.rows.length);
+  assert.deepStrictEqual(r.rows.filter((v) => v !== '0px 0px'), [], 'every top-level row: no rule, no margin');
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
