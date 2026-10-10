@@ -405,6 +405,12 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
     ['a\n- b', 'a\n\\- b', 'lazy continuation line'],
     ['\\## x', '\\## x', 'already escaped stays'],
     ['Alpha ## not start', 'Alpha ## not start', 'mid-line'],
+    ['-- -', '\\-- -', 'spaced-dash thematic break'],
+    ['-- - -', '\\-- - -', 'spaced-dash thematic break'],
+    ['----  -', '\\----  -', 'spaced-dash thematic break'],
+    ['a\n-- -', 'a\n\\-- -', 'spaced-dash break after a paragraph line'],
+    ['- -- -', '\\- -- -', 'bullet rule first'],
+    ['-- x', '-- x', 'dashes then a word: not a marker'],
   ];
   rows.forEach(([input, want, why]) => {
     assert.strictEqual(escapeBlockStarts(input), want, why + ': ' + JSON.stringify(input));

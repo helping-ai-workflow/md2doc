@@ -1216,6 +1216,11 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   assert.strictEqual(r.md, '- \\## x\n- -5 dBm', 'got:\n' + JSON.stringify(r.md));
   // The tree serializer (serializeList) escapes the same way.
   assert.strictEqual(serializeList(ul(li('> q'), li('1. x'))).md, '- \\> q\n- 1\\. x');
+  // A spaced-dash thematic break as an item's text, and one behind a bullet.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0', indent: 0 }, text('-- -')),
+    liBlock({ id: '1', indent: 0 }, text('- -- -')),
+  ]).md, '- \\-- -\n- \\- -- -');
 }
 
 

@@ -69,7 +69,7 @@ function post(port, p, body) {
 // text is exactly what was typed.
 {
   const htmlEscaped = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  ['## Title', '- item', '> q', '1. x', '---', '| a | b |'].forEach((s) => {
+  ['## Title', '- item', '> q', '1. x', '---', '| a | b |', '-- -', '-- - -', '----  -'].forEach((s) => {
     const out = escapeBlockStarts(escapeText(s));
     const toks = marked.lexer(out);
     assert.strictEqual(toks.length, 1, 'one token for ' + JSON.stringify(out));
