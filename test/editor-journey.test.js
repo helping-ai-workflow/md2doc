@@ -9203,6 +9203,21 @@ async function main() {
     const TWO_IN_ONE_MD = '# Doc\n\n![a](a.drawio) ![b](b.drawio)\n\nTail para two.\n';
     const TABLE_MD = '# Doc\n\n| ![d](d.drawio) | x |\n|---|---|\n| y | z |\n\nTail para two.\n';
     const HEARTBEAT_WAIT = 15000;   // one real 10s tick + a headless bake
+    // T17 (v3.13.1): a row that waits for a CHANGE polls for it instead of sleeping
+    // a fixed beat (measured latency 3.9-10.9 s: the heartbeat phase plus the bake).
+    // Calls read() every 100 ms until it returns `want` or budgetMs passes, and
+    // returns the LAST plain value read; the caller asserts on it, so a miss prints
+    // the real value instead of a timeout. Rows that assert nothing CHANGED keep the
+    // fixed sleep: a poll for "still unchanged" returns at once and proves nothing.
+    async function pollUntil(read, want, budgetMs) {
+      const t0 = Date.now();
+      let v = await read();
+      while (v !== want && Date.now() - t0 < budgetMs) {
+        await new Promise((r) => setTimeout(r, 100));
+        v = await read();
+      }
+      return v;
+    }
     // Scoped to these rows only (re-review G10). They sit still for a real
     // heartbeat (two of them for two). Originally an `idleTimeoutMs`
     // override, because the old ping-driven idle timer's 30s default was
@@ -9354,8 +9369,7 @@ async function main() {
       assert.strictEqual(before, 'SINGLE_BOX',
         'F1 前提失敗：初始頁面必須已經烤出原始的 .drawio 內容');
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'F1：開著文件、完全不編輯、外部改掉 .drawio —— 這條主路徑必須真的更新畫面');
       assert.strictEqual(ctx.errs.length, 0, 'F1：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -9372,8 +9386,7 @@ async function main() {
       assert.strictEqual(picked, 'Flow', '(c) 前提失敗：切到第二頁必須真的切過去');
       await recordBanners(ctx.page);
       rewriteDrawio(ctx, FLOW_ARCH);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const attr = await pagesAttr(ctx.page);
+      const attr = await pollUntil(() => pagesAttr(ctx.page), 'Flow|Architecture', 30000);
       assert.strictEqual(attr, 'Flow|Architecture',
         '(c) 前提失敗：重烤必須真的套用到畫面上（否則「還在同一頁」只是因為什麼都沒發生）');
       const kept = await shownPage(ctx.page);
@@ -9398,8 +9411,7 @@ async function main() {
       assert.strictEqual(await shownPage(ctx.page), 'Flow', '前提失敗：必須先切到 Flow');
       await recordBanners(ctx.page);
       rewriteDrawio(ctx, ARCH_TIMING);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const attr = await pagesAttr(ctx.page);
+      const attr = await pollUntil(() => pagesAttr(ctx.page), 'Architecture|Timing', 30000);
       assert.strictEqual(attr, 'Architecture|Timing',
         'B2-P1 前提失敗：重烤必須真的套用到畫面上');
       const landed = await shownPage(ctx.page);
@@ -9431,6 +9443,7 @@ async function main() {
       assert.strictEqual(beforeFocus.indexOf('ed-wys-armed') !== -1, true,
         '前提失敗：必須真的有一個 WYSIWYG 編輯面獲得焦點，got ' + beforeFocus);
       rewriteDrawio(ctx, SINGLE_V2);
+      // Fixed wait on purpose: this asserts the focus did NOT move; a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const afterFocus = await ctx.page.evaluate(() => {
         const ae = document.activeElement;
@@ -9469,6 +9482,7 @@ async function main() {
         };
       });
       rewriteDrawio(ctx, SINGLE_V2);
+      // Fixed wait on purpose: this asserts the screen did NOT change (the bailed beat); a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const midMark = await shownMark(ctx.page);
       const midCalls = await ctx.page.evaluate(() => window.__renderCalls);
@@ -9481,8 +9495,7 @@ async function main() {
       // DRAWIO_BACKOFF_BASE_MS * 2 = 20s — so the retry lands on a later tick
       // than the next one. That delay is the whole point of the backoff; what
       // this row pins is that the update is DELAYED, never dropped.
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT + 25000));
-      const finalMark = await shownMark(ctx.page);
+      const finalMark = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 45000);
       assert.strictEqual(finalMark, 'CHANGED_BOX',
         'F2：用戶端放棄了一輪之後，下一次心跳必須再報一次 stale 並且這次成功 —— ' +
         '基準線只能在用戶端確認套用之後才前進');
@@ -9533,6 +9546,7 @@ async function main() {
         'F5 前提失敗：必須真的先升起磁碟衝突 banner，got ' + JSON.stringify(conflict));
       // Now make the background path WANT to raise its own notice.
       rewriteDrawio(ctx, ARCH_TIMING);
+      // Fixed wait on purpose: this asserts the conflict banner is NOT replaced; a poll would return at once.
       await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const stillConflict = await visibleBannerText(ctx.page);
       assert.strictEqual(
@@ -9591,9 +9605,7 @@ async function main() {
       }, CODE_SEL);
 
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'G1：引用了這段標記文字的區塊不得讓整輪刷新放棄 —— 舊版會每 10 秒重跑一次 ' +
         '完整 render + headless 烘焙，而圖永遠不更新');
@@ -9631,13 +9643,12 @@ async function main() {
         boxes.forEach((b, i) => { b.closest('.ed-block').__drawioProbe = 'block' + i; });
       });
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await ctx.page.evaluate(() =>
+      const after = await pollUntil(() => ctx.page.evaluate(() =>
         Array.from(document.querySelectorAll('.drawio')).map((box) => {
           const vis = box.querySelector('.drawio-page:not([hidden])');
           const blk = box.closest('.ed-block');
           return ((vis || box).textContent || '').trim() + '/' + String(blk && blk.__drawioProbe);
-        }).join('|'));
+        }).join('|')), 'CHANGED_BOX/undefined|ARCH_BOX/block1', 30000);
       assert.strictEqual(after, 'CHANGED_BOX/undefined|ARCH_BOX/block1',
         'G4：改了 a.drawio 只能換掉 a 那個區塊（所以它的標記不見了）；' +
         'b.drawio 那個區塊必須原封不動（標記還在），got ' + after);
@@ -9668,8 +9679,7 @@ async function main() {
       assert.strictEqual(boxesPerBlock, '0|2|0',
         'H2 前提失敗：兩張圖必須落在同一個區塊裡（否則測到的是已經會過的那一種），got ' + boxesPerBlock);
       fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await bothMarks(ctx.page);
+      const after = await pollUntil(() => bothMarks(ctx.page), 'SINGLE_BOX|OTHER_CHANGED', 30000);
       assert.strictEqual(after, 'SINGLE_BOX|OTHER_CHANGED',
         'H2：同一個區塊裡的第二張圖改變時必須真的更新 —— 舊版把它當成「沒變」跳過、' +
         '然後還 ack 回去，伺服器基準線越過了一個畫面從未顯示的版本，永久且無聲，got ' + after);
@@ -9737,8 +9747,7 @@ async function main() {
       assert.strictEqual(gripsUp, 0,
         'H1：degraded 表格上滑過列不得升起任何握把 / 邊選單，got ' + gripsUp);
       rewriteDrawio(ctx, SINGLE_V2);
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const after = await shownMark(ctx.page);
+      const after = await pollUntil(() => shownMark(ctx.page), 'CHANGED_BOX', 30000);
       assert.strictEqual(after, 'CHANGED_BOX',
         'H1：表格區塊裡的 drawio 一樣要重烤 —— 這條路徑真的會整個換掉一個 table 區塊，got ' + after);
       assert.strictEqual(ctx.errs.length, 0, 'H1：不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -9760,12 +9769,11 @@ async function main() {
       // (1) unrelated write: a.drawio changes, b's annotations must survive.
       await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
+      const marksNow = await pollUntil(() => bothMarks(ctx.page), 'CHANGED_BOX|OTHER_BOX', 30000);
       const kept = await ctx.page.evaluate(() =>
         document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
       assert.strictEqual(kept, 1,
         'H3：改的是別的檔案，讀者自己畫的註記必須原封不動，got ' + kept);
-      const marksNow = await bothMarks(ctx.page);
       assert.strictEqual(marksNow, 'CHANGED_BOX|OTHER_BOX',
         'H3 前提失敗：而那次改動本身仍然要套用，got ' + marksNow);
       const bannerNow = await visibleBannerText(ctx.page);
@@ -9778,8 +9786,7 @@ async function main() {
       // annotations cannot follow, and the reader is told.
       await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'b.drawio'), OTHER_V2, 'utf8');
-      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
-      const marksAfter = await bothMarks(ctx.page);
+      const marksAfter = await pollUntil(() => bothMarks(ctx.page), 'CHANGED_BOX|OTHER_CHANGED', 30000);
       assert.strictEqual(marksAfter, 'CHANGED_BOX|OTHER_CHANGED',
         'H3：被註記的那張圖自己變了時仍然必須重烤，got ' + marksAfter);
       const seen2 = await seenBanners(ctx.page);
