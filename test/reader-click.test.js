@@ -88,6 +88,24 @@ function fixtureUrl(name, mdLines) {
   return 'file://' + htmlFile;
 }
 
+// ── Follow-up fixture (v3.13.1): the main fixture's shape, plus phrases that
+// cross text nodes (a heading's number span, inline code, a soft line break,
+// bold) and three short trailing sections ─────────────────────────────────────
+const FOLLOWUP_MD = ['# Reader Fixture Spec', ''];
+for (let s = 1; s <= 8; s++) {
+  FOLLOWUP_MD.push('## ' + s + '. Section ' + s, '', filler(s, 4), '');
+  if (s === 5) FOLLOWUP_MD.push('The zebrafinch handshake is defined here.', '');
+  FOLLOWUP_MD.push('### ' + s + '.1 Child of ' + s, '', filler(s + '.1', 3), '');
+  if (s === 4) {
+    FOLLOWUP_MD.push('### 4.2 Assumptions', '', 'The link partner keeps its clock.', '');
+    FOLLOWUP_MD.push('A `rcv_v` beat crosses an inline code boundary.', '');
+    FOLLOWUP_MD.push('alpha line', 'bravo line wraps by a soft break.', '');
+    FOLLOWUP_MD.push('Words **bold kiwi** run on.', '');
+  }
+}
+FOLLOWUP_MD.push('## 9. Short nine', '', 'One line.', '', '## 10. Short ten', '', 'One line.', '', '## 11. Short eleven', '', 'One line.', '');
+const FOLLOWUP_URL = fixtureUrl('followup', FOLLOWUP_MD);
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -337,6 +355,81 @@ check('phone: search from the drawer; picking a result closes it and shows the h
   assert.ok(!(await page.evaluate(() => document.body.hasAttribute('data-sidebar-open'))), 'drawer closed');
   const hit = await page.$eval('mark.search-hit.is-selected', (m) => { const r = m.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; });
   assert.ok(hit.top >= 44 && hit.bottom <= PHONE.height, 'hit visible below the bar: ' + JSON.stringify(hit));
+});
+
+// ── Search marks across text nodes (R2) ─────────────────────────────────────
+// A phrase that crosses a heading's .sec span, inline code, a soft line break or
+// bold used to get no mark at all, and the reader fell back to the heading.
+// Plain values only: the joined mark text, the mark count, and whether the
+// first mark is fully inside the viewport.
+async function selectedMarks(page) {
+  return page.evaluate(() => {
+    const marks = Array.from(document.querySelectorAll('mark.search-hit.is-selected'));
+    let onScreen = false;
+    if (marks.length) {
+      const r = marks[0].getBoundingClientRect();
+      onScreen = r.width > 0 && r.height > 0 && r.left >= -0.5 && r.top >= -0.5 &&
+        r.right <= window.innerWidth + 0.5 && r.bottom <= window.innerHeight + 0.5;
+    }
+    return {
+      text: marks.map((m) => m.textContent).join('').replace(/\s+/g, ' ').toLowerCase(),
+      count: marks.length,
+      onScreen,
+      top: marks.length ? Math.round(marks[0].getBoundingClientRect().top) : null,
+    };
+  });
+}
+async function searchFor(page, q) {
+  await page.fill('#doc-search-input', q);
+  await page.press('#doc-search-input', 'Enter');
+  await wait(300);
+  return selectedMarks(page);
+}
+check('search: a phrase across a heading number and its title', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const r = await searchFor(page, '4.2 assumptions');
+  assert.strictEqual(r.text, '4.2 assumptions', 'joined mark text, count=' + r.count);
+  assert.ok(r.count >= 1, 'at least one mark, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+});
+check('search: a phrase across inline code, a soft break and bold', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  for (const q of ['a rcv_v beat', 'alpha line bravo', 'words bold kiwi']) {
+    const r = await searchFor(page, q);
+    assert.strictEqual(r.text, q, q + ': joined mark text, count=' + r.count);
+    assert.strictEqual(r.onScreen, true, q + ': first mark on screen, top=' + r.top);
+  }
+});
+check('search: multi-node hits clear cleanly after next/prev', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const q = 'a rcv_v beat';
+  // Marks must exist before the clear, or a clean innerHTML proves nothing.
+  const first = await searchFor(page, q);
+  assert.strictEqual(first.text, q, 'searched: joined mark text, count=' + first.count);
+  assert.ok(first.count > 1, 'the hit spans several marks, count=' + first.count);
+  await page.click('#search-next'); await wait(300);
+  const next = await selectedMarks(page);
+  assert.strictEqual(next.text, q, 'after next: joined mark text, count=' + next.count);
+  assert.ok(next.count > 1, 'after next: several marks, count=' + next.count);
+  await page.click('#search-prev'); await wait(300);
+  const prev = await selectedMarks(page);
+  assert.strictEqual(prev.text, q, 'after prev: joined mark text, count=' + prev.count);
+  assert.ok(prev.count > 1, 'after prev: several marks, count=' + prev.count);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+check('phone: a multi-node search from the drawer lands on screen', PHONE, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.click('#sidebar-toggle'); await wait(350);
+  await searchFor(page, 'a rcv_v beat');
+  await page.click('.search-result-item >> nth=0'); await wait(400);
+  const r = await selectedMarks(page);
+  assert.strictEqual(r.text, 'a rcv_v beat', 'joined mark text, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  assert.ok(r.top >= 44, 'first mark below the bar, top=' + r.top);
 });
 
 // Tab (keyboard modality, so :focus-visible matches) until the focused element
