@@ -105,6 +105,18 @@ for (let s = 1; s <= 8; s++) {
 }
 FOLLOWUP_MD.push('## 9. Short nine', '', 'One line.', '', '## 10. Short ten', '', 'One line.', '', '## 11. Short eleven', '', 'One line.', '');
 const FOLLOWUP_URL = fixtureUrl('followup', FOLLOWUP_MD);
+// Search across nodes, its own file so FOLLOWUP_MD stays as Tasks 11–13 expect:
+// a phrase whose only separator is a whitespace-only text node between two
+// inline elements, and one multi-node phrase found in two different sections.
+const SEARCH_NODES_URL = fixtureUrl('search-nodes', [
+  '# Search Nodes', '',
+  '## 1. First', '', filler(1, 2), '',
+  'Run **bold** *italic* here.', '',
+  'The `tx_ready` flag rises.', '',
+  '## 2. Second', '', filler(2, 6), '',
+  'Later the `tx_ready` flag falls.', '',
+  '## 3. Third', '', filler(3, 6), '',
+]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -430,6 +442,63 @@ check('phone: a multi-node search from the drawer lands on screen', PHONE, async
   assert.strictEqual(r.text, 'a rcv_v beat', 'joined mark text, count=' + r.count);
   assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
   assert.ok(r.top >= 44, 'first mark below the bar, top=' + r.top);
+});
+check('search: a space that is its own text node between inline elements', DESKTOP, async (page) => {
+  await page.goto(SEARCH_NODES_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const r = await searchFor(page, 'bold italic');
+  assert.strictEqual(r.text, 'bold italic', 'joined mark text, count=' + r.count);
+  assert.strictEqual(r.onScreen, true, 'first mark on screen, top=' + r.top);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
+});
+check('search: next/prev move a multi-node hit between two sections, then clear', DESKTOP, async (page) => {
+  await page.goto(SEARCH_NODES_URL, { waitUntil: 'load' }); await wait(400);
+  const before = await page.evaluate(() => document.querySelector('main.content').innerHTML);
+  const q = 'the tx_ready flag';
+  // Which paragraph holds the selected hit, how many marks the whole page has,
+  // and the result counter, as plain values.
+  const where = () => page.evaluate(() => {
+    const m = document.querySelector('mark.search-hit.is-selected');
+    return {
+      block: m ? m.closest('p').textContent : null,
+      allMarks: document.querySelectorAll('main.content mark').length, // the results list has snippet marks of its own
+      status: document.getElementById('search-result-count').textContent.trim(),
+    };
+  });
+  const FIRST = 'The tx_ready flag rises.';
+  const SECOND = 'Later the tx_ready flag falls.';
+  const first = await searchFor(page, q);
+  assert.strictEqual(first.text, q, 'searched: joined mark text, count=' + first.count);
+  assert.strictEqual(first.count, 3, 'searched: one mark per node');
+  const w1 = await where();
+  assert.strictEqual(w1.block, FIRST, 'searched: the hit is in section 1');
+  assert.strictEqual(w1.allMarks, 3, 'searched: only this hit is marked');
+  const n = Number(w1.status.split('/')[1]);
+  assert.strictEqual(w1.status, '1/' + n);
+  assert.ok(n >= 2, 'the phrase is found in two sections, n=' + n);
+  await page.click('#search-next'); await wait(300);
+  const next = await selectedMarks(page);
+  const w2 = await where();
+  assert.strictEqual(next.text, q, 'after next: joined mark text, count=' + next.count);
+  assert.strictEqual(w2.status, '2/' + n);
+  assert.strictEqual(w2.block, SECOND, 'after next: the hit moved to section 2');
+  assert.strictEqual(w2.allMarks, 3, 'after next: the old hit is unmarked');
+  assert.strictEqual(next.onScreen, true, 'after next: first mark on screen, top=' + next.top);
+  await page.click('#search-prev'); await wait(300);
+  const prev = await selectedMarks(page);
+  const w3 = await where();
+  assert.strictEqual(prev.text, q, 'after prev: joined mark text, count=' + prev.count);
+  assert.strictEqual(w3.status, '1/' + n);
+  assert.strictEqual(w3.block, FIRST, 'after prev: the hit is back in section 1');
+  assert.strictEqual(w3.allMarks, 3, 'after prev: the old hit is unmarked');
+  assert.strictEqual(prev.onScreen, true, 'after prev: first mark on screen, top=' + prev.top);
+  await page.click('#doc-search-clear'); await wait(200);
+  const after = await page.evaluate(() => ({ html: document.querySelector('main.content').innerHTML, marks: document.querySelectorAll('mark').length }));
+  assert.strictEqual(after.marks, 0, 'no mark left');
+  assert.strictEqual(after.html === before, true, 'main.content innerHTML restored byte for byte (lengths ' + before.length + ' / ' + after.html.length + ')');
 });
 
 // Tab (keyboard modality, so :focus-visible matches) until the focused element
