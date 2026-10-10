@@ -9387,6 +9387,8 @@ async function main() {
       await recordBanners(ctx.page);
       rewriteDrawio(ctx, FLOW_ARCH);
       const attr = await pollUntil(() => pagesAttr(ctx.page), 'Flow|Architecture', 30000);
+      // Intentional full-beat settle (R6): the assertions below are stability claims, and stability needs a window.
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       assert.strictEqual(attr, 'Flow|Architecture',
         '(c) 前提失敗：重烤必須真的套用到畫面上（否則「還在同一頁」只是因為什麼都沒發生）');
       const kept = await shownPage(ctx.page);
@@ -9770,6 +9772,8 @@ async function main() {
       await recordBanners(ctx.page);
       fs.writeFileSync(path.join(ctx.dir, 'a.drawio'), SINGLE_V2, 'utf8');
       const marksNow = await pollUntil(() => bothMarks(ctx.page), 'CHANGED_BOX|OTHER_BOX', 30000);
+      // Intentional full-beat settle (R6): the assertions below are stability claims, and stability needs a window.
+      await new Promise((r) => setTimeout(r, HEARTBEAT_WAIT));
       const kept = await ctx.page.evaluate(() =>
         document.querySelectorAll('.drawio-page .anno-inline-wrap').length);
       assert.strictEqual(kept, 1,

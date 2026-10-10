@@ -795,7 +795,8 @@ async function printState(page) {
     const gv = document.querySelector('.content .graphviz svg');
     const wd = document.querySelector('[id^="WaveDrom_Display_"] svg');
     return { gvText: getComputedStyle(gv.querySelector('g.node text')).fill, gvEdge: getComputedStyle(gv.querySelector('g.edge path')).stroke,
-      gvFlag: gv.hasAttribute('data-md2doc-recoloured'), wdText: getComputedStyle(wd.querySelector('text')).fill, wdFlag: wd.hasAttribute('data-md2doc-recoloured') };
+      gvFlag: gv.hasAttribute('data-md2doc-recoloured'), wdText: getComputedStyle(wd.querySelector('text')).fill, wdFlag: wd.hasAttribute('data-md2doc-recoloured'),
+      styles: [].slice.call(gv.querySelectorAll('*')).concat([].slice.call(wd.querySelectorAll('*'))).map((e) => e.getAttribute('style')) };
   });
 }
 check('desktop: printing while dark shows light graphviz and WaveDrom, then restores dark', DESKTOP, async (page) => {
@@ -806,7 +807,7 @@ check('desktop: printing while dark shows light graphviz and WaveDrom, then rest
   await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
   const printing = await printState(page);
   assert.deepStrictEqual(printing, light, 'light while printing');
-  assert.deepStrictEqual(light, { gvText: 'rgb(0, 0, 0)', gvEdge: 'rgb(0, 0, 0)', gvFlag: false, wdText: 'rgb(0, 65, 196)', wdFlag: false });
+  assert.deepStrictEqual({ gvText: light.gvText, gvEdge: light.gvEdge, gvFlag: light.gvFlag, wdText: light.wdText, wdFlag: light.wdFlag }, { gvText: 'rgb(0, 0, 0)', gvEdge: 'rgb(0, 0, 0)', gvFlag: false, wdText: 'rgb(0, 65, 196)', wdFlag: false });
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   const back = await printState(page);
   assert.deepStrictEqual(back, dark, 'dark again after print');
