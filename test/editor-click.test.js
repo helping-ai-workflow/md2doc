@@ -3094,7 +3094,7 @@ check('enter-type: a failed render still shows the buffered characters', DESKTOP
   await page.keyboard.press('Enter'); await page.keyboard.type('new');
   await renderIdle(page);
   const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
-  assert.ok(texts.indexOf('new') !== -1, 'the buffered characters are on screen: ' + JSON.stringify(texts));
+  assert.deepStrictEqual(texts, ['alpha', 'bravo', 'new', 'charlie'], 'the buffered characters are on screen');
 }, { md: TIGHT_MD });
 // A composition's text is in the DOM before compositionend can hold it. A
 // failed render keeps that DOM, so unless the guard takes it back out, the
@@ -3116,6 +3116,121 @@ check('enter-type: a character composed during a failed render shows once', DESK
   const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
   assert.deepStrictEqual(texts, ['alpha', 'bravo', '你', 'charlie']);
 }, { md: TIGHT_MD, engines: ['chromium'] });
+
+// ── enter-type, fix round 1: held keys go where they were typed ──
+// Clicks the character at `offset` of the surface whose text is exactly
+// `text`, on its left half, so the caret lands BEFORE that character — a real
+// pointer press, which is what moves focus mid-flight.
+async function clickChar(page, text, offset) {
+  const pt = await page.evaluate(([t, o]) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((e) => e.textContent === t);
+    if (!s) return null;
+    const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = o;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (left < n.data.length) {
+        const r = document.createRange(); r.setStart(n, left); r.setEnd(n, left + 1);
+        const b = r.getBoundingClientRect();
+        return [b.left + 1, b.top + b.height / 2];
+      }
+      left -= n.data.length;
+    }
+    return null;
+  }, [text, offset]);
+  assert.ok(pt, 'clickChar: no surface with text ' + JSON.stringify(text));
+  await page.mouse.click(pt[0], pt[1]);
+}
+const LIST_PARA_MD = '# D\n\n- alpha\n- bravo\n- charlie\n\nOmega.\n';
+const P3_MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\nOmega.\n';
+const liTexts = (page) => page.evaluate(() => [...document.querySelectorAll('.ed-li-text')].map((e) => e.textContent));
+check('enter-type: keys typed after clicking another paragraph mid-render go to that paragraph', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- charlie\n\nOmcega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: LIST_PARA_MD });
+check('enter-type: a click into another paragraph mid-render keeps the caret there', DESKTOP, async (page) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'Omega.', 2);
+  await renderIdle(page);
+  const where = await page.evaluate(() => {
+    const s = getSelection();
+    const surf = s.anchorNode && (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement).closest('.ed-wys-armed');
+    return surf ? [surf.textContent, s.anchorOffset] : null;
+  });
+  assert.deepStrictEqual(where, ['Omega.', 2], 'the caret stays where the click put it');
+}, { md: LIST_PARA_MD });
+check('caret: a click mid-paragraph after editing another lands at the click', DESKTOP, async (page, boot) => {
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await renderIdle(page); await wait(300);
+  await page.keyboard.type('ZZ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('caret: keys typed right after that click land at the click', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.type('ZZ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: an arrow key mid-render moves within the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.type('ab'); await page.keyboard.press('ArrowLeft'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoacb paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: Delete during another block\'s render deletes the next character', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.press('Delete'); await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoQparagraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a word deleted mid-render stays deleted', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab cd');
+  await page.keyboard.press('Control+Backspace');
+  await page.keyboard.type('e');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab e\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: a paste mid-render is kept, in order', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.evaluate(() => {
+    const dt = new DataTransfer(); dt.setData('text/plain', 'PP');
+    document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- abPPc\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: Escape mid-render discards the held keys', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('Escape'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- c\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: one Ctrl+Z undoes a replayed word', DESKTOP, async (page) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlie'], 'guard: the word was replayed');
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', '', 'charlie']);
+}, { md: TIGHT_MD });
 
 // ── f1 (v3.13.1 T2): a block marker typed at the start of a paragraph or
 // list-item line is saved escaped, so the block stays what it was ──
