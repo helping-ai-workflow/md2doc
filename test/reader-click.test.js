@@ -1372,6 +1372,44 @@ check('desktop: a single-H1 TOC has no chapter separators', DESKTOP, async (page
   assert.deepStrictEqual(r.rows.filter((v) => v !== '0px 0px'), [], 'every top-level row: no rule, no margin');
 });
 
+// ── The reading line on resizes (R4) ──────────────────────────────────────
+// The rule the runtime follows, minus the click pin: the last heading with a
+// TOC row whose top is at or above 35% of the viewport, else the first one.
+async function readingLine(page) {
+  return page.evaluate(() => {
+    const line = window.innerHeight * 0.35;
+    const rows = new Set([...document.querySelectorAll('.toc a[href^="#"]')].map((a) => a.getAttribute('href').slice(1)));
+    let first = null;
+    let expected = null;
+    for (const h of document.querySelectorAll('[data-reader-heading]')) {
+      if (!rows.has(h.id)) continue;
+      if (!first) first = h.id;
+      if (h.getBoundingClientRect().top <= line) expected = h.id; else break;
+    }
+    return { expected: expected || first, active: window.__readerState.activeSectionId };
+  });
+}
+async function scrollHeadingTo(page, id, top) {
+  await page.evaluate(([i, t]) => window.scrollBy(0, document.getElementById(i).getBoundingClientRect().top - t), [id, top]);
+}
+check('reading line: a height-only resize moves the highlight', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await scrollHeadingTo(page, '6-1-child-of-6', 270); await wait(400);
+  await page.setViewportSize({ width: 1440, height: 500 }); await wait(500);
+  const r = await readingLine(page);
+  assert.strictEqual(r.expected, '6-section-6', 'the shorter viewport puts the line above 6.1, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+// Guard (green by design): the column ResizeObserver's anchor hold already
+// scrolls, so the scroll listener runs a pass; the explicit call keeps it so.
+check('reading line: collapsing the sidebar recomputes the highlight', DESKTOP, async (page) => {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await scrollHeadingTo(page, '6-1-child-of-6', 300); await wait(400);
+  await page.click('#toc-collapse-toggle'); await wait(500);
+  const r = await readingLine(page);
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
