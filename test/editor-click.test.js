@@ -3581,6 +3581,53 @@ check('baseline paste: Ctrl+Shift+V pastes the plain flavour verbatim', DESKTOP,
 }, { md: BASE_MD });
 
 
+// ── T5: inline formatting ──
+async function selectInSurface(page, text, from, to) {
+  const sel = await page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed, .ed-wys-cell')].find((el) => el.textContent === t);
+    if (!s) return null;
+    s.setAttribute('data-sel-probe', '1');
+    return '[data-sel-probe="1"]';
+  }, text);
+  assert.ok(sel, 'selectInSurface: no surface with text ' + JSON.stringify(text));
+  await page.click(sel); await wait(150);
+  const ok = await page.evaluate(([a, b]) => {
+    const s = document.querySelector('[data-sel-probe="1"]');
+    s.removeAttribute('data-sel-probe');
+    const pos = (off) => {
+      const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+      let left = off;
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        if (left <= n.data.length) return [n, left];
+        left -= n.data.length;
+      }
+      return null;
+    };
+    const p = pos(a), q = pos(b);
+    if (!p || !q) return false;
+    getSelection().setBaseAndExtent(p[0], p[1], q[0], q[1]);
+    return true;
+  }, [from, to]);
+  assert.strictEqual(ok, true, 'selectInSurface: range inside ' + JSON.stringify(text));
+  await wait(150);
+}
+for (const [label, act, want] of [
+  ['toolbar bold', (p) => p.click('[data-ed-tb="bold"]'), '**Alpha**.'],
+  ['toolbar italic', (p) => p.click('[data-ed-tb="italic"]'), '*Alpha*.'],
+  ['toolbar strike', (p) => p.click('[data-ed-tb="strike"]'), '~~Alpha~~.'],
+  ['toolbar inline-code', (p) => p.click('[data-ed-tb="inline-code"]'), '`Alpha`.'],
+  ['Ctrl+B', (p) => p.keyboard.press('Control+b'), '**Alpha**.'],
+  ['Ctrl+I', (p) => p.keyboard.press('Control+i'), '*Alpha*.'],
+  ['Ctrl+U', (p) => p.keyboard.press('Control+u'), '<u>Alpha</u>.'],
+]) {
+  check('baseline format: ' + label, DESKTOP, async (page, boot) => {
+    await selectInSurface(page, 'Alpha.', 0, 5);
+    await act(page);
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\n' + want + '\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
+
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
