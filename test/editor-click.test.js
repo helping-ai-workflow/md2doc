@@ -3322,6 +3322,84 @@ check('enter-type: Ctrl+Z mid-render undoes the held typing, not the Enter under
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- c\n- charlie\n\nOmega.\n');
   assert.strictEqual(await noticeText(page), null, 'no notice');
 }, { md: LIST_PARA_MD });
+// ── fix round 3: a later click must not move keys held before it, and a
+// failed render keeps every key where it was typed ──
+const failFirstRender = async (page) => {
+  let first = true;
+  await page.route('**/api/render', async (route) => {
+    if (!first) { await route.continue(); return; }
+    first = false;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+};
+check('enter-type: keys typed before a second click stay where they were typed', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('xy');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoxy paragraph text.\n\nOmZega.\n');
+}, { md: P3_MD });
+check('enter-type: an item edit, then two clicks, each with keys after it', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.type('X');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('c');
+  await clickChar(page, 'alpha', 2); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alZpha\n- bravoX\n- charlie\n\nOmcega.\n');
+}, { md: LIST_PARA_MD });
+for (const ms of [0, 800]) {
+  check('enter-type: click, type, click, type with no pauses (' + ms + ' ms render delay)', DESKTOP, async (page, boot) => {
+    if (ms) await delayRender(page, ms);
+    await clickChar(page, 'Alpha para one.', 14); await page.keyboard.type('1');
+    await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('Z');
+    await clickChar(page, 'Omega.', 2); await page.keyboard.type('Y');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one1.\n\nBravoZ paragraph text.\n\nOmYega.\n');
+  }, { md: P3_MD });
+}
+check('enter-type: a second click later in the same paragraph lands past the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('ab');
+  await clickChar(page, 'Bravo paragraph text.', 10); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoab paracgraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a second click later in the same item lands past the held text', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'charlie', 1); await page.keyboard.type('X');
+  await clickChar(page, 'charlie', 4); await page.keyboard.type('Y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- cXharYlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
+check('enter-type: a failed render keeps keys typed after a click in the clicked paragraph', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
+  await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('ZZ');
+  await renderIdle(page);
+  const texts = await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].map((e) => e.textContent));
+  assert.deepStrictEqual(texts, ['D', 'Alpha para one.1', 'BravoZZ paragraph text.', 'Omega.']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a failed render keeps the new item\'s keys and the clicked item\'s keys apart', DESKTOP, async (page) => {
+  await failFirstRender(page);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await clickChar(page, 'charlie', 2); await page.keyboard.type('Z');
+  await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'ab', 'chZarlie']);
+}, { md: LIST_PARA_MD });
+check('enter-type: Ctrl+Z mid-render drops held typing but keeps a held arrow', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Control+z'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n-\n- ccharlie\n\nOmega.\n');
+}, { md: LIST_PARA_MD });
 check('enter-type: Delete during another block\'s render deletes the next character', DESKTOP, async (page, boot) => {
   await delayRender(page, 800);
   await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End');
