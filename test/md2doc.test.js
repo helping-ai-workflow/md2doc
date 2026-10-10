@@ -621,6 +621,14 @@ console.log('md2doc dot WASM test passed');
     '<svg width="20" height="10"><text>z</text></svg>\n');
   assert.ok(!/<div class="inline-svg"><svg x="10"/.test(nested) && !/<p class="inline-svg"><svg x="10"/.test(nested), 'nested svg is not wrapped: ' + nested);
   assert.match(nested, /<p class="inline-svg"><svg width="20"/, 'the svg after the closed outer one is wrapped: ' + nested);
+  // Fix round 2: only real html counts as an open svg. A code span naming <svg>,
+  // or an svg left unclosed inside a paragraph (its </p> ends the svg in the
+  // browser too), must not cost every later svg its plate.
+  const later = { codespan: 'Use the `<svg>` element.\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    codespanBlock: 'Use the `<svg>` element.\n\n<svg width="20" height="10">\n<text>x</text>\n</svg>\n',
+    unclosedTypo: '<svg width="5"><circle r="2"/>\n\npara\n\n<svg width="20" height="10"><text>x</text></svg>\n',
+    looseListCode: '- write `<svg viewBox="0 0 1 1">`\n\n- b\n\n<svg width="20" height="10"><text>x</text></svg>\n' };
+  for (const [k, md] of Object.entries(later)) assert.match(await body(md), /class="inline-svg"><svg width="20"/, k + ': the later svg keeps its plate');
   const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
   assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
   assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
