@@ -1436,6 +1436,63 @@ check('short tail: a plain scroll to the bottom does not light the last row', DE
   assert.strictEqual(r.active, r.expected, 'the highlight follows the line, ' + JSON.stringify(r));
 });
 
+// ── The search freeze ends on a TOC click or a user scroll (R6, R6b) ──────
+// Selecting a search result freezes the highlight on the hit's section so the
+// jump does not move it. A TOC click, or a wheel / touch scroll in the content,
+// is the reader moving on; a wheel over the sidebar (the results list) is not,
+// and neither is a programmatic scroll.
+async function frozenOnZebrafinch(page) {
+  await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
+  await page.fill('#doc-search-input', 'zebrafinch');
+  await page.press('#doc-search-input', 'Enter'); await wait(400);
+  return page.evaluate(() => window.__readerState.activeSectionId);
+}
+check('frozen: a TOC click moves the highlight', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  assert.notStrictEqual(frozenAt, '2-section-2', 'the search froze somewhere else, frozenAt=' + frozenAt);
+  await page.click('#toc-expand-all');
+  await page.click('.toc-list a[href="#2-section-2"]'); await wait(600);
+  const rows = await activeRows(page);
+  assert.deepStrictEqual(rows.map((r) => r.href), ['#2-section-2'], 'the clicked row is lit, got ' + JSON.stringify(rows.map((r) => r.href)));
+});
+check('frozen: a wheel in the content follows the reading line again', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  // The visible middle of the content column (its box is far taller than the viewport).
+  const pt = await page.evaluate(() => {
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    return { x: Math.round((r.left + r.right) / 2), y: Math.round((Math.max(r.top, 0) + Math.min(r.bottom, innerHeight)) / 2) };
+  });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('main.content'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is over the content, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 1500); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the wheel moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+});
+// Guard (green by design): a wheel over the results list, then a programmatic
+// scroll, leaves the highlight frozen.
+check('frozen: a wheel over the results list keeps it frozen', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  const pt = await page.$eval('#search-results-list', (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + Math.min(r.height, 40) / 2) }; });
+  const hit = await page.evaluate(({ x, y }) => !!(document.elementFromPoint(x, y) || document.body).closest('#search-results-list'), pt);
+  assert.strictEqual(hit, true, 'the wheel point is over the results list, ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.wheel(0, 300); await wait(200);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, frozenAt, 'still frozen, ' + JSON.stringify(r));
+});
+check('frozen: a touchmove in the content unfreezes', DESKTOP, async (page) => {
+  const frozenAt = await frozenOnZebrafinch(page);
+  await page.evaluate(() => document.querySelector('main.content p').dispatchEvent(new Event('touchmove', { bubbles: true })));
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  const r = await readingLine(page);
+  assert.notStrictEqual(r.expected, frozenAt, 'the scroll moved the line off the frozen section, ' + JSON.stringify(r));
+  assert.strictEqual(r.active, r.expected, 'the highlight follows the line, frozenAt=' + frozenAt + ' ' + JSON.stringify(r));
+});
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
