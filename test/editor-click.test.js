@@ -3628,6 +3628,61 @@ for (const [label, act, want] of [
 }
 
 
+// ── T6: table cells ──
+const TBL2_MD = '# D\n\n| A | B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n\nafter\n';
+function mdTable(md) {
+  return md.split('\n').filter((l) => /^\|/.test(l) && !/^\|\s*:?-/.test(l))
+    .map((l) => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map((s) => s.trim()));
+}
+async function shiftClickCell(page, text) {
+  const p = await page.evaluate((t) => {
+    const c = [...document.querySelectorAll('.ed-wys-cell')].find((el) => el.textContent === t);
+    if (!c) return null;
+    c.scrollIntoView({ block: 'center' });
+    const r = c.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, text);
+  assert.ok(p, 'shiftClickCell: no cell with text ' + JSON.stringify(text));
+  await page.keyboard.down('Shift'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Shift');
+  await renderIdle(page);
+}
+check('baseline table: typing in a cell', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'b1', 2);
+  await page.keyboard.type('X');
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['a1', 'b1X'], ['a2', 'b2']]);
+}, { md: TBL2_MD });
+check('baseline table: Tab selects the next whole cell and typing replaces it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 2);
+  await page.keyboard.press('Tab');
+  await page.keyboard.type('Q');
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['a1', 'Q'], ['a2', 'b2']]);
+}, { md: TBL2_MD });
+check('baseline table: ArrowDown and ArrowUp move between rows', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 0);
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.type('Z');
+  await focusSurface(page, 'b2', 0);
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.type('Y');
+  const t = mdTable(await commitAndRead(page, boot));
+  assert.ok(t[2][0].includes('Z'), 'row 2 col 0: ' + JSON.stringify(t));
+  assert.ok(t[1][1].includes('Y'), 'row 1 col 1: ' + JSON.stringify(t));
+  assert.deepStrictEqual([t[0], t[1][0], t[2][1]], [['A', 'B'], 'a1', 'b2'], 'other cells: ' + JSON.stringify(t));
+}, { md: TBL2_MD });
+check('baseline table: a cell range copies as TSV and HTML', DESKTOP, async (page) => {
+  await focusSurface(page, 'a1', 0);
+  await shiftClickCell(page, 'b2');
+  const got = await clipboardEvent(page, 'copy', null, null);
+  assert.strictEqual(got.plain, 'a1\tb1\na2\tb2');
+  assert.strictEqual(got.prevented, true);
+  assert.strictEqual(/<td>a1<\/td><td>b1<\/td>[\s\S]*<td>a2<\/td><td>b2<\/td>/.test(got.html), true, 'html: ' + got.html);
+}, { md: TBL2_MD });
+check('baseline table: a TSV paste fills from the caret cell', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 0);
+  await clipboardEvent(page, 'paste', 'x\ty\nz\tw', null);
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), [['A', 'B'], ['x', 'y'], ['z', 'w']]);
+}, { md: TBL2_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
