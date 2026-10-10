@@ -6873,7 +6873,11 @@ async function main() {
     assert.deepStrictEqual({ at: afterClick.at, cursors: afterClick.cursors },
       { at: null, cursors: [] },
       '點到別的地方就是交還鍵盤，游標必須收掉，got ' + JSON.stringify(afterClick));
-    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph.A\n\nBBravo paragraph.\n',
+    // v3.13.1 R11: a click into another block keeps its caret where it was
+    // clicked (it used to be reset to the block's start, which is what the
+    // old 'BBravo paragraph.' here pinned). page.click presses the centre of
+    // the full-width block, right of the short text, so 'B' lands at the end.
+    assert.strictEqual(disk, '# Doc\n\nAlpha paragraph.A\n\nBravo paragraph.B\n',
       '逛過工具列再去第三個地方打字，兩邊的字都必須落到磁碟上，got ' +
       JSON.stringify(disk));
     assert.strictEqual(ctx.errs.length, 0,
