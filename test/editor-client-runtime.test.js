@@ -9496,13 +9496,11 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
         // Task 8: the top-level press ALSO hands the user a focused provisional
-        // paragraph (spec §4's "converts to a paragraph") — a second commit
-        // that lands strictly after the removal's own re-render. Wait for it to
-        // be established before saving, so this scenario measures the settled
-        // state instead of racing the second half of the flow (a Ctrl+S that
-        // arrives in between would persist the paragraph's placeholder line,
-        // because resolveBurst() has not had a chance to recognise the insert
-        // as abandoned yet).
+        // paragraph (spec §4's "converts to a paragraph"). Since v3.14.0 it is
+        // a transient that writes nothing, created right after the removal's
+        // own re-render; waiting for it to have focus is what makes the save
+        // below measure the settled state (a transient kept by that save,
+        // since focus is inside it, writes no byte either way).
         await page.waitForFunction(
           () => !!document.activeElement && !!document.activeElement.closest &&
             !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
@@ -11799,9 +11797,9 @@ async function gutterGeometry(page, sel) {
     // Reviewer's exact byte probe: "# Doc\n\n- Only item\n\nTrailer" ->
     // "# Doc\n\nTrailer". Also verifies a FOLLOW-UP edit after the removal
     // still maps to the right block (blockmap/shiftBlocks integrity).
-    // Task 8: the provisional paragraph the top-level press inserts is
-    // abandoned (never typed into) here, so it self-removes on the Ctrl+S
-    // resolution and leaves no trace — see the row-3 scenario below.
+    // Task 8: the provisional paragraph the top-level press leaves is a
+    // transient (v3.14.0) that is never typed into here, so it writes no byte;
+    // the click into Trailer below removes it — see the row-3 scenario below.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc(['# Doc', '', '- Only item', '', 'Trailer']);
@@ -11822,13 +11820,11 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
         // Task 8: the top-level press ALSO hands the user a focused provisional
-        // paragraph (spec §4's "converts to a paragraph") — a second commit
-        // that lands strictly after the removal's own re-render. Wait for it to
-        // be established before saving, so this scenario measures the settled
-        // state instead of racing the second half of the flow (a Ctrl+S that
-        // arrives in between would persist the paragraph's placeholder line,
-        // because resolveBurst() has not had a chance to recognise the insert
-        // as abandoned yet).
+        // paragraph (spec §4's "converts to a paragraph"). Since v3.14.0 it is
+        // a transient that writes nothing, created right after the removal's
+        // own re-render; waiting for it to have focus is what makes the save
+        // below measure the settled state (a transient kept by that save,
+        // since focus is inside it, writes no byte either way).
         await page.waitForFunction(
           () => !!document.activeElement && !!document.activeElement.closest &&
             !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
@@ -14988,6 +14984,17 @@ async function gutterGeometry(page, sel) {
     // '# D\n\n\nGHOST\n\n- - b\n', a ghost block plus a doubled blank, with
     // no banner. With the guards in place: [heading, li, li], the refusal
     // banner, and '# D\n\n- - b\n'.
+    //
+    // v3.14.0 T1 MIGRATION: the row-3 press no longer goes through
+    // insertBlockBelow() at all — it leaves a TRANSIENT paragraph, placed
+    // after the END OF THE SUBTREE of the block blockElAtLine() hands back
+    // (subtreeEndOf()), and the transient's own commit anchors on the real
+    // block right before it (transientAnchorEl()). For this fixture both of
+    // those are the CHILD `b`, which owns line 3 — so the zero-line outer item
+    // is never an anchor, and there is nothing left to refuse: the
+    // conversion now does what spec §4 asks for. The defect this scenario
+    // exists for (a paragraph ABOVE the list, a ghost block, a doubled blank)
+    // is pinned below by the DOM order and the exact bytes, with no banner.
     {
       const rows = ['# D', '', '- - b', '', '1. x', ''];
       const { srv: gsrv, url: gurl, mdPath: gmdPath } = await setupListDoc(rows);
@@ -15034,26 +15041,32 @@ async function gutterGeometry(page, sel) {
           const el = document.querySelector('.ed-conflict');
           return el ? el.textContent : null;
         });
-        assert.ok(banner && banner.indexOf('無法在其後插入。') !== -1,
-          'the refusal must reach the user as a banner, not be silent; got: ' +
-          JSON.stringify(banner));
+        assert.strictEqual(banner, null,
+          'nothing is refused: the transient never anchors on the zero-line outer item');
         const types = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block'))
-            .map((el) => el.getAttribute('data-block-type')));
-        assert.deepStrictEqual(types, ['heading', 'li', 'li'],
-          'no paragraph may be inserted anywhere — least of all ABOVE the list, which is ' +
-          'where the unguarded path put it; got: ' + JSON.stringify(types));
-        // Typed with nothing focused: proves the keystrokes are not quietly
-        // captured by a phantom block that the DOM check above cannot see.
+            .map((el) => (el.hasAttribute('data-ed-transient') ? '~' : '') +
+              el.getAttribute('data-block-type')));
+        assert.deepStrictEqual(types, ['heading', 'li', 'li', '~paragraph'],
+          'the paragraph is a transient BELOW the list — never above it, which is ' +
+          'where the unguarded v3.13 path put it; got: ' + JSON.stringify(types));
+        assert.strictEqual(await page.evaluate(() => {
+          const t = document.querySelector('[data-ed-transient]');
+          return !!t && t.contains(document.activeElement);
+        }), true, 'and it has the caret');
+        assert.strictEqual(fs.readFileSync(gmdPath, 'utf8'), rows.join('\n'),
+          'nothing saved yet (fixture sanity for the byte checks below)');
+        assert.strictEqual(await saveAndRead(page, gmdPath), '# D\n\n- - b\n',
+          'before typing: the li removal (one op) stands and the transient wrote nothing');
         await page.keyboard.type('GHOST');
         await settleEditor(page);
         const after = await saveAndRead(page, gmdPath);
-        assert.strictEqual(after, '# D\n\n- - b\n',
-          'the li removal (commit #1) stands and nothing else changed; got:\n' +
-          JSON.stringify(after));
+        assert.strictEqual(after, '# D\n\n- - b\n\nGHOST\n',
+          'typed: one paragraph after the nest, one blank line between, no ghost block ' +
+          'and no doubled blank; got:\n' + JSON.stringify(after));
         await page.close();
-        console.log('T8: Enter on an emptied item after a same-line nest refuses the ' +
-          'zero-line anchor instead of inserting a ghost paragraph above the list — OK');
+        console.log('T8: Enter on an emptied item after a same-line nest lands its transient ' +
+          'paragraph after the nest\'s own line, never on the zero-line anchor and never above the list — OK');
       } finally { gsrv.close(); }
     }
 
