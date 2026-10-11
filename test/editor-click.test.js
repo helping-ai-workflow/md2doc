@@ -3736,6 +3736,112 @@ check('baseline raw: Esc cancels the raw box', DESKTOP, async (page, boot) => {
   assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'raw box gone');
 }, { md: BASE_MD });
 
+// ── v3.14.0 helpers (T1), used by every later v3.14.0 check ──
+// One entry per `.content .ed-block` in DOM order: '~' for a transient, the
+// block type, and its surface's text (the armed surface, else the li text,
+// else the block's own text without the gutter chrome).
+async function blockList(page) {
+  return page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) => {
+    let s = b.querySelector('.ed-wys-armed') || b.querySelector('.ed-li-text');
+    let text;
+    if (s) text = s.textContent;
+    else {
+      const c = b.cloneNode(true);
+      c.querySelectorAll('.ed-handle, .ed-insert').forEach((x) => x.remove());
+      text = c.textContent.trim();
+    }
+    return (b.hasAttribute('data-ed-transient') ? '~' : '') + b.getAttribute('data-block-type') + ':' + text;
+  }));
+}
+// The focused surface's text, the caret's character offset in it, and
+// whether it is a transient; null when no armed surface has focus.
+async function caretNow(page) {
+  return page.evaluate(() => {
+    const a = document.activeElement;
+    const s = a && a.closest ? a.closest('.ed-wys-armed') : null;
+    const sel = getSelection();
+    if (!s || !sel.rangeCount || !s.contains(sel.focusNode)) return null;
+    const r = document.createRange();
+    r.setStart(s, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+    return { text: s.textContent, offset: r.toString().length, transient: !!s.closest('[data-ed-transient]') };
+  });
+}
+const transientCount = (page) => page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length);
+async function tb(page, id) {
+  await page.click('[data-ed-tb="' + id + '"]');
+  await renderIdle(page);
+}
+
+// ── transient-model (v3.14.0 T1) ──
+check('transient-model: 在下方插入 opens a focused empty paragraph that writes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, BASE_MD);
+  assert.strictEqual(disk.indexOf('​'), -1, 'no ZWSP');
+}, { md: BASE_MD });
+check('transient-model: typing then leaving commits one paragraph, one undo step', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.keyboard.type('New.');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('transient-model: 在上方插入 on the first block puts it at the top', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'D', 1);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual(await blockList(page), ['~paragraph:', 'heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  await page.keyboard.type('Top.');
+  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# D\n\nAlpha.\n\nOmega.\n');
+}, { md: BASE_MD });
+check('transient-model: ＋ 段落 opens a transient and abandoning it leaves the file alone', DESKTOP, async (page, boot) => {
+  const sel = await blockByText(page, 'Alpha.');
+  await page.hover(sel); await wait(150);
+  await page.click(sel + ' > .ed-insert'); await wait(300);
+  await page.evaluate(() => [...document.querySelectorAll('.ed-insert-menu-btn')].find((b) => b.textContent.trim() === '段落').click());
+  await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('transient-model: at most one, and 在下方插入 inside it keeps it', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after'); await tb(page, 'insert-after');
+  assert.strictEqual(await transientCount(page), 1);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+}, { md: BASE_MD });
+check('transient-model: Ctrl+S with an empty transient focused keeps it and writes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  assert.strictEqual(await transientCount(page), 1);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+}, { md: BASE_MD });
+check('transient-model: Enter on an empty last item ends the list with a transient, one undo step', DESKTOP, async (page, boot) => {
+  await liText(page, 'charlie').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', 'li:charlie', '~paragraph:', 'paragraph:Omega.']);
+  await page.keyboard.type('Para.');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- charlie\n\nPara.\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), LIST_PARA_MD);
+}, { md: LIST_PARA_MD });
+check('failed-render: a transient whose commit fails keeps its text and commits on the next try', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await failFirstRender(page);
+  await page.keyboard.type('New.');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:New.', 'paragraph:Omega.'], 'the text stays on screen');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

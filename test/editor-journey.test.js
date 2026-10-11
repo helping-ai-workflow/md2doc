@@ -1873,6 +1873,8 @@ async function main() {
       .replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
     return {
       types: blocks.map((b) => b.getAttribute('data-block-type')).join(','),
+      // v3.14.0 T1: the index of each transient (id-less, nothing on disk yet).
+      transient: blocks.map((b, i) => (b.hasAttribute('data-ed-transient') ? String(i) : '')).filter(Boolean).join(','),
       indents: blocks.map((b) => String(b.getAttribute('data-indent'))).join(','),
       text: blocks.map((b) => clean(b.textContent)).join(' | '),
       marks: blocks.map((b) => Array.from(b.querySelectorAll('strong, em, del, a, code'))
@@ -2126,16 +2128,20 @@ async function main() {
       { id: 'table',        state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,paragraph,table,paragraph' ? null
           : '必須在游標那個 block 後面長出一個表格，got ' + a.types },
+      // v3.14.0 T1: the new paragraph is a transient (index 1 / 2 in docSnap's
+      // block list) — the old ZWSP skeleton paragraph would read '' here too.
       { id: 'insert-before', state: 'sel', answer: 'caret',
         effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
           ? '必須多出一個段落，got ' + a.types
-          : (a.text === 'H |  | Alpha bravo charlie delta. | Bravo paragraph.' ? null
-            : '新段落必須落在游標那個 block 【前面】，got ' + a.text) },
+          : (a.text !== 'H |  | Alpha bravo charlie delta. | Bravo paragraph.'
+            ? '新段落必須落在游標那個 block 【前面】，got ' + a.text
+            : (a.transient === '1' ? null : '新段落必須是暫存段落（transient），got ' + JSON.stringify(a.transient))) },
       { id: 'insert-after', state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
           ? '必須多出一個段落，got ' + a.types
-          : (a.text === 'H | Alpha bravo charlie delta. |  | Bravo paragraph.' ? null
-            : '新段落必須落在游標那個 block 【後面】，got ' + a.text) },
+          : (a.text !== 'H | Alpha bravo charlie delta. |  | Bravo paragraph.'
+            ? '新段落必須落在游標那個 block 【後面】，got ' + a.text
+            : (a.transient === '2' ? null : '新段落必須是暫存段落（transient），got ' + JSON.stringify(a.transient))) },
       // Task 9 review M4: bar-only → caret. insertBlockBelow()'s own
       // `kind === 'line'` branch now opens the new hr's raw editor — same
       // MEASURED shape as quote/code above.
@@ -4160,6 +4166,11 @@ async function main() {
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
         label + '（hold=' + hold + 'ms）：block 數應增加，got ' + before + ' → ' + after);
+      // v3.14.0 T1: ＋ 段落 adds a transient (an id-less .ed-block), never a
+      // ZWSP paragraph; 建立副本 adds a real block.
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length),
+        itemText === '段落' ? 1 : 0, label + '（hold=' + hold + 'ms）：transient 數');
       assert.strictEqual(ctx.errs.length, 0,
         label + '（hold=' + hold + 'ms）：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
