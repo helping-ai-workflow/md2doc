@@ -3832,6 +3832,17 @@ check('transient-model: Enter on an empty last item ends the list with a transie
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), LIST_PARA_MD);
 }, { md: LIST_PARA_MD });
+// The press that blurs an empty transient removes it, and the blocks below it
+// move up. The press must still open the block it landed on: the transient
+// stays until the press is over, so the click lands on the same block.
+check('transient-model: a press on the paragraph below an empty transient opens that paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.locator('.ed-block[data-block-type="paragraph"]', { hasText: 'Omega.' }).click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  await page.keyboard.press('End'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.X\n');
+}, { md: BASE_MD });
 check('failed-render: a transient whose commit fails keeps its text and commits on the next try', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
   await tb(page, 'insert-after');
