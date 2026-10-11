@@ -3843,6 +3843,49 @@ check('transient-model: a press on the paragraph below an empty transient opens 
   await page.keyboard.press('End'); await page.keyboard.type('X');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.X\n');
 }, { md: BASE_MD });
+// ── transient-model, fix round 1 (I1): keys typed after a press that
+// commits a transient go to the block that was pressed. The commit inserts
+// lines, so every block below the landing line is renumbered by the render.
+check('transient-model: typing after a click below a committing transient lands in the clicked block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.keyboard.type('New.');
+  await delayRender(page, 800);
+  await clickChar(page, 'Omega.', 0); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nXOmega.\n');
+}, { md: BASE_MD });
+check('transient-model: typing after a click on the heading below a committing top transient lands in the heading', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'D', 1);
+  await tb(page, 'insert-before');
+  await page.keyboard.type('Top.');
+  await delayRender(page, 800);
+  await clickChar(page, 'D', 0); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# XD\n\nAlpha.\n\nOmega.\n');
+}, { md: BASE_MD });
+check('transient-model: typing after a click two blocks below a committing top transient lands in that block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'D', 1);
+  await tb(page, 'insert-before');
+  await page.keyboard.type('Top.');
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha.', 0); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# D\n\nXAlpha.\n\nOmega.\n');
+}, { md: BASE_MD });
+// I2: a ⠿ / ＋ gesture on a block below a typed transient. The gesture's
+// switchAwayFrom() commits the transient, which moves the target down.
+check('transient-model: ＋ 段落 on the block below a typed transient commits it and opens the new one below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.keyboard.type('New.');
+  const sel = await blockByText(page, 'Omega.');
+  await page.hover(sel); await wait(150);
+  await page.click(sel + ' > .ed-insert'); await wait(300);
+  await page.evaluate(() => [...document.querySelectorAll('.ed-insert-menu-btn')].find((b) => b.textContent.trim() === '段落').click());
+  await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no 文件已更新 notice');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:New.', 'paragraph:Omega.', '~paragraph:']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
+}, { md: BASE_MD });
 check('failed-render: a transient whose commit fails keeps its text and commits on the next try', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
   await tb(page, 'insert-after');
