@@ -3851,24 +3851,32 @@ check('transient-model: typing after a click below a committing transient lands 
   await tb(page, 'insert-after');
   await page.keyboard.type('New.');
   await delayRender(page, 800);
-  await clickChar(page, 'Omega.', 0); await page.keyboard.type('X');
-  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nXOmega.\n');
+  await clickChar(page, 'Omega.', 3); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmeXga.\n');
 }, { md: BASE_MD });
 check('transient-model: typing after a click on the heading below a committing top transient lands in the heading', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'D', 1);
   await tb(page, 'insert-before');
   await page.keyboard.type('Top.');
   await delayRender(page, 800);
-  await clickChar(page, 'D', 0); await page.keyboard.type('X');
-  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# XD\n\nAlpha.\n\nOmega.\n');
+  // 'D' has no middle: the press lands on its right half, so the caret is at
+  // offset 1, not at the offset 0 a bare focus() would give.
+  const dEnd = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'D');
+    const r = document.createRange(); r.setStart(s.firstChild, 0); r.setEnd(s.firstChild, 1);
+    const b = r.getBoundingClientRect();
+    return [b.right - 1, b.top + b.height / 2];
+  });
+  await page.mouse.click(dEnd[0], dEnd[1]); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# DX\n\nAlpha.\n\nOmega.\n');
 }, { md: BASE_MD });
 check('transient-model: typing after a click two blocks below a committing top transient lands in that block', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'D', 1);
   await tb(page, 'insert-before');
   await page.keyboard.type('Top.');
   await delayRender(page, 800);
-  await clickChar(page, 'Alpha.', 0); await page.keyboard.type('X');
-  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# D\n\nXAlpha.\n\nOmega.\n');
+  await clickChar(page, 'Alpha.', 3); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# D\n\nAlpXha.\n\nOmega.\n');
 }, { md: BASE_MD });
 // I2: a ⠿ / ＋ gesture on a block below a typed transient. The gesture's
 // switchAwayFrom() commits the transient, which moves the target down.
