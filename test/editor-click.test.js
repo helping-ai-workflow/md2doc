@@ -4398,6 +4398,24 @@ check('failed-render: a structural key that throws shows the error card and typi
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBraQvo paragraph text.\n\nOmega.\n');
 }, { md: P3_MD });
 
+// ── v3.14.0 T2+T3 fix round 2: a join into a heading adds no stray space ──
+check('merge: Backspace removing an emptied paragraph under a heading leaves the heading as it was', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'first', 5);
+  for (let i = 0; i < 5; i++) await page.keyboard.press('Backspace');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), '', 'guard: the paragraph is empty');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'D', offset: 1, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nOmega.\n');
+}, { md: '# D\n\nfirst\n\nOmega.\n' });
+check('merge: text ending in a line break joins a heading with no trailing space', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'first', 5);
+  await page.keyboard.press('Shift+Enter');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.querySelectorAll('br').length > 0), true, 'guard: the surface ends in a <br>');
+  await focusSurface(page, 'first', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Dfirst\n\nOmega.\n');
+}, { md: '# D\n\nfirst\n\nOmega.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
