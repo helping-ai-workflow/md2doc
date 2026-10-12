@@ -4070,6 +4070,17 @@ check('failed-render: Enter after a failed split re-commits it, then splits agai
   assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo', 'paragraph text.', 'Omega.']);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nvo\n\nparagraph text.\n\nOmega.\n');
 }, { md: P3_MD });
+// Fix (found by ER 'burst undo: … cascades to the previous commit'): an
+// Enter transient the user has already clicked away from is not the next
+// Ctrl+Z's step in another block — that block's own undo is.
+check('para-enter: Ctrl+Z in another block right after leaving an Enter transient undoes that block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 1, 'guard: the Enter transient is on screen');
+  await clickChar(page, 'Alpha.X', 2);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
 check('failed-render: a paragraph split whose render fails is written by the next commit', DESKTOP, async (page, boot) => {
   await failFirstRender(page);
   await focusSurface(page, 'Bravo paragraph text.', 3);
