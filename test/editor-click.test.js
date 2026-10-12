@@ -4091,6 +4091,189 @@ check('failed-render: a paragraph split whose render fails is written by the nex
   assert.deepStrictEqual(await paragraphs(page), screen, 'DOM equals file');
 }, { md: P3_MD });
 
+// ── merge (v3.14.0 T3) ──
+const TBL_AFTER_MD = '# D\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter.\n';
+check('merge: Enter then Backspace at the split restores the file byte for byte', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Bravo paragraph text.', offset: 3, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+}, { md: P3_MD });
+check('merge: Backspace at a paragraph start under a heading joins into the heading', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# DAlpha.\n\nOmega.\n');
+}, { md: BASE_MD });
+check('merge: Backspace at a heading start makes it a paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Head text', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nHead text\n\nOmega.\n');
+}, { md: HEAD_MD });
+check('merge: a heading whose text reads as a list marker stays a paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, '1. Alpha', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1\\. Alpha\n');
+}, { md: '# D\n\n## 1. Alpha\n' });
+check('merge: Backspace at a top-level item start converts it like ⠿ 轉換成 文字', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  const viaKey = await saveAndRead(page, boot);
+  fs.writeFileSync(boot.mdPath, TIGHT_MD); await page.reload(); await page.waitForSelector('.ed-toolbar'); await wait(400);
+  await gutterMenu(page, await blockByText(page, 'bravo'), ['轉換成', '文字']);
+  assert.strictEqual(viaKey, await saveAndRead(page, boot), 'the ⠿ path is the oracle');
+}, { md: TIGHT_MD });
+check('merge: Backspace at a nested item start outdents it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n');
+}, { md: '# D\n\n- alpha\n  - bravo\n' });
+check('merge: Backspace on an empty top-level item removes it and leaves a transient', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', '~paragraph:', 'li:charlie']);
+  assert.strictEqual(await saveAndRead(page, boot), TIGHT_MD);
+}, { md: TIGHT_MD });
+// Review Focus 2
+check('merge: Backspace across bold joins the marks', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'ld x', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAl **bold** x\n');
+}, { md: '# D\n\nAl **bo**\n\n**ld** x\n' });
+check('merge: a link at the end of the line above stays one link', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'tail', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nSee [link](https://e.com)tail\n');
+}, { md: '# D\n\nSee [link](https://e.com)\n\ntail\n' });
+// R13: the seam merge of two links with the same href — Review Focus 2's
+// "a link at the seam stays one link", with a link on both sides.
+check('merge: a link split by Enter joins back into one link', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See link now.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  // On screen, not via Ctrl+S: a save ends the burst without blurring, and
+  // reopening a burst on the next key is Task 8's (ensureBurst, D8).
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"] .ed-wys-armed')]
+    .map((p) => [p.textContent, p.querySelectorAll('a').length])), [['See li', 1], ['nk now.', 1]], 'guard: split, a link in each half');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content a[href="https://e.com"]').length), 1, 'one link on screen');
+  assert.strictEqual(await saveAndRead(page, boot), LINK_MD);
+}, { md: LINK_MD });
+check('merge: Backspace into a paragraph after a list joins the last item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- charlieOmega.\n');
+}, { md: LIST_PARA_MD });
+check('merge: Backspace below a table selects it, a second Backspace deletes it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'After.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-block.ed-selected')].map((b) => b.getAttribute('data-block-type'))), ['table']);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAfter.\n');
+}, { md: TBL_AFTER_MD });
+// R12 (spec §3.2): an EMPTY block below a table is removed and the caret
+// lands at the table's end, rather than the table being selected.
+check('merge: Backspace in an empty paragraph below a table removes it and lands in the table', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'After.', 0);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true }, 'guard: the caret is in the empty paragraph below the table');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const a = document.activeElement;
+    return { cell: !!(a && a.classList && a.classList.contains('ed-wys-cell')), text: a ? a.textContent : null,
+      selected: document.querySelectorAll('.ed-block.ed-selected').length };
+  }), { cell: true, text: '1', selected: 0 });
+  assert.strictEqual(await saveAndRead(page, boot), TBL_AFTER_MD);
+}, { md: TBL_AFTER_MD });
+// R12, the real-block half: a paragraph emptied by typing is removed (one op)
+// and the caret lands at the table's end.
+check('merge: Backspace in an emptied paragraph below a table removes it and lands in the table', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'After.', 0, 6);
+  await page.keyboard.press('Backspace');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), '', 'guard: the paragraph is empty');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const a = document.activeElement;
+    return { cell: !!(a && a.classList && a.classList.contains('ed-wys-cell')), text: a ? a.textContent : null,
+      blocks: document.querySelectorAll('.content .ed-block').length };
+  }), { cell: true, text: '1', blocks: 2 });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n| a | b |\n|---|---|\n| 1 | 2 |\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), TBL_AFTER_MD, 'one undo step');
+}, { md: TBL_AFTER_MD });
+check('merge: Backspace in an empty transient removes it and returns to the end above', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('merge: Delete at a paragraph end pulls the next one up', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.Omega.', offset: 6, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.Omega.\n');
+}, { md: BASE_MD });
+// Guard: may be green before the change (native Delete at the end of the last
+// block deletes nothing).
+check('merge: Delete at the end of the last block changes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+// R12: nothing after it, so nothing happens. Guard: green before the change
+// too (a native Delete in an empty surface deletes nothing).
+check('merge: Delete in an empty transient with nothing after it does nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.', '~paragraph:']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('merge: Delete above a table selects it', DESKTOP, async (page) => {
+  await focusSurface(page, 'D', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-block.ed-selected')].map((b) => b.getAttribute('data-block-type'))), ['table']);
+}, { md: TBL_AFTER_MD });
+check('merge: one Ctrl+Z undoes the merge and keeps the typing before it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.type('X'); await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.XOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nXOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+// Review Focus 5
+check('merge: undo and redo walk back and forth across a split and a merge', DESKTOP, async (page, boot) => {
+  const SPLIT = '# D\n\nAlpha para one.\n\nBra\n\nvo paragraph text.\n\nOmega.\n';
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  const seen = [await saveAndRead(page, boot)];
+  for (const id of ['undo', 'undo', 'redo', 'redo']) { await tb(page, id); seen.push(await saveAndRead(page, boot)); }
+  assert.deepStrictEqual(seen, [P3_MD, SPLIT, P3_MD, SPLIT, P3_MD]);
+}, { md: P3_MD });
+check('merge: Backspace held during another block\'s render merges once it lands', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End'); await page.keyboard.type('1');
+  await clickChar(page, 'Bravo paragraph text.', 0);
+  await page.keyboard.press('Backspace');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1Bravo paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('failed-render: a merge whose render fails is written by the next commit', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.Omega.'], 'the screen keeps the merge');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Omega.\n');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

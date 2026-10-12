@@ -1682,8 +1682,14 @@ function countInCode(source, needle) {
   //   * retryPendingStructure() — re-commits a structure whose render failed
   //     (D7) over the range it records, so it owns that rollback (+1).
   // 1 declaration + 22 call sites = 23.
-  assert.strictEqual(helperCalls, 23,
-    'the helper must be DECLARED once and used at all twenty-two ' +
+  // MIGRATED by v3.14.0 T3 (23 -> 25). ONE genuinely new
+  // commit-then-render site that rolls back two ops: commitEdgeStructure(),
+  // the shared tail of every Backspace / Delete join, the heading ->
+  // paragraph conversion and the empty-block removal — the pending typing of
+  // the block (D4) and the structure, rolled back newest first (+2).
+  // 1 declaration + 24 call sites = 25.
+  assert.strictEqual(helperCalls, 25,
+    'the helper must be DECLARED once and used at all twenty-four ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
