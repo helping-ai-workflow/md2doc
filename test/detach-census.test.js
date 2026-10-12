@@ -162,6 +162,8 @@ const CENSUS = [
     why: '(b) lexical —— Backspace 合併：移除的是按鍵所在的區塊，但焦點已在同一個 withFocusoutSuppressed() 區間內先移到上一個區塊的接縫，所以這一行 detach 的已不是聚焦元素；那一次移焦的 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端 endBurstWithoutResolve() 結束' },
   { fn: 'deleteAtEnd()', needle: 'next.parentNode.removeChild(next);', disposition: 'none',
     why: 'Delete 合併：移除的是【下一個】區塊（文字已併進聚焦面），從來不是聚焦元素；寫在 withFocusoutSuppressed() 內只是與 Backspace 那支對稱' },
+  { fn: 'joinTransientIntoBlock()', needle: "editEl.closest('.ed-block').parentNode.removeChild(editEl.closest('.ed-block'));", disposition: 'b',
+    why: '(b) lexical —— R31 Backspace：按鍵所在的區塊併進上方有字的 transient；焦點在同一個 withFocusoutSuppressed() 區間內先移到 transient 的接縫，這一行 detach 的已不是聚焦元素；移焦那一發 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端 endBurstWithoutResolve() 結束' },
 ];
 
 let checks = 0;
@@ -191,8 +193,9 @@ assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).lengt
 // v3.10.0：29 → 27，刪掉的兩個站點是 leaveSourceMode() 的 ta.remove() 與
 // enterSourceMode() 的 contentEl.hidden = true（整份原始碼模式移除）。
 // v3.14.0 T2/T3：27 → 30，splitSurfaceAtCaret()、joinIntoPrevious()、deleteAtEnd()。
-assert.strictEqual(CENSUS.length, 30,
-  'census: 站點總數應為 30。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
+// v3.14.0 T2/T3 fix round 1：30 → 31，joinTransientIntoBlock()（R31）。
+assert.strictEqual(CENSUS.length, 31,
+  'census: 站點總數應為 31。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
   'commit message 說明是哪一個站點 —— 這條斷言存在的唯一理由是讓「表悄悄變短或 ' +
   '變長」變成紅燈。');
 

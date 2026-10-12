@@ -4274,6 +4274,130 @@ check('failed-render: a merge whose render fails is written by the next commit',
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Omega.\n');
 }, { md: BASE_MD });
 
+// ── v3.14.0 T2+T3 fix round 1 ──
+// The surface whose text starts with `prefix`, clicked, caret at `offset`
+// counted over its text nodes (for surfaces whose exact text holds a break).
+async function focusSurfaceStarting(page, prefix, offset) {
+  const sel = await page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent.indexOf(t) === 0);
+    if (!s) return null;
+    s.setAttribute('data-fr-probe', '1');
+    return '[data-fr-probe="1"]';
+  }, prefix);
+  assert.ok(sel, 'focusSurfaceStarting: no surface starting ' + JSON.stringify(prefix));
+  await page.click(sel); await wait(150);
+  assert.strictEqual(await page.evaluate((off) => {
+    const s = document.querySelector('[data-fr-probe="1"]');
+    s.removeAttribute('data-fr-probe');
+    const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = off;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (left <= n.data.length) { getSelection().setBaseAndExtent(n, left, n, left); return true; }
+      left -= n.data.length;
+    }
+    return false;
+  }, offset), true, 'focusSurfaceStarting: offset ' + offset);
+}
+// C1
+check('para-enter: Enter in a paragraph emptied by a selection removes it and opens a transient there', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Bravo paragraph text.', 0, 21);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha para one.', '~paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nnew\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: P3_MD });
+check('para-enter: typing right after Enter in an emptied paragraph on a slow render lands there', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await selectInSurface(page, 'Bravo paragraph text.', 0, 21);
+  await page.keyboard.press('Enter'); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nnew\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: P3_MD });
+check('para-enter: a paragraph erased by Backspace, then Enter, never writes a <br> block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nZ\n');
+}, { md: BASE_MD });
+// C2
+const WRAP_P_MD = '# D\n\nAlpha one\nbravo two.\n\nOmega.\n';
+check('para-enter: Enter right before a soft wrap drops the newline and the next key lands', DESKTOP, async (page, boot) => {
+  await focusSurfaceStarting(page, 'Alpha one', 9);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'bravo two.', offset: 0, transient: false });
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha one\n\nZbravo two.\n\nOmega.\n');
+}, { md: WRAP_P_MD });
+check('para-enter: Enter right after a soft wrap drops the newline and the next key lands', DESKTOP, async (page, boot) => {
+  await focusSurfaceStarting(page, 'Alpha one', 10);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha one\n\nZbravo two.\n\nOmega.\n');
+}, { md: WRAP_P_MD });
+// C3 (R30)
+check('merge: Backspace into a heading flattens a hard break to one space', DESKTOP, async (page, boot) => {
+  await focusSurfaceStarting(page, 'first', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Dfirst second\n');
+}, { md: '# D\n\nfirst\\\nsecond\n' });
+check('merge: Backspace into a heading flattens a soft wrap to one space', DESKTOP, async (page, boot) => {
+  await focusSurfaceStarting(page, 'first', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Dfirst second\n');
+}, { md: '# D\n\nfirst\nsecond\n' });
+check('merge: Delete at a heading end flattens the pulled-up hard break', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'D', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Dfirst second\n');
+}, { md: '# D\n\nfirst\\\nsecond\n' });
+// I1 (R29)
+check('merge: Backspace at a nested item start after typing is two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 5);
+  await page.keyboard.type('X'); await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravoX\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n  - bravoX\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n  - bravo\n');
+}, { md: '# D\n\n- alpha\n  - bravo\n' });
+// Guard: may be green before (the ⠿ path already resolves the burst first);
+// it pins R29 for D14's conversion.
+check('merge: Backspace at a top-level item start after typing is two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 5);
+  await page.keyboard.type('X'); await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  const converted = await saveAndRead(page, boot);
+  assert.ok(converted.indexOf('bravoX') !== -1 && converted.indexOf('- bravoX') === -1, 'converted: ' + JSON.stringify(converted));
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravoX\n- charlie\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), TIGHT_MD);
+}, { md: TIGHT_MD });
+// R31 (guard for the reachable half: implemented in Task 3 already)
+check('merge: Backspace at the start of a transient with text joins it to the block above', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await page.keyboard.type('abc'); await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.abc', offset: 6, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.abc\n\nOmega.\n');
+}, { md: BASE_MD });
+// R32
+check('failed-render: a structural key that throws shows the error card and typing still works', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.evaluate(() => {
+    const im = window.md2docInlineMd; const orig = im.serializeInline;
+    im.serializeInline = function () { im.serializeInline = orig; throw new Error('probe'); };
+  });
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.ok(/未預期/.test(await noticeText(page) || ''), 'the error card: ' + await noticeText(page));
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBraQvo paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

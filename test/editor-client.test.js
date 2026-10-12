@@ -1688,8 +1688,12 @@ function countInCode(source, needle) {
   // paragraph conversion and the empty-block removal — the pending typing of
   // the block (D4) and the structure, rolled back newest first (+2).
   // 1 declaration + 24 call sites = 25.
-  assert.strictEqual(helperCalls, 25,
-    'the helper must be DECLARED once and used at all twenty-four ' +
+  // MIGRATED by v3.14.0 T2+T3 fix round 1 (25 -> 23): splitBlockAtCaret()
+  // no longer owns a rollback — the Enter split commits through
+  // commitTypingThenStructure() (the old commitEdgeStructure(), renamed),
+  // which was already counted (-2). 1 declaration + 22 call sites = 23.
+  assert.strictEqual(helperCalls, 23,
+    'the helper must be DECLARED once and used at all twenty-two ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
