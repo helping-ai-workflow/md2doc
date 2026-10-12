@@ -227,7 +227,11 @@ async function primeOneCommit(ctx) {
   await new Promise((r) => setTimeout(r, 200));
   await ctx.page.keyboard.type(' PRIMED');
   await new Promise((r) => setTimeout(r, 200));
-  await ctx.page.keyboard.press('Enter');   // blur → commit → render
+  // v3.14.0 T2: blur, not Enter — exactly what Enter used to do. Enter at the
+  // end now also leaves a transient paragraph on screen, and an id-less block
+  // in `.content` forces the NEXT render to fall back, which is the one thing
+  // a primed patch scenario must not have.
+  await ctx.page.evaluate(() => document.activeElement.blur());   // blur → commit → render
   await new Promise((r) => setTimeout(r, 900));
 }
 // Two counters, because "did this render patch?" needs both halves:
@@ -1005,7 +1009,9 @@ async function main() {
     // 在 Bravo 打字並提交（產生一個可 undo 的 op）
     await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
     await ctx.page.keyboard.type(' TWO');
-    await ctx.page.keyboard.press('Enter');
+    // v3.14.0 T2: blur (Enter's old meaning). Enter at the end now leaves an
+    // empty transient below whose own Ctrl+Z step would come first.
+    await ctx.page.evaluate(() => document.activeElement.blur());
     await new Promise((r) => setTimeout(r, 400));
     // 把游標放回 Bravo（即將被 undo 改寫的那個 block）
     await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
@@ -1899,7 +1905,9 @@ async function main() {
   const v2TypeAndCommit = async (ctx) => {
     await ctx.page.keyboard.type('ZZ');
     await new Promise((r) => setTimeout(r, 250));
-    await ctx.page.keyboard.press('Enter');          // blur → commit → render
+    // v3.14.0 T2: the caret sits after ZZ, mid-paragraph, where Enter now
+    // splits the paragraph — commit by leaving it instead (Enter's old meaning).
+    await ctx.page.evaluate(() => document.activeElement.blur());          // blur → commit → render
     await new Promise((r) => setTimeout(r, 700));
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 300));
@@ -12174,7 +12182,10 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' EDITED');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: committed by blur (what Enter used to do). Enter at the
+      // end now opens an empty transient below, and the Ctrl+Z right after it
+      // would be that transient's step, not this edit's undo.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       await ctx.page.keyboard.down('Control');
       await ctx.page.keyboard.press('KeyZ');
@@ -12272,7 +12283,9 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' ONE');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: blur (Enter's old meaning) — the Ctrl+Z below must undo
+      // this edit, not take away the transient Enter now opens.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       const disk1 = await saveAndRead(ctx);
       assert.ok(disk1.indexOf('ONE') !== -1, 'T7i 前提失敗：第一筆要真的存進磁碟');
@@ -12373,7 +12386,10 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' EDITED');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: committed by blur (what Enter used to do). Enter at the
+      // end now opens an empty transient below, and the Ctrl+Z right after it
+      // would be that transient's step, not this edit's undo.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       await ctx.page.keyboard.down('Control');
       await ctx.page.keyboard.press('KeyZ');

@@ -4726,8 +4726,11 @@ async function gutterGeometry(page, sel) {
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
     //    type + Enter commits; file line updated on save ──────────────────
+    // v3.14.0 T2: Enter at the end still commits the edit, and now also opens
+    // a transient empty paragraph below, focused, which writes nothing.
     {
       const page = await newPage(browser);
+      const fileBefore = fs.readFileSync(mdPath, 'utf8');
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
@@ -4759,18 +4762,28 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('WYSIWYG-EDITED-TEXT'),
         { timeout: 5000 }
       );
+      await settleEditor(page);
       assert.ok(
         await page.evaluate(() => !document.querySelector('.content').innerHTML.includes('undefined')),
         'commit must not stringify undefined into the DOM'
       );
+      assert.deepStrictEqual(await page.evaluate(() => {
+        const a = document.activeElement;
+        return { inTransient: !!(a && a.closest && a.closest('[data-ed-transient]')),
+          transients: document.querySelectorAll('[data-ed-transient]').length,
+          text: a ? a.textContent : null };
+      }), { inTransient: true, transients: 1, text: '' },
+      'v3.14.0 T2: Enter at the end opens ONE empty transient paragraph below, with the caret in it');
 
       await pressSaveAndLand(page);
       const fileText1 = fs.readFileSync(mdPath, 'utf8');
-      assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
-        'WYSIWYG: Enter-commit + save must update the file on disk');
+      assert.strictEqual(fileBefore.split('First paragraph.').length, 2,
+        'fixture sanity: "First paragraph." appears exactly once on disk');
+      assert.strictEqual(fileText1, fileBefore.replace('First paragraph.', 'WYSIWYG-EDITED-TEXT'),
+        'WYSIWYG: Enter-commit + save writes exactly the edited line; the transient writes nothing');
 
       await page.close();
-      console.log('wysiwyg: paragraph edit commits via Enter and persists to file — OK');
+      console.log('wysiwyg: Enter at the end of an edited paragraph commits it and opens an empty paragraph below — OK');
     }
 
     // ── Task 3 WYSIWYG: **bold** shows <strong> while editing (no literal
@@ -5785,8 +5798,11 @@ async function gutterGeometry(page, sel) {
         'Bold must wrap "commit" in <strong> before commit'
       );
 
-      await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
-      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
+      // blur() -> the delegated focusout handler -> switchAwayFrom()
       // is an async chain now (one more hop than Phase 2's direct commit()
       // call from the keydown handler itself) — waiting on innerHTML alone
       // is not a reliable "commit landed" signal here: applyMarkToggle()
@@ -5813,7 +5829,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
 
       await page.close();
-      console.log('sel-toolbar: Bold + Enter commits **word** to source and <strong> to render — OK');
+      console.log('sel-toolbar: Bold + leaving the paragraph commits **word** to source and <strong> to render — OK');
     }
 
     // ── FIX 2: clicking S (刪除線/strikethrough) wraps the selection in
@@ -5878,7 +5894,10 @@ async function gutterGeometry(page, sel) {
         'S must wrap "commit" in <del> before commit'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('<del>commit</del>'),
@@ -5891,7 +5910,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
 
       await page.close();
-      console.log('sel-toolbar: S + Enter commits ~~word~~ to source and <del> to render — OK');
+      console.log('sel-toolbar: S + leaving the paragraph commits ~~word~~ to source and <del> to render — OK');
     }
 
     // ── FIX 2: U applied once, Enter to commit -> the source line gains the
@@ -5916,7 +5935,10 @@ async function gutterGeometry(page, sel) {
         'U must wrap "commit" in <u> before commit'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('<u>commit</u>'),
@@ -5929,7 +5951,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
 
       await page.close();
-      console.log('sel-toolbar: U + Enter commits <u>word</u> to source and renders underlined — OK');
+      console.log('sel-toolbar: U + leaving the paragraph commits <u>word</u> to source and renders underlined — OK');
     }
 
     // ── Task 4: the code button wraps the WHOLE paragraph (which contains a
@@ -5966,7 +5988,10 @@ async function gutterGeometry(page, sel) {
         'the code button must wrap the selection in <code>'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction((s) => !!document.querySelector(s + ' code'), {}, sel);
       await pressSaveAndLand(page);
       const fileTextCode = fs.readFileSync(mdPath, 'utf8');
@@ -6005,7 +6030,10 @@ async function gutterGeometry(page, sel) {
         'the link button must wrap the selection in <a href> using the (stubbed) prompt result'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('href="https://example.org"'),
         { timeout: 5000 }
@@ -6215,12 +6243,15 @@ async function gutterGeometry(page, sel) {
         sl.addRange(r);
       }, editEl);
 
-      // Commit via plain Enter (no mark toggle needed — any text-changing
-      // commit triggers the same rerenderAll() body swap this fix targets).
+      // Commit by leaving the paragraph (no mark toggle needed — any
+      // text-changing commit triggers the same rerenderAll() body swap this
+      // fix targets). v3.14.0 T2: not Enter any more — Enter at the end now
+      // also opens a transient paragraph whose own burst attaches a listener
+      // of its own, and this scenario counts listeners down to zero.
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
       await page.keyboard.type('-EDITED');
-      await page.keyboard.press('Enter');
-      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      await page.evaluate(() => document.activeElement.blur());
+      // blur() -> the delegated focusout handler -> switchAwayFrom()
       // is an async chain (see the sel-toolbar Bold+Enter scenario's comment
       // above for why an innerHTML-only wait races the actual commit) — wait
       // for __selCount to actually settle at 0 before asserting on it.
@@ -8814,8 +8845,10 @@ async function gutterGeometry(page, sel) {
           'e2e: Bold via the toolbar must wrap the selected word in <strong>'
         );
 
-        // Commit the paragraph session (plain Enter — mousedown preventDefault
-        // on the toolbar button kept focus/selection on paraEditEl).
+        // Commit the paragraph session by leaving it (mousedown preventDefault
+        // on the toolbar button kept focus/selection on paraEditEl). v3.14.0
+        // T2: was plain Enter; with the selection still standing, Enter now
+        // replaces it with a paragraph split.
         // The <strong> asserted above is OPTIMISTIC DOM: WYSIWYG puts it on
         // screen BEFORE the commit's /api/render round-trip lands, so a
         // waitForFunction on that markup returns while rerenderAll()'s
@@ -8825,7 +8858,7 @@ async function gutterGeometry(page, sel) {
         // Invisible on a fast dev box, a real flake on a loaded CI runner, so
         // wait for the swap itself (the idiom awaitContentSwap() exists for).
         const paraStale = await nodeHandleFor(page, paraSel);
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await awaitContentSwap(page, paraStale);
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
@@ -11904,7 +11937,10 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(murl, { waitUntil: 'networkidle2' });
 
-        // 1) paragraph edit (Ctrl+A -> type -> Enter commits and ends the burst).
+        // 1) paragraph edit (Ctrl+A -> type -> leaving the paragraph commits
+        // and ends the burst). v3.14.0 T2: was Enter, which now also opens a
+        // transient paragraph and keeps the caret in it — and this flow needs
+        // focus on BODY before its next step.
         const paraSel = await paragraphSelByText(page, 'Paragraph text here for editing.');
         const paraEditEl = paraSel + ' > *';
         await openWysiwyg(page, paraSel);
@@ -11913,7 +11949,7 @@ async function gutterGeometry(page, sel) {
         await page.keyboard.press('KeyA');
         await page.keyboard.up('Control');
         await page.keyboard.type('Paragraph text EDITED for the mega e2e.');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Paragraph text EDITED for the mega e2e.'),
           { timeout: 5000 }
@@ -13309,7 +13345,10 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, earlierSel);
         await page.keyboard.type(' EDITED');
         const staleEarlier = await nodeHandleFor(page, earlierSel);
-        await page.keyboard.press('Enter');
+        // v3.14.0 T2: committed by leaving the paragraph, not Enter — Enter at
+        // the end now also opens a transient below, and the paragraph count
+        // this scenario takes next must not include it.
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Earlier edit target. EDITED')
         );
@@ -23870,7 +23909,9 @@ async function gutterGeometry(page, sel) {
           'target',
           'the toolbar Bold must wrap "target" in <strong> before commit');
 
-        await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
+        // v3.14.0 T2: the selection still stands, and Enter with a selection
+        // now replaces it with a paragraph split — commit by leaving instead.
+        await page.evaluate(() => document.activeElement.blur()); // burst commit (blur -> resolveBurst)
         await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
@@ -24251,7 +24292,12 @@ async function gutterGeometry(page, sel) {
     // each scenario's asserted commit actually took is confirmed from the
     // page's own state (a spy on window.md2docPatchmap.patchmap, or — for
     // Case 1 — the very fact that a fallback destroys every node, so a
-    // preserved object identity is itself proof). ──────────────────────────
+    // preserved object identity is itself proof).
+    // v3.14.0 T2: every commit below is a blur, not Enter — blur is exactly
+    // what Enter used to do. Enter at the end of a paragraph now also opens a
+    // transient paragraph and moves focus into it: an id-less block in
+    // `.content` forces the next render to fall back, and the focus move
+    // ends the very burst Case 5 pins as surviving its own commit. ───────
 
     // ── Case 1: the caret on an UNEDITED block does not move. Focus
     //    paragraph A (no edit), then commit an edit to a DIFFERENT paragraph
@@ -24274,7 +24320,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, bSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const aSel = await paragraphSelByText(page, 'Case1 Para A');
@@ -24372,7 +24418,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, anchorSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
         await page.waitForFunction(
           () => !!document.querySelector('.content .mermaid svg'), { timeout: 10000 });
@@ -24394,7 +24440,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, targetSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' EDITED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const svgIdAfter = await page.evaluate(() => {
@@ -24437,7 +24483,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, aSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         await page.evaluate(() => {
@@ -24501,7 +24547,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, aSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         await page.evaluate(() => {
@@ -24592,7 +24638,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, sel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter'); // first commit -> always falls back
+        await page.evaluate(() => document.activeElement.blur()); // first commit -> always falls back
         await settleEditor(page);
 
         // Test-only fetch harness: freeze the NEXT /api/render response's
@@ -24631,7 +24677,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, sel2);
         await page.keyboard.press('End');
         await page.keyboard.type(' P1');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const sel3 = await paragraphSelByText(page, 'Case5 freeze target');
@@ -24645,7 +24691,7 @@ async function gutterGeometry(page, sel) {
 
         await page.evaluate(() => { window.__freezeNext = true; window.__caseFivePlans.length = 0; });
         await page.keyboard.type(' FROZEN');
-        await page.keyboard.press('Enter'); // self-commit, but the response is frozen to the OLD parts
+        await page.evaluate(() => document.activeElement.blur()); // self-commit, but the response is frozen to the OLD parts
         await settleEditor(page);
 
         const post = await page.evaluate(() => ({

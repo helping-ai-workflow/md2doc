@@ -3904,6 +3904,182 @@ check('failed-render: a transient whose commit fails keeps its text and commits 
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
 }, { md: BASE_MD });
 
+// ── para-enter (v3.14.0 T2) ──
+const HEAD_MD = '# D\n\n## Head text\n\nOmega.\n';
+const LINK_MD = '# D\n\nSee [link](https://e.com) now.\n';
+const BOLD_MD = '# D\n\nAl **bold** x\n';
+const paragraphs = (page) => page.evaluate(() => [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"] .ed-wys-armed')].map((e) => e.textContent));
+check('para-enter: Enter mid-paragraph splits at the caret, caret at the new paragraph start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo paragraph text.', 'Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: 'vo paragraph text.', offset: 0, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nvo paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('para-enter: the space at the split point is dropped from both halves', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 5);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('para-enter: Enter at the end opens a focused transient below and writes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('para-enter: Enter at the start opens a transient above and the caret stays', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Omega.', offset: 0, transient: false });
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nXOmega.\n');
+}, { md: BASE_MD });
+check('para-enter: a heading splits into the heading and a paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Head text', 4);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'heading:Head', 'paragraph:text', 'paragraph:Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n## Head\n\ntext\n\nOmega.\n');
+}, { md: HEAD_MD });
+check('para-enter: Enter at the end of a heading opens a transient below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Head text', 9);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('P');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n## Head text\n\nP\n\nOmega.\n');
+}, { md: HEAD_MD });
+check('para-enter: across bold both halves close their marks', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Al bold x', 5);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAl **bo**\n\n**ld** x\n');
+}, { md: BOLD_MD });
+// Review Focus 3
+check('para-enter: at the end of a link the link stays whole on the left', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See link now.', 8);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nSee [link](https://e.com)\n\nnow.\n');
+}, { md: LINK_MD });
+check('para-enter: inside a link both halves keep the link', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See link now.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nSee [li](https://e.com)\n\n[nk](https://e.com) now.\n');
+}, { md: LINK_MD });
+check('para-enter: Enter with a word selected replaces it with the split', DESKTOP, async (page, boot) => {
+  await dblclickChar(page, 'Bravo paragraph text.', 8);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\ntext.\n\nOmega.\n');
+}, { md: P3_MD });
+// R10: the split is asserted on disk first, so the undo cannot pass by
+// undoing nothing.
+check('para-enter: one Ctrl+Z undoes a mid-paragraph Enter', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nvo paragraph text.\n\nOmega.\n', 'the split is on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+}, { md: P3_MD });
+check('para-enter: typing, Enter, Ctrl+Z keeps the typing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.type('Z'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBraZvo paragraph text.\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+}, { md: P3_MD });
+check('para-enter: one Ctrl+Z after Enter at the end removes the empty paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('para-enter: Enter in a transient with text commits it and opens the next one', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await page.keyboard.type('abc');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:abc', '~paragraph:', 'paragraph:Omega.']);
+  await page.keyboard.type('def');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nabc\n\ndef\n\nOmega.\n');
+}, { md: BASE_MD });
+check('para-enter: Enter in an empty transient does nothing', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+}, { md: BASE_MD });
+// Review Focus 1
+check('para-enter: typing right after a mid-paragraph Enter on a slow render lands in the new paragraph', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await focusSurface(page, 'Bravo paragraph text.', 6);
+  await page.keyboard.press('Enter'); await page.keyboard.type('New ');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\nNew paragraph text.\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: P3_MD });
+check('para-enter: typing right after Enter at the end of an edited paragraph lands in the new paragraph', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await page.keyboard.press('Enter'); await page.keyboard.type('Next');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.X\n\nNext\n\nOmega.\n');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: BASE_MD });
+// Review Focus 4
+check('para-enter: an IME character then Enter splits after it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '你' });
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra你\n\nvo paragraph text.\n\nOmega.\n');
+}, { md: P3_MD, engines: ['chromium'] });
+// Guard: may be green before the change (an IME's confirming Enter is not a
+// split); it pins that the split never takes it.
+check('para-enter: an IME confirming Enter does not split', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  const prevented = await page.evaluate(() => {
+    const ev = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(ev); return ev.defaultPrevented;
+  });
+  await renderIdle(page);
+  assert.strictEqual(prevented, false, 'the IME keeps its Enter');
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+}, { md: P3_MD });
+// Added (not in the brief): the transient's own middle case — its two halves
+// are its one commit.
+check('para-enter: Enter in the middle of a transient commits both halves as one step', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await page.keyboard.type('abc def');
+  for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:abc', 'paragraph:def', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: 'def', offset: 0, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nabc\n\ndef\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+// Added (R6, the slot this task introduces): a structural key while a failed
+// split is pending re-commits it first, then acts.
+check('failed-render: Enter after a failed split re-commits it, then splits again', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo paragraph text.', 'Omega.'], 'the screen keeps the split');
+  for (let i = 0; i < 2; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo', 'paragraph text.', 'Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nvo\n\nparagraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('failed-render: a paragraph split whose render fails is written by the next commit', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await page.keyboard.type('X'); await renderIdle(page);
+  const screen = await paragraphs(page);
+  assert.deepStrictEqual(screen, ['Alpha para one.', 'Bra', 'Xvo paragraph text.', 'Omega.'], 'the screen keeps the split');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nXvo paragraph text.\n\nOmega.\n');
+  assert.deepStrictEqual(await paragraphs(page), screen, 'DOM equals file');
+}, { md: P3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

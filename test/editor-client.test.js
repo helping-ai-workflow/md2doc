@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1673,8 +1673,17 @@ function countInCode(source, needle) {
   // transient paragraph, one commitInsertionAt() over a range it computes
   // itself — is a genuinely new commit-then-render site that owns its
   // rollback (+1). 1 declaration + 19 call sites = 20.
-  assert.strictEqual(helperCalls, 20,
-    'the helper must be DECLARED once and used at all nineteen ' +
+  // MIGRATED by v3.14.0 T2 (20 -> 23). Two genuinely new commit-then-render
+  // sites, one of which rolls back two ops:
+  //   * splitBlockAtCaret() — Enter mid-paragraph / mid-heading commits the
+  //     pending typing over the unsplit block (D4) and then commitSplit(),
+  //     and renders once. A failed render rolls back BOTH, newest first: two
+  //     lines (+2).
+  //   * retryPendingStructure() — re-commits a structure whose render failed
+  //     (D7) over the range it records, so it owns that rollback (+1).
+  // 1 declaration + 22 call sites = 23.
+  assert.strictEqual(helperCalls, 23,
+    'the helper must be DECLARED once and used at all twenty-two ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2568,6 +2577,20 @@ function countInCode(source, needle) {
   const m = commitInsertionAt({ lines: ['# Doc', '', 'Para1', '', 'Para2'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() }, 1, ['a', '', 'b']);
   assert.deepStrictEqual(m.lines, ['# Doc', '', 'Para1', '', 'a', '', 'b', '', 'Para2']);
   assert.strictEqual(m.newStartLine, 5);
+}
+
+// -- v3.14.0 T2: commitSplit() — Enter mid-paragraph, one op --------------
+{
+  const st = { lines: ['# D', '', 'Bravo paragraph text.', '', 'Omega.'], blocks: [
+    { id: 0, type: 'heading', startLine: 1, endLine: 1 }, { id: 1, type: 'paragraph', startLine: 3, endLine: 3 },
+    { id: 2, type: 'paragraph', startLine: 5, endLine: 5 }], stack: new UndoStack() };
+  const r = commitSplit(st, 1, 'Bra', 'vo paragraph text.');
+  assert.deepStrictEqual(r.lines, ['# D', '', 'Bra', '', 'vo paragraph text.', '', 'Omega.']);
+  assert.strictEqual(r.rightStartLine, 5);
+  assert.strictEqual(r.blocks.find((b) => b.id === 2).startLine, 7);
+  assert.deepStrictEqual(st.stack.undo(r.lines).lines, st.lines);
+  const h = commitSplit({ lines: ['a\\', 'b'], blocks: [{ id: 0, type: 'paragraph', startLine: 1, endLine: 2 }], stack: new UndoStack() }, 0, 'a\\\nb', 'c');
+  assert.strictEqual(h.rightStartLine, 4, 'a two-line left half');
 }
 
 console.log('editor-client.test.js OK');
