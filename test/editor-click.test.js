@@ -4543,6 +4543,69 @@ check('empty-doc: erasing the last block leaves a transient to type into', DESKT
   assert.strictEqual(await saveAndRead(page, boot), '');
 }, { md: '' });
 
+// ── arrow-transient / paste-transient (v3.14.0 T5) ──
+check('arrow-transient: ↑ out of an empty transient removes it and lands above', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('ArrowUp'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+  assert.strictEqual((await caretNow(page)).text, 'Alpha.');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('arrow-transient: ↓ out of a transient with text commits it and lands below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await page.keyboard.type('New');
+  await page.keyboard.press('ArrowDown'); await renderIdle(page);
+  assert.strictEqual((await caretNow(page)).text, 'Omega.');
+  assert.strictEqual(await noticeText(page), null);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nNew\n\nOmega.\n');
+}, { md: BASE_MD });
+// guard (green before the change): the arrow already lands in a transient
+check('arrow-transient: ↑ walks into a transient left by Enter at a paragraph start', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('ArrowUp'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  assert.strictEqual(await noticeText(page), null);
+  await page.keyboard.type('Mid'); await page.keyboard.press('ArrowDown'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nMid\n\nOmega.\n');
+}, { md: BASE_MD });
+// guard (green before the change)
+check('arrow-transient: ↑ from the first paragraph into a transient at the top', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('ArrowUp');
+  assert.strictEqual(await noticeText(page), null);
+  await page.keyboard.type('Top'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Top\n\nAlpha.\n');
+}, { md: 'Alpha.\n' });
+check('paste-transient: plain text lands in it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await clipboardEvent(page, 'paste', 'pasted', null);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\npasted\n\nOmega.\n');
+}, { md: BASE_MD });
+check('paste-transient: two paragraphs replace it in one undo step', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await clipboardEvent(page, 'paste', 'P1\n\nP2', '<p>P1</p><p>P2</p>');
+  assert.strictEqual(await transientCount(page), 0);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nP1\n\nP2\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('paste-transient: an image replaces it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.evaluate((b64) => {
+    const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
+    document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, PNG_1PX);
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, { md: BASE_MD });
+check('paste-transient: blocks pasted after typed text keep the text first', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await page.keyboard.type('Lead');
+  await clipboardEvent(page, 'paste', 'H\n\nP2', '<h2>H</h2><p>P2</p>');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nLead\n\n## H\n\nP2\n\nOmega.\n');
+  assert.deepStrictEqual(await caretNow(page), { text: 'P2', offset: 2, transient: false });
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
