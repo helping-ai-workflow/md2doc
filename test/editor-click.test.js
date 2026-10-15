@@ -4416,6 +4416,133 @@ check('merge: text ending in a line break joins a heading with no trailing space
   assert.strictEqual(await saveAndRead(page, boot), '# Dfirst\n\nOmega.\n');
 }, { md: '# D\n\nfirst\n\nOmega.\n' });
 
+// ── empty-doc / click-below / placeholder / toolbar-transient (v3.14.0 T4) ──
+const hintOf = (page) => page.evaluate(() => {
+  const s = document.querySelector('[data-ed-transient] .ed-wys-armed') || document.activeElement;
+  const cs = getComputedStyle(s, '::before');
+  const probe = document.createElement('span'); probe.style.color = 'var(--md-muted-2)'; document.body.appendChild(probe);
+  const want = getComputedStyle(probe).color; probe.remove();
+  return { content: cs.content, colourIsMuted2: cs.color === want };
+});
+check('empty-doc: opens with one focused transient and its hint', DESKTOP, async (page, boot) => {
+  assert.deepStrictEqual(await blockList(page), ['~paragraph:']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+  await page.keyboard.type('Hello');
+  assert.strictEqual((await hintOf(page)).content, 'none');
+  assert.strictEqual(await saveAndRead(page, boot), 'Hello\n');
+}, { md: '' });
+check('empty-doc: a whitespace-only file is an empty document', DESKTOP, async (page, boot) => {
+  await page.keyboard.type('Hi');
+  assert.strictEqual(await saveAndRead(page, boot), 'Hi\n');
+}, { md: '\n\n' });
+check('empty-doc: typing and erasing everything writes nothing and keeps the paragraph', DESKTOP, async (page, boot) => {
+  await page.keyboard.type('ab'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace');
+  assert.strictEqual(await saveAndRead(page, boot), '');
+  assert.strictEqual(await transientCount(page), 1);
+}, { md: '' });
+check('empty-doc: in dark mode the hint keeps the muted token', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+}, { md: '' });
+check('empty-doc: the table button inserts a table at the top', DESKTOP, async (page, boot) => {
+  await tb(page, 'table');
+  await page.keyboard.type('x');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.deepStrictEqual(mdTable(fs.readFileSync(boot.mdPath, 'utf8')), [['A', 'B'], ['x', '']]);
+}, { md: '' });
+check('click-below: a click under the last block opens a transient at the end', DESKTOP, async (page, boot) => {
+  const pt = await page.evaluate(() => { const bs = document.querySelectorAll('.content .ed-block'); const r = bs[bs.length - 1].getBoundingClientRect(); return [r.left + 40, r.bottom + 60]; });
+  await page.mouse.click(pt[0], pt[1]); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.', '~paragraph:']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  await page.mouse.click(pt[0], pt[1] + 20); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 1, 'a second click reuses it');
+  await page.keyboard.type('Tail.');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n\nTail.\n');
+}, { md: BASE_MD });
+check('click-below: a click between two blocks opens nothing', DESKTOP, async (page) => {
+  const pt = await page.evaluate(() => { const a = [...document.querySelectorAll('.content .ed-block')][1].getBoundingClientRect(); return [a.left + 40, a.bottom + 4]; });
+  await page.mouse.click(pt[0], pt[1]); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+}, { md: BASE_MD });
+check('placeholder: a transient made by Enter at a paragraph start shows its hint unfocused', DESKTOP, async (page) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+}, { md: BASE_MD });
+check('toolbar-transient: quote, numbered and check are off while it is empty', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const st = () => page.evaluate(() => ['quote', 'ordered-list', 'check'].map((id) => document.querySelector('[data-ed-tb="' + id + '"]').disabled));
+  assert.deepStrictEqual(await st(), [true, true, true]);
+  await page.keyboard.type('x'); await wait(200);
+  assert.deepStrictEqual(await st(), [false, false, false]);
+}, { md: BASE_MD });
+check('toolbar-transient: 清單 on a transient with text commits it as a list item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Item');
+  await tb(page, 'list');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n- Item\n\nOmega.\n');
+}, { md: BASE_MD });
+
+check('toolbar-transient: an empty one keeps a line of height', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-ed-transient] .ed-wys-armed').offsetHeight >= 20), true);
+}, { md: BASE_MD });
+check('toolbar-transient: 分隔線 on an empty one writes a rule and leaves a focused transient after it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await tb(page, 'line');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'hr:', '~paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+  await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n---\n\nZ\n\nOmega.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 標題 2 on an empty one inserts a heading and typing fills it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.click('[data-ed-tb="headings"]');
+  await page.locator('.ed-toolbar-menu-btn', { hasText: '標題 2' }).click(); await renderIdle(page);
+  await page.keyboard.type('Sub');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n## Sub\n\nOmega.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 清單 on an empty one inserts a list item at its position', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await tb(page, 'list');
+  await page.keyboard.type('One');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- One\n\nOmega.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 清單 on an empty one right below a list continues that list', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await tb(page, 'list');
+  await page.keyboard.type('One'); await commitAndRead(page, boot);
+  await liText(page, 'One').click(); await page.keyboard.press('End');
+  await tb(page, 'insert-after');
+  await tb(page, 'list');
+  await page.keyboard.type('Two');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- One\n- Two\n\nOmega.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 圖片 on an empty one replaces it with the picked image', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, { md: BASE_MD });
+check('empty-doc: the code button inserts a fenced block at the top', DESKTOP, async (page, boot) => {
+  await tb(page, 'code');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'raw box open');
+  await page.keyboard.type('x');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '```\nx\n```\n');
+}, { md: '' });
+check('empty-doc: erasing the last block leaves a transient to type into', DESKTOP, async (page, boot) => {
+  await tb(page, 'insert-after');
+  assert.strictEqual(await transientCount(page), 1);
+  await page.keyboard.type('a'); await page.keyboard.press('Backspace');
+  assert.strictEqual(await saveAndRead(page, boot), '');
+}, { md: '' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

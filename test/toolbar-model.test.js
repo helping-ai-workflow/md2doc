@@ -376,4 +376,14 @@ function baseCtx(overrides) {
   ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
 }
 
+// --- v3.14.0 T4: the toolbar on a transient paragraph ----------------------------
+{
+  const base = { blockType: 'paragraph', indent: null, inList: false, hasSelection: false, dirty: false };
+  const s = tm.deriveState(Object.assign({ transient: 'empty' }, base));
+  eq(['quote', 'ordered-list', 'check', 'indent', 'outdent', 'table', 'list', 'code', 'line', 'image', 'insert-after'].map((id) => s[id].disabled),
+    [true, true, true, true, true, false, false, false, false, false, false], 'an empty transient disables only the five buttons');
+  const t = tm.deriveState(Object.assign({ transient: 'text' }, base));
+  eq(['quote', 'ordered-list', 'check'].map((id) => t[id].disabled), [false, false, false], 'a transient with text disables nothing extra');
+}
+
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');
