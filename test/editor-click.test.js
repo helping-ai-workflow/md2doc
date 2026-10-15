@@ -4606,6 +4606,45 @@ check('paste-transient: blocks pasted after typed text keep the text first', DES
   assert.deepStrictEqual(await caretNow(page), { text: 'P2', offset: 2, transient: false });
 }, { md: BASE_MD });
 
+// ── v3.14.0 B3 fix round 1 ──
+const throwOnceInSerialize = (page) => page.evaluate(() => {
+  const im = window.md2docInlineMd; const orig = im.serializeInline;
+  im.serializeInline = function () { im.serializeInline = orig; throw new Error('probe'); };
+});
+check('paste-transient: a paste commit that throws shows the error card and keeps the typed text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await page.keyboard.type('Lead');
+  await throwOnceInSerialize(page);
+  await clipboardEvent(page, 'paste', 'H\n\nP2', '<h2>H</h2><p>P2</p>');
+  assert.ok(/未預期/.test(await noticeText(page) || ''), 'the error card: ' + await noticeText(page));
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-ed-transient] .ed-wys-armed').textContent), 'Lead');
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nLeadX\n\nOmega.\n');
+}, { md: BASE_MD });
+check('click-below: a rejection while resolving shows the error card and the next click works', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Z');
+  await throwOnceInSerialize(page);
+  const pt = await page.evaluate(() => { const bs = document.querySelectorAll('.content .ed-block'); const r = bs[bs.length - 1].getBoundingClientRect(); return [r.left + 40, r.bottom + 60]; });
+  await page.mouse.click(pt[0], pt[1]); await renderIdle(page);
+  assert.ok(/未預期/.test(await noticeText(page) || ''), 'the error card: ' + await noticeText(page));
+  await page.mouse.click(pt[0], pt[1]); await renderIdle(page);
+  await page.keyboard.type('Tail.');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.Z\n\nTail.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 圖片 on an empty one survives a window blur while the file dialog is open', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await page.evaluate(() => {
+    document.activeElement.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    window.dispatchEvent(new Event('blur'));
+  });
+  await wait(300);
+  assert.strictEqual(await transientCount(page), 1, 'the transient is still there');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
