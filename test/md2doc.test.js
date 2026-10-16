@@ -634,6 +634,11 @@ console.log('md2doc dot WASM test passed');
   const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
   assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
   assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
+  const editBody = (md) => body(md, { editMode: true });
+  assert.match(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /<div class="ed-block" data-block-id="\d+" data-block-type="[a-z]+" data-svg-plate="1">/, 'edit mode marks an svg-only block');
+  assert.match(await editBody('<svg width="20" height="10"><text>x</text></svg>\n'), /data-svg-plate="1"/, 'edit mode marks a one-line svg paragraph');
+  assert.doesNotMatch(await editBody('Text <svg width="5"><circle r="2"/></svg> after\n'), /data-svg-plate/, 'svg in prose is not marked');
+  assert.doesNotMatch(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /inline-svg/, 'still no inline-svg wrapper in edit mode');
   assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
     /inline-svg/, 'edit mode emits no inline-svg wrapper');
   console.log('md2doc inline svg wrapper test passed');

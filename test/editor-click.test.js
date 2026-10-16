@@ -4994,6 +4994,16 @@ check('edit-search: an untouched marked paragraph stays byte-identical', DESKTOP
   assert.strictEqual(await commitAndRead(page, boot), SEARCH_MD);
 }, { md: SEARCH_MD });
 
+// ── svg-plate (v3.14.0 T10) ──
+const SVG_MD = '# D\n\n<svg width="40" height="20"><text x="2" y="14">S</text></svg>\n\nTail.\n';
+check('svg-plate: an inline svg on the edit page sits on a white plate in dark only', DESKTOP, async (page, boot) => {
+  const read = () => page.evaluate(() => { const s = document.querySelector('.content .ed-block > p > svg, .content .ed-block > svg'); const cs = getComputedStyle(s); return { bg: cs.backgroundColor, ink: cs.color }; });
+  assert.strictEqual((await read()).bg, 'rgba(0, 0, 0, 0)', 'light: no plate');
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
+  assert.strictEqual(await saveAndRead(page, boot), SVG_MD, 'no byte changes');
+}, { md: SVG_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
