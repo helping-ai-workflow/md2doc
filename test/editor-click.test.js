@@ -4645,6 +4645,106 @@ check('toolbar-transient: 圖片 on an empty one survives a window blur while th
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
 }, { md: BASE_MD });
 
+// ── failed-render, lists (v3.14.0 T6; R14 widened) ──
+// The first `n` renders are held 800 ms and then fail.
+const failRenders = async (page, n) => {
+  let left = n;
+  await page.route('**/api/render', async (route) => {
+    if (left <= 0) { await route.continue(); return; }
+    left--;
+    await wait(800);
+    await route.fulfill({ status: 500, body: '{}' });
+  });
+};
+for (const [kind, md, want] of [
+  ['tight', TIGHT_MD, '# D\n\n- alpha\n- bravo\n- new\n- charlie\n'],
+  ['loose', LOOSE_MD, '# D\n\n- alpha\n\n- bravo\n\n- new\n\n- charlie\n'],
+]) {
+  check('failed-render: ' + kind + ' list Enter, the file matches the screen', DESKTOP, async (page, boot) => {
+    await failFirstRender(page);
+    await liText(page, 'bravo').click(); await page.keyboard.press('End');
+    await page.keyboard.press('Enter'); await page.keyboard.type('new');
+    await renderIdle(page);
+    const screen = await liTexts(page);
+    assert.deepStrictEqual(screen, ['alpha', 'bravo', 'new', 'charlie'], 'guard: the screen keeps the new item');
+    assert.strictEqual(await commitAndRead(page, boot), want);
+    assert.deepStrictEqual(await liTexts(page), screen, 'DOM equals file');
+  }, { md });
+}
+// R11: clickChar + End rather than focusSurface (its click lands mid-word).
+check('failed-render: a later edit elsewhere also writes the pending list first', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await clickChar(page, 'Omega.', 5); await page.keyboard.press('End'); await page.keyboard.type('!');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlie\n\nOmega.!\n');
+}, { md: LIST_PARA_MD });
+// R6, the list half: a structural key while a failed list Enter is pending
+// re-commits it first, then acts — the caret stays in the new item.
+check('failed-render: Enter after a failed list Enter re-commits it, then adds another item', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await page.keyboard.type('x'); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'x', 'charlie']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- x\n- charlie\n');
+}, { md: TIGHT_MD });
+// Ctrl+S right after a failed list Enter writes it and keeps the caret.
+check('failed-render: Ctrl+S after a failed list Enter saves it and the caret stays in the new item', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlie\n');
+  assert.deepStrictEqual(await caretNow(page), { text: 'new', offset: 3, transient: false });
+}, { md: TIGHT_MD });
+// R28: the split's render fails, the retry a click into another block makes
+// fails too, and the user types there. The next commit writes both.
+check('failed-render: typing in another block after a failed split and a failed retry is kept', DESKTOP, async (page, boot) => {
+  await failRenders(page, 2);
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await clickChar(page, 'Omega.', 5); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo paragraph text.', 'Omega.'], 'guard: the screen keeps the split');
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBra\n\nvo paragraph text.\n\nOmegaX.\n');
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo paragraph text.', 'OmegaX.'], 'DOM equals file');
+  // One undo step each, newest first: the typing, then the split.
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bra', 'vo paragraph text.', 'Omega.'], 'first undo: the typing');
+}, { md: P3_MD });
+check('failed-render: typing in another block after a failed list Enter and a failed retry is kept', DESKTOP, async (page, boot) => {
+  await failRenders(page, 2);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await clickChar(page, 'Omega.', 5); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlie'], 'guard: the screen keeps the new item');
+  await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlie\n\nOmegaX.\n');
+}, { md: LIST_PARA_MD });
+// R34: a pending structure is unsaved work — the title says so, and an edit
+// made outside raises the conflict card instead of reloading it away.
+check('failed-render: a pending split counts as unsaved work', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await focusSurface(page, 'Bravo paragraph text.', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  const split = ['Alpha para one.', 'Bra', 'vo paragraph text.', 'Omega.'];
+  assert.deepStrictEqual(await paragraphs(page), split, 'guard: the screen keeps the split');
+  assert.strictEqual((await page.title()).indexOf('● '), 0, 'the title shows unsaved work');
+  await page.evaluate(() => { window.__r34Probe = 1; });
+  fs.writeFileSync(boot.mdPath, P3_MD + '\nAppended outside.\n');
+  const read = () => page.evaluate(() => ({ samePage: window.__r34Probe === 1,
+    conflict: [...document.querySelectorAll('.ed-conflict')].some((c) => c.textContent.includes('這個檔案剛在別處被修改')) }));
+  let r = null;
+  for (const deadline = Date.now() + 15000; Date.now() < deadline;) {
+    await wait(250);
+    try { r = await read(); } catch (e) { r = { samePage: false, conflict: false }; }
+    if (r.conflict || !r.samePage) break;
+  }
+  assert.deepStrictEqual(r, { samePage: true, conflict: true });
+  assert.deepStrictEqual(await paragraphs(page), split, 'the split is still on screen');
+}, { md: P3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
