@@ -4950,6 +4950,50 @@ check('escape: after Escape an IME character is one undo step', DESKTOP, async (
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
 }, { md: BASE_MD, engines: ['chromium'] });
 
+// ── edit-search (v3.14.0 T9) ──
+const SEARCH_MD = '# D\n\n## One\n\nAlpha bravo.\n\n- item one\n\n## Two\n\nCharlie delta.\n';
+const SEARCH2_MD = '# D\n\n## Part\n\n- item one\n- item two\n\n## Rest\n\nCharlie delta.\n';
+const editMarks = (page) => page.evaluate(() => {
+  const ms = [...document.querySelectorAll('.content mark.search-hit')];
+  return { text: ms.map((m) => m.textContent).join('').toLowerCase(), types: ms.map((m) => m.closest('.ed-block').getAttribute('data-block-type')) };
+});
+const editMarksInSurface = (page) => page.evaluate(() => document.querySelectorAll('.ed-wys-armed mark.search-hit').length);
+const editSearch = async (page, q) => { await page.fill('#doc-search-input', q); await page.press('#doc-search-input', 'Enter'); await wait(300); };
+check('edit-search: a hit in a section paragraph is marked', DESKTOP, async (page) => {
+  await editSearch(page, 'charlie');
+  assert.deepStrictEqual(await editMarks(page), { text: 'charlie', types: ['paragraph'] });
+}, { md: SEARCH_MD });
+check('edit-search: a phrase across two blocks of a section is marked', DESKTOP, async (page) => {
+  await editSearch(page, 'bravo. item');
+  assert.deepStrictEqual(await editMarks(page), { text: 'bravo.item', types: ['paragraph', 'li'] });
+}, { md: SEARCH_MD });
+check('edit-search: a phrase across two adjacent list items is marked', DESKTOP, async (page) => {
+  await editSearch(page, 'one item');
+  assert.deepStrictEqual(await editMarks(page), { text: 'oneitem', types: ['li', 'li'] });
+}, { md: SEARCH2_MD });
+check('edit-search: clearing restores the edit DOM', DESKTOP, async (page) => {
+  const before = await page.evaluate(() => document.querySelector('.content').innerHTML);
+  await editSearch(page, 'charlie');
+  assert.strictEqual((await editMarks(page)).text, 'charlie', 'the mark exists before clearing');
+  await page.fill('#doc-search-input', ''); await page.press('#doc-search-input', 'Enter'); await wait(300);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.content').innerHTML), before);
+}, { md: SEARCH_MD });
+check('edit-search: typing into a marked paragraph saves plain text', DESKTOP, async (page, boot) => {
+  await editSearch(page, 'bravo');
+  assert.ok(await editMarksInSurface(page) > 0, 'a mark stands inside the paragraph surface');
+  await focusSurface(page, 'Alpha bravo.', 12); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), SEARCH_MD.replace('Alpha bravo.', 'Alpha bravo.X'));
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'no source box');
+  assert.strictEqual(await noticeText(page), null);
+}, { md: SEARCH_MD });
+check('edit-search: an untouched marked paragraph stays byte-identical', DESKTOP, async (page, boot) => {
+  await editSearch(page, 'bravo');
+  assert.ok(await editMarksInSurface(page) > 0, 'a mark stands inside the paragraph surface');
+  await focusSurface(page, 'Alpha bravo.', 0);
+  await page.fill('#doc-search-input', ''); await page.press('#doc-search-input', 'Enter'); await wait(300);
+  assert.strictEqual(await commitAndRead(page, boot), SEARCH_MD);
+}, { md: SEARCH_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

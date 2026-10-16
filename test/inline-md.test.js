@@ -30,6 +30,9 @@ assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b')).md, 'a<b
 assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), el('br', { 'data-ed-tail': '1' }))).md, 'a<br>');
 assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b', el('br', { 'data-ed-tail': '1' }))).md, 'a<br>b');
 assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, 'a'), el('br', { 'data-ed-tail': '1' }), el('strong', {}, 'b'))).md, '**a**<!-- -->**b**');
+// v3.14.0 T9: the reader's search mark is transparent; any other mark is not
+assert.strictEqual(serializeInline(el('p', {}, 'a ', el('mark', { class: 'search-hit is-selected' }, 'b'), ' c')).md, 'a b c');
+assert.deepStrictEqual(serializeInline(el('p', {}, 'a ', el('mark', {}, 'b'))).unsupported, ['MARK'], 'only the search mark is transparent');
 // escaping: backtick/asterisk/backslash always; underscore intraword NOT escaped
 assert.strictEqual(escapeText('snake_case_id'), 'snake_case_id');
 assert.strictEqual(escapeText('_lead and trail_'), '\\_lead and trail\\_');
