@@ -4745,6 +4745,56 @@ check('failed-render: a pending split counts as unsaved work', DESKTOP, async (p
   assert.deepStrictEqual(await paragraphs(page), split, 'the split is still on screen');
 }, { md: P3_MD });
 
+// ── enter-type (v3.14.0 T7): formatting chords and repeated clicks in one surface mid-render ──
+const editAlphaThenFlight = async (page) => {
+  await delayRender(page, 800);
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End'); await page.keyboard.type('1');
+};
+const P3_HEAD = '# D\n\nAlpha para one.1\n\n';
+check('enter-type: Ctrl+B mid-render bolds what is typed next', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.press('Control+b'); await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- **x**\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: Ctrl+I on a word double-clicked mid-render', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await dblclickChar(page, 'Bravo paragraph text.', 8); await page.keyboard.press('Control+i');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'Bravo *paragraph* text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: Ctrl+U mid-render underlines what is typed next', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.press('Control+u'); await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- <u>x</u>\n- charlie\n');
+}, { md: TIGHT_MD });
+check('enter-type: a Backspace before a second click in the same paragraph shifts the click back', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Backspace');
+  await clickChar(page, 'Bravo paragraph text.', 15); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'Brav paragraphZ text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a paste before a second click in the same paragraph shifts the click', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await clickChar(page, 'Bravo paragraph text.', 5);
+  await page.evaluate(() => { const dt = new DataTransfer(); dt.setData('text/plain', 'PP'); document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); });
+  await clickChar(page, 'Bravo paragraph text.', 15); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'BravoPP paragraphZ text.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: a word replaced before a second click shifts the click by the difference', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await dblclickChar(page, 'Bravo paragraph text.', 8); await page.keyboard.type('Q');
+  await clickChar(page, 'Bravo paragraph text.', 20); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'Bravo Q textZ.\n\nOmega.\n');
+}, { md: P3_MD });
+check('enter-type: two clicks at the same spot keep their typing in order', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('X');
+  await clickChar(page, 'Bravo paragraph text.', 7); await page.keyboard.type('Y');
+  await clickChar(page, 'Bravo paragraph text.', 7); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'BravoX pYZaragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
