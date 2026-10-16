@@ -4871,6 +4871,85 @@ check('escape: Escape in a typed-into transient puts the caret back and the next
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Y\n\nOmega.\n');
 }, { md: BASE_MD });
 
+// ── v3.14.0 B4 fix round 1 ──
+// I1: a replay into one paragraph, then into another (which commits the
+// first and replaces its surface), then a later click in the first.
+check('enter-type: a click in another paragraph between two clicks in the same one keeps the later click in place', DESKTOP, async (page, boot) => {
+  await editAlphaThenFlight(page);
+  await clickChar(page, 'Bravo paragraph text.', 5); await page.keyboard.type('X');
+  await clickChar(page, 'Omega.', 3); await page.keyboard.type('Y');
+  await clickChar(page, 'Bravo paragraph text.', 10); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'BravoX paraZgraph text.\n\nOmeYga.\n');
+}, { md: P3_MD });
+// I1, second half: a click made during a LATER render, in a surface whose
+// earlier replayed edit survived a failed render, was taken in that
+// surface's current text — it must not be shifted by that edit again. The
+// first render lands (800 ms), the second is held 1.5 s and fails.
+check('enter-type: a click during a later render, in a surface an earlier replay edited, lands where it was made', DESKTOP, async (page, boot) => {
+  let n = 0;
+  await page.route('**/api/render', async (route) => {
+    n++;
+    if (n === 1) { await wait(800); await route.continue(); return; }
+    if (n === 2) { await wait(1500); await route.fulfill({ status: 500, body: '{}' }); return; }
+    await route.continue();
+  });
+  await clickChar(page, 'Alpha para one.', 14); await page.keyboard.press('End'); await page.keyboard.type('1');
+  await clickChar(page, 'Omega.', 2); await page.keyboard.type('X');
+  await page.keyboard.press('End'); await page.keyboard.press('Enter'); await page.keyboard.type('Q');
+  // Bounded: until X has replayed and the replayed Enter's commit is out.
+  let seen = false;
+  for (const deadline = Date.now() + 5000; Date.now() < deadline && !seen;) {
+    await wait(25);
+    seen = n === 2 && await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === 'OmXega.'));
+  }
+  assert.strictEqual(seen, true, 'guard: X replayed into Omega and the second render is out');
+  await clickChar(page, 'OmXega.', 5); await page.keyboard.type('W');
+  assert.strictEqual(renderCounters.get(page).n > 0 && n === 2, true, 'guard: the click and W fell inside the second render');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const omega = await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].map((e) => e.textContent).find((t) => t.indexOf('Om') === 0));
+  assert.strictEqual(omega, 'OmXegWa.Q');
+}, { md: P3_MD });
+// I2: an item typed into after a failed retry, whose own retry fails too.
+check('failed-render: typing in a list item survives a retry that fails again', DESKTOP, async (page, boot) => {
+  await failRenders(page, 3);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await liText(page, 'charlie').click(); await renderIdle(page);
+  await page.keyboard.press('End'); await page.keyboard.type('Q');
+  await clickChar(page, 'Omega.', 5); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlieQ'], 'guard: the screen after three failed renders');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- charlieQ\n\nOmega.\n');
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlieQ'], 'DOM equals file');
+}, { md: LIST_PARA_MD });
+// I3 (R35): IME text into a focused surface with no burst.
+const imeType = async (page, ch) => {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: ch });
+};
+check('escape: an IME character typed right after Escape is kept', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await page.keyboard.press('Escape');
+  await imeType(page, '你');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.你\n\nOmega.\n');
+}, { md: BASE_MD, engines: ['chromium'] });
+check('escape: an IME character after Ctrl+S on an untouched paragraph is saved', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  await imeType(page, '你');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.你\n\nOmega.\n');
+}, { md: BASE_MD, engines: ['chromium'] });
+// Escape then IME composition, then Ctrl+Z steps back over the composed text
+// only (one burst, opened once).
+check('escape: after Escape an IME character is one undo step', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Escape');
+  await imeType(page, '你'); await wait(500);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].map((e) => e.textContent)[1]), 'Alpha.');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD, engines: ['chromium'] });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
