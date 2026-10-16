@@ -4795,6 +4795,82 @@ check('enter-type: two clicks at the same spot keep their typing in order', DESK
   assert.strictEqual(await commitAndRead(page, boot), P3_HEAD + 'BravoX pYZaragraph text.\n\nOmega.\n');
 }, { md: P3_MD });
 
+// ── shift-enter / escape (v3.14.0 T8) ──
+check('shift-enter: a character typed after Shift+Enter at a paragraph end lands after the break', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Shift+Enter'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.<br>Z\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shift-enter: the same in a list item', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Shift+Enter'); await page.keyboard.type('Z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo<br>Z\n- charlie\n');
+}, { md: TIGHT_MD });
+check('shift-enter: the same for Enter in a table cell', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a1', 2);
+  await page.keyboard.press('Enter'); await page.keyboard.type('Z');
+  assert.deepStrictEqual(mdTable(await commitAndRead(page, boot))[1], ['a1<br>Z', 'b1']);
+}, { md: TBL2_MD });
+check('shift-enter: the same while a list commit renders', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('ab');
+  await page.keyboard.press('Shift+Enter'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab<br>c\n- charlie\n');
+}, { md: TIGHT_MD });
+// Guard (may be green before T8): T8 must keep these bytes.
+check('shift-enter: Shift+Enter then leaving writes the same bytes as before', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Shift+Enter');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.<br>\n\nOmega.\n');
+}, { md: BASE_MD });
+check('escape: a character typed right after Escape is kept', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await page.keyboard.press('Escape');
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false });
+  await page.keyboard.type('Y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Y\n\nOmega.\n');
+}, { md: BASE_MD });
+check('escape: in a new list item, Escape then typing keeps the typing', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('ab'); await page.keyboard.press('Escape'); await page.keyboard.type('c');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- c\n- charlie\n');
+}, { md: TIGHT_MD });
+// Guard (may be green before T8): the T21 one-Ctrl+Z restore must survive
+// the caret staying put.
+check('escape: Ctrl+Z right after Escape still brings the discarded typing back', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.X\n\nOmega.\n');
+}, { md: BASE_MD });
+check('escape: typing after Ctrl+S on an untouched paragraph is saved', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  await page.keyboard.type('Q');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.Q\n\nOmega.\n');
+}, { md: BASE_MD });
+// Added: Ctrl+S, then a structural key in the same surface (dead before
+// ensureBurst — the T2/T3 note).
+check('escape: Enter after Ctrl+S on an untouched paragraph splits it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 3);
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlp\n\nha.\n\nOmega.\n');
+}, { md: BASE_MD });
+// Added (D8 for a transient): Escape in a transient with text abandons it and
+// the caret goes back where Enter was pressed, so the next key is kept.
+check('escape: Escape in a typed-into transient puts the caret back and the next key is kept', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new'); await page.keyboard.press('Escape');
+  assert.strictEqual(await transientCount(page), 0, 'the transient is gone');
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false });
+  await page.keyboard.type('Y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Y\n\nOmega.\n');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

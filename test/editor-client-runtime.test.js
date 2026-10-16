@@ -636,6 +636,19 @@ const LI_SEL_PREFIX = '.ed-block[data-block-type="li"]';
 function liSel(blockId) { return LI_SEL_PREFIX + '[data-block-id="' + blockId + '"]'; }
 function isLiSel(sel) { return sel.indexOf(LI_SEL_PREFIX) === 0; }
 
+// v3.14.0 T8 (D8): what Escape leaves behind in an armed surface — the
+// caret stays there, collapsed at the end of the reverted text. Plain values
+// only (never a handle).
+async function caretAfterEscape(page, surfaceSel) {
+  return page.evaluate((s) => {
+    const el = document.querySelector(s);
+    const sel = getSelection();
+    if (!el || !sel.rangeCount || !el.contains(sel.focusNode)) return { focused: !!el && document.activeElement === el, text: el ? el.textContent : null, offset: null };
+    const r = document.createRange(); r.setStart(el, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+    return { focused: document.activeElement === el, text: el.textContent, offset: sel.isCollapsed ? r.toString().length : null };
+  }, surfaceSel);
+}
+
 async function openWysiwyg(page, sel) {
   // Task 8 (per-li arch geometry): a li block's box ENCLOSES its nested
   // sublist, so page.click()'s center-of-box coordinate for a parent item
@@ -2197,16 +2210,20 @@ async function gutterGeometry(page, sel) {
         'clicking outside any block must move focus away from it'
       );
 
-      // Esc reverts the burst to its pre-focus baseline and ends it (blurs)
-      // — the always-on replacement for the old "Esc dismisses the bar".
+      // Esc reverts the burst to its pre-focus baseline and ends it — the
+      // always-on replacement for the old "Esc dismisses the bar".
+      // v3.14.0 T8 (D8), migrated: it no longer blurs. The caret stays in the
+      // reverted surface, at its end, so the next key is kept.
       await page.click(selHeading);
       await page.waitForFunction(
         (s) => document.activeElement === document.querySelector(s + ' > *'), {}, selHeading
       );
+      const headText = await page.evaluate((s) => document.querySelector(s + ' > *').textContent, selHeading);
       await page.keyboard.press('Escape');
-      await page.waitForFunction(
-        (s) => document.activeElement !== document.querySelector(s + ' > *'), {}, selHeading
-      );
+      await settleEditor(page);
+      assert.deepStrictEqual(await caretAfterEscape(page, selHeading + ' > *'),
+        { focused: true, text: headText, offset: headText.length },
+        'Esc keeps the caret in the reverted heading, at its end');
 
       // Clicking a lightbox target (an image) must open the lightbox, NOT
       // start editing — img/.mermaid/.graphviz/wavedrom stay excluded, same
@@ -4820,9 +4837,13 @@ async function gutterGeometry(page, sel) {
       );
 
       await page.keyboard.press('Escape');
-      await page.waitForFunction(
-        (s) => document.activeElement !== document.querySelector(s), {}, editEl
-      );
+      await settleEditor(page);
+      // v3.14.0 T8 (D8), migrated: Esc used to blur; the caret now stays in
+      // the reverted surface, at its end.
+      const boldText = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
+      assert.deepStrictEqual(await caretAfterEscape(page, editEl),
+        { focused: true, text: boldText, offset: boldText.length },
+        'WYSIWYG: Esc keeps the caret in the reverted surface, at its end');
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).innerHTML, editEl),
         originalHtml,
@@ -4991,8 +5012,10 @@ async function gutterGeometry(page, sel) {
       );
       await pressSaveAndLand(page);
       const fileText3 = fs.readFileSync(mdPath, 'utf8');
-      assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
-        'Shift+Enter\'s <br> must round-trip into the saved markdown source');
+      // v3.14.0 T8, tightened: the text typed after the break lands AFTER it
+      // (it used to land before it: `Second paragraph.SECOND-LINE<br>`).
+      assert.ok(fileText3.split('\n').includes('Second paragraph.<br>SECOND-LINE'),
+        'Shift+Enter\'s <br> must round-trip into the saved markdown source, the typed line after it, got:\n' + fileText3);
 
       await page.close();
       console.log('wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK');
@@ -5253,7 +5276,16 @@ async function gutterGeometry(page, sel) {
 
       for (let i = 0; i < 3; i++) {
         await openWysiwyg(page, sel);
+        const cycleText = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
         await page.keyboard.press('Escape');
+        await settleEditor(page);
+        // v3.14.0 T8 (D8), migrated: Esc keeps the caret (it used to blur).
+        // Blurred here by the test so the next cycle's click opens a fresh
+        // burst, exactly the focus/Esc cycle this scenario counts.
+        assert.deepStrictEqual(await caretAfterEscape(page, editEl),
+          { focused: true, text: cycleText, offset: cycleText.length },
+          'cycle ' + i + ': Esc keeps the caret in the reverted surface, at its end');
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction((s) => document.activeElement !== document.querySelector(s), {}, editEl);
       }
 
@@ -17224,13 +17256,26 @@ async function gutterGeometry(page, sel) {
           await page.keyboard.type('Z');
           await page.keyboard.press('Escape');
           await settleEditor(page);
-          assert.ok(await page.evaluate(() => document.activeElement === document.body),
-            'fixture sanity: Escape out of a burst must leave focus on BODY');
+          // v3.14.0 T8 (D8), migrated: Escape no longer leaves BODY focused —
+          // the caret stays in the reverted item, which has no burst. Tab there
+          // is class B (the no-burst bail) and must still be consumed; the old
+          // BODY shape is kept below by blurring explicitly.
+          assert.deepStrictEqual(await caretAfterEscape(page, alpha + ' > .ed-li-text'),
+            { focused: true, text: 'alpha', offset: 5 },
+            'fixture sanity: Escape out of a burst keeps the caret in the reverted item, at its end');
           const t = await pressRecorded(page, 'Tab');
           assert.strictEqual(t.prevented, true,
             'class A (post-Escape): Tab must be consumed. Focus went ' + t.before + ' -> ' + t.after);
           assert.strictEqual(t.after, t.before,
             'class A (post-Escape): focus must not move, got ' + t.before + ' -> ' + t.after);
+          await page.evaluate(() => document.activeElement.blur());
+          assert.ok(await page.evaluate(() => document.activeElement === document.body),
+            'fixture sanity: after a blur BODY holds focus');
+          const tb2 = await pressRecorded(page, 'Tab');
+          assert.strictEqual(tb2.prevented, true,
+            'class A (BODY after Escape): Tab must be consumed. Focus went ' + tb2.before + ' -> ' + tb2.after);
+          assert.strictEqual(tb2.after, tb2.before,
+            'class A (BODY after Escape): focus must not move, got ' + tb2.before + ' -> ' + tb2.after);
           await page.close();
         }
         // The other side of the same rule: a REAL control inside a block keeps

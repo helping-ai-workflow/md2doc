@@ -26,6 +26,10 @@ assert.strictEqual(serializeInline(el('p', {}, el('a', { href: 'http://x' }, 'ln
 assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '#ref-1' }, '[ref-1, §2]'))).md, '[[ref-1, §2]]');
 // br
 assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b')).md, 'a<br>b');
+// v3.14.0 T8: the tail <br> Shift+Enter leaves at a surface end is not written
+assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), el('br', { 'data-ed-tail': '1' }))).md, 'a<br>');
+assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b', el('br', { 'data-ed-tail': '1' }))).md, 'a<br>b');
+assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, 'a'), el('br', { 'data-ed-tail': '1' }), el('strong', {}, 'b'))).md, '**a**<!-- -->**b**');
 // escaping: backtick/asterisk/backslash always; underscore intraword NOT escaped
 assert.strictEqual(escapeText('snake_case_id'), 'snake_case_id');
 assert.strictEqual(escapeText('_lead and trail_'), '\\_lead and trail\\_');
