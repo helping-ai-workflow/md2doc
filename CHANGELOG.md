@@ -3,6 +3,17 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.14.1 — 2026-10-18
+
+### Changed — 文件
+
+- **README 改寫成繁體中文，加上截圖。** 架構比照同組織的其他專案：一句話說明、主截圖、
+  「它幫你解決什麼」對照表、三步開始、介面一覽（搜尋、深色、點圖放大、手機、編輯頁、波形編輯器），
+  接著是圖表寫法、常用參數、常見問題，開發者資訊收在可展開的區塊裡。篇幅從約 415 行縮到約 215 行；
+  原本完整的編輯器快捷鍵表拿掉了，改成四條重點；波形編輯器的快捷鍵在它自己的 ? 卡片裡。
+- 截圖來自一份虛構的示範文件 `docs/readme/demo.md`，用 `node docs/readme/shots.js`（headless
+  Chromium）重新產生。npm 套件不包含這些檔案；npm 頁面上的圖從 GitHub 載入。
+
 ## v3.14.0 — 2026-10-17
 
 ### Added — 編輯器（打字）
