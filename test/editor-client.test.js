@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1667,8 +1667,33 @@ function countInCode(source, needle) {
   // (counted above) and re-applies them with stack.redo() if its render
   // fails — so it is not a commit-then-render site any more (-1). Nothing else
   // changed. 1 declaration + 19 call sites = 20.
-  assert.strictEqual(helperCalls, 20,
-    'the helper must be DECLARED once and used at all nineteen ' +
+  // MIGRATED by v3.14.0 T1 (20 -> 20), checked rather than assumed, because
+  // the total hides a swap: insertParagraphAtTop() is gone with the ZWSP
+  // paragraph skeleton (-1), and commitLinesAtTransient() — the commit of a
+  // transient paragraph, one commitInsertionAt() over a range it computes
+  // itself — is a genuinely new commit-then-render site that owns its
+  // rollback (+1). 1 declaration + 19 call sites = 20.
+  // MIGRATED by v3.14.0 T2 (20 -> 23). Two genuinely new commit-then-render
+  // sites, one of which rolls back two ops:
+  //   * splitBlockAtCaret() — Enter mid-paragraph / mid-heading commits the
+  //     pending typing over the unsplit block (D4) and then commitSplit(),
+  //     and renders once. A failed render rolls back BOTH, newest first: two
+  //     lines (+2).
+  //   * retryPendingStructure() — re-commits a structure whose render failed
+  //     (D7) over the range it records, so it owns that rollback (+1).
+  // 1 declaration + 22 call sites = 23.
+  // MIGRATED by v3.14.0 T3 (23 -> 25). ONE genuinely new
+  // commit-then-render site that rolls back two ops: commitEdgeStructure(),
+  // the shared tail of every Backspace / Delete join, the heading ->
+  // paragraph conversion and the empty-block removal — the pending typing of
+  // the block (D4) and the structure, rolled back newest first (+2).
+  // 1 declaration + 24 call sites = 25.
+  // MIGRATED by v3.14.0 T2+T3 fix round 1 (25 -> 23): splitBlockAtCaret()
+  // no longer owns a rollback — the Enter split commits through
+  // commitTypingThenStructure() (the old commitEdgeStructure(), renamed),
+  // which was already counted (-2). 1 declaration + 22 call sites = 23.
+  assert.strictEqual(helperCalls, 23,
+    'the helper must be DECLARED once and used at all twenty-two ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2543,6 +2568,39 @@ function countInCode(source, needle) {
   assert.ok(openFn.includes('waveUndoOffer = null;') && openFn.includes('waveRedoOffer = null;'),
     'opening the wave editor drops both offers');
   console.log('editor-client: closing the wave editor keeps, and Ctrl+Z reverts the session — OK');
+}
+
+// v3.14.0 T1: commitInsertionAt — top, zero blocks, and the anchored case.
+{
+  const B = (id, s, e) => ({ id, type: 'paragraph', startLine: s, endLine: e });
+  const st = { lines: ['# Doc', '', 'Para1', ''], blocks: [B(0, 1, 1), B(1, 3, 3)], stack: new UndoStack() };
+  const r = commitInsertionAt(st, null, ['NEW']);
+  assert.deepStrictEqual(r.lines, ['NEW', '', '# Doc', '', 'Para1', '']);
+  assert.strictEqual(r.newStartLine, 1);
+  assert.deepStrictEqual(r.blocks.map((b) => [b.startLine, b.endLine]), [[3, 3], [5, 5]], 'every block shifts');
+  assert.deepStrictEqual(st.stack.undo(r.lines).lines, st.lines, 'undo is byte-identical');
+  for (const empty of [[''], ['', '', '']]) {
+    const z = commitInsertionAt({ lines: empty, blocks: [], stack: new UndoStack() }, null, ['Hello']);
+    assert.deepStrictEqual(z.lines, ['Hello', ''], JSON.stringify(empty));
+    assert.strictEqual(z.newStartLine, 1);
+  }
+  const m = commitInsertionAt({ lines: ['# Doc', '', 'Para1', '', 'Para2'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() }, 1, ['a', '', 'b']);
+  assert.deepStrictEqual(m.lines, ['# Doc', '', 'Para1', '', 'a', '', 'b', '', 'Para2']);
+  assert.strictEqual(m.newStartLine, 5);
+}
+
+// -- v3.14.0 T2: commitSplit() — Enter mid-paragraph, one op --------------
+{
+  const st = { lines: ['# D', '', 'Bravo paragraph text.', '', 'Omega.'], blocks: [
+    { id: 0, type: 'heading', startLine: 1, endLine: 1 }, { id: 1, type: 'paragraph', startLine: 3, endLine: 3 },
+    { id: 2, type: 'paragraph', startLine: 5, endLine: 5 }], stack: new UndoStack() };
+  const r = commitSplit(st, 1, 'Bra', 'vo paragraph text.');
+  assert.deepStrictEqual(r.lines, ['# D', '', 'Bra', '', 'vo paragraph text.', '', 'Omega.']);
+  assert.strictEqual(r.rightStartLine, 5);
+  assert.strictEqual(r.blocks.find((b) => b.id === 2).startLine, 7);
+  assert.deepStrictEqual(st.stack.undo(r.lines).lines, st.lines);
+  const h = commitSplit({ lines: ['a\\', 'b'], blocks: [{ id: 0, type: 'paragraph', startLine: 1, endLine: 2 }], stack: new UndoStack() }, 0, 'a\\\nb', 'c');
+  assert.strictEqual(h.rightStartLine, 4, 'a two-line left half');
 }
 
 console.log('editor-client.test.js OK');

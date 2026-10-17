@@ -26,6 +26,18 @@ assert.strictEqual(serializeInline(el('p', {}, el('a', { href: 'http://x' }, 'ln
 assert.strictEqual(serializeInline(el('p', {}, el('a', { href: '#ref-1' }, '[ref-1, §2]'))).md, '[[ref-1, §2]]');
 // br
 assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b')).md, 'a<br>b');
+// v3.14.0 T8: the tail <br> Shift+Enter leaves at a surface end is not written
+assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), el('br', { 'data-ed-tail': '1' }))).md, 'a<br>');
+assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b', el('br', { 'data-ed-tail': '1' }))).md, 'a<br>b');
+assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, 'a'), el('br', { 'data-ed-tail': '1' }), el('strong', {}, 'b'))).md, '**a**<!-- -->**b**');
+// v3.14.0 T9: the reader's search mark is transparent; any other mark is not
+assert.strictEqual(serializeInline(el('p', {}, 'a ', el('mark', { class: 'search-hit is-selected' }, 'b'), ' c')).md, 'a b c');
+assert.deepStrictEqual(serializeInline(el('p', {}, 'a ', el('mark', {}, 'b'))).unsupported, ['MARK'], 'only the search mark is transparent');
+{
+  const mk = (tag, attrs) => serializeInline(el('p', {}, el('strong', {}, 'a'), el(tag, attrs, 'b'), el('strong', {}, 'c'))).md;
+  assert.strictEqual(mk('mark', { class: 'search-hit' }), mk('span', {}), 'a search mark between two bold marks serializes like a bare span');
+  assert.strictEqual(mk('mark', { class: 'search-hit' }), '**a**b**c**');
+}
 // escaping: backtick/asterisk/backslash always; underscore intraword NOT escaped
 assert.strictEqual(escapeText('snake_case_id'), 'snake_case_id');
 assert.strictEqual(escapeText('_lead and trail_'), '\\_lead and trail\\_');

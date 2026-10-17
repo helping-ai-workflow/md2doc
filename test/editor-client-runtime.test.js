@@ -636,6 +636,19 @@ const LI_SEL_PREFIX = '.ed-block[data-block-type="li"]';
 function liSel(blockId) { return LI_SEL_PREFIX + '[data-block-id="' + blockId + '"]'; }
 function isLiSel(sel) { return sel.indexOf(LI_SEL_PREFIX) === 0; }
 
+// v3.14.0 T8 (D8): what Escape leaves behind in an armed surface — the
+// caret stays there, collapsed at the end of the reverted text. Plain values
+// only (never a handle).
+async function caretAfterEscape(page, surfaceSel) {
+  return page.evaluate((s) => {
+    const el = document.querySelector(s);
+    const sel = getSelection();
+    if (!el || !sel.rangeCount || !el.contains(sel.focusNode)) return { focused: !!el && document.activeElement === el, text: el ? el.textContent : null, offset: null };
+    const r = document.createRange(); r.setStart(el, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+    return { focused: document.activeElement === el, text: el.textContent, offset: sel.isCollapsed ? r.toString().length : null };
+  }, surfaceSel);
+}
+
 async function openWysiwyg(page, sel) {
   // Task 8 (per-li arch geometry): a li block's box ENCLOSES its nested
   // sublist, so page.click()'s center-of-box coordinate for a parent item
@@ -2197,16 +2210,20 @@ async function gutterGeometry(page, sel) {
         'clicking outside any block must move focus away from it'
       );
 
-      // Esc reverts the burst to its pre-focus baseline and ends it (blurs)
-      // — the always-on replacement for the old "Esc dismisses the bar".
+      // Esc reverts the burst to its pre-focus baseline and ends it — the
+      // always-on replacement for the old "Esc dismisses the bar".
+      // v3.14.0 T8 (D8), migrated: it no longer blurs. The caret stays in the
+      // reverted surface, at its end, so the next key is kept.
       await page.click(selHeading);
       await page.waitForFunction(
         (s) => document.activeElement === document.querySelector(s + ' > *'), {}, selHeading
       );
+      const headText = await page.evaluate((s) => document.querySelector(s + ' > *').textContent, selHeading);
       await page.keyboard.press('Escape');
-      await page.waitForFunction(
-        (s) => document.activeElement !== document.querySelector(s + ' > *'), {}, selHeading
-      );
+      await settleEditor(page);
+      assert.deepStrictEqual(await caretAfterEscape(page, selHeading + ' > *'),
+        { focused: true, text: headText, offset: headText.length },
+        'Esc keeps the caret in the reverted heading, at its end');
 
       // Clicking a lightbox target (an image) must open the lightbox, NOT
       // start editing — img/.mermaid/.graphviz/wavedrom stay excluded, same
@@ -4121,7 +4138,8 @@ async function gutterGeometry(page, sel) {
 
       // A NON-list kind under a li. The measured danger is a descendant at 4
       // columns, and it is one level down from the parent: measured against
-      // the pure core, commitBlockInsertion() anchored on `child` gives
+      // the pure core (v3.13, with the ZWSP paragraph skeleton of the time),
+      // commitBlockInsertion() anchored on `child` gave
       // '# Doc\n\n- alpha\n  - child\n\n​\n\n    - grand\n', and marked
       // lexes '    - grand' after a paragraph as an INDENTED CODE BLOCK — the
       // item's content is gone. Anchoring on the end of the subtree is what
@@ -4142,15 +4160,20 @@ async function gutterGeometry(page, sel) {
               () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length),
             1, 'the paragraph must actually have landed');
           assert.strictEqual(await bannerNow(page), null, 'and it must not have been refused');
-          // The skeleton paragraph is a `pristineInsert`: left untouched, the
-          // very Ctrl+S below resolves its burst and DISCARDS it again (a
-          // pre-existing contract — see resolveBurst()'s pristineInsert
-          // branch — and measured here: the save came back without it).
-          // Typing into it is what a real user does, and it is what makes the
-          // byte assertion below about the insertion rather than about that
-          // discard. focusInsertedBlock() has already selected the ZWSP, so
-          // the keystrokes replace it.
+          // v3.14.0 T1: the new paragraph is a TRANSIENT, and it sits after the
+          // anchor's whole subtree on screen — exactly where its commit lands.
+          assert.deepStrictEqual(
+            await page.evaluate(() => Array.from(document.querySelectorAll('.content .ed-block'))
+              .map((b) => (b.hasAttribute('data-ed-transient') ? '~' : '') + b.getAttribute('data-block-type'))),
+            ['heading', 'li', 'li', 'li', '~paragraph'],
+            'the transient opens after `grand`, not between `child` and its child');
+          // It writes nothing until it has content: a save now (focus still
+          // inside it, so it is kept) leaves the file byte-identical.
           await settleEditor(page);
+          assert.strictEqual(await saveAndRead(page, t7fMd), '# Doc\n\n- alpha\n  - child\n    - grand\n',
+            'an untyped transient writes no byte');
+          // Typing into it is what a real user does, and it is what makes the
+          // byte assertion below about the insertion.
           assert.strictEqual(
             await page.evaluate(() => !!(document.activeElement &&
               document.activeElement.classList.contains('ed-wys-armed'))),
@@ -4720,8 +4743,11 @@ async function gutterGeometry(page, sel) {
 
     // ── Task 3 WYSIWYG: click paragraph -> contenteditable, no textarea;
     //    type + Enter commits; file line updated on save ──────────────────
+    // v3.14.0 T2: Enter at the end still commits the edit, and now also opens
+    // a transient empty paragraph below, focused, which writes nothing.
     {
       const page = await newPage(browser);
+      const fileBefore = fs.readFileSync(mdPath, 'utf8');
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const ids = await page.evaluate(() =>
@@ -4753,18 +4779,28 @@ async function gutterGeometry(page, sel) {
         () => document.querySelector('.content').innerHTML.includes('WYSIWYG-EDITED-TEXT'),
         { timeout: 5000 }
       );
+      await settleEditor(page);
       assert.ok(
         await page.evaluate(() => !document.querySelector('.content').innerHTML.includes('undefined')),
         'commit must not stringify undefined into the DOM'
       );
+      assert.deepStrictEqual(await page.evaluate(() => {
+        const a = document.activeElement;
+        return { inTransient: !!(a && a.closest && a.closest('[data-ed-transient]')),
+          transients: document.querySelectorAll('[data-ed-transient]').length,
+          text: a ? a.textContent : null };
+      }), { inTransient: true, transients: 1, text: '' },
+      'v3.14.0 T2: Enter at the end opens ONE empty transient paragraph below, with the caret in it');
 
       await pressSaveAndLand(page);
       const fileText1 = fs.readFileSync(mdPath, 'utf8');
-      assert.ok(fileText1.includes('WYSIWYG-EDITED-TEXT'),
-        'WYSIWYG: Enter-commit + save must update the file on disk');
+      assert.strictEqual(fileBefore.split('First paragraph.').length, 2,
+        'fixture sanity: "First paragraph." appears exactly once on disk');
+      assert.strictEqual(fileText1, fileBefore.replace('First paragraph.', 'WYSIWYG-EDITED-TEXT'),
+        'WYSIWYG: Enter-commit + save writes exactly the edited line; the transient writes nothing');
 
       await page.close();
-      console.log('wysiwyg: paragraph edit commits via Enter and persists to file — OK');
+      console.log('wysiwyg: Enter at the end of an edited paragraph commits it and opens an empty paragraph below — OK');
     }
 
     // ── Task 3 WYSIWYG: **bold** shows <strong> while editing (no literal
@@ -4801,9 +4837,13 @@ async function gutterGeometry(page, sel) {
       );
 
       await page.keyboard.press('Escape');
-      await page.waitForFunction(
-        (s) => document.activeElement !== document.querySelector(s), {}, editEl
-      );
+      await settleEditor(page);
+      // v3.14.0 T8 (D8), migrated: Esc used to blur; the caret now stays in
+      // the reverted surface, at its end.
+      const boldText = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
+      assert.deepStrictEqual(await caretAfterEscape(page, editEl),
+        { focused: true, text: boldText, offset: boldText.length },
+        'WYSIWYG: Esc keeps the caret in the reverted surface, at its end');
       assert.strictEqual(
         await page.evaluate((s) => document.querySelector(s).innerHTML, editEl),
         originalHtml,
@@ -4972,8 +5012,10 @@ async function gutterGeometry(page, sel) {
       );
       await pressSaveAndLand(page);
       const fileText3 = fs.readFileSync(mdPath, 'utf8');
-      assert.ok(fileText3.includes('<br>') && fileText3.includes('SECOND-LINE'),
-        'Shift+Enter\'s <br> must round-trip into the saved markdown source');
+      // v3.14.0 T8, tightened: the text typed after the break lands AFTER it
+      // (it used to land before it: `Second paragraph.SECOND-LINE<br>`).
+      assert.ok(fileText3.split('\n').includes('Second paragraph.<br>SECOND-LINE'),
+        'Shift+Enter\'s <br> must round-trip into the saved markdown source, the typed line after it, got:\n' + fileText3);
 
       await page.close();
       console.log('wysiwyg: Shift+Enter inserts <br>, later Enter commits it — OK');
@@ -5234,7 +5276,16 @@ async function gutterGeometry(page, sel) {
 
       for (let i = 0; i < 3; i++) {
         await openWysiwyg(page, sel);
+        const cycleText = await page.evaluate((s) => document.querySelector(s).textContent, editEl);
         await page.keyboard.press('Escape');
+        await settleEditor(page);
+        // v3.14.0 T8 (D8), migrated: Esc keeps the caret (it used to blur).
+        // Blurred here by the test so the next cycle's click opens a fresh
+        // burst, exactly the focus/Esc cycle this scenario counts.
+        assert.deepStrictEqual(await caretAfterEscape(page, editEl),
+          { focused: true, text: cycleText, offset: cycleText.length },
+          'cycle ' + i + ': Esc keeps the caret in the reverted surface, at its end');
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction((s) => document.activeElement !== document.querySelector(s), {}, editEl);
       }
 
@@ -5779,8 +5830,11 @@ async function gutterGeometry(page, sel) {
         'Bold must wrap "commit" in <strong> before commit'
       );
 
-      await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
-      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
+      // blur() -> the delegated focusout handler -> switchAwayFrom()
       // is an async chain now (one more hop than Phase 2's direct commit()
       // call from the keydown handler itself) — waiting on innerHTML alone
       // is not a reliable "commit landed" signal here: applyMarkToggle()
@@ -5807,7 +5861,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar Bold commit: the saved source must contain **commit**, got: ' + fileTextBold);
 
       await page.close();
-      console.log('sel-toolbar: Bold + Enter commits **word** to source and <strong> to render — OK');
+      console.log('sel-toolbar: Bold + leaving the paragraph commits **word** to source and <strong> to render — OK');
     }
 
     // ── FIX 2: clicking S (刪除線/strikethrough) wraps the selection in
@@ -5872,7 +5926,10 @@ async function gutterGeometry(page, sel) {
         'S must wrap "commit" in <del> before commit'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('<del>commit</del>'),
@@ -5885,7 +5942,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar S commit: the saved source must contain ~~commit~~, got: ' + fileTextStrike);
 
       await page.close();
-      console.log('sel-toolbar: S + Enter commits ~~word~~ to source and <del> to render — OK');
+      console.log('sel-toolbar: S + leaving the paragraph commits ~~word~~ to source and <del> to render — OK');
     }
 
     // ── FIX 2: U applied once, Enter to commit -> the source line gains the
@@ -5910,7 +5967,10 @@ async function gutterGeometry(page, sel) {
         'U must wrap "commit" in <u> before commit'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('<u>commit</u>'),
@@ -5923,7 +5983,7 @@ async function gutterGeometry(page, sel) {
         'sel-toolbar U commit: the saved source must contain the literal <u>commit</u>, got: ' + fileTextU);
 
       await page.close();
-      console.log('sel-toolbar: U + Enter commits <u>word</u> to source and renders underlined — OK');
+      console.log('sel-toolbar: U + leaving the paragraph commits <u>word</u> to source and renders underlined — OK');
     }
 
     // ── Task 4: the code button wraps the WHOLE paragraph (which contains a
@@ -5960,7 +6020,10 @@ async function gutterGeometry(page, sel) {
         'the code button must wrap the selection in <code>'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction((s) => !!document.querySelector(s + ' code'), {}, sel);
       await pressSaveAndLand(page);
       const fileTextCode = fs.readFileSync(mdPath, 'utf8');
@@ -5999,7 +6062,10 @@ async function gutterGeometry(page, sel) {
         'the link button must wrap the selection in <a href> using the (stubbed) prompt result'
       );
 
-      await page.keyboard.press('Enter');
+      // v3.14.0 T2: the selection still stands here, and Enter with a
+      // selection now replaces it with a paragraph split — so this commits by
+      // leaving the paragraph (blur), the gesture this scenario is about.
+      await page.evaluate(() => document.activeElement.blur());
       await page.waitForFunction(
         () => document.querySelector('.content').innerHTML.includes('href="https://example.org"'),
         { timeout: 5000 }
@@ -6209,12 +6275,15 @@ async function gutterGeometry(page, sel) {
         sl.addRange(r);
       }, editEl);
 
-      // Commit via plain Enter (no mark toggle needed — any text-changing
-      // commit triggers the same rerenderAll() body swap this fix targets).
+      // Commit by leaving the paragraph (no mark toggle needed — any
+      // text-changing commit triggers the same rerenderAll() body swap this
+      // fix targets). v3.14.0 T2: not Enter any more — Enter at the end now
+      // also opens a transient paragraph whose own burst attaches a listener
+      // of its own, and this scenario counts listeners down to zero.
       await page.evaluate((s) => document.querySelector(s).focus(), editEl);
       await page.keyboard.type('-EDITED');
-      await page.keyboard.press('Enter');
-      // Enter -> blur() -> the delegated focusout handler -> switchAwayFrom()
+      await page.evaluate(() => document.activeElement.blur());
+      // blur() -> the delegated focusout handler -> switchAwayFrom()
       // is an async chain (see the sel-toolbar Bold+Enter scenario's comment
       // above for why an innerHTML-only wait races the actual commit) — wait
       // for __selCount to actually settle at 0 before asserting on it.
@@ -8808,8 +8877,10 @@ async function gutterGeometry(page, sel) {
           'e2e: Bold via the toolbar must wrap the selected word in <strong>'
         );
 
-        // Commit the paragraph session (plain Enter — mousedown preventDefault
-        // on the toolbar button kept focus/selection on paraEditEl).
+        // Commit the paragraph session by leaving it (mousedown preventDefault
+        // on the toolbar button kept focus/selection on paraEditEl). v3.14.0
+        // T2: was plain Enter; with the selection still standing, Enter now
+        // replaces it with a paragraph split.
         // The <strong> asserted above is OPTIMISTIC DOM: WYSIWYG puts it on
         // screen BEFORE the commit's /api/render round-trip lands, so a
         // waitForFunction on that markup returns while rerenderAll()'s
@@ -8819,7 +8890,7 @@ async function gutterGeometry(page, sel) {
         // Invisible on a fast dev box, a real flake on a loaded CI runner, so
         // wait for the swap itself (the idiom awaitContentSwap() exists for).
         const paraStale = await nodeHandleFor(page, paraSel);
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await awaitContentSwap(page, paraStale);
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
@@ -9459,11 +9530,11 @@ async function gutterGeometry(page, sel) {
 
     // Row 3 (top-level press): Enter on an EMPTY top-level item removes it
     // AND ends the burst (commits). Spec §4 converts the block to a
-    // paragraph; markdown cannot persist an empty paragraph, so the existing
-    // §10 pristine-insert machinery supplies a self-removing provisional
-    // paragraph — abandoning it (here: never typing into it before Ctrl+S)
-    // leaves the file byte-identical to "the li was just deleted", which is
-    // exactly what this scenario asserts. See the dedicated row-3 scenario
+    // paragraph; markdown cannot persist an empty paragraph, so a transient
+    // paragraph (v3.14.0) takes the item's place — it writes nothing until
+    // typed into (here: never, before Ctrl+S), so the file is byte-identical
+    // to "the li was just deleted", which is exactly what this scenario
+    // asserts. See the dedicated row-3 scenario
     // below for the two-press outdent-then-paragraph flow and its undo
     // granularity.
     {
@@ -9490,13 +9561,11 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
         // Task 8: the top-level press ALSO hands the user a focused provisional
-        // paragraph (spec §4's "converts to a paragraph") — a second commit
-        // that lands strictly after the removal's own re-render. Wait for it to
-        // be established before saving, so this scenario measures the settled
-        // state instead of racing the second half of the flow (a Ctrl+S that
-        // arrives in between would persist the paragraph's placeholder line,
-        // because resolveBurst() has not had a chance to recognise the insert
-        // as abandoned yet).
+        // paragraph (spec §4's "converts to a paragraph"). Since v3.14.0 it is
+        // a transient that writes nothing, created right after the removal's
+        // own re-render; waiting for it to have focus is what makes the save
+        // below measure the settled state (a transient kept by that save,
+        // since focus is inside it, writes no byte either way).
         await page.waitForFunction(
           () => !!document.activeElement && !!document.activeElement.closest &&
             !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
@@ -9845,10 +9914,9 @@ async function gutterGeometry(page, sel) {
 
     // Row 3: an EMPTY li + Enter outdents ONE level per press; at top level
     // the next press converts the block to a paragraph. Markdown cannot
-    // persist an empty paragraph, so the top-level press reuses the existing
-    // §10 pristine-insert flow: the user gets a focused provisional paragraph
-    // that self-removes if abandoned, and becomes a real paragraph as soon as
-    // anything is typed into it.
+    // persist an empty paragraph, so the top-level press leaves a focused
+    // TRANSIENT paragraph (v3.14.0) in the item's place: it writes nothing
+    // until typed into, and becomes a real paragraph when its text commits.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc(['# List doc', '', '- alpha', '  - nested item', '']);
@@ -9902,6 +9970,15 @@ async function gutterGeometry(page, sel) {
           true,
           'row 3 press 2 (top level): the user must end up in a focused provisional PARAGRAPH block'
         );
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const ae = document.activeElement;
+            const blockEl = ae && ae.closest && ae.closest('.ed-block');
+            return { transient: !!blockEl && blockEl.hasAttribute('data-ed-transient'),
+              id: blockEl ? blockEl.getAttribute('data-block-id') : 'none' };
+          }),
+          { transient: true, id: null },
+          'v3.14.0: that paragraph is the id-less transient, not a ZWSP paragraph written to the file');
 
         // Typing into it makes it real; blur commits it.
         await page.keyboard.type('PARA');
@@ -9921,17 +9998,13 @@ async function gutterGeometry(page, sel) {
       }
     }
 
-    // Row 3, top-level press — UNDO GRANULARITY (RULING F-J).
-    // Every other structural key is ONE undo op. This press is not: markdown
-    // cannot hold an empty paragraph, so it is li-removal (commit #1) followed
-    // by the §10 pristine paragraph insert (commit #2). The repo's existing
-    // pristine machinery makes an ABANDONED insert cost zero NET undo ops
-    // (UndoStack.discardTop(), see "abandoned inserts (all 5 kinds)
-    // auto-remove" and "Ctrl+Z on a pristine insert removes ONLY the insert"
-    // above), so the OBSERVED granularity — asserted below rather than forced
-    // — is: Ctrl+Z #1 removes the provisional paragraph and pushes nothing;
-    // Ctrl+Z #2 is the first one that touches the stack, and it reverts the
-    // li removal. Two presses to get back to the pre-key lines.
+    // Row 3, top-level press — UNDO GRANULARITY (v3.14.0 T1 replaces RULING
+    // F-J's two commits). The press is ONE op, the li removal; the paragraph
+    // that takes the item's place is a transient that wrote nothing. So:
+    // Ctrl+Z #1, in the still-empty transient, removes the transient and
+    // touches no op (it is not the undo of anything written); Ctrl+Z #2 is
+    // the first one that pops the stack, and it reverts the li removal. Two
+    // presses to get back to the pre-key lines, of which only one is an op.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath, original: lorig } =
         await setupListDoc(['# List doc', '', '- alpha', '- beta', '']);
@@ -9955,8 +10028,14 @@ async function gutterGeometry(page, sel) {
         // commit so the next click sees the POST-swap DOM.
         await settleEditor(page);
 
-        // Ctrl+Z #1: the provisional paragraph is still untouched, so this is
-        // the pristine auto-remove — the li removal is NOT reverted with it.
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-block[data-ed-transient]').length), 1,
+          'the press leaves exactly one transient paragraph');
+        assert.strictEqual(await saveAndRead(page, lmdPath), '# List doc\n\n- alpha\n',
+          'ONE op on disk: the removal; the transient wrote nothing (the save keeps it: focus is inside)');
+
+        // Ctrl+Z #1: the transient is still empty, so this takes it away and
+        // pops nothing — the li removal is NOT reverted with it.
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
@@ -9966,6 +10045,8 @@ async function gutterGeometry(page, sel) {
         );
         assert.strictEqual(await runShapeOf(page, list0), '0:alpha',
           'Ctrl+Z #1 must remove ONLY the provisional paragraph — the li removal stays applied');
+        assert.strictEqual(await saveAndRead(page, lmdPath), '# List doc\n\n- alpha\n',
+          'Ctrl+Z #1 popped no op: the file still holds the removal');
 
         // Ctrl+Z #2: the first press that pops the undo stack — the emptied
         // li comes back.
@@ -9988,8 +10069,8 @@ async function gutterGeometry(page, sel) {
           JSON.stringify(fileText));
 
         await page.close();
-        console.log('list WYSIWYG (row 3 / F-J): top-level empty-Enter granularity = pristine-insert ' +
-          'auto-remove + ONE stack op — OK');
+        console.log('list WYSIWYG (row 3 / F-J): top-level empty-Enter granularity = ONE op (the removal) ' +
+          'plus a transient that Ctrl+Z takes away without an op — OK');
       } finally {
         lsrv.close();
       }
@@ -11781,9 +11862,9 @@ async function gutterGeometry(page, sel) {
     // Reviewer's exact byte probe: "# Doc\n\n- Only item\n\nTrailer" ->
     // "# Doc\n\nTrailer". Also verifies a FOLLOW-UP edit after the removal
     // still maps to the right block (blockmap/shiftBlocks integrity).
-    // Task 8: the provisional paragraph the top-level press inserts is
-    // abandoned (never typed into) here, so it self-removes on the Ctrl+S
-    // resolution and leaves no trace — see the row-3 scenario below.
+    // Task 8: the provisional paragraph the top-level press leaves is a
+    // transient (v3.14.0) that is never typed into here, so it writes no byte;
+    // the click into Trailer below removes it — see the row-3 scenario below.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc(['# Doc', '', '- Only item', '', 'Trailer']);
@@ -11804,13 +11885,11 @@ async function gutterGeometry(page, sel) {
           { timeout: 5000 }
         );
         // Task 8: the top-level press ALSO hands the user a focused provisional
-        // paragraph (spec §4's "converts to a paragraph") — a second commit
-        // that lands strictly after the removal's own re-render. Wait for it to
-        // be established before saving, so this scenario measures the settled
-        // state instead of racing the second half of the flow (a Ctrl+S that
-        // arrives in between would persist the paragraph's placeholder line,
-        // because resolveBurst() has not had a chance to recognise the insert
-        // as abandoned yet).
+        // paragraph (spec §4's "converts to a paragraph"). Since v3.14.0 it is
+        // a transient that writes nothing, created right after the removal's
+        // own re-render; waiting for it to have focus is what makes the save
+        // below measure the settled state (a transient kept by that save,
+        // since focus is inside it, writes no byte either way).
         await page.waitForFunction(
           () => !!document.activeElement && !!document.activeElement.closest &&
             !!document.activeElement.closest('.ed-block[data-block-type="paragraph"]'),
@@ -11890,7 +11969,10 @@ async function gutterGeometry(page, sel) {
         const page = await newPage(browser);
         await page.goto(murl, { waitUntil: 'networkidle2' });
 
-        // 1) paragraph edit (Ctrl+A -> type -> Enter commits and ends the burst).
+        // 1) paragraph edit (Ctrl+A -> type -> leaving the paragraph commits
+        // and ends the burst). v3.14.0 T2: was Enter, which now also opens a
+        // transient paragraph and keeps the caret in it — and this flow needs
+        // focus on BODY before its next step.
         const paraSel = await paragraphSelByText(page, 'Paragraph text here for editing.');
         const paraEditEl = paraSel + ' > *';
         await openWysiwyg(page, paraSel);
@@ -11899,7 +11981,7 @@ async function gutterGeometry(page, sel) {
         await page.keyboard.press('KeyA');
         await page.keyboard.up('Control');
         await page.keyboard.type('Paragraph text EDITED for the mega e2e.');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Paragraph text EDITED for the mega e2e.'),
           { timeout: 5000 }
@@ -12881,10 +12963,19 @@ async function gutterGeometry(page, sel) {
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
         );
-        // Caret must land in the new block's own edit surface, focused and
-        // ready to type — the "select-all placeholder" contract means the
-        // very first keystroke replaces the ZWSP placeholder, not appends
-        // next to it.
+        // v3.14.0 T1: the new paragraph is a focused, empty TRANSIENT — no
+        // ZWSP, nothing written yet.
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const t = document.querySelectorAll('.ed-block[data-ed-transient]');
+            const ae = document.activeElement;
+            return { count: t.length, text: t.length ? t[0].textContent : null,
+              focused: !!(t.length && ae && t[0].contains(ae)), id: t.length ? t[0].getAttribute('data-block-id') : 'none' };
+          }),
+          { count: 1, text: '', focused: true, id: null },
+          'the inserted paragraph must be one focused, empty, id-less transient');
+        assert.strictEqual(fs.readFileSync(biMdPath, 'utf8'), '# Doc\n\nPara one.\n\nPara two.',
+          'nothing reaches the file before the transient has content');
         await page.keyboard.type('Hello inserted');
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(savedText, '# Doc\n\nPara one.\n\nHello inserted\n\nPara two.',
@@ -12999,10 +13090,20 @@ async function gutterGeometry(page, sel) {
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
         );
-        // No typing — Ctrl+Z immediately: the fresh burst on the new block
-        // is already at its history bottom (untouched), so this cascades
-        // straight out to the document-level undo() stack, which must
-        // remove the whole inserted block in ONE step.
+        // v3.14.0 T1: the new paragraph is a focused, empty TRANSIENT — no
+        // ZWSP, nothing written yet.
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const t = document.querySelectorAll('.ed-block[data-ed-transient]');
+            const ae = document.activeElement;
+            return { count: t.length, text: t.length ? t[0].textContent : null,
+              focused: !!(t.length && ae && t[0].contains(ae)), id: t.length ? t[0].getAttribute('data-block-id') : 'none' };
+          }),
+          { count: 1, text: '', focused: true, id: null },
+          'the inserted paragraph must be one focused, empty, id-less transient');
+        // No typing — Ctrl+Z immediately. v3.14.0 T1: the transient wrote no
+        // op, so the Ctrl+Z is not a document undo: it takes the transient
+        // away and puts the caret back at the end of the block above it.
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
         await page.keyboard.up('Control');
@@ -13010,9 +13111,22 @@ async function gutterGeometry(page, sel) {
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount
         );
+        await settleEditor(page);
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const ae = document.activeElement;
+            const sel = getSelection();
+            if (!ae || !ae.classList.contains('ed-wys-armed') || !sel.rangeCount) return null;
+            const r = document.createRange();
+            r.setStart(ae, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+            return { text: ae.textContent, offset: r.toString().length,
+              transients: document.querySelectorAll('[data-ed-transient]').length };
+          }),
+          { text: 'Para one.', offset: 9, transients: 0 },
+          'Ctrl+Z removes the transient and leaves the caret at the end of the block above');
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(savedText, original,
-          'Ctrl+Z after a block insert must remove it entirely (ONE undo op), got:\n' + savedText);
+          'Ctrl+Z after a block insert must remove it entirely, got:\n' + savedText);
         await page.close();
         console.log('§10: Ctrl+Z removes insert — OK');
       } finally {
@@ -13064,9 +13178,15 @@ async function gutterGeometry(page, sel) {
           const paras = document.querySelectorAll('.ed-block[data-block-type="paragraph"] > *');
           return Array.from(paras).some((p) => p === document.activeElement);
         });
-        // Review fix: an UNTOUCHED insert now auto-removes itself on save
-        // (see the dedicated abandon scenario below) — type into it so
-        // "the insert lands" is actually what this scenario exercises.
+        // v3.14.0 T1: the insert is a transient — it writes nothing until it
+        // has content, so the file holds ONLY the dirty burst's commit here.
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('.ed-block[data-ed-transient]').length), 1,
+          'the 段落 insert is one transient');
+        assert.strictEqual(
+          await saveAndRead(page, biMdPath),
+          '# Doc\n\nDirty target text here. EDITED\n\nInsert target text here.\n\nTrailer text here.',
+          'before typing, only the dirty burst\'s commit is on disk');
         await page.keyboard.type('New inserted text');
 
         const savedText = await saveAndRead(page, biMdPath);
@@ -13197,6 +13317,16 @@ async function gutterGeometry(page, sel) {
             {}, countSel, beforeCount + 1
           );
           if (waitExtra) await page.waitForSelector(waitExtra);
+          // v3.14.0 T1: 段落 is a transient (zero ops from the start, nothing
+          // to discard); the other four kinds are still skeletons written to
+          // the file and discarded again (discardPristineInsert()).
+          assert.strictEqual(
+            await page.evaluate(() => document.querySelectorAll('.ed-block[data-ed-transient]').length),
+            kind === '段落' ? 1 : 0, kind + ': transient count after the insert');
+          if (kind === '段落') {
+            assert.strictEqual(fs.readFileSync(biMdPath, 'utf8'), original,
+              '段落: the abandoned transient never wrote a byte, even before it was abandoned');
+          }
           // Click a DIFFERENT, untouched block — a real blur, no typing.
           const awaySel = await paragraphSelByText(page, 'Away target.');
           await page.click(awaySel);
@@ -13221,7 +13351,8 @@ async function gutterGeometry(page, sel) {
           '.ed-block[data-block-type="code"] textarea.ed-raw');
 
         await page.close();
-        console.log('§10 review fix: abandoned inserts (all 5 kinds) auto-remove, zero net undo ops, byte-identical file — OK');
+        console.log('§10 review fix: abandoned inserts (all 5 kinds) auto-remove, zero net undo ops, byte-identical file ' +
+          '(段落: an abandoned transient, zero ops) — OK');
       } finally {
         biSrv.close();
       }
@@ -13229,7 +13360,10 @@ async function gutterGeometry(page, sel) {
 
     // ── review fix: Ctrl+Z on an untouched pristine insert must still
     //    remove it in exactly ONE step (not clobber the doc by cascading a
-    //    SECOND undo past it) — the auto-remove-on-blur IS the undo. ──────
+    //    SECOND undo past it) — the auto-remove-on-blur IS the undo.
+    //    v3.14.0 T1: the 段落 insert is now a transient, so the step is
+    //    "Ctrl+Z in the empty transient removes only the transient; the
+    //    earlier edit survives". ──────────────────────────────────────────
     {
       const { srv: biSrv, url: biUrl, mdPath: biMdPath, original } = await setupBlockOpsDoc(
         ['# Doc', '', 'Earlier edit target.', '', 'Insert anchor.']);
@@ -13243,7 +13377,10 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, earlierSel);
         await page.keyboard.type(' EDITED');
         const staleEarlier = await nodeHandleFor(page, earlierSel);
-        await page.keyboard.press('Enter');
+        // v3.14.0 T2: committed by leaving the paragraph, not Enter — Enter at
+        // the end now also opens a transient below, and the paragraph count
+        // this scenario takes next must not include it.
+        await page.evaluate(() => document.activeElement.blur());
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('Earlier edit target. EDITED')
         );
@@ -13259,6 +13396,17 @@ async function gutterGeometry(page, sel) {
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
         );
+        // v3.14.0 T1: the new paragraph is a focused, empty TRANSIENT — no
+        // ZWSP, nothing written yet.
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const t = document.querySelectorAll('.ed-block[data-ed-transient]');
+            const ae = document.activeElement;
+            return { count: t.length, text: t.length ? t[0].textContent : null,
+              focused: !!(t.length && ae && t[0].contains(ae)), id: t.length ? t[0].getAttribute('data-block-id') : 'none' };
+          }),
+          { count: 1, text: '', focused: true, id: null },
+          'the inserted paragraph must be one focused, empty, id-less transient');
         // No typing — Ctrl+Z immediately.
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyZ');
@@ -13275,8 +13423,12 @@ async function gutterGeometry(page, sel) {
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(savedText, '# Doc\n\nEarlier edit target. EDITED\n\nInsert anchor.',
           'the earlier edit must still be saved; the insert must be fully gone, got:\n' + savedText);
+        assert.strictEqual(
+          await page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length), 0,
+          'and the transient is gone from the screen');
         await page.close();
-        console.log('§10 review fix: Ctrl+Z on a pristine insert removes ONLY the insert (no double-cascade) — OK');
+        console.log('§10 review fix: Ctrl+Z on a pristine insert removes ONLY the insert (no double-cascade; ' +
+          '段落 = Ctrl+Z in the empty transient removes only the transient) — OK');
       } finally {
         biSrv.close();
       }
@@ -14822,6 +14974,17 @@ async function gutterGeometry(page, sel) {
         }, codeSel);
         await clickInsertMenuItem(page, charlieSel, '段落');
         await settleEditor(page);
+        // v3.14.0 T1: a transient after the block it was pressed on (Charlie),
+        // which the raw-edit commit renumbered.
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const t = document.querySelector('[data-ed-transient]');
+            const prev = t && t.previousElementSibling;
+            return { prev: prev ? prev.textContent.replace(/[＋⠿]/g, '').trim() : null,
+              focused: !!(t && t.contains(document.activeElement)) };
+          }),
+          { prev: 'Charlie', focused: true },
+          'the transient opens focused, right after Charlie');
         await page.keyboard.type('Inserted');
         await page.evaluate(() => { document.activeElement && document.activeElement.blur(); });
         await settleEditor(page);
@@ -14892,6 +15055,17 @@ async function gutterGeometry(page, sel) {
     // '# D\n\n\nGHOST\n\n- - b\n', a ghost block plus a doubled blank, with
     // no banner. With the guards in place: [heading, li, li], the refusal
     // banner, and '# D\n\n- - b\n'.
+    //
+    // v3.14.0 T1 MIGRATION: the row-3 press no longer goes through
+    // insertBlockBelow() at all — it leaves a TRANSIENT paragraph, placed
+    // after the END OF THE SUBTREE of the block blockElAtLine() hands back
+    // (subtreeEndOf()), and the transient's own commit anchors on the real
+    // block right before it (transientAnchorEl()). For this fixture both of
+    // those are the CHILD `b`, which owns line 3 — so the zero-line outer item
+    // is never an anchor, and there is nothing left to refuse: the
+    // conversion now does what spec §4 asks for. The defect this scenario
+    // exists for (a paragraph ABOVE the list, a ghost block, a doubled blank)
+    // is pinned below by the DOM order and the exact bytes, with no banner.
     {
       const rows = ['# D', '', '- - b', '', '1. x', ''];
       const { srv: gsrv, url: gurl, mdPath: gmdPath } = await setupListDoc(rows);
@@ -14938,26 +15112,32 @@ async function gutterGeometry(page, sel) {
           const el = document.querySelector('.ed-conflict');
           return el ? el.textContent : null;
         });
-        assert.ok(banner && banner.indexOf('無法在其後插入。') !== -1,
-          'the refusal must reach the user as a banner, not be silent; got: ' +
-          JSON.stringify(banner));
+        assert.strictEqual(banner, null,
+          'nothing is refused: the transient never anchors on the zero-line outer item');
         const types = await page.evaluate(() =>
           Array.from(document.querySelectorAll('.ed-block'))
-            .map((el) => el.getAttribute('data-block-type')));
-        assert.deepStrictEqual(types, ['heading', 'li', 'li'],
-          'no paragraph may be inserted anywhere — least of all ABOVE the list, which is ' +
-          'where the unguarded path put it; got: ' + JSON.stringify(types));
-        // Typed with nothing focused: proves the keystrokes are not quietly
-        // captured by a phantom block that the DOM check above cannot see.
+            .map((el) => (el.hasAttribute('data-ed-transient') ? '~' : '') +
+              el.getAttribute('data-block-type')));
+        assert.deepStrictEqual(types, ['heading', 'li', 'li', '~paragraph'],
+          'the paragraph is a transient BELOW the list — never above it, which is ' +
+          'where the unguarded v3.13 path put it; got: ' + JSON.stringify(types));
+        assert.strictEqual(await page.evaluate(() => {
+          const t = document.querySelector('[data-ed-transient]');
+          return !!t && t.contains(document.activeElement);
+        }), true, 'and it has the caret');
+        assert.strictEqual(fs.readFileSync(gmdPath, 'utf8'), rows.join('\n'),
+          'nothing saved yet (fixture sanity for the byte checks below)');
+        assert.strictEqual(await saveAndRead(page, gmdPath), '# D\n\n- - b\n',
+          'before typing: the li removal (one op) stands and the transient wrote nothing');
         await page.keyboard.type('GHOST');
         await settleEditor(page);
         const after = await saveAndRead(page, gmdPath);
-        assert.strictEqual(after, '# D\n\n- - b\n',
-          'the li removal (commit #1) stands and nothing else changed; got:\n' +
-          JSON.stringify(after));
+        assert.strictEqual(after, '# D\n\n- - b\n\nGHOST\n',
+          'typed: one paragraph after the nest, one blank line between, no ghost block ' +
+          'and no doubled blank; got:\n' + JSON.stringify(after));
         await page.close();
-        console.log('T8: Enter on an emptied item after a same-line nest refuses the ' +
-          'zero-line anchor instead of inserting a ghost paragraph above the list — OK');
+        console.log('T8: Enter on an emptied item after a same-line nest lands its transient ' +
+          'paragraph after the nest\'s own line, never on the zero-line anchor and never above the list — OK');
       } finally { gsrv.close(); }
     }
 
@@ -17076,13 +17256,26 @@ async function gutterGeometry(page, sel) {
           await page.keyboard.type('Z');
           await page.keyboard.press('Escape');
           await settleEditor(page);
-          assert.ok(await page.evaluate(() => document.activeElement === document.body),
-            'fixture sanity: Escape out of a burst must leave focus on BODY');
+          // v3.14.0 T8 (D8), migrated: Escape no longer leaves BODY focused —
+          // the caret stays in the reverted item, which has no burst. Tab there
+          // is class B (the no-burst bail) and must still be consumed; the old
+          // BODY shape is kept below by blurring explicitly.
+          assert.deepStrictEqual(await caretAfterEscape(page, alpha + ' > .ed-li-text'),
+            { focused: true, text: 'alpha', offset: 5 },
+            'fixture sanity: Escape out of a burst keeps the caret in the reverted item, at its end');
           const t = await pressRecorded(page, 'Tab');
           assert.strictEqual(t.prevented, true,
             'class A (post-Escape): Tab must be consumed. Focus went ' + t.before + ' -> ' + t.after);
           assert.strictEqual(t.after, t.before,
             'class A (post-Escape): focus must not move, got ' + t.before + ' -> ' + t.after);
+          await page.evaluate(() => document.activeElement.blur());
+          assert.ok(await page.evaluate(() => document.activeElement === document.body),
+            'fixture sanity: after a blur BODY holds focus');
+          const tb2 = await pressRecorded(page, 'Tab');
+          assert.strictEqual(tb2.prevented, true,
+            'class A (BODY after Escape): Tab must be consumed. Focus went ' + tb2.before + ' -> ' + tb2.after);
+          assert.strictEqual(tb2.after, tb2.before,
+            'class A (BODY after Escape): focus must not move, got ' + tb2.before + ' -> ' + tb2.after);
           await page.close();
         }
         // The other side of the same rule: a REAL control inside a block keeps
@@ -23761,7 +23954,9 @@ async function gutterGeometry(page, sel) {
           'target',
           'the toolbar Bold must wrap "target" in <strong> before commit');
 
-        await page.keyboard.press('Enter'); // burst commit (Enter -> blur -> resolveBurst)
+        // v3.14.0 T2: the selection still stands, and Enter with a selection
+        // now replaces it with a paragraph split — commit by leaving instead.
+        await page.evaluate(() => document.activeElement.blur()); // burst commit (blur -> resolveBurst)
         await page.waitForFunction(() => !document.querySelector('.ed-seltb'), { timeout: 5000 });
         await page.waitForFunction(
           () => document.querySelector('.content').innerHTML.includes('<strong>target</strong>'),
@@ -24142,7 +24337,12 @@ async function gutterGeometry(page, sel) {
     // each scenario's asserted commit actually took is confirmed from the
     // page's own state (a spy on window.md2docPatchmap.patchmap, or — for
     // Case 1 — the very fact that a fallback destroys every node, so a
-    // preserved object identity is itself proof). ──────────────────────────
+    // preserved object identity is itself proof).
+    // v3.14.0 T2: every commit below is a blur, not Enter — blur is exactly
+    // what Enter used to do. Enter at the end of a paragraph now also opens a
+    // transient paragraph and moves focus into it: an id-less block in
+    // `.content` forces the next render to fall back, and the focus move
+    // ends the very burst Case 5 pins as surviving its own commit. ───────
 
     // ── Case 1: the caret on an UNEDITED block does not move. Focus
     //    paragraph A (no edit), then commit an edit to a DIFFERENT paragraph
@@ -24165,7 +24365,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, bSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const aSel = await paragraphSelByText(page, 'Case1 Para A');
@@ -24263,7 +24463,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, anchorSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
         await page.waitForFunction(
           () => !!document.querySelector('.content .mermaid svg'), { timeout: 10000 });
@@ -24285,7 +24485,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, targetSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' EDITED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const svgIdAfter = await page.evaluate(() => {
@@ -24328,7 +24528,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, aSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         await page.evaluate(() => {
@@ -24392,7 +24592,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, aSel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         await page.evaluate(() => {
@@ -24483,7 +24683,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, sel);
         await page.keyboard.press('End');
         await page.keyboard.type(' PRIMED');
-        await page.keyboard.press('Enter'); // first commit -> always falls back
+        await page.evaluate(() => document.activeElement.blur()); // first commit -> always falls back
         await settleEditor(page);
 
         // Test-only fetch harness: freeze the NEXT /api/render response's
@@ -24522,7 +24722,7 @@ async function gutterGeometry(page, sel) {
         await openWysiwyg(page, sel2);
         await page.keyboard.press('End');
         await page.keyboard.type(' P1');
-        await page.keyboard.press('Enter');
+        await page.evaluate(() => document.activeElement.blur());
         await settleEditor(page);
 
         const sel3 = await paragraphSelByText(page, 'Case5 freeze target');
@@ -24536,7 +24736,7 @@ async function gutterGeometry(page, sel) {
 
         await page.evaluate(() => { window.__freezeNext = true; window.__caseFivePlans.length = 0; });
         await page.keyboard.type(' FROZEN');
-        await page.keyboard.press('Enter'); // self-commit, but the response is frozen to the OLD parts
+        await page.evaluate(() => document.activeElement.blur()); // self-commit, but the response is frozen to the OLD parts
         await settleEditor(page);
 
         const post = await page.evaluate(() => ({

@@ -227,7 +227,11 @@ async function primeOneCommit(ctx) {
   await new Promise((r) => setTimeout(r, 200));
   await ctx.page.keyboard.type(' PRIMED');
   await new Promise((r) => setTimeout(r, 200));
-  await ctx.page.keyboard.press('Enter');   // blur → commit → render
+  // v3.14.0 T2: blur, not Enter — exactly what Enter used to do. Enter at the
+  // end now also leaves a transient paragraph on screen, and an id-less block
+  // in `.content` forces the NEXT render to fall back, which is the one thing
+  // a primed patch scenario must not have.
+  await ctx.page.evaluate(() => document.activeElement.blur());   // blur → commit → render
   await new Promise((r) => setTimeout(r, 900));
 }
 // Two counters, because "did this render patch?" needs both halves:
@@ -1005,7 +1009,9 @@ async function main() {
     // 在 Bravo 打字並提交（產生一個可 undo 的 op）
     await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
     await ctx.page.keyboard.type(' TWO');
-    await ctx.page.keyboard.press('Enter');
+    // v3.14.0 T2: blur (Enter's old meaning). Enter at the end now leaves an
+    // empty transient below whose own Ctrl+Z step would come first.
+    await ctx.page.evaluate(() => document.activeElement.blur());
     await new Promise((r) => setTimeout(r, 400));
     // 把游標放回 Bravo（即將被 undo 改寫的那個 block）
     await ctx.page.click('.ed-block[data-block-id="2"] .ed-wys-armed');
@@ -1873,6 +1879,8 @@ async function main() {
       .replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
     return {
       types: blocks.map((b) => b.getAttribute('data-block-type')).join(','),
+      // v3.14.0 T1: the index of each transient (id-less, nothing on disk yet).
+      transient: blocks.map((b, i) => (b.hasAttribute('data-ed-transient') ? String(i) : '')).filter(Boolean).join(','),
       indents: blocks.map((b) => String(b.getAttribute('data-indent'))).join(','),
       text: blocks.map((b) => clean(b.textContent)).join(' | '),
       marks: blocks.map((b) => Array.from(b.querySelectorAll('strong, em, del, a, code'))
@@ -1897,7 +1905,9 @@ async function main() {
   const v2TypeAndCommit = async (ctx) => {
     await ctx.page.keyboard.type('ZZ');
     await new Promise((r) => setTimeout(r, 250));
-    await ctx.page.keyboard.press('Enter');          // blur → commit → render
+    // v3.14.0 T2: the caret sits after ZZ, mid-paragraph, where Enter now
+    // splits the paragraph — commit by leaving it instead (Enter's old meaning).
+    await ctx.page.evaluate(() => document.activeElement.blur());          // blur → commit → render
     await new Promise((r) => setTimeout(r, 700));
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await new Promise((r) => setTimeout(r, 300));
@@ -2126,16 +2136,20 @@ async function main() {
       { id: 'table',        state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,paragraph,table,paragraph' ? null
           : '必須在游標那個 block 後面長出一個表格，got ' + a.types },
+      // v3.14.0 T1: the new paragraph is a transient (index 1 / 2 in docSnap's
+      // block list) — the old ZWSP skeleton paragraph would read '' here too.
       { id: 'insert-before', state: 'sel', answer: 'caret',
         effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
           ? '必須多出一個段落，got ' + a.types
-          : (a.text === 'H |  | Alpha bravo charlie delta. | Bravo paragraph.' ? null
-            : '新段落必須落在游標那個 block 【前面】，got ' + a.text) },
+          : (a.text !== 'H |  | Alpha bravo charlie delta. | Bravo paragraph.'
+            ? '新段落必須落在游標那個 block 【前面】，got ' + a.text
+            : (a.transient === '1' ? null : '新段落必須是暫存段落（transient），got ' + JSON.stringify(a.transient))) },
       { id: 'insert-after', state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types !== 'heading,paragraph,paragraph,paragraph'
           ? '必須多出一個段落，got ' + a.types
-          : (a.text === 'H | Alpha bravo charlie delta. |  | Bravo paragraph.' ? null
-            : '新段落必須落在游標那個 block 【後面】，got ' + a.text) },
+          : (a.text !== 'H | Alpha bravo charlie delta. |  | Bravo paragraph.'
+            ? '新段落必須落在游標那個 block 【後面】，got ' + a.text
+            : (a.transient === '2' ? null : '新段落必須是暫存段落（transient），got ' + JSON.stringify(a.transient))) },
       // Task 9 review M4: bar-only → caret. insertBlockBelow()'s own
       // `kind === 'line'` branch now opens the new hr's raw editor — same
       // MEASURED shape as quote/code above.
@@ -4160,6 +4174,11 @@ async function main() {
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
         label + '（hold=' + hold + 'ms）：block 數應增加，got ' + before + ' → ' + after);
+      // v3.14.0 T1: ＋ 段落 adds a transient (an id-less .ed-block), never a
+      // ZWSP paragraph; 建立副本 adds a real block.
+      assert.strictEqual(
+        await ctx.page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length),
+        itemText === '段落' ? 1 : 0, label + '（hold=' + hold + 'ms）：transient 數');
       assert.strictEqual(ctx.errs.length, 0,
         label + '（hold=' + hold + 'ms）：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -12163,7 +12182,10 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' EDITED');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: committed by blur (what Enter used to do). Enter at the
+      // end now opens an empty transient below, and the Ctrl+Z right after it
+      // would be that transient's step, not this edit's undo.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       await ctx.page.keyboard.down('Control');
       await ctx.page.keyboard.press('KeyZ');
@@ -12261,7 +12283,9 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' ONE');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: blur (Enter's old meaning) — the Ctrl+Z below must undo
+      // this edit, not take away the transient Enter now opens.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       const disk1 = await saveAndRead(ctx);
       assert.ok(disk1.indexOf('ONE') !== -1, 'T7i 前提失敗：第一筆要真的存進磁碟');
@@ -12362,7 +12386,10 @@ async function main() {
       await new Promise((r) => setTimeout(r, 200));
       await ctx.page.keyboard.type(' EDITED');
       await new Promise((r) => setTimeout(r, 200));
-      await ctx.page.keyboard.press('Enter');
+      // v3.14.0 T2: committed by blur (what Enter used to do). Enter at the
+      // end now opens an empty transient below, and the Ctrl+Z right after it
+      // would be that transient's step, not this edit's undo.
+      await ctx.page.evaluate(() => document.activeElement.blur());
       await new Promise((r) => setTimeout(r, 1200));
       await ctx.page.keyboard.down('Control');
       await ctx.page.keyboard.press('KeyZ');

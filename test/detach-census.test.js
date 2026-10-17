@@ -155,6 +155,15 @@ const CENSUS = [
     why: '(d) —— burstUndo() 的第三個雙胞胎（T21 item 1 新增）：d.editEl 就是聚焦的 .ed-wys-armed 本身，賦值只換掉子樹。實測 Escape → Ctrl+Z 這一手勢：before=after=P.ed-wys-armed、零 focus 事件。下一行的 placeCaretAtEnd(d.editEl) 收的一樣是插入符不是焦點' },
   { fn: 'revertBurstAndEnd() 的 innerHTML 寫入（不是它下面那行 blur()）', needle: 'editEl.innerHTML = burst.original;', disposition: 'd',
     why: '(d) —— 這一行跑在同函式的 `currentBurst = null;` 【之前】（T21 item 1 之後的順序是 history.flushTyping() → innerHTML → history.snap() → 存進 discardedBurst → currentBurst = null → ... → blur()；v3.3.0 之前第一步是 history.dispose()，改成保留是因為 Escape 丟掉的字現在要能被下一個 Ctrl+Z 拿回來），所以上面那列 blur() 站點「已先歸零」的理由蓋不到它；它安全的理由不同：editEl 就是聚焦面本身。probe 情境 3 實測 Escape 當下這次賦值零 focusout、磁碟未被寫，該手勢唯一的 blur/focusout 出現在賦值之後、來自那行明寫的 editEl.blur()。這裡沒有 placeCaretAtEnd() —— 它不需要插入符，下一步就是 blur' },
+  // ── v3.14.0 T2/T3（Q3：這一版新增、會寫 DOM 的敘述）──────────────────
+  { fn: 'splitSurfaceAtCaret()', needle: 'const frag = tail.extractContents();', disposition: 'd',
+    why: '(d) —— Enter 中段分割：抽出的是聚焦面（左半）的【子樹】，聚焦元素本身不動；右半是新建的 provisional 段落，焦點隨後才由 armProvisionalSurface() 在 withFocusoutSuppressed() 內移過去（左半那一發 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端自己 endBurstWithoutResolve()）' },
+  { fn: 'joinIntoPrevious()', needle: 'else blockEl.parentNode.removeChild(blockEl);', disposition: 'b',
+    why: '(b) lexical —— Backspace 合併：移除的是按鍵所在的區塊，但焦點已在同一個 withFocusoutSuppressed() 區間內先移到上一個區塊的接縫，所以這一行 detach 的已不是聚焦元素；那一次移焦的 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端 endBurstWithoutResolve() 結束' },
+  { fn: 'deleteAtEnd()', needle: 'next.parentNode.removeChild(next);', disposition: 'none',
+    why: 'Delete 合併：移除的是【下一個】區塊（文字已併進聚焦面），從來不是聚焦元素；寫在 withFocusoutSuppressed() 內只是與 Backspace 那支對稱' },
+  { fn: 'joinTransientIntoBlock()', needle: "editEl.closest('.ed-block').parentNode.removeChild(editEl.closest('.ed-block'));", disposition: 'b',
+    why: '(b) lexical —— R31 Backspace：按鍵所在的區塊併進上方有字的 transient；焦點在同一個 withFocusoutSuppressed() 區間內先移到 transient 的接縫，這一行 detach 的已不是聚焦元素；移焦那一發 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端 endBurstWithoutResolve() 結束' },
 ];
 
 let checks = 0;
@@ -175,15 +184,18 @@ assert.strictEqual(CENSUS.filter((r) => r.disposition === 'a').length >= 6, true
 
 // (d) 家族（純 d 與 b+d）。2026-09-06 補表補進來的四列就是這四個，數字釘住的是
 // 「table 變體有、平版沒有」那個漏法不會再默默發生一次。
-assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 7,
-  'census: (d) 家族應為 7 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
+// v3.14.0 T2: 7 → 8，加入 splitSurfaceAtCaret() 的 tail.extractContents()。
+assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 8,
+  'census: (d) 家族應為 8 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
   'innerHTML 寫入 / handleLiKeydown 空項目 Enter 的 textEl 清空 / extractRangeInto / ' +
-  'dropEmptied / restoreDiscardedBurst 的非表格分支）');
+  'dropEmptied / restoreDiscardedBurst 的非表格分支 / splitSurfaceAtCaret）');
 
 // v3.10.0：29 → 27，刪掉的兩個站點是 leaveSourceMode() 的 ta.remove() 與
 // enterSourceMode() 的 contentEl.hidden = true（整份原始碼模式移除）。
-assert.strictEqual(CENSUS.length, 27,
-  'census: 站點總數應為 27。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
+// v3.14.0 T2/T3：27 → 30，splitSurfaceAtCaret()、joinIntoPrevious()、deleteAtEnd()。
+// v3.14.0 T2/T3 fix round 1：30 → 31，joinTransientIntoBlock()（R31）。
+assert.strictEqual(CENSUS.length, 31,
+  'census: 站點總數應為 31。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
   'commit message 說明是哪一個站點 —— 這條斷言存在的唯一理由是讓「表悄悄變短或 ' +
   '變長」變成紅燈。');
 
