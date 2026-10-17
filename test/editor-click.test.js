@@ -4224,6 +4224,26 @@ check('merge: Backspace in an emptied paragraph below a table removes it and lan
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), TBL_AFTER_MD, 'one undo step');
 }, { md: TBL_AFTER_MD });
+// Final review I2: the emptying of a block that a join then removes is not
+// an undo step of its own. Measured before: one Ctrl+Z left a `<br>` block
+// on screen, and saving there wrote it to the file.
+for (const [label, md, text, key, merged] of [
+  ['Backspace removing an emptied paragraph', BASE_MD, 'Omega.', 'Backspace', ['heading:D', 'paragraph:Alpha.']],
+  ['Delete in an emptied paragraph', BASE_MD, 'Alpha.', 'Delete', ['heading:D', 'paragraph:Omega.']],
+  ['Delete in an emptied heading', HEAD_MD, 'Head text', 'Delete', ['heading:D', 'heading:Omega.']],
+]) {
+  check('merge: ' + label + ' is one Ctrl+Z step back to the file before it', DESKTOP, async (page, boot) => {
+    const before = await blockList(page);
+    await selectInSurface(page, text, 0, text.length);
+    await page.keyboard.press('Backspace');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), '', 'guard: the block is empty');
+    await page.keyboard.press(key); await renderIdle(page);
+    assert.deepStrictEqual(await blockList(page), merged, 'guard: joined');
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.deepStrictEqual(await blockList(page), before, 'no <br> block on screen');
+    assert.strictEqual(await saveAndRead(page, boot), md);
+  }, { md });
+}
 check('merge: Backspace in an empty transient removes it and returns to the end above', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
   await page.keyboard.press('Enter'); await renderIdle(page);
