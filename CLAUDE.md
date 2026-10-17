@@ -523,7 +523,7 @@ create a real worktree with `git worktree add`.
 
 Markdown cannot hold an empty block: a blank line is a separator, so an empty paragraph has no bytes to live in. The editor therefore keeps an empty paragraph as a **transient**: a DOM-only `.ed-block` marked `data-ed-transient` with **no `data-block-id`**, which owns no line until it has text. Every render drops it (`applyFullRender` clears the state), and it is discarded when left empty.
 
-Gestures that create one: Enter at the end or start of a block, ＋ 段落 and 在上方／在下方插入, a click below the last block, and a blank file (the only block there, never removed).
+Gestures that create one — every caller of `createTransient(` in `lib/editor/client.js`, which is the list to trust over this sentence: Enter at the end or start of a block, Enter in an emptied paragraph or heading, Enter on an empty list item, Backspace on an empty top-level item or an empty heading, ＋ 段落 and 在上方／在下方插入, 分隔線 on a transient, a click below the last block, and a blank file or the deletion of the last block (`ensureEmptyDocTransient` after every render; the only block there, never removed).
 
 Walker rule: any new code that walks `.ed-block` must decide to skip or include a transient, and any reader of `data-block-id` must survive `null` (`Number(null) === 0` silently binds to block 0, which is how a failed split render could once overwrite line 1).
 
