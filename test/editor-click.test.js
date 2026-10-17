@@ -4119,6 +4119,8 @@ check('merge: a heading whose text reads as a list marker stays a paragraph', DE
 check('merge: Backspace at a top-level item start converts it like ⠿ 轉換成 文字', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'bravo', 0);
   await page.keyboard.press('Backspace'); await renderIdle(page);
+  // Final review I1: the caret stays at the start of the text, as in Notion.
+  assert.deepStrictEqual(await caretNow(page), { text: 'bravo', offset: 0, transient: false });
   const viaKey = await saveAndRead(page, boot);
   fs.writeFileSync(boot.mdPath, TIGHT_MD); await page.reload(); await page.waitForSelector('.ed-toolbar'); await wait(400);
   await gutterMenu(page, await blockByText(page, 'bravo'), ['轉換成', '文字']);
@@ -4127,7 +4129,26 @@ check('merge: Backspace at a top-level item start converts it like ⠿ 轉換成
 check('merge: Backspace at a nested item start outdents it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'bravo', 0);
   await page.keyboard.press('Backspace'); await renderIdle(page);
+  // Final review I1: the caret stays at the start of the text.
+  assert.deepStrictEqual(await caretNow(page), { text: 'bravo', offset: 0, transient: false });
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n');
+}, { md: '# D\n\n- alpha\n  - bravo\n' });
+// Final review I1: Backspace, Backspace, Backspace climbs out of a list —
+// outdent, then a paragraph, then a join into the item above. No press
+// deletes a character.
+check('merge: Backspace three times climbs out of a nested item and keeps every character', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'bravo', 0);
+  const steps = [];
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press('Backspace'); await renderIdle(page);
+    steps.push({ blocks: await blockList(page), caret: await caretNow(page) });
+  }
+  assert.deepStrictEqual(steps, [
+    { blocks: ['heading:D', 'li:alpha', 'li:bravo'], caret: { text: 'bravo', offset: 0, transient: false } },
+    { blocks: ['heading:D', 'li:alpha', 'paragraph:bravo'], caret: { text: 'bravo', offset: 0, transient: false } },
+    { blocks: ['heading:D', 'li:alphabravo'], caret: { text: 'alphabravo', offset: 5, transient: false } },
+  ]);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alphabravo\n');
 }, { md: '# D\n\n- alpha\n  - bravo\n' });
 check('merge: Backspace on an empty top-level item removes it and leaves a transient', DESKTOP, async (page, boot) => {
   await liText(page, 'bravo').click(); await page.keyboard.press('End');
