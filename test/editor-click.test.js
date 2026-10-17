@@ -4900,6 +4900,38 @@ check('escape: Enter after Ctrl+S on an untouched paragraph splits it', DESKTOP,
   await page.keyboard.press('Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlp\n\nha.\n\nOmega.\n');
 }, { md: BASE_MD });
+// Final review I3: a format chord into a focused surface with no burst opens
+// one, so the formatting is written. Measured before: the bold showed on
+// screen and the file kept `Alpha.`. The selection is made without a click,
+// which would not open a burst either (the surface already has focus).
+async function selectInFocused(page, from, to) {
+  assert.strictEqual(await page.evaluate(([a, b]) => {
+    const s = document.activeElement;
+    const n = s && s.firstChild;
+    if (!n || n.nodeType !== 3 || n.data.length < b) return false;
+    getSelection().setBaseAndExtent(n, a, n, b);
+    return true;
+  }, [from, to]), true, 'selectInFocused: a text node in the focused surface');
+}
+for (const [chord, want] of [['Control+b', '**Alpha**.'], ['Control+i', '*Alpha*.'], ['Control+u', '<u>Alpha</u>.']]) {
+  check('escape: ' + chord + ' on a selection right after Escape is saved', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    await page.keyboard.type('X'); await page.keyboard.press('Escape');
+    assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false }, 'guard: reverted, caret kept');
+    await selectInFocused(page, 0, 5);
+    await page.keyboard.press(chord);
+    assert.strictEqual(await page.evaluate(() => !!document.activeElement.querySelector('b, strong, i, em, u')), true, 'guard: formatted on screen');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\n' + want + '\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
+check('escape: Control+b on a selection after Ctrl+S on an untouched paragraph is saved', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  await selectInFocused(page, 0, 5);
+  await page.keyboard.press('Control+b');
+  assert.strictEqual(await page.evaluate(() => !!document.activeElement.querySelector('b, strong')), true, 'guard: bold on screen');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n**Alpha**.\n\nOmega.\n');
+}, { md: BASE_MD });
 // Added (D8 for a transient): Escape in a transient with text abandons it and
 // the caret goes back where Enter was pressed, so the next key is kept.
 check('escape: Escape in a typed-into transient puts the caret back and the next key is kept', DESKTOP, async (page, boot) => {
