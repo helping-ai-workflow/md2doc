@@ -4502,6 +4502,23 @@ check('click-below: a click under the last block opens a transient at the end', 
   await page.keyboard.type('Tail.');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n\nTail.\n');
 }, { md: BASE_MD });
+// Final review M6: a press below a last transient that holds typed text puts
+// the caret at the end of that text, not its start. Reached without a failed
+// commit: the caret is still in the transient, so the mousedown only moves
+// the caret; the click that follows commits the transient (the click
+// delegator's switchAwayFrom), and keys typed during that render are held and
+// replayed where the caret was put.
+check('click-below: a click under a transient with text puts the caret at the end of its text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new');
+  await delayRender(page, 800);
+  const pt = await page.evaluate(() => { const bs = document.querySelectorAll('.content .ed-block'); const r = bs[bs.length - 1].getBoundingClientRect(); return [r.left + 40, r.bottom + 60]; });
+  await page.mouse.move(pt[0], pt[1]); await page.mouse.down();
+  assert.deepStrictEqual(await caretNow(page), { text: 'new', offset: 3, transient: true });
+  await page.mouse.up(); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n\nnewX\n');
+}, { md: BASE_MD });
 check('click-below: a click between two blocks opens nothing', DESKTOP, async (page) => {
   const pt = await page.evaluate(() => { const a = [...document.querySelectorAll('.content .ed-block')][1].getBoundingClientRect(); return [a.left + 40, a.bottom + 4]; });
   await page.mouse.click(pt[0], pt[1]); await renderIdle(page);
