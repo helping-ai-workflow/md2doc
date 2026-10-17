@@ -1,415 +1,215 @@
-# @helping-ai-workflow/md2doc
+# md2doc
 
-> Markdown → HTML / PDF renderer with WaveDrom, Mermaid, Graphviz, and draw.io support.
+**把 Markdown 轉成一份單檔 HTML 或 PDF：時序圖、狀態圖、方塊圖、公式直接畫好，離線就能看。**
 
-A single global CLI (`md2doc`) you can call from any directory.
+<p align="center">
+  <img src="docs/images/readme/reader.jpg" width="820"
+       alt="閱讀頁：左邊是搜尋框和目錄，右邊是訊號表和 Graphviz 方塊圖">
+</p>
+<p align="center"><sub>轉出來的 HTML：左邊目錄跟著閱讀位置走，表格、程式碼、四種圖都排好了。截圖用的是虛構的示範文件。</sub></p>
 
-## Install
+md2doc 是一個命令列工具（`md2doc`），在哪個資料夾都能用。輸出是**一個檔案**：圖片、字型、圖表引擎全包在裡面，
+寄出去、丟進共用資料夾、斷網打開都一樣。加上 `--edit`，同一份文件可以直接在瀏覽器裡改，存回原本的 `.md`。
 
-Requires Node.js 18 or higher. The first install pulls puppeteer (≈ 170 MB Chromium download); subsequent installs reuse it.
-
-Chromium is needed for **PDF export**, for the optional `--bake-svg` flag, and for **`.drawio` diagrams**, which are always rendered to SVG at generation time. Everything else needs nothing extra — Graphviz runs in-process via WebAssembly, and Mermaid / WaveDrom are bundled and inlined.
-
-Nothing is fetched at render time or at read time: every engine, including the vendored draw.io viewer, runs locally, so documents render and read **offline with no system Graphviz, no draw.io install and no CDN**.
-
-### Recommended: install via nvm
-
-If you do not yet have Node.js — or your system Node lives under `/usr/local` and `npm install -g` fails with `EACCES` — install Node through [nvm](https://github.com/nvm-sh/nvm) first. nvm puts Node under `~/.nvm`, so global packages never need `sudo`.
-
-```bash
-sudo apt install -y curl     # Debian / Ubuntu only; skip if curl is already installed
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
-source ~/.zshrc              # or: source ~/.bashrc
-nvm install --lts
-nvm use --lts
-npm install -g @helping-ai-workflow/md2doc
-```
-
-### Already have Node.js
-
-```bash
-npm install -g @helping-ai-workflow/md2doc
-```
-
-### Troubleshooting
-
-**`EACCES: permission denied, mkdir '/usr/local/lib/node_modules'`**
-Your system Node is owned by root. Do **not** run `sudo npm install -g` — puppeteer's postinstall would download Chromium as root and break later runs. Instead, switch to nvm using the steps above.
-
-**`Failed to set up chrome ...! Set "PUPPETEER_SKIP_DOWNLOAD" env variable to skip download.`**
-An earlier install left a half-finished Chromium download in `~/.cache/puppeteer`. md2doc ≥ 1.0.3 cleans this automatically; on older versions, clear the cache and retry:
-
-```bash
-rm -rf ~/.cache/puppeteer
-npm install -g @helping-ai-workflow/md2doc
-```
-
-## Usage
-
-```bash
-md2doc foo.md                              # render HTML to OS temp dir, open viewer
-md2doc --pdf foo.md                        # render PDF instead
-md2doc --html --pdf foo.md                 # render both formats
-md2doc *.md                                # batch: each file → temp + open
-
-md2doc foo.md --out bar.html               # write to a specific file (no auto-open)
-md2doc foo.md --out report.pdf             # --pdf inferred from the extension
-md2doc foo.md --out ./build/               # write to ./build/foo.html (no auto-open)
-md2doc *.md --out ./build/                 # batch into ./build/
-md2doc foo.md --out ./build/ --open        # explicit open with --out
-```
-
-By default, `md2doc` writes to your OS temp directory and launches the platform viewer.
-Pass `--out <path>` to write somewhere specific; doing so disables auto-open unless you
-also pass `--open`.
-
-### Flags
-
-| Flag | Meaning |
-|---|---|
-| `--html` | Render HTML (default when neither `--html`/`--pdf` nor a `.pdf` file `--out` is given; directory targets always default to HTML). |
-| `--pdf` | Render PDF. Combine with `--html` to render both. |
-| `--out <path>` | Output path. Ends with `/` or an existing directory → directory mode. Ends with `.html` / `.pdf` → file mode (single input only). Without `--html`/`--pdf`, the extension selects the format. Implies `--no-open` unless `--open` is also passed. |
-| `--open` | Launch the platform viewer (`xdg-open` / `open` / `start`) after render. Default when `--out` is absent. |
-| `--no-open` | Skip the viewer launch. |
-| `--quiet` | Suppress per-file progress messages. |
-| `--bake-svg` | Pre-render Mermaid / WaveDrom to inert SVG at generation time (HTML output only; needs Chromium). The output then contains no diagram JavaScript. |
-| `--lang <tag>` | Set `<html lang>` (for example `en`, `zh-Hant`). Default: detected — `zh-Hant` when Chinese characters are at least 10% of the prose (code excluded), `ja` / `ko` when kana / Hangul make up at least 20% of the CJK characters, otherwise `en`. |
-| `--version`, `-v` | Print version. |
-| `--help`, `-h` | Print help. |
-
-### Reading view
-
-- **Dark mode** — a ☀/☾ toggle (bottom-right on desktop, top bar on phone). Light by default; the choice is remembered in the browser. PDF and print stay light.
-
-### Images
-
-Local images referenced from the markdown are resolved against the **markdown file's own
-directory** and inlined into the output as base64 `data:` URIs, so the rendered HTML / PDF
-stays self-contained wherever it is written (the OS temp dir by default) and however it is
-later copied or mailed.
-
-```markdown
-![block diagram](assets/block.png)        <!-- inlined -->
-<img src="assets/block.png" width="400">  <!-- inlined, attributes preserved -->
-![remote](https://example.com/x.png)      <!-- left as a remote URL -->
-```
-
-`srcset` and `<source>` inside `<picture>` are inlined too. Only known image
-extensions are inlined, so `![x](../../id_rsa)` is left alone rather than
-base64'd into a document you may be about to share.
-
-A reference with no file on disk keeps its original `src` and prints
-`[WARN] image not found, left as-is: ...` on stderr; the render still succeeds.
-
-Each reference carries its own copy of the payload, so re-using one large diagram
-in several places grows the HTML accordingly. PDF output is unaffected.
-
-### Viewing diagrams
-
-Click any image, Mermaid, Graphviz, draw.io or WaveDrom graphic in the rendered HTML to
-open it full-screen.
-
-| Input | Action |
-|---|---|
-| Wheel / shift+wheel | Scroll vertically / horizontally |
-| Ctrl (or ⌘) + wheel | Zoom around the pointer |
-| Drag | Pan |
-| `+` `-` | Zoom in / out |
-| `0` `1` | Fit to window / actual size |
-| Double-click | Toggle fit ↔ 100% |
-| `Esc`, ✕, backdrop click | Close |
-
-Vector diagrams open scaled to fill the window; raster images open at actual size. An
-image wrapped in a link stays a link. The overlay is hidden in print and never reaches
-the PDF output.
-
-### Migration from md2html / md2pdf (v1.x → v2.0.0)
-
-| Old | New |
-|---|---|
-| `md2html foo.md` | `md2doc foo.md` |
-| `md2pdf foo.md` | `md2doc --pdf foo.md` |
-| `md2html foo.md --out f.html` | `md2doc foo.md --out f.html` |
-| `md2html foo.md --open` | `md2doc foo.md` (open is default) |
-| `md2html *.md` (output next to source) | `md2doc *.md --out ./build/` (or accept temp output) |
-
-## Editing (`--edit`)
-
-```bash
-md2doc --edit foo.md              # serve foo.md in the browser editor, open a tab
-md2doc --edit foo.md bar.md       # one tab per file
-md2doc --edit foo.md --port 4000  # pin the server to a specific port
-md2doc --edit foo.md --no-open    # start the server without launching a browser tab
-```
-
-`--edit` starts a local (`127.0.0.1`-only) server and opens the rendered document in
-your browser. Click anywhere inside a paragraph, heading, list item, or table cell
-to place your cursor and start typing directly — no separate "select then edit" step.
-The block is live-marked as edited; focus leaving the block commits your changes
-automatically. Press `Ctrl+S` to save to disk explicitly.
-
-### Direct editing: click to type
-
-Every paragraph, heading, list, and table cell is editable by clicking inside it.
-The rendered formatting (bold, italic, code, links) displays as you type; no
-Markdown syntax characters are shown. This applies to any block that doesn't
-contain unsupported content (see "Degraded blocks" below).
-
-| Block type | Interaction |
-|---|---|
-| Paragraph | Click to place caret, type; Enter commits, Esc reverts |
-| Heading | Click to place caret, type; Enter commits, Esc reverts |
-| List | Click to place caret, type; list-specific keys below |
-| Table | Click any cell to edit; Tab/Shift+Tab navigate between cells |
-
-### ⠿ Block menu
-
-Every block has a ⠿ button on its left edge. Click it to open a menu with block-level
-operations:
-
-| Item | Applies to | Action |
-|---|---|---|
-| **−** (minus) | Heading only | Decrease heading level (# → ... → #####) |
-| **+** (plus) | Heading only | Increase heading level |
-| **MD 原始碼** | All blocks | Discard in-progress edits, switch to raw Markdown source editing |
-| **刪除** | All blocks | Delete the block entirely (absorbs one adjacent blank line; one Ctrl+Z restores it exactly) |
-| **✕** | All blocks | Close the menu |
-
-The **MD 原始碼** button is the escape hatch: it reverts any unsaved typing in the
-current block and opens the raw Markdown editor instead, letting you make changes
-WYSIWYG cannot express.
-
-### ＋ Insert menu
-
-Every block also has a ＋ button, stacked just above the ⠿ handle in the same left
-gutter. Click it to open a menu for inserting a new block directly below:
-
-| Item | Inserts |
-|---|---|
-| **段落** | An empty paragraph |
-| **標題** | An empty `##` heading |
-| **清單** | An empty single-item list |
-| **表格** | A minimal 2×2 table skeleton |
-| **程式碼** | An empty fenced code block |
-
-The new block is inserted below the block whose ＋ you clicked, and the cursor lands
-directly in it — the first (body) cell for a table, the raw source editor for a code
-block, and the always-on WYSIWYG surface (pre-selected, so your first keystroke
-replaces the placeholder) for everything else. The whole insert is a single Ctrl+Z
-step — one undo removes the block entirely.
-
-### Paragraph and heading editing
-
-Click inside a paragraph or heading to place your cursor. Type and format text
-normally; the rendered marks (bold, italic, code, links) show as you type.
-
-**Selection toolbar**: when you select text inside a paragraph or heading, a
-floating toolbar appears with formatting buttons:
-
-| Button | Action |
-|---|---|
-| **B** | Toggle bold (`**text**`) |
-| **I** | Toggle italic (`*text*`) |
-| **`<>`** | Wrap selection in backticks (`` `code` ``) |
-| **🔗** | Wrap selection as a link; click to edit the URL |
-
-**Key shortcuts**:
-
-| Key | Action |
-|---|---|
-| Enter | Commit and close the editor |
-| Shift + Enter | Insert a line break within the paragraph |
-| Esc | Revert all edits and close the editor |
-| Ctrl + Z | Step backward through the paragraph's local edit history, then cascade to document-level undos once exhausted |
-| Ctrl + Y (or Ctrl + Shift + Z) | Step forward through the paragraph's local edit history, then cascade to document-level redos once exhausted |
-
-### List editing
-
-Click inside a list item to place your cursor and type. Lists support structural editing:
-
-| Key | Action |
-|---|---|
-| Enter | Split the current item into two siblings at the caret; empty item + Enter removes it and ends the burst |
-| Shift + Enter | Insert a line break (`<br>`) within the item (does not split) |
-| Tab | Indent the current item (becomes a child of the previous sibling; no-op if no previous sibling) |
-| Shift + Tab | Outdent the current item (moves after its parent; no-op at top level) |
-| Esc | Revert all edits and close the list |
-| Ctrl + Z / Ctrl + Y | Step through the list's local edit history, then cascade to document-level history |
-
-An empty list (all items removed) is cleaned up automatically — the block is deleted
-entirely and the document structure stays consistent.
-
-### Table editing
-
-Click any table cell to edit it. The table is treated as a single editing unit —
-focus remains inside the table until you press Esc, click outside, or navigate away.
-
-**Cell navigation**:
-
-| Key / Action | Effect |
-|---|---|
-| Click a cell | Move to that cell and edit |
-| Tab | Move to the next cell (left-to-right, row by row; no-op — stays put — on the last cell) |
-| Shift + Tab | Move to the previous cell |
-| Enter | Insert a line break (`<br>`) within the cell (does NOT commit the table) |
-| Esc | Revert the entire table session (all cells) and discard all changes |
-| Ctrl + Z / Ctrl + Y | Step through the table's local edit history, then cascade to document-level history |
-
-**Column grip**: hover any cell in a column — a small horizontal 6-dot grip handle
-appears just above it (Notion-style affordance, replacing the old edge-hover-only
-target). Click the grip to open the column menu:
-
-| Option | Action |
-|---|---|
-| **刪除欄** | Delete the column (last column protected) |
-| **對齊** | Cycle alignment: left → center → right → left (no unset state; use Ctrl+Z to revert a cycle) |
-
-A **＋** insert bubble separately appears when you hover the top boundary between
-two columns — click it to insert an empty column there.
-
-**Row grip**: hover any cell in a body row — a small vertical 6-dot grip handle
-appears just left of it (the header row never gets one; it isn't deletable or
-draggable). Click the grip to open the row menu:
-
-| Option | Action |
-|---|---|
-| **刪除列** | Delete the row (header row and last body row protected) |
-| *Drag* | Press and hold the row grip and drag up/down; drop to reorder (body rows only; header fixed) |
-
-A **＋** insert bubble separately appears when you hover the left boundary between
-two rows — click it to insert an empty row there.
-
-**Edited tables emit minimal form**: tables that you edit are saved with single-space
-padding and minimal separators (`|---|`) to keep the Markdown readable and
-version-control-friendly.
-
-### Degraded blocks: code, diagrams, images, math
-
-Blocks containing content WYSIWYG cannot represent (code fences, Mermaid/Graphviz/
-WaveDrom/draw.io diagrams, images, LaTeX math, or unstyled HTML) automatically degrade to
-raw-edit mode: click the block to open the raw Markdown source in a textarea, make
-your changes, then press `Ctrl+Enter` to commit or `Esc` to cancel.
-
-If a WYSIWYG session encounters unsupported content mid-edit (e.g., via a rich
-paste), it automatically falls back to raw-edit with the block's untouched
-on-disk source, preserving your unsaved work context.
-
-### Burst undo: local history + cascade
-
-Ctrl+Z / Ctrl+Y step through a block's local edit history first (the changes you
-made in the current editing session). Once that history is exhausted, the next
-Ctrl+Z cascades out to the document-level undo stack, covering all committed edits.
-This lets you undo/redo recent changes within a block without affecting work in
-other blocks.
-
-### Whole-document controls
-
-| Key / control | Action |
-|---|---|
-| `Ctrl`/`⌘` + `S` | Save the document to disk (explicit; changes commit locally when focus leaves) |
-| `Ctrl`/`⌘` + `Z` | Undo: first steps through the focused block's local history, then cascades to document level |
-| `Ctrl`/`⌘` + `Y` (or `Ctrl`/`⌘` + `Shift` + `Z`) | Redo: mirrors undo's cascade behavior |
-| Click outside any block | Commit any open block if changed, dismiss the ⠿/＋ menu |
-| `Esc` (at document level, not in an open block) | Close the ⠿/＋ menu |
-
-### Auto-commit on focus change
-
-When focus leaves a block:
-- If the block is **unchanged**, it closes silently.
-- If the block is **changed**, it commits automatically to the undo stack (but not to disk — you must press Ctrl+S for that).
-
-This means switching between blocks flows naturally — you never get stuck waiting to
-confirm or cancel.
-
-### Save and conflict handling
-
-**Save is explicit, not autosave**. Your changes are committed to the undo stack
-immediately when you press Enter or focus leaves a block, but they're not written
-to disk until you press `Ctrl+S`.
-
-**Conflict detection**: each save carries the file's last-known modification time.
-If the file on disk has changed since the page loaded (edited elsewhere, or saved
-from another tab), the save is rejected with a conflict banner instead of silently
-overwriting — reload the page to pick up the newer content, then re-apply your edit.
-
-### Fidelity guarantee
-
-Only the lines inside the block(s) you actually commit are rewritten. Every other
-line — including whitespace-sensitive formatting like padded table columns, trailing
-spaces, and the file's original EOF-newline state — is left byte-for-byte untouched,
-whether you save with zero edits or after several. This applies both to unchanged
-blocks and to blocks you open and then revert.
-
-### Known Phase-3 limitations
-
-**First diagram/math type requires reload**: if a committed edit introduces the
-*first* occurrence of a diagram type (Mermaid or WaveDrom) that the document didn't
-already contain when the page was loaded, that diagram library was never embedded
-into the page, so the new block renders as raw source until you reload the browser
-tab (no need to restart `md2doc --edit`). The same applies to math: if a committed
-edit introduces the document's *first* `math` fence or `$…$`/`$$…$$` expression,
-the KaTeX stylesheet was never injected, so the equation renders unstyled until you
-reload the tab.
-
-**Alignment cycle has no unset state**: the **對齊** button cycles through left,
-center, and right alignment. To revert an unwanted alignment, use Ctrl+Z.
+目前版本見 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
-`--edit` does not support directory inputs yet (planned for a later phase) and
-cannot be combined with `--html` / `--pdf` / `--out` / `--bake-svg`.
+## 它幫你解決什麼
 
-## Supported diagram types
+| 麻煩 | md2doc 怎麼處理 |
+|---|---|
+| 規格書裡的時序圖、狀態圖要另外畫、另外貼 | 在 Markdown 裡寫 `wavedrom`、`mermaid`、`dot` 程式碼區塊，或引用 `.drawio` 檔，轉檔時直接畫進去 |
+| 轉出來的 HTML 一寄出去圖就破 | 本機圖片轉成 base64 內嵌，圖表引擎也內嵌；不連 CDN、不用裝 Graphviz 或 draw.io |
+| 長文件找不到東西 | 側欄目錄跟著閱讀位置展開；全文搜尋會在內文標出每一筆 |
+| 圖太小看不清楚 | 點一下圖就全螢幕開啟，可以縮放、平移，還能直接畫圈、畫箭頭做標註 |
+| 晚上看白底很刺眼 | 右下角 ☀／☾ 切深色，圖表跟著變深；列印和 PDF 一律淺色 |
+| 改一個字就要開編輯器、再轉一次 | `md2doc --edit`：點哪裡就改哪裡，波形圖有自己的編輯器，Ctrl+S 存回 `.md` |
+| 編輯器把整份檔案重新排版、diff 一大片 | 只改你動過的那幾行，其他每個位元組都不變 |
 
-Embedded in fenced code blocks inside your Markdown:
+---
 
-````markdown
-```mermaid
-graph LR
-A --> B
+## 三步開始
+
+**1. 安裝**（需要 Node.js 18 以上）
+
+```bash
+npm install -g @helping-ai-workflow/md2doc
 ```
 
+第一次安裝會下載 Chromium（約 170 MB），只有轉 PDF、`--bake-svg` 和 `.drawio` 圖會用到。
+還沒有 Node.js，或安裝時出現 `EACCES`，見下方[常見問題](#安裝時出現-eacces-permission-denied)。
+
+**2. 轉檔**
+
+```bash
+md2doc spec.md                     # 轉成 HTML 並直接打開
+md2doc spec.md --out spec.html     # 寫到指定的檔案
+md2doc --pdf spec.md               # 轉成 PDF
+```
+
+**3. 想改內容就加 `--edit`**
+
+```bash
+md2doc --edit spec.md
+```
+
+瀏覽器會開一個只有本機連得到的編輯頁，改完按 Ctrl+S 存檔。
+
+---
+
+## 介面一覽
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/readme/search.jpg" alt="搜尋 tx_ready：側欄列出三筆結果，內文與目錄標黃"></td>
+    <td width="50%"><img src="docs/images/readme/dark.jpg" alt="深色模式：WaveDrom 時序圖與上色的 Verilog 程式碼"></td>
+  </tr>
+  <tr>
+    <td><sub><b>搜尋。</b>按 Enter 搜尋，結果列出所在章節，內文與目錄標黃，▲▼ 跳上一筆、下一筆。</sub></td>
+    <td><sub><b>深色模式。</b>時序圖、狀態圖跟著變深；程式碼有語法上色（Verilog、Python、C、Tcl 等），滑過區塊出現複製鍵。</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/images/readme/lightbox.jpg" alt="燈箱：方塊圖放大到 266%，上方是縮放與標註工具列"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><sub><b>點圖放大。</b>Ctrl＋滾輪縮放、拖曳平移；<code>f</code> 手繪、<code>e</code> 橢圓、<code>r</code> 方框、<code>a</code> 箭頭，⧉ 連同標註一起複製成圖片。Esc 關閉。</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/images/readme/phone.jpg" width="250" alt="手機：文件標題、文件資訊與公式">
+  <img src="docs/images/readme/phone-toc.jpg" width="250" alt="手機：☰ 打開的目錄抽屜">
+</p>
+<p align="center"><sub><b>手機。</b>頂列顯示目前章節，☰ 打開目錄；寬的表格左右捲動時，第一欄固定在左邊。</sub></p>
+
+### 編輯模式（`--edit`）
+
+<p align="center"><img src="docs/images/readme/editor.jpg" width="820" alt="編輯頁：上方工具列，表格的一格正在編輯，選取的文字上方浮出格式工具列"></p>
+<p align="center"><sub>點一格就能打字；選取文字浮出 B／I／刪除線／程式碼／連結。右上角顯示存檔狀態。</sub></p>
+
+- **點哪裡改哪裡**：段落、標題、清單、表格格子直接打字，看到的是排版後的樣子，不是 Markdown 符號。
+- **區塊左邊的 ⠿ 與 ＋**：⠿ 拖曳排序、刪除、改格式，或開「MD 原始碼」直接改這一塊；＋ 在下方插入新區塊。
+- **表格**：Tab 換格、拖格子選範圍、滑過欄列出現握把，可以插入、刪除、拖曳排序。
+- **存檔是手動的**：Ctrl+S 才寫回檔案；檔案在別處被改了，頁面會自動重新載入或提示衝突，不會蓋掉別人的修改。
+
+<p align="center"><img src="docs/images/readme/wave-editor.jpg" width="820" alt="波形編輯器：上方電位工具列，下方是 WaveDrom 畫的 5 條訊號與關聯線"></p>
+<p align="center"><sub><b>波形編輯器。</b>滑過時序圖按「編輯」打開。畫布就是輸出的那張圖：點一拍改電位、按住拖曳塗一段、拖圓點拉關聯線，? 看全部快捷鍵。</sub></p>
+
+---
+
+## 圖表與公式怎麼寫
+
+````markdown
 ```wavedrom
-{ "signal": [...] }
+{ "signal": [ { "name": "clk", "wave": "p...." }, { "name": "req", "wave": "01.0." } ] }
+```
+
+```mermaid
+stateDiagram-v2
+  IDLE --> BUSY: start
 ```
 
 ```dot
-digraph G { A -> B }
+digraph G { cpu -> bus -> uart }
 ```
+
+![系統架構](arch.drawio)        <!-- #Flow 選分頁名稱，#2 選第 2 頁 -->
+
+$$ f_{baud} = \frac{f_{clk}}{16 (div + 1)} $$
 ````
 
-A fourth engine, **draw.io**, is referenced with image syntax rather than a code fence, because a `.drawio` file is an external artifact rather than inline source:
+Mermaid 與 WaveDrom 預設在瀏覽器裡畫，加 `--bake-svg` 改成轉檔時就畫成 SVG（輸出裡不帶 JavaScript）。
+Graphviz 與 draw.io 一律在轉檔時畫好。本機圖片（`![](assets/x.png)`、`<img>`、`<picture>`）以 `.md` 所在的資料夾為準，轉檔時內嵌。
 
-```markdown
-![Architecture overview](arch.drawio)
-![Just the Flow sheet](arch.drawio#Flow)
-![Just the second sheet](arch.drawio#2)
+---
+
+## 常用參數
+
+| 參數 | 作用 |
+|---|---|
+| `--out <path>` | 輸出到指定的檔案或資料夾（`./build/`）；副檔名 `.pdf` 就轉 PDF。指定後不自動打開，要打開再加 `--open` |
+| `--pdf`、`--html` | 選輸出格式，兩個都加就兩種都轉 |
+| `--edit [--port <n>]` | 在瀏覽器裡編輯，可以一次開多個檔案 |
+| `--bake-svg` | Mermaid／WaveDrom 在轉檔時就畫成 SVG |
+| `--lang <tag>` | 指定 `<html lang>`；不指定時依內容自動判斷（`zh-Hant`、`ja`、`ko`、`en`） |
+| `--quiet` | 不印進度 |
+
+`md2doc *.md --out ./build/` 一次轉整個資料夾。完整說明：`md2doc --help`。
+
+---
+
+## 常見問題
+
+### 安裝時出現 `EACCES: permission denied`
+
+系統的 Node.js 裝在 root 的目錄底下。**不要**用 `sudo npm install -g`（Chromium 會以 root 下載，之後執行會壞），改用 [nvm](https://github.com/nvm-sh/nvm) 裝 Node.js：
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+source ~/.zshrc              # 或 ~/.bashrc
+nvm install --lts
+npm install -g @helping-ai-workflow/md2doc
 ```
 
-A `.xml` file is treated as a diagram only when its root element really is `<mxfile>` or `<mxGraphModel>`; anything else falls through to the ordinary image path unchanged. `#Name` selects a sheet by name, `#N` by 1-based position (a name wins over a number). The alt text becomes the rendered box's accessible name. Multi-sheet files get a small sheet bar on hover — every sheet is baked into the output, so switching sheets involves no engine.
+### 安裝時出現 `Failed to set up chrome`
 
-All four render directly in the output (HTML or PDF), **offline and with no system dependencies**: Graphviz `dot` runs in-process via WebAssembly (no system `dot` binary required), Mermaid / WaveDrom are bundled and inlined (no CDN), and `.drawio` files are rendered by a vendored draw.io viewer running in a build-time headless Chromium. Each engine's runtime is embedded only when the document actually uses that diagram type — and the draw.io viewer never is, at any size, because `.drawio` diagrams are fully pre-rendered (a multi-sheet document carries only a few lines of sheet-switching script, not an engine).
+之前的安裝留下下載到一半的 Chromium。刪掉 `~/.cache/puppeteer` 再裝一次：
 
-By default, Mermaid and WaveDrom render in the browser when the HTML is opened; pass `--bake-svg` to pre-render them to inert SVG at generation time instead (Graphviz and draw.io are always pre-rendered to SVG).
+```bash
+rm -rf ~/.cache/puppeteer && npm install -g @helping-ai-workflow/md2doc
+```
 
-## Why a global CLI
+### 編輯模式會不會把我的格式改掉？
 
-Multiple repos used to ship copies of this script. They drifted. This package centralises the renderer so every repo references the same version. See [`docs/why.md`](https://github.com/helping-ai-workflow/md2doc) for background.
+不會。只有你按 Enter、或離開時有改過的區塊會重寫；其他行（包含對齊用的空白、行尾空白、檔尾換行）一個位元組都不動。
+你改過的表格會存成最精簡的寫法（`| a | b |`、`|---|`）。
 
-## Licence
+### 在編輯模式裡新增了第一張 Mermaid／WaveDrom 圖或第一個公式，卻沒畫出來？
 
-md2doc's own source is **MIT** — see [`LICENSE`](LICENSE).
+頁面打開時文件裡沒有這種圖，所以沒載入它的引擎。重新整理瀏覽器分頁就好，不用重開 `md2doc --edit`。
 
-The published package is not MIT-only, because it ships one vendored
-third-party file: `vendor/drawio/viewer-static.min.js`, the draw.io /
-diagrams.net viewer (v31.3.2, ~4 MB), under the **Apache License 2.0**.
-Its licence text and a per-component NOTICE travel with it, in
-[`vendor/drawio/LICENSE`](vendor/drawio/LICENSE) and
-[`vendor/drawio/NOTICE`](vendor/drawio/NOTICE).
+### 轉檔時 stderr 出現 `data labels are wider than their segments`？
 
-**Running a licence scan? Start at
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).** It lists everything
-redistributed inside the tarball, including the components bundled inside
-the draw.io viewer itself (DOMPurify, pako, spin.js, Rough.js), and says
-how each finding was established.
+WaveDrom 圖裡有資料標籤比它那一段還寬。訊息會說最寬的是哪一個，以及 `config.hscale` 要設多少才放得下；輸出照常產生，exit code 仍是 0。
+
+### 從 md2html／md2pdf（v1.x）升級
+
+`md2html foo.md` 改成 `md2doc foo.md`，`md2pdf foo.md` 改成 `md2doc --pdf foo.md`。
+以前輸出會寫在原始檔旁邊，現在預設寫到暫存資料夾；要寫在固定的地方就加 `--out ./build/`。
+
+---
+
+## 開發者資訊
+
+<details>
+<summary><b>目錄、測試、截圖</b></summary>
+
+| 路徑 | 內容 |
+|---|---|
+| `bin/md2doc.js` | 命令列入口 |
+| `lib/md2doc.js` | 轉檔主程式（閱讀頁的 HTML、CSS、JavaScript 都在這裡） |
+| `lib/editor/` | `--edit` 的本機伺服器與編輯器 |
+| `lib/theme/` | 深色模式的配色表與切換 |
+| `vendor/drawio/` | 內附的 draw.io viewer（Apache-2.0） |
+| `test/` | 測試 |
+
+```bash
+npm test                 # 轉檔與編輯器的測試
+npm run test:browser     # 在 Chromium 與 WebKit 實際點過閱讀頁和編輯頁
+                         # （第一次先跑 npx playwright install chromium webkit）
+node docs/readme/shots.js   # 重新產生 README 的截圖（用 docs/readme/demo.md）
+```
+
+貢獻規則與發版流程見 [CLAUDE.md](CLAUDE.md)。
+
+</details>
+
+---
+
+## 授權
+
+md2doc 本身是 **MIT**，見 [`LICENSE`](LICENSE)。
+
+npm 套件裡另外附了一個第三方檔案：`vendor/drawio/viewer-static.min.js`（draw.io／diagrams.net viewer v31.3.2），授權是 **Apache License 2.0**，
+授權全文與 NOTICE 在 [`vendor/drawio/`](vendor/drawio/)。要做授權掃描，從 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) 開始看。
