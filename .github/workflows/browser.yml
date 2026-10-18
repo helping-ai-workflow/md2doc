@@ -6,7 +6,9 @@ name: browser
 # Every pull request, no path filter: this is a required check on main, and a
 # path-filtered required check never reports on a PR that does not touch those
 # paths, which would block the merge. It runs beside the CI job (about 14 min
-# against 39), so it adds no wall-clock time.
+# against 39), so it adds no wall-clock time. A PR that only changes README.md,
+# CLAUDE.md or docs/** skips every step after the scope check and reports
+# success (.github/docs-only.sh).
 on:
   pull_request:
   workflow_dispatch:
@@ -16,25 +18,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Docs-only change?
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: .github/docs-only.sh
       - uses: actions/setup-node@v4
+        if: steps.scope.outputs.docs_only != 'true'
         with:
           node-version: '20'
       - name: Install
+        if: steps.scope.outputs.docs_only != 'true'
         run: npm ci || npm install
       - name: Playwright version
+        if: steps.scope.outputs.docs_only != 'true'
         id: pw
         run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
+        if: steps.scope.outputs.docs_only != 'true'
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-cw-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: Install Chromium and WebKit
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium webkit
       - name: Install Chromium and WebKit system deps
-        if: steps.cache.outputs.cache-hit == 'true'
+        if: steps.scope.outputs.docs_only != 'true' && steps.cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium webkit
       - name: Click-through checks
+        if: steps.scope.outputs.docs_only != 'true'
         run: npm run test:browser
