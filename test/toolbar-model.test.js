@@ -374,6 +374,8 @@ function baseCtx(overrides) {
   // and leak into the block's textContent (measured: 6 spaces per block).
   ok(icons.NAMES.every((n) => !/>\s+</.test(icons.svg(n, 16))), 'icon markup has no whitespace text nodes');
   ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
+  // v3.15.0 T1 (R43 M7): the "/" menu's catalogue is inlined the same way.
+  ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/block-catalog.js'), 'utf8')), 'block-catalog.js is inlined into a script tag');
 }
 
 // --- v3.14.0 T4: the toolbar on a transient paragraph ----------------------------

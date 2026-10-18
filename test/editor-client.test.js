@@ -1698,8 +1698,14 @@ function countInCode(source, needle) {
   // one commitRangeEdit() over the paragraph's own lines, and owns its
   // rollback (+1). The menu's other insertion paths go through
   // commitLinesAtTransient(), already counted. 1 declaration + 23 call sites = 24.
-  assert.strictEqual(helperCalls, 24,
-    'the helper must be DECLARED once and used at all twenty-three ' +
+  // MIGRATED by v3.15.0 B1 fix round 1 (24 -> 25), checked rather than
+  // assumed: replaceParagraphWithItem()'s site moved into
+  // replaceParagraphWithLines() (shared with the 圖片 replacement; 0), and
+  // insertTaskSiblingAfter() — 待辦清單 written tight under a bullet item —
+  // is a genuinely new commit-then-render site that owns its rollback (+1).
+  // 1 declaration + 24 call sites = 25.
+  assert.strictEqual(helperCalls, 25,
+    'the helper must be DECLARED once and used at all twenty-four ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 

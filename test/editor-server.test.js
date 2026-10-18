@@ -114,6 +114,10 @@ function assertNoAutoCloseFor(server, ms) {
     assert.ok(page.body.indexOf('md2docListMd') < page.body.indexOf('/*client*/'),
       'list-md must be injected before the client runtime (client depends on window.md2docListMd)');
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
+    // v3.15.0 T1 (R43 M7): the "/" menu's catalogue, ahead of the client.
+    assert.ok(page.body.includes('root.md2docBlockCatalog = factory()'), 'block-catalog runtime inlined');
+    assert.ok(page.body.indexOf('root.md2docBlockCatalog = factory()') < page.body.indexOf('/*client*/'),
+      'block-catalog must be injected before the client runtime (client reads window.md2docBlockCatalog)');
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');
 

@@ -5191,6 +5191,12 @@ check('slash: with text before it, the item goes below and the "/query" is remov
   await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('Sub');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n## Sub\n\nOmega.\n');
+  // R43 M6: the "/query" removal left Alpha. as it was (no op), so the steps
+  // are the insert and the typing.
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n##\n\nOmega.\n', 'the typing is one step');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'the insertion is one step');
 }, { md: BASE_MD });
 check('slash: ↑↓ cycle, Esc closes and keeps the text, Enter after Esc splits normally', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
@@ -5460,6 +5466,173 @@ check('plus: on an empty paragraph 引用 / 編號 / 核取 are enabled and inse
   assert.deepStrictEqual(dis, [false, false, false, true, true]);
   await tb(page, 'check'); await page.keyboard.type('todo');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- [ ] todo\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// ── B1 fix round 1 (review I1–I5, rulings R41–R43) ──
+// A real (non-transient) paragraph emptied down to `typed` — the D8 branch
+// where the paragraph itself becomes the item.
+async function emptyAlphaTo(page, typed) {
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await page.keyboard.type(typed);
+}
+const errorCardUp = (page) => page.evaluate(() => !!document.querySelector('.ed-conflict[data-level="error"]'));
+check('failed-render: a real paragraph emptied to "/h2" whose render fails keeps the keys typed after it, after it', DESKTOP, async (page, boot) => {
+  await emptyAlphaTo(page, '/h2');
+  await failFirstRender(page);
+  await page.keyboard.press('Enter'); await page.keyboard.type('Sub');
+  await wait(1500); await renderIdle(page);
+  assert.strictEqual(await errorCardUp(page), true, 'the failure is shown');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:/h2Sub', 'paragraph:Omega.'], 'the screen keeps what was typed, in order');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n/h2Sub\n\nOmega.\n', 'screen = file, nothing typed inside Alpha.');
+}, { md: BASE_MD });
+check('slash: a real paragraph emptied to "/h2" becomes the heading, one undo step', DESKTOP, async (page, boot) => {
+  await emptyAlphaTo(page, '/h2');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'heading:', 'paragraph:Omega.']);
+  await page.keyboard.type('T');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n## T\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n##\n\nOmega.\n', 'the typing is its own step');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'the paragraph -> heading is one step back to the original text');
+}, { md: BASE_MD });
+check('slash: a real paragraph emptied to "/圖片" becomes the picked image', DESKTOP, async (page, boot) => {
+  const chooserP = page.waitForEvent('filechooser');
+  await emptyAlphaTo(page, '/圖片');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['圖片']);
+  await page.keyboard.press('Enter');
+  const chooser = await chooserP;
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:/圖片', 'paragraph:Omega.'], 'nothing changes while the picker is open');
+  await pickImage(page, chooser);
+  assert.strictEqual(await errorCardUp(page), false);
+  assert.ok(/^# D\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(await saveAndRead(page, boot)), 'the paragraph became the image');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'one undo step back to the original paragraph');
+}, { md: BASE_MD });
+check('slash: a picker left unanswered from a real "/圖片" leaves the paragraph as typed', DESKTOP, async (page, boot) => {
+  const chooserP = page.waitForEvent('filechooser');
+  await emptyAlphaTo(page, '/圖片');
+  await page.keyboard.press('Enter');
+  await chooserP; await wait(300);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:/圖片', 'paragraph:Omega.']);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'nothing written');
+}, { md: BASE_MD });
+check('slash: a mouse pick of 文字 in a real paragraph does what Enter does', DESKTOP, async (page) => {
+  await emptyAlphaTo(page, '/');
+  await slashPick(page, '文字');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: false }, 'the caret stays in the paragraph');
+}, { md: BASE_MD });
+check('slash: Enter on 文字 in a real paragraph keeps it, caret in it (control for the mouse pick)', DESKTOP, async (page) => {
+  await emptyAlphaTo(page, '/');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:', 'paragraph:Omega.']);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: false });
+}, { md: BASE_MD });
+check('plus: 文字 keeps what was typed after ＋ (R41)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'Alpha.');
+  await page.keyboard.type('Text');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Text', offset: 4, transient: true });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nText\n\nOmega.\n');
+}, { md: BASE_MD });
+// R42: an existing list's looseness never changes.
+const TIGHT2_MD = '# D\n\n- alpha\n- bravo\n\nOmega.\n';
+// Enter at the end of bravo, Enter on the empty item: a transient below the list.
+async function transientBelowList(page) {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', '~paragraph:', 'paragraph:Omega.'], 'a transient below the list');
+}
+const TIGHT_TODO = '# D\n\n- alpha\n- bravo\n- [ ] x\n\nOmega.\n';
+const TIGHT_THEN_OL = '# D\n\n- alpha\n- bravo\n\n1. x\n\nOmega.\n';
+check('list-keep: ＋ on a tight item then 待辦清單 continues the list tight', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'bravo');
+  await page.keyboard.type('todo'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_TODO);
+}, { md: TIGHT2_MD });
+check('list-keep: ＋ on a tight item then 編號列表 starts its own list after a blank line', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'bravo');
+  await page.keyboard.type('ordered'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_THEN_OL);
+}, { md: TIGHT2_MD });
+check('list-keep: "/todo" in the paragraph an empty item\'s Enter left continues the list tight', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('/todo'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_TODO);
+}, { md: TIGHT2_MD });
+check('list-keep: "/bullet" there continues the list tight', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n\nOmega.\n');
+}, { md: TIGHT2_MD });
+check('list-keep: "/ordered" there starts its own list after a blank line', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('/ordered'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_THEN_OL);
+}, { md: TIGHT2_MD });
+check('list-keep: toolbar 核取 on that paragraph continues the list tight', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await tb(page, 'check'); await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_TODO);
+}, { md: TIGHT2_MD });
+check('list-keep: toolbar 編號 on that paragraph starts its own list after a blank line', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await tb(page, 'ordered-list'); await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_THEN_OL);
+}, { md: TIGHT2_MD });
+check('list-keep: 待辦清單 from ＋ on a nested item lands at that item\'s depth, after its subtree', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await page.keyboard.type('todo'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - child\n    - grand\n  - [ ] x\n- bravo\n\nOmega.\n');
+}, { md: '# D\n\n- alpha\n  - child\n    - grand\n- bravo\n\nOmega.\n' });
+check('list-keep: an untouched 待辦清單 from ＋ is removed again when left', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'bravo');
+  await page.keyboard.type('todo'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', 'li:', 'paragraph:Omega.']);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), TIGHT2_MD);
+}, { md: TIGHT2_MD });
+check('list-keep: under an ordered list, 編號列表 continues it tight', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'bravo');
+  await page.keyboard.type('ordered'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n3. x\n\nOmega.\n');
+}, { md: '# D\n\n1. alpha\n2. bravo\n\nOmega.\n' });
+check('slash: with no match ↑↓ move the caret', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/zz');
+  assert.strictEqual((await slashMenu(page)).empty, '沒有符合的區塊');
+  await page.keyboard.press('ArrowUp'); await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(((await caretNow(page)) || {}).text, 'Alpha.', 'the caret went up a line');
+}, { md: BASE_MD });
+check('slash: Shift+Enter closes the menu and breaks the line', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/');
+  await page.keyboard.press('Shift+Enter'); await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.innerHTML.indexOf('<br') !== -1), true, 'a soft break went in');
+}, { md: BASE_MD });
+check('slash: with text before it, one undo removes the block and a second the paragraph\'s own edit', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' x /math');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha. x\n\n$$\nx^2\n$$\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha. x\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
 }, { md: BASE_MD });
 
 (async () => {
