@@ -5697,6 +5697,43 @@ check('failed-render: ＋ 待辦清單 under a list item keeps the paragraph and
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n\ntodox\n\nOmega.\n', 'screen = file');
 }, { md: '# D\n\n- alpha\n- bravo\n\nOmega.\n' });
 
+// ── B1 fix round 3 (R51) ──
+// A run-re-serializing insert (編號列表 / 項目符號列表 continuing the list)
+// whose render fails drops its provisional item: only the paragraph and its
+// text stay, where ＋ put it, and leaving it writes that paragraph between the
+// items. Measured before: on a middle item the retry wrote the run up to the
+// paragraph over the whole run, and the item below was gone from the file.
+for (const [label, q, n1, n2] of [
+  ['編號列表', 'ordered', '1. ', '2. '],
+  ['項目符號列表', 'bullet', '- ', '- '],
+]) {
+  const md = '# D\n\n' + n1 + 'alpha\n' + n2 + 'bravo\n\nOmega.\n';
+  check('failed-render: ＋ ' + label + ' on a middle item keeps every item (R51)', DESKTOP, async (page, boot) => {
+    await plusClick(page, 'alpha');
+    await page.keyboard.type(q);
+    await failFirstRender(page);
+    await page.keyboard.press('Enter'); await page.keyboard.type('x');
+    await wait(1500); await renderIdle(page);
+    assert.strictEqual(await errorCardUp(page), true, 'the failure is shown');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', '~paragraph:' + q + 'x', 'li:bravo', 'paragraph:Omega.'],
+      'no provisional item: the paragraph and its text, between the items');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\n' + n1 + 'alpha\n\n' + q + 'x\n\n' + n2 + 'bravo\n\nOmega.\n', 'every item kept');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'paragraph:' + q + 'x', 'li:bravo', 'paragraph:Omega.'], 'screen = file');
+  }, { md });
+  check('failed-render: ＋ ' + label + ' on the last item keeps screen = file (R51)', DESKTOP, async (page, boot) => {
+    await plusClick(page, 'bravo');
+    await page.keyboard.type(q);
+    await failFirstRender(page);
+    await page.keyboard.press('Enter'); await page.keyboard.type('x');
+    await wait(1500); await renderIdle(page);
+    assert.strictEqual(await errorCardUp(page), true, 'the failure is shown');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', '~paragraph:' + q + 'x', 'paragraph:Omega.'],
+      'no provisional item: the paragraph and its text, below the list');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\n' + n1 + 'alpha\n' + n2 + 'bravo\n\n' + q + 'x\n\nOmega.\n', 'the screen\'s order');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', 'paragraph:' + q + 'x', 'paragraph:Omega.'], 'screen = file');
+  }, { md });
+}
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
