@@ -1692,8 +1692,14 @@ function countInCode(source, needle) {
   // no longer owns a rollback — the Enter split commits through
   // commitTypingThenStructure() (the old commitEdgeStructure(), renamed),
   // which was already counted (-2). 1 declaration + 22 call sites = 23.
-  assert.strictEqual(helperCalls, 23,
-    'the helper must be DECLARED once and used at all twenty-two ' +
+  // MIGRATED by v3.15.0 T1 (23 -> 24). ONE genuinely new commit-then-render
+  // site: replaceParagraphWithItem() — a "/" menu item chosen in a real
+  // paragraph that holds nothing but the "/query" becomes that item through
+  // one commitRangeEdit() over the paragraph's own lines, and owns its
+  // rollback (+1). The menu's other insertion paths go through
+  // commitLinesAtTransient(), already counted. 1 declaration + 23 call sites = 24.
+  assert.strictEqual(helperCalls, 24,
+    'the helper must be DECLARED once and used at all twenty-three ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 

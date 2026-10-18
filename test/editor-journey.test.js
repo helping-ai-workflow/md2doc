@@ -2966,8 +2966,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十六個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十六個 `position: fixed` 宣告（另有若干處是註解裡的散文
+  // ══ V3: 十八個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十八個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -3017,6 +3017,9 @@ async function main() {
     { sel: '.ed-te-menu',              after: 'gone' },
     { sel: '.ed-tb-insert',            after: 'gone' },
     { sel: '.ed-toolbar-menu',         after: 'gone' },
+    // v3.15.0 T1 (R24): the "/" block menu sits at the caret's viewport
+    // coordinates, so a scroll closes it (onAnyScroll). Its row is below.
+    { sel: '.ed-slash-menu',           after: 'gone' },
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
@@ -3706,6 +3709,23 @@ async function main() {
     assert.ok(isGone(after), '.ed-toolbar-menu 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-toolbar-menu vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-slash-menu（v3.15.0 T1 的「/」區塊選單）─────────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type(' /');
+    await ctx.page.waitForSelector('.ed-slash-menu', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-slash-menu');
+    assertRaised(before, '.ed-slash-menu');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-slash-menu');
+    assert.ok(isGone(after), '.ed-slash-menu 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-slash-menu vanishes on scroll — OK');
   }
 
   // ── V3b: onAnyScroll 的 `capture: true` ─────────────────────────────

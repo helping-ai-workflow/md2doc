@@ -4468,7 +4468,7 @@ const hintOf = (page) => page.evaluate(() => {
 check('empty-doc: opens with one focused transient and its hint', DESKTOP, async (page, boot) => {
   assert.deepStrictEqual(await blockList(page), ['~paragraph:']);
   assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
-  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字，或按「/」選擇區塊"', colourIsMuted2: true });
   await page.keyboard.type('Hello');
   assert.strictEqual((await hintOf(page)).content, 'none');
   assert.strictEqual(await saveAndRead(page, boot), 'Hello\n');
@@ -4484,7 +4484,7 @@ check('empty-doc: typing and erasing everything writes nothing and keeps the par
 }, { md: '' });
 check('empty-doc: in dark mode the hint keeps the muted token', DESKTOP, async (page) => {
   await page.locator('#md2doc-theme-toggle').click(); await wait(300);
-  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字，或按「/」選擇區塊"', colourIsMuted2: true });
 }, { md: '' });
 check('empty-doc: the table button inserts a table at the top', DESKTOP, async (page, boot) => {
   await tb(page, 'table');
@@ -4527,7 +4527,7 @@ check('click-below: a click between two blocks opens nothing', DESKTOP, async (p
 check('placeholder: a transient made by Enter at a paragraph start shows its hint unfocused', DESKTOP, async (page) => {
   await focusSurface(page, 'Omega.', 0);
   await page.keyboard.press('Enter'); await renderIdle(page);
-  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字"', colourIsMuted2: true });
+  assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字，或按「/」選擇區塊"', colourIsMuted2: true });
 }, { md: BASE_MD });
 check('toolbar-transient: quote, numbered and check are off while it is empty', DESKTOP, async (page) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
@@ -5093,6 +5093,261 @@ check('svg-plate: an inline svg on the edit page sits on a white plate in dark o
   assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
   assert.strictEqual(await saveAndRead(page, boot), SVG_MD, 'no byte changes');
 }, { md: SVG_MD });
+
+// ── slash (v3.15.0 T1): the "/" block menu ──
+// The menu as the user sees it: the labels of its items in order, the item
+// under the keyboard cursor, the 「沒有符合的區塊」 line, and where it sits —
+// `below` = its top is at or under the caret's bottom, `inView` = it is inside
+// the viewport. The caret rect is the collapsed selection's own client rect.
+async function slashMenu(page) {
+  return page.evaluate(() => {
+    const m = document.querySelector('.ed-slash-menu');
+    if (!m || !m.isConnected || m.hidden) return { open: false, labels: [], cursor: null, empty: null, below: null, inView: null };
+    const labelOf = (b) => b.querySelector('.ed-slash-label').textContent;
+    const items = [...m.querySelectorAll('.ed-slash-item')].filter((b) => b.getClientRects().length > 0);
+    const cur = m.querySelector('.ed-slash-item[data-ed-slash-cursor]');
+    const emptyEl = m.querySelector('.ed-slash-empty');
+    const r = m.getBoundingClientRect();
+    let below = null;
+    const sel = getSelection();
+    if (sel.rangeCount) {
+      const range = sel.getRangeAt(0).cloneRange(); range.collapse(false);
+      const rects = range.getClientRects();
+      const c = rects.length ? rects[rects.length - 1] : null;
+      if (c) below = r.top >= c.bottom - 0.5;
+    }
+    return { open: true, labels: items.map(labelOf), cursor: cur ? labelOf(cur) : null,
+      empty: emptyEl && emptyEl.getClientRects().length ? emptyEl.textContent : null,
+      below, inView: r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth };
+  });
+}
+// A real mouse click on the visible item labelled `label`, then the render.
+async function slashPick(page, label) {
+  const pt = await page.evaluate((l) => {
+    const b = [...document.querySelectorAll('.ed-slash-menu .ed-slash-item')]
+      .find((x) => x.querySelector('.ed-slash-label').textContent === l && x.getClientRects().length > 0);
+    if (!b) return null;
+    b.scrollIntoView({ block: 'nearest' });
+    const r = b.getBoundingClientRect();
+    return [r.left + r.width / 2, r.top + r.height / 2];
+  }, label);
+  assert.ok(pt, 'slashPick: no visible item ' + JSON.stringify(label));
+  await page.mouse.click(pt[0], pt[1]);
+  await renderIdle(page);
+}
+// The raw source box, when one is open: its value, caret and focus.
+const rawBox = (page) => page.evaluate(() => {
+  const t = document.querySelector('textarea.ed-raw');
+  return t ? { value: t.value, caret: t.selectionStart, focused: document.activeElement === t } : null;
+});
+const inBase = (block) => '# D\n\nAlpha.\n\n' + block + '\n\nOmega.\n';
+const TABLE_3X2_X = '| A | B | C |\n|---|---|---|\n| x |  |  |\n|  |  |  |';
+const TABLE_3X2 = '| A | B | C |\n|---|---|---|\n|  |  |  |\n|  |  |  |';
+// R19: an untouched pristine insert is discarded on save by design, so a
+// check that saves a fresh table types into its first body cell first.
+async function typeInFirstBodyCell(page, text) {
+  await page.locator('.ed-block[data-block-type="table"] tbody tr').first().locator('td').first().click();
+  await wait(150);
+  await page.keyboard.type(text);
+}
+check('slash: "/" in an empty paragraph opens 16 items under the caret', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/');
+  const m = await slashMenu(page);
+  assert.strictEqual(m.labels.length, 16);
+  assert.deepStrictEqual(m.labels, ['文字', '標題 1', '標題 2', '標題 3', '項目符號列表', '編號列表', '待辦清單', '引用', '程式碼', '分隔線', '表格', '圖片', 'Mermaid 圖', 'Graphviz 圖', 'WaveDrom 波形', '數學公式']);
+  assert.strictEqual(m.cursor, '文字');
+  assert.deepStrictEqual([m.below, m.inView], [true, true]);
+  assert.deepStrictEqual(await caretNow(page), { text: '/', offset: 1, transient: true }, 'focus stays in the paragraph');
+}, { md: BASE_MD });
+check('slash: "/表" filters to 表格 and Enter inserts a 3×2 table in place of the empty paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/表');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['表格']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await transientCount(page), 0, 'the table took the empty paragraph\'s place');
+  await typeInFirstBodyCell(page, 'x');
+  assert.strictEqual(await saveAndRead(page, boot), inBase(TABLE_3X2_X));
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), inBase(TABLE_3X2), 'the typing is its own step');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'the insertion is one undo step');
+}, { md: BASE_MD });
+check('slash: with text before it, the item goes below and the "/query" is removed', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' /h2');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['標題 2']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Sub');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n## Sub\n\nOmega.\n');
+}, { md: BASE_MD });
+check('slash: ↑↓ cycle, Esc closes and keeps the text, Enter after Esc splits normally', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/');
+  await page.keyboard.press('ArrowUp');
+  assert.strictEqual((await slashMenu(page)).cursor, '數學公式', 'wraps to the last');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+  assert.strictEqual((await slashMenu(page)).cursor, '標題 1');
+  await page.keyboard.press('Escape');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.deepStrictEqual(await caretNow(page), { text: '/', offset: 1, transient: true }, 'Esc did not revert the paragraph');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:/', '~paragraph:', 'paragraph:Omega.'], 'Enter split as usual');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await saveAndRead(page, boot), inBase('/'));
+}, { md: BASE_MD });
+check('slash: no match shows the empty line; a space closes and keeps the text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/zz');
+  const m = await slashMenu(page);
+  assert.deepStrictEqual([m.empty, m.labels], ['沒有符合的區塊', []]);
+  await page.keyboard.type(' x');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n/zz x\n\nOmega.\n');
+}, { md: BASE_MD });
+check('slash: Enter with no match closes the menu and splits', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/zz');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:/zz', '~paragraph:', 'paragraph:Omega.']);
+}, { md: BASE_MD });
+check('slash: a slash inside a word or URL opens nothing', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  for (const s of ['src/lib', ' https://x.y/a', ' and/or']) { await page.keyboard.type(s); assert.strictEqual((await slashMenu(page)).open, false, s); }
+}, { md: BASE_MD });
+check('slash: a mouse click on an item inserts it (Graphviz renders, raw box not forced open)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/');
+  await slashPick(page, 'Graphviz 圖');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await rawBox(page), null, 'no raw box');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```dot\ndigraph { a -> b }\n```\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.graphviz svg').length), 1);
+}, { md: BASE_MD });
+// One check per item: Enter at the end of Alpha., "/" + the item's first
+// keyword, Enter. A pristine skeleton (heading, list, table, code, quote) is
+// typed into before it is saved (R19); its block is asserted on screen first.
+const SLASH_EVERY = [
+  ['text', 'text', null],
+  ['h1', 'h1', 'heading'], ['h2', 'h2', 'heading'], ['h3', 'h3', 'heading'],
+  ['ul', 'bullet', 'li'], ['ol', 'ordered', 'li'], ['task', 'todo', 'li'],
+  ['quote', 'quote', 'raw'], ['code', 'code', 'raw'],
+  ['divider', 'divider', null], ['table', 'table', 'table'],
+  ['mermaid', 'mermaid', null], ['graphviz', 'graphviz', null], ['wavedrom', 'wavedrom', null], ['math', 'math', null],
+];
+const SLASH_EVERY_LABEL = { text: '文字', h1: '標題 1', h2: '標題 2', h3: '標題 3', ul: '項目符號列表', ol: '編號列表', task: '待辦清單',
+  quote: '引用', code: '程式碼', divider: '分隔線', table: '表格', mermaid: 'Mermaid 圖', graphviz: 'Graphviz 圖', wavedrom: 'WaveDrom 波形', math: '數學公式' };
+for (const [id, kw] of SLASH_EVERY) {
+  check('slash: every item writes its skeleton (text…math): ' + id, DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type('/' + kw);
+    assert.strictEqual((await slashMenu(page)).cursor, SLASH_EVERY_LABEL[id], 'the keyword puts the cursor on the item');
+    await page.keyboard.press('Enter'); await renderIdle(page);
+    assert.strictEqual((await slashMenu(page)).open, false, 'the menu closed');
+    const list = await blockList(page);
+    if (id === 'text') {
+      assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true }, '文字 on an empty paragraph leaves it empty');
+      assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+    } else if (id === 'h1' || id === 'h2' || id === 'h3') {
+      assert.strictEqual(list[2], 'heading:');
+      await page.keyboard.type('T');
+      assert.strictEqual(await commitAndRead(page, boot), inBase('#'.repeat(Number(id.slice(1))) + ' T'));
+    } else if (id === 'ul' || id === 'ol' || id === 'task') {
+      assert.strictEqual(list[2], 'li:');
+      await page.keyboard.type('T');
+      assert.strictEqual(await commitAndRead(page, boot), inBase({ ul: '- T', ol: '1. T', task: '- [ ] T' }[id]));
+    } else if (id === 'quote') {
+      assert.deepStrictEqual(await rawBox(page), { value: '> ', caret: 2, focused: true });
+      await page.keyboard.type('T'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+      assert.strictEqual(await saveAndRead(page, boot), inBase('> T'));
+    } else if (id === 'code') {
+      assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 4, focused: true });
+      await page.keyboard.type('x'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+      assert.strictEqual(await saveAndRead(page, boot), inBase('```\nx\n```'));
+    } else if (id === 'divider') {
+      assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true }, 'a paragraph below the rule takes the caret');
+      assert.strictEqual(await saveAndRead(page, boot), inBase('---'));
+    } else if (id === 'table') {
+      assert.strictEqual(list[2], 'table:ABC');
+      await typeInFirstBodyCell(page, 'x');
+      assert.strictEqual(await saveAndRead(page, boot), inBase(TABLE_3X2_X));
+    } else {
+      assert.strictEqual(await rawBox(page), null, 'a diagram inserts rendered, no raw box');
+      assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true }, 'a paragraph below the diagram takes the caret');
+      assert.strictEqual(await saveAndRead(page, boot), inBase({
+        mermaid: '```mermaid\ngraph TD\n  A --> B\n```',
+        graphviz: '```dot\ndigraph { a -> b }\n```',
+        wavedrom: "```wavedrom\n{ signal: [{ name: 'clk', wave: 'p....' }] }\n```",
+        math: '$$\nx^2\n$$',
+      }[id]));
+    }
+  }, { md: BASE_MD });
+}
+check('slash: "/表" then Enter during a slow render inserts the table', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' x');
+  await delayRender(page, 800);
+  await page.keyboard.press('End'); await page.keyboard.press('Enter');   // a commit is now in flight
+  await page.keyboard.type('/表'); await page.keyboard.press('Enter');
+  await renderIdle(page);
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.strictEqual(await transientCount(page), 0);
+  await typeInFirstBodyCell(page, 'x');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha. x\n\n' + TABLE_3X2_X + '\n\nOmega.\n');
+}, { md: BASE_MD });
+check('slash: Tab inserts the cursor item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/h1');
+  await page.keyboard.press('Tab'); await renderIdle(page);
+  await page.keyboard.type('T');
+  assert.strictEqual(await commitAndRead(page, boot), inBase('# T'));
+}, { md: BASE_MD });
+const TALL_MD = '# D\n\n' + Array.from({ length: 40 }, (_, i) => 'Filler ' + i + '.').join('\n\n') + '\n\nTarget.\n\n' +
+  Array.from({ length: 40 }, (_, i) => 'Tail ' + i + '.').join('\n\n') + '\n';
+check('slash: near the viewport bottom the menu opens above the caret', DESKTOP, async (page) => {
+  await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === 'Target.');
+    window.scrollBy(0, s.getBoundingClientRect().bottom - (innerHeight - 60));
+  });
+  await wait(200);
+  const y = await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === 'Target.').getBoundingClientRect().bottom);
+  assert.ok(y > 900 - 120 && y <= 900, 'the paragraph sits in the last 120px: ' + y);
+  await focusSurface(page, 'Target.', 7);
+  await page.keyboard.type(' /');
+  const m = await slashMenu(page);
+  assert.strictEqual(m.open, true);
+  const g = await page.evaluate(() => {
+    const r = getSelection().getRangeAt(0).getClientRects();
+    const c = r[r.length - 1];
+    const mr = document.querySelector('.ed-slash-menu').getBoundingClientRect();
+    return { menuBottom: mr.bottom, caretTop: c.top, menuTop: mr.top };
+  });
+  assert.ok(g.menuBottom <= g.caretTop + 0.5, 'menu above the caret: ' + JSON.stringify(g));
+  assert.deepStrictEqual([m.below, m.inView], [false, true]);
+}, { md: TALL_MD });
+check('slash: the placeholder names "/"', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual((await hintOf(page)).content, '"輸入文字，或按「/」選擇區塊"');
+}, { md: BASE_MD });
+check('slash: the menu is readable in dark mode', DESKTOP, async (page) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/');
+  const s = await page.evaluate(() => {
+    const m = document.querySelector('.ed-slash-menu');
+    const l = m.querySelector('.ed-slash-label');
+    return { bg: getComputedStyle(m).backgroundColor, fg: getComputedStyle(l).color };
+  });
+  assert.strictEqual(s.bg, 'rgb(42, 42, 45)');
+  assert.notStrictEqual(s.fg, s.bg);
+  assert.ok(contrast(s.fg, s.bg) >= 4.5, 'label contrast ' + JSON.stringify(s));
+}, { md: BASE_MD });
+check('slash: scrolling closes the menu', DESKTOP, async (page) => {
+  await focusSurface(page, 'Target.', 7); await page.keyboard.type(' /');
+  assert.strictEqual((await slashMenu(page)).open, true);
+  await page.mouse.wheel(0, 300); await wait(300);
+  assert.strictEqual((await slashMenu(page)).open, false);
+}, { md: TALL_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
