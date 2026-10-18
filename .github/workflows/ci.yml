@@ -4,6 +4,8 @@ name: CI
 # check (and the browser job) is green and the branch is up to date with main,
 # so a merge lands exactly the tree that was tested. Pushes to main and the
 # release tag do not re-run the suite (v3.12.1 ran npm test four times).
+# A PR that only changes README.md, CLAUDE.md or docs/** skips install and
+# test and reports success (.github/docs-only.sh says why it must still report).
 on:
   pull_request:
   workflow_dispatch:
@@ -14,14 +16,25 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Docs-only change?
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: .github/docs-only.sh
 
       - name: Setup Node
+        if: steps.scope.outputs.docs_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install
+        if: steps.scope.outputs.docs_only != 'true'
         run: npm ci || npm install
 
       - name: Test
+        if: steps.scope.outputs.docs_only != 'true'
         run: npm test
