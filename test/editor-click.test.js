@@ -5635,6 +5635,68 @@ check('slash: with text before it, one undo removes the block and a second the p
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
 }, { md: BASE_MD });
 
+// ── B1 fix round 2 (R47, R48) ──
+check('list-keep: 待辦清單 under a nested ordered item starts its own list at that depth, tight (R47)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await page.keyboard.type('todo'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  1. child\n  - [ ] x\n- bravo\n\nOmega.\n');
+}, { md: '# D\n\n- alpha\n  1. child\n- bravo\n\nOmega.\n' });
+check('list-keep: 編號列表 under a nested bullet item starts its own list at that depth, tight (R47)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await page.keyboard.type('ordered'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n   - child\n   1. x\n2. bravo\n\nOmega.\n');
+}, { md: '# D\n\n1. alpha\n   - child\n2. bravo\n\nOmega.\n' });
+// R48: keys typed straight after Enter, while the continuation renders, land
+// in the new item.
+for (const [q, md, want] of [
+  ['todo', '# D\n\n- alpha\n- bravo\n\nOmega.\n', '# D\n\n- alpha\n- bravo\n- [ ] xy\n\nOmega.\n'],
+  ['ordered', '# D\n\n1. alpha\n2. bravo\n\nOmega.\n', '# D\n\n1. alpha\n2. bravo\n3. xy\n\nOmega.\n'],
+  ['bullet', '# D\n\n- alpha\n- bravo\n\nOmega.\n', '# D\n\n- alpha\n- bravo\n- xy\n\nOmega.\n'],
+]) {
+  check('list-keep: keys typed while "' + q + '" continues a list land in the new item (R48)', DESKTOP, async (page, boot) => {
+    await delayRender(page, 800);
+    await plusClick(page, 'bravo');
+    await page.keyboard.type(q); await page.keyboard.press('Enter'); await page.keyboard.type('xy');
+    await renderIdle(page);
+    assert.strictEqual(await noticeText(page), null, 'nothing dropped');
+    assert.strictEqual(await commitAndRead(page, boot), want);
+  }, { md });
+}
+// ＋ on a MIDDLE item: the transient sits inside the run while it renders.
+// The insert's own commit renumbers the items after it (saved before any
+// typing: a later edit of the item re-serializes the run and would hide it).
+check('list-keep: 編號列表 from ＋ on a middle item renumbers the items after it in its own commit', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'alpha');
+  await page.keyboard.type('ordered'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. alpha\n2.\n3. bravo\n\nOmega.\n');
+}, { md: '# D\n\n1. alpha\n2. bravo\n\nOmega.\n' });
+check('list-keep: 編號列表 from ＋ on a middle item, keys typed meanwhile land in it (R48)', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await plusClick(page, 'alpha');
+  await page.keyboard.type('ordered'); await page.keyboard.press('Enter'); await page.keyboard.type('xy');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. xy\n3. bravo\n\nOmega.\n');
+}, { md: '# D\n\n1. alpha\n2. bravo\n\nOmega.\n' });
+check('list-keep: 項目符號列表 from ＋ on a middle item, keys typed meanwhile land in it (R48)', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await plusClick(page, 'alpha');
+  await page.keyboard.type('bullet'); await page.keyboard.press('Enter'); await page.keyboard.type('xy');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- xy\n- bravo\n\nOmega.\n');
+}, { md: '# D\n\n- alpha\n- bravo\n\nOmega.\n' });
+check('failed-render: ＋ 待辦清單 under a list item keeps the paragraph and its text (R48)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'bravo');
+  await page.keyboard.type('todo');
+  await failFirstRender(page);
+  await page.keyboard.press('Enter'); await page.keyboard.type('x');
+  await wait(1500); await renderIdle(page);
+  assert.strictEqual(await errorCardUp(page), true, 'the failure is shown');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', '~paragraph:todox', 'paragraph:Omega.'], 'the paragraph and what was typed stay');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n\ntodox\n\nOmega.\n', 'screen = file');
+}, { md: '# D\n\n- alpha\n- bravo\n\nOmega.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

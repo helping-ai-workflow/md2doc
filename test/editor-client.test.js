@@ -1703,6 +1703,8 @@ function countInCode(source, needle) {
   // replaceParagraphWithLines() (shared with the 圖片 replacement; 0), and
   // insertTaskSiblingAfter() — 待辦清單 written tight under a bullet item —
   // is a genuinely new commit-then-render site that owns its rollback (+1).
+  // (B1 fix round 2 renamed it insertListLineAfter(), which also writes R47's
+  // nested cross-type item; still one site.)
   // 1 declaration + 24 call sites = 25.
   assert.strictEqual(helperCalls, 25,
     'the helper must be DECLARED once and used at all twenty-four ' +
