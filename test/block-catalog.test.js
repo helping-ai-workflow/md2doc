@@ -36,4 +36,39 @@ assert.deepStrictEqual(cat.itemById('wavedrom').lines, ['\x60\x60\x60wavedrom', 
 assert.strictEqual(cat.itemById('nope'), null);
 assert.deepStrictEqual(ids('TaBlE'), ['table'], 'case-insensitive');
 assert.deepStrictEqual(ids('able'), [], 'prefix, not substring');
+// v3.15.0 T3: the Markdown shortcut matcher (D3) and the lines a match
+// writes (D5 skeletons when nothing follows the caret). NBSP is written as an
+// escape: a contenteditable often types a trailing space as U+00A0.
+const ms = cat.matchShortcut;
+assert.deepStrictEqual(ms('## ', false), { kind: 'heading', depth: 2 });
+assert.deepStrictEqual(ms('## ', false), { kind: 'heading', depth: 2 });
+assert.deepStrictEqual(ms('###### ', true), { kind: 'heading', depth: 6 });
+assert.strictEqual(ms('####### ', true), null);
+assert.deepStrictEqual([ms('- ', true), ms('* ', true)], [{ kind: 'ul' }, { kind: 'ul' }]);
+assert.deepStrictEqual([ms('- ', true), ms('* ', false)], [{ kind: 'ul' }, { kind: 'ul' }]);
+assert.deepStrictEqual(ms('12. ', true), { kind: 'ol', start: 12 });
+assert.deepStrictEqual(ms('3. ', false), { kind: 'ol', start: 3 });
+assert.deepStrictEqual([ms('[] ', true), ms('[ ] ', true)], [{ kind: 'task' }, { kind: 'task' }]);
+assert.deepStrictEqual(ms('[ ] ', true), { kind: 'task' });
+assert.deepStrictEqual(ms('> ', false), { kind: 'quote' });
+assert.deepStrictEqual(ms('> ', true), { kind: 'quote' });
+assert.deepStrictEqual([ms('\x60\x60\x60', true), ms('\x60\x60\x60', false)], [{ kind: 'code' }, null]);
+assert.deepStrictEqual([ms('---', true), ms('---', false)], [{ kind: 'divider' }, null]);
+assert.deepStrictEqual([ms('a## ', true), ms('#', true), ms('1.', true)], [null, null, null]);
+assert.deepStrictEqual([ms('## x', true), ms(' ## ', true), ms('1234567890. ', true), ms('+ ', true)], [null, null, null, null]);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'heading', depth: 2 }, []), ['##']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'heading', depth: 2 }, ['']), ['##']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'heading', depth: 2 }, ['Title']), ['## Title']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'heading', depth: 1 }, ['a', 'b']), ['# a b'], 'a heading is one line');
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'ul' }, []), ['-']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'ul' }, ['x', 'y']), ['- x', '  y']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'task' }, []), ['- [ ] ']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'task' }, ['x']), ['- [ ] x']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'ol', start: 3 }, []), ['3.']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'ol', start: 3 }, ['x']), ['3. x']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'ol', start: 12 }, ['x', 'y']), ['12. x', '    y']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'quote' }, []), ['>']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'quote' }, ['a', 'b']), ['> a', '> b']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'code' }, []), ['\x60\x60\x60', '', '\x60\x60\x60']);
+assert.deepStrictEqual(cat.shortcutLines({ kind: 'divider' }, []), ['---']);
 console.log('block-catalog.test.js OK');

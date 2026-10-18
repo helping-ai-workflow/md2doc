@@ -3473,17 +3473,23 @@ async function focusSurface(page, text, offset) {
   }, offset);
   assert.strictEqual(placed, true, 'focusSurface: offset ' + offset + ' is inside ' + JSON.stringify(text));
 }
-check('f1: "## " at a paragraph start saves escaped and stays a paragraph', DESKTOP, async (page, boot) => {
+// MIGRATED by v3.15.0 T3 (R18): `f1: "## " at a paragraph start saves escaped
+// and stays a paragraph` -> `…converts; Ctrl+Z gives the escaped literal`. The
+// marker is now a shortcut (spec §3.3): the paragraph becomes a heading, and
+// one Ctrl+Z gives back exactly what the old check pinned — a paragraph
+// reading "## Alpha.", saved as `\## Alpha.`, no notice.
+check('f1: "## " at a paragraph start converts; Ctrl+Z gives the escaped literal', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 0);
   await page.keyboard.type('## ');
-  await page.locator('.ed-block[data-block-type="heading"]').first().click();
   await renderIdle(page);
-  const type = await page.evaluate(() => {
-    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === '## Alpha.');
+  const typeOf = (text) => page.evaluate((t) => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((el) => el.textContent === t);
     const b = s && s.closest('.ed-block');
     return b ? b.getAttribute('data-block-type') : null;
-  });
-  assert.strictEqual(type, 'paragraph', 'the block reads "## Alpha." and is still a paragraph');
+  }, text);
+  assert.strictEqual(await typeOf('Alpha.'), 'heading', 'typing converts');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await typeOf('## Alpha.'), 'paragraph', 'the block reads "## Alpha." and is a paragraph again');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n\\## Alpha.\n\nOmega.\n');
   assert.strictEqual(await noticeText(page), null, 'no notice');
 }, { md: BASE_MD });
@@ -3493,9 +3499,14 @@ check('f1: "> " at a list item start', DESKTOP, async (page, boot) => {
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- \\> bravo\n');
   assert.strictEqual(await noticeText(page), null, 'no notice');
 }, { md: '# D\n\n- bravo\n' });
-check('f1: "1. " at a paragraph start', DESKTOP, async (page, boot) => {
+// MIGRATED by v3.15.0 T3 (R18): `f1: "1. " at a paragraph start` -> `…converts;
+// Ctrl+Z gives the escaped literal`, same reason as the "## " row above.
+check('f1: "1. " at a paragraph start converts; Ctrl+Z gives the escaped literal', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 0);
   await page.keyboard.type('1. ');
+  await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:Alpha.', 'paragraph:Omega.'], 'typing converts');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1\\. Alpha.\n\nOmega.\n');
   assert.strictEqual(await noticeText(page), null, 'no notice');
 }, { md: BASE_MD });
@@ -5733,6 +5744,161 @@ for (const [label, q, n1, n2] of [
     assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', 'paragraph:' + q + 'x', 'paragraph:Omega.'], 'screen = file');
   }, { md });
 }
+
+// ── shortcut (v3.15.0 T3): a Markdown marker typed at the start of a
+// paragraph converts it (spec §3.3, D1–D5) ──
+for (const [typed, file, kind] of [
+  ['# ', '# D\n\nAlpha.\n\n# T\n\nOmega.\n', 'heading'], ['### ', '# D\n\nAlpha.\n\n### T\n\nOmega.\n', 'heading'],
+  ['- ', '# D\n\nAlpha.\n\n- T\n\nOmega.\n', 'li'], ['* ', '# D\n\nAlpha.\n\n- T\n\nOmega.\n', 'li'],
+  ['1. ', '# D\n\nAlpha.\n\n1. T\n\nOmega.\n', 'li'], ['[] ', '# D\n\nAlpha.\n\n- [ ] T\n\nOmega.\n', 'li'], ['[ ] ', '# D\n\nAlpha.\n\n- [ ] T\n\nOmega.\n', 'li'],
+]) {
+  check('shortcut: "' + typed + '" in a new paragraph converts, and typing goes into the block', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type(typed); await renderIdle(page);
+    assert.strictEqual((await caretNow(page)).offset, 0);
+    await page.keyboard.type('T');
+    assert.strictEqual(await page.evaluate(() => document.activeElement.closest('.ed-block').getAttribute('data-block-type')), kind);
+    assert.strictEqual(await commitAndRead(page, boot), file);
+  }, { md: BASE_MD });
+}
+// D3 keeps the typed start number in the conversion. (Typing into the item
+// afterwards renumbers it to 1: the list re-serializer discards a list's start
+// number, §3.8 — measured the same at 2fb4ac3 on '3. alpha' + a typed key,
+// before this task. Not changed here.)
+check('shortcut: "3. " keeps its start number in the conversion', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('3. '); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.closest('.ed-block').getAttribute('data-block-type')), 'li');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n3.\n\nOmega.\n');
+}, { md: BASE_MD });
+// R20: the literal is serialized like any paragraph — `\##`, its trailing
+// space dropped — so the screen shows `##` with the caret after it.
+check('shortcut: Ctrl+Z right after shows the literal, caret after it, and it stays literal', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('## '); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: '##', offset: 2, transient: false });
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n##x\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: after Ctrl+Z the paragraph does not convert again while the caret stays in it (R20)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('## '); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  await page.keyboard.type(' x'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:## x', 'paragraph:Omega.']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\## x\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: at the start of an existing paragraph the text after the caret becomes the heading', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0); await page.keyboard.type('## '); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n## Omega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n\\## Omega.\n');
+}, { md: BASE_MD });
+// The raw box commits with Ctrl+Enter (openRawEditor()'s own keydown).
+check('shortcut: "```" opens a code box with the caret on the fence line', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('```'); await renderIdle(page);
+  assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 3, focused: true });
+  await page.keyboard.type('js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: "---" writes a divider and opens a paragraph below it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('---'); await renderIdle(page);
+  await page.keyboard.type('After');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n---\n\nAfter\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: "> " opens the quote box with the caret after "> "', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('> '); await renderIdle(page);
+  const r = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t && { v: t.value, s: t.selectionStart }; });
+  assert.deepStrictEqual(r, { v: '> ', s: 2 });
+  await page.keyboard.type('Q'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n> Q\n\nOmega.\n');
+}, { md: BASE_MD });
+// Guard (green before T3): a marker that is not the whole text before the
+// caret, or one typed into a list item, a heading or a table cell, is text.
+check('shortcut: mid-paragraph nothing converts', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' ## x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha. ## x\n\nOmega.\n');
+}, { md: BASE_MD });
+const NOCONV_MD = '# D\n\n## Head\n\n- alpha\n\n| a | b |\n|---|---|\n| 1 | 2 |\n';
+check('shortcut: in a list item, a heading and a table cell nothing converts', DESKTOP, async (page, boot) => {
+  const leave = async () => { await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page); };
+  await focusSurface(page, 'alpha', 0); await page.keyboard.type('## '); await leave();
+  await focusSurface(page, 'Head', 0); await page.keyboard.type('- '); await leave();
+  await focusSurface(page, '1', 0); await page.keyboard.type('> '); await leave();
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'heading:- Head', 'li:## alpha', 'table:ab\n> 12']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n## - Head\n\n- \\## alpha\n\n| a | b |\n|---|---|\n| > 1 | 2 |\n');
+}, { md: NOCONV_MD });
+check('shortcut: typing straight on after "## " on a slow render lands in the heading', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('## Title');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n## Title\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: typing straight on after "- " on a slow render lands in the item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('- item');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- item\n\nOmega.\n');
+}, { md: BASE_MD });
+// R15 / R17: "## T" is held while the Enter renders and replayed one
+// character at a time; the replayed space starts the shortcut's commit and
+// the "T" after it waits for that render, then lands in the heading.
+check('shortcut: "## T" typed during an Enter\'s slow render still converts', DESKTOP, async (page, boot) => {
+  await delayRender(page, 800);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' x'); await page.keyboard.press('Enter');
+  await page.keyboard.type('## T');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha. x\n\n## T\n\nOmega.\n');
+}, { md: BASE_MD });
+check('failed-render: a shortcut whose render fails keeps the literal and the keys after it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await failFirstRender(page);
+  await page.keyboard.type('## Ti'); await renderIdle(page);
+  assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:## Ti', 'paragraph:Omega.']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\## Ti\n\nOmega.\n');
+}, { md: BASE_MD });
+check('failed-render: a shortcut at the start of a real paragraph whose render fails keeps it as typed', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await failFirstRender(page);
+  await page.keyboard.type('## Ti'); await renderIdle(page);
+  assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:## TiOmega.']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\## TiOmega.\n');
+}, { md: BASE_MD });
+// R46 (carries R42): below a tight list the shortcut gives the same answer as
+// the "/" menu — a bullet or a to-do continues the list tight, an ordered
+// item starts its own list after a blank line.
+check('shortcut: "- " on a paragraph below a tight list continues it tight', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('- x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n\nOmega.\n');
+}, { md: TIGHT2_MD });
+check('shortcut: "[] " on a paragraph below a tight list continues it tight', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('[] x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_TODO);
+}, { md: TIGHT2_MD });
+check('shortcut: "1. " on a paragraph below a tight list starts its own list after a blank line', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('1. x');
+  assert.strictEqual(await commitAndRead(page, boot), TIGHT_THEN_OL);
+}, { md: TIGHT2_MD });
+// R44: the run re-serializer writes an empty to-do item as `- [ ] ` (with
+// its space), so it reads back as a to-do and the next key lands in it.
+check('shortcut: Enter at the end of a to-do item then typing keeps it a to-do (R44)', DESKTOP, async (page, boot) => {
+  await liText(page, 'alpha').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- [ ] alpha\n- [ ] x\n\nOmega.\n');
+}, { md: '# D\n\n- [ ] alpha\n\nOmega.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

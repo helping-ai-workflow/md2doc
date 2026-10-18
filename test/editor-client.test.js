@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1706,8 +1706,13 @@ function countInCode(source, needle) {
   // (B1 fix round 2 renamed it insertListLineAfter(), which also writes R47's
   // nested cross-type item; still one site.)
   // 1 declaration + 24 call sites = 25.
-  assert.strictEqual(helperCalls, 25,
-    'the helper must be DECLARED once and used at all twenty-four ' +
+  // MIGRATED by v3.15.0 T3 (25 -> 27). ONE genuinely new commit-then-render
+  // site that rolls back two ops: commitShortcutAt() — a Markdown shortcut
+  // writes the literal and the conversion (commitShortcut(), D1) and renders
+  // once; a failed render rolls back both, op 2 first (R35): two lines (+2).
+  // 1 declaration + 26 call sites = 27.
+  assert.strictEqual(helperCalls, 27,
+    'the helper must be DECLARED once and used at all twenty-six ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2615,6 +2620,43 @@ function countInCode(source, needle) {
   assert.deepStrictEqual(st.stack.undo(r.lines).lines, st.lines);
   const h = commitSplit({ lines: ['a\\', 'b'], blocks: [{ id: 0, type: 'paragraph', startLine: 1, endLine: 2 }], stack: new UndoStack() }, 0, 'a\\\nb', 'c');
   assert.strictEqual(h.rightStartLine, 4, 'a two-line left half');
+}
+
+// -- v3.15.0 T3: commitShortcut() — a Markdown shortcut is two ops ---------
+// D1 / R1: op 1 writes the literal the user typed (escaped), op 2 the
+// conversion, over the same range. One undo shows the literal, a second the
+// paragraph as it was. On a transient, op 1 inserts the literal where the
+// transient's commit would land (commitInsertionAt()).
+{
+  const B = (id, s, e) => ({ id, type: 'paragraph', startLine: s, endLine: e });
+  const st = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const r = commitShortcut(st, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
+  assert.deepStrictEqual(r.lines, ['# D', '', '## Alpha.', '', 'Omega.']);
+  assert.strictEqual(r.ops.length, 2);
+  assert.strictEqual(r.newStartLine, 3);
+  const u1 = st.stack.undo(r.lines).lines;
+  assert.deepStrictEqual(u1, ['# D', '', '\\## Alpha.', '', 'Omega.'], 'one undo → the literal');
+  assert.deepStrictEqual(st.stack.undo(u1).lines, st.lines, 'two undos → the original');
+  const t = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const tr = commitShortcut(t, { anchorBlockId: 1 }, ['\\-'], ['-']);
+  assert.deepStrictEqual(tr.lines, ['# D', '', 'Alpha.', '', '-', '', 'Omega.']);
+  assert.strictEqual(tr.newStartLine, 5);
+  assert.deepStrictEqual(t.stack.undo(tr.lines).lines, ['# D', '', 'Alpha.', '', '\\-', '', 'Omega.']);
+  // A skeleton longer than the literal shifts the blocks below it.
+  const c = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const cr = commitShortcut(c, { anchorBlockId: 1 }, ['\\`\\`\\`'], ['\x60\x60\x60', '', '\x60\x60\x60']);
+  assert.deepStrictEqual(cr.lines, ['# D', '', 'Alpha.', '', '\x60\x60\x60', '', '\x60\x60\x60', '', 'Omega.']);
+  assert.strictEqual(cr.blocks.find((b) => b.id === 2).startLine, 9, 'Omega moved down by the literal and the skeleton');
+  // A transient that opens the document (no anchor).
+  const n = { lines: ['# D', '', 'Alpha.'], blocks: [B(0, 1, 1), B(1, 3, 3)], stack: new UndoStack() };
+  const nr = commitShortcut(n, { anchorBlockId: null }, ['\\##'], ['##']);
+  assert.deepStrictEqual(nr.lines, ['##', '', '# D', '', 'Alpha.']);
+  assert.strictEqual(nr.newStartLine, 1);
+  // The literal equals what the file already holds: op 1 is null, op 2 alone.
+  const same = { lines: ['# D', '', '\\## Alpha.'], blocks: [B(0, 1, 1), B(1, 3, 3)], stack: new UndoStack() };
+  const sr = commitShortcut(same, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
+  assert.deepStrictEqual(sr.ops.map((o) => o !== null), [false, true]);
+  assert.deepStrictEqual(same.stack.undo(sr.lines).lines, ['# D', '', '\\## Alpha.']);
 }
 
 console.log('editor-client.test.js OK');
