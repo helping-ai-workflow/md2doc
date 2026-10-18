@@ -3800,11 +3800,10 @@ check('transient-model: 在上方插入 on the first block puts it at the top', 
   assert.strictEqual(await commitAndRead(page, boot), 'Top.\n\n# D\n\nAlpha.\n\nOmega.\n');
 }, { md: BASE_MD });
 check('transient-model: ＋ 段落 opens a transient and abandoning it leaves the file alone', DESKTOP, async (page, boot) => {
-  const sel = await blockByText(page, 'Alpha.');
-  await page.hover(sel); await wait(150);
-  await page.click(sel + ' > .ed-insert'); await wait(300);
-  await page.evaluate(() => [...document.querySelectorAll('.ed-insert-menu-btn')].find((b) => b.textContent.trim() === '段落').click());
-  await renderIdle(page);
+  // v3.15.0 T2: ＋ opens the "/" menu on the transient; 段落 is its 文字.
+  await plusClick(page, 'Alpha.');
+  await slashPick(page, '文字');
+  assert.strictEqual((await slashMenu(page)).open, false);
   assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
@@ -3884,11 +3883,10 @@ check('transient-model: ＋ 段落 on the block below a typed transient commits 
   await focusSurface(page, 'Alpha.', 6);
   await tb(page, 'insert-after');
   await page.keyboard.type('New.');
-  const sel = await blockByText(page, 'Omega.');
-  await page.hover(sel); await wait(150);
-  await page.click(sel + ' > .ed-insert'); await wait(300);
-  await page.evaluate(() => [...document.querySelectorAll('.ed-insert-menu-btn')].find((b) => b.textContent.trim() === '段落').click());
-  await renderIdle(page);
+  // v3.15.0 T2: ＋ opens the "/" menu on the transient; 段落 is its 文字.
+  await plusClick(page, 'Omega.');
+  await slashPick(page, '文字');
+  assert.strictEqual((await slashMenu(page)).open, false);
   assert.strictEqual(await noticeText(page), null, 'no 文件已更新 notice');
   assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:New.', 'paragraph:Omega.', '~paragraph:']);
   assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
@@ -4490,7 +4488,7 @@ check('empty-doc: the table button inserts a table at the top', DESKTOP, async (
   await tb(page, 'table');
   await page.keyboard.type('x');
   await page.keyboard.press('Control+s'); await renderIdle(page);
-  assert.deepStrictEqual(mdTable(fs.readFileSync(boot.mdPath, 'utf8')), [['A', 'B'], ['x', '']]);
+  assert.deepStrictEqual(mdTable(fs.readFileSync(boot.mdPath, 'utf8')), [['A', 'B', 'C'], ['x', '', ''], ['', '', '']]);
 }, { md: '' });
 check('click-below: a click under the last block opens a transient at the end', DESKTOP, async (page, boot) => {
   const pt = await page.evaluate(() => { const bs = document.querySelectorAll('.content .ed-block'); const r = bs[bs.length - 1].getBoundingClientRect(); return [r.left + 40, r.bottom + 60]; });
@@ -4529,12 +4527,25 @@ check('placeholder: a transient made by Enter at a paragraph start shows its hin
   await page.keyboard.press('Enter'); await renderIdle(page);
   assert.deepStrictEqual(await hintOf(page), { content: '"輸入文字，或按「/」選擇區塊"', colourIsMuted2: true });
 }, { md: BASE_MD });
-check('toolbar-transient: quote, numbered and check are off while it is empty', DESKTOP, async (page) => {
+// v3.15.0 T2 (D11, R25): migrated from "…are off while it is empty" — on an
+// empty transient the three now insert their skeleton.
+check('toolbar-transient: quote, numbered and check are on while it is empty and insert their skeleton', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   const st = () => page.evaluate(() => ['quote', 'ordered-list', 'check'].map((id) => document.querySelector('[data-ed-tb="' + id + '"]').disabled));
-  assert.deepStrictEqual(await st(), [true, true, true]);
+  assert.deepStrictEqual(await st(), [false, false, false]);
   await page.keyboard.type('x'); await wait(200);
   assert.deepStrictEqual(await st(), [false, false, false]);
+  await page.keyboard.press('Backspace'); await wait(200);
+  assert.deepStrictEqual(await st(), [false, false, false], 'empty again');
+  await tb(page, 'ordered-list'); await page.keyboard.type('n');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n1. n\n\nOmega.\n');
+}, { md: BASE_MD });
+check('toolbar-transient: 引用 on an empty paragraph opens the raw box seeded "> "', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await tb(page, 'quote');
+  assert.deepStrictEqual(await rawBox(page), { value: '> ', caret: 2, focused: true });
+  await page.keyboard.type('Q'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n> Q\n\nOmega.\n');
 }, { md: BASE_MD });
 check('toolbar-transient: 清單 on a transient with text commits it as a list item', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
@@ -5348,6 +5359,108 @@ check('slash: scrolling closes the menu', DESKTOP, async (page) => {
   await page.mouse.wheel(0, 300); await wait(300);
   assert.strictEqual((await slashMenu(page)).open, false);
 }, { md: TALL_MD });
+
+// ── plus (v3.15.0 T2): ＋ and the toolbar's insert buttons open the "/" menu ──
+// Hovers the block whose surface text is `text`, clicks its ＋ with the real
+// mouse (holding Alt when asked), then waits for the renders.
+async function plusClick(page, text, opts) {
+  const o = opts || {};
+  const sel = await blockByText(page, text);
+  await page.hover(sel); await wait(150);
+  const box = await page.locator(sel + ' > .ed-insert').boundingBox();
+  assert.ok(box, 'plusClick: no ＋ on ' + JSON.stringify(text));
+  if (o.alt) await page.keyboard.down('Alt');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  if (o.alt) await page.keyboard.up('Alt');
+  await renderIdle(page);
+}
+// Answers a file chooser with the 1px PNG and waits for its upload and the
+// render that follows (R41: renderIdle alone does not wait for /api/asset).
+async function pickImage(page, chooser) {
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') }),
+  ]);
+  await renderIdle(page);
+}
+check('plus: ＋ opens an empty paragraph below with the menu on it', DESKTOP, async (page) => {
+  await plusClick(page, 'Alpha.');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  const m = await slashMenu(page);
+  assert.deepStrictEqual([m.open, m.labels.length, m.cursor, m.inView], [true, 16, '文字', true]);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+}, { md: BASE_MD });
+check('plus: typing after ＋ filters, Enter inserts', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'Alpha.');
+  await page.keyboard.type('h2');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['標題 2']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Sub');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n## Sub\n\nOmega.\n');
+}, { md: BASE_MD });
+check('plus: text that matches no block closes the menu and stays text', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'Alpha.');
+  await page.keyboard.type('N');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['編號列表'], '"N" still matches (number)');
+  await page.keyboard.type('ew.');
+  assert.strictEqual((await slashMenu(page)).open, false, 'nothing matches "Ne": plain text, no empty panel');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
+}, { md: BASE_MD });
+check('plus: Alt+＋ inserts above', DESKTOP, async (page) => {
+  await plusClick(page, 'Omega.', { alt: true });
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  assert.strictEqual((await slashMenu(page)).open, true);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true });
+}, { md: BASE_MD });
+check('plus: Esc closes the menu and leaving the empty paragraph writes nothing', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'Alpha.');
+  await page.keyboard.press('Escape');
+  assert.strictEqual((await slashMenu(page)).open, false);
+  assert.deepStrictEqual(await caretNow(page), { text: '', offset: 0, transient: true }, 'Esc keeps the paragraph and the caret');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+check('plus: toolbar 在下方插入 / 在上方插入 open the menu too', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 3);
+  await tb(page, 'insert-after');
+  assert.deepStrictEqual([(await slashMenu(page)).open, await transientCount(page)], [true, 1]);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  await page.keyboard.press('Escape');
+  await focusSurface(page, 'Omega.', 3);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.']);
+  assert.strictEqual((await slashMenu(page)).open, true);
+}, { md: BASE_MD });
+check('plus: the pill menu is gone', DESKTOP, async (page) => {
+  await plusClick(page, 'Alpha.');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-insert-menu, .ed-insert-menu-btn').length), 0);
+  assert.strictEqual((await slashMenu(page)).open, true, 'the "/" menu is what ＋ opens');
+}, { md: BASE_MD });
+check('plus: 圖片 from the menu replaces the empty paragraph with the picked image', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'Alpha.');
+  // Armed before the keys, not in a Promise.all with the Enter. Measured
+  // (Chromium): armed alongside the Enter, the event never came when this
+  // check ran after the other plus: checks in one browser, yet came every
+  // time alone; armed here it comes in both. Likely Playwright turning
+  // interception on asynchronously while a bare keypress, unlike page.click,
+  // has no actionability wait in front of it.
+  const chooserP = page.waitForEvent('filechooser');
+  await page.keyboard.type('圖片');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['圖片']);
+  await page.keyboard.press('Enter');
+  const chooser = await chooserP;
+  await pickImage(page, chooser);
+  assert.strictEqual(await transientCount(page), 0);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(await saveAndRead(page, boot)));
+}, { md: BASE_MD });
+check('plus: on an empty paragraph 引用 / 編號 / 核取 are enabled and insert their block', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const dis = await page.evaluate(() => ['quote', 'ordered-list', 'check', 'indent', 'outdent'].map((id) => document.querySelector('[data-ed-tb="' + id + '"]').disabled));
+  assert.deepStrictEqual(dis, [false, false, false, true, true]);
+  await tb(page, 'check'); await page.keyboard.type('todo');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- [ ] todo\n\nOmega.\n');
+}, { md: BASE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

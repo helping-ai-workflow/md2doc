@@ -1517,16 +1517,18 @@ async function setupBlockOpsDoc(rows) {
   return { dir, mdPath, srv, url: srv.urlFor(mdPath), original };
 }
 
-// Hovers a block to reveal its ＋ button, opens its small insert menu, and
-// clicks the menu item whose exact textContent is `label` (段落/標題/清單/
-// 表格/程式碼). Mirrors clickGutterMenuItem()'s role for the ⠿ menu.
+// Hovers a block to reveal its ＋ button, clicks it, and clicks the "/"
+// menu item whose label is exactly `label`. Mirrors clickGutterMenuItem()'s
+// role for the ⠿ menu.
+// v3.15.0 T2: ＋ opens an empty paragraph below the block with the "/" menu
+// on it (the five-item pill menu inside the block is gone). The old labels
+// map to menu items: 段落 → 文字, 標題 → 標題 2, 清單 → 項目符號列表,
+// 表格 → 表格 (3×2 now), 程式碼 → 程式碼.
 async function clickInsertMenuItem(page, sel, label) {
   await page.hover(sel);
   await page.click(sel + ' .ed-insert');
   await page.waitForFunction(
-    (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
-    {}, sel
-  );
+    () => document.querySelectorAll('.ed-slash-menu .ed-slash-item').length > 0);
   // S1: data-indent is now written LOCALLY by a structural key BEFORE its
   // commit round-trip (pre-S1 only the server ever wrote it), so the shape
   // wait above no longer proves the commit landed. The commit fetch is
@@ -1534,12 +1536,12 @@ async function clickInsertMenuItem(page, sel, label) {
   // deterministic — and it is what makes the next click / save observe the
   // POST-swap DOM instead of tearing a stale handle out mid-click.
   await settleEditor(page);
-  await page.evaluate((s, l) => {
-    const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
-      .find((b) => b.textContent === l);
-    if (!btn) throw new Error('insert menu item not found: ' + l);
+  await page.evaluate((l) => {
+    const btn = Array.from(document.querySelectorAll('.ed-slash-menu .ed-slash-item'))
+      .find((b) => b.querySelector('.ed-slash-label').textContent === l);
+    if (!btn) throw new Error('"/" menu item not found: ' + l);
     btn.click();
-  }, sel, label);
+  }, label);
 }
 
 // ── v2.11.1 acceptance helpers (Tab focus / gutter hover) ───────────────
@@ -4001,7 +4003,7 @@ async function gutterGeometry(page, sel) {
         try {
           const page = await newPage(browser);
           await page.goto(t7bUrl, { waitUntil: 'networkidle2' });
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '項目符號列表');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});
@@ -4040,7 +4042,7 @@ async function gutterGeometry(page, sel) {
         try {
           const page = await newPage(browser);
           await page.goto(t7cUrl, { waitUntil: 'networkidle2' });
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});
@@ -4067,7 +4069,7 @@ async function gutterGeometry(page, sel) {
         try {
           const page = await newPage(browser);
           await page.goto(t7dUrl, { waitUntil: 'networkidle2' });
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '清單');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '項目符號列表');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});
@@ -4099,7 +4101,7 @@ async function gutterGeometry(page, sel) {
           const page = await newPage(browser);
           await page.goto(t7eUrl, { waitUntil: 'networkidle2' });
           const t7eBefore = fs.readFileSync(t7eMd, 'utf8');
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '清單');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});
@@ -4150,7 +4152,7 @@ async function gutterGeometry(page, sel) {
         try {
           const page = await newPage(browser);
           await page.goto(t7fUrl, { waitUntil: 'networkidle2' });
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '段落');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'child'), '文字');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === 1,
             { timeout: 5000 }).catch(() => {});
@@ -4207,7 +4209,7 @@ async function gutterGeometry(page, sel) {
           assert.ok((await runUnsupported(page)).indexOf('P') !== -1,
             'FIXTURE SANITY: this run must really be degraded, or the refusal below is ' +
             'green for the wrong reason');
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'a'), '清單');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'a'), '項目符號列表');
           await settleEditor(page);
           assert.strictEqual(await bannerNow(page), '此清單含不支援的格式，無法調整結構',
             '§4.3: the ＋ goes through the same run-wide gate as 轉換／建立副本／刪除');
@@ -4255,16 +4257,18 @@ async function gutterGeometry(page, sel) {
             await page.evaluate((s) => document.activeElement === document.querySelector(s), editEl),
             true, '5a: the mousedown on ＋ must NOT blur the still-open dirty burst');
           await page.mouse.up();
+          // v3.15.0 T2: the click on ＋ commits the dirty burst and opens the
+          // "/" menu on a new empty paragraph; 清單 is its 項目符號列表.
           await page.waitForFunction(
-            (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
-            { timeout: 5000 }, sel);
+            () => document.querySelectorAll('.ed-slash-menu .ed-slash-item').length > 0,
+            { timeout: 5000 });
           await settleEditor(page);
-          await page.evaluate((s) => {
-            const btn = Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn'))
-              .find((b) => b.textContent === '清單');
-            if (!btn) throw new Error('insert menu item not found: 清單');
+          await page.evaluate(() => {
+            const btn = Array.from(document.querySelectorAll('.ed-slash-menu .ed-slash-item'))
+              .find((b) => b.querySelector('.ed-slash-label').textContent === '項目符號列表');
+            if (!btn) throw new Error('"/" menu item not found: 項目符號列表');
             btn.click();
-          }, sel);
+          });
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});
@@ -12922,7 +12926,7 @@ async function gutterGeometry(page, sel) {
 
     // ── §10-gap fix: block-level INSERT (＋) and DELETE (⠿ menu) ───────────
 
-    // ── ＋ menu appears, with the 5 expected items ──────────────────────────
+    // ── ＋ opens the "/" menu (v3.15.0 T2: was the five-item pill menu) ────
     {
       const { srv: biSrv, url: biUrl } = await setupBlockOpsDoc(
         ['# Doc', '', 'Para one.', '', 'Para two.']);
@@ -12933,16 +12937,25 @@ async function gutterGeometry(page, sel) {
         await page.hover(sel);
         await page.click(sel + ' .ed-insert');
         await page.waitForFunction(
-          (s) => document.querySelectorAll(s + ' .ed-insert-menu-btn').length > 0,
-          {}, sel
-        );
-        const labels = await page.evaluate((s) =>
-          Array.from(document.querySelectorAll(s + ' .ed-insert-menu-btn')).map((b) => b.textContent),
-          sel);
-        assert.deepStrictEqual(labels, ['段落', '標題', '清單', '表格', '程式碼'],
-          '＋ menu must offer exactly the 5 block kinds, in order');
+          () => document.querySelectorAll('.ed-slash-menu .ed-slash-item').length > 0);
+        const labels = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('.ed-slash-menu .ed-slash-item'))
+            .map((b) => b.querySelector('.ed-slash-label').textContent));
+        assert.deepStrictEqual(labels, ['文字', '標題 1', '標題 2', '標題 3', '項目符號列表', '編號列表',
+          '待辦清單', '引用', '程式碼', '分隔線', '表格', '圖片', 'Mermaid 圖', 'Graphviz 圖', 'WaveDrom 波形', '數學公式'],
+          '＋ must open the "/" menu with all 16 blocks, in order');
+        assert.deepStrictEqual(
+          await page.evaluate(() => {
+            const t = document.querySelectorAll('.ed-block[data-ed-transient]');
+            const ae = document.activeElement;
+            return { count: t.length, text: t.length ? t[0].textContent : null,
+              focused: !!(t.length && ae && t[0].contains(ae)),
+              pill: document.querySelectorAll('.ed-insert-menu, .ed-insert-menu-btn').length };
+          }),
+          { count: 1, text: '', focused: true, pill: 0 },
+          'the menu sits on one focused, empty transient, and no pill menu is left');
         await page.close();
-        console.log('§10: ＋ menu appears with 5 items — OK');
+        console.log('§10: ＋ opens the "/" menu with 16 items — OK');
       } finally {
         biSrv.close();
       }
@@ -12958,7 +12971,7 @@ async function gutterGeometry(page, sel) {
         const sel = await paragraphSelByText(page, 'Para one.');
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
-        await clickInsertMenuItem(page, sel, '段落');
+        await clickInsertMenuItem(page, sel, '文字');
         await page.waitForFunction(
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
@@ -13012,7 +13025,7 @@ async function gutterGeometry(page, sel) {
         const savedText = await saveAndRead(page, biMdPath);
         assert.strictEqual(
           savedText,
-          '# Doc\n\nPara one.\n\n| A | B |\n|---|---|\n| hi |  |\n\nPara two.',
+          '# Doc\n\nPara one.\n\n| A | B | C |\n|---|---|---|\n| hi |  |  |\n|  |  |  |\n\nPara two.',
           'exact byte contract for the table skeleton once typed into, got:\n' + savedText
         );
         await page.close();
@@ -13085,7 +13098,7 @@ async function gutterGeometry(page, sel) {
         const sel = await paragraphSelByText(page, 'Para one.');
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
-        await clickInsertMenuItem(page, sel, '段落');
+        await clickInsertMenuItem(page, sel, '文字');
         await page.waitForFunction(
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
@@ -13156,7 +13169,7 @@ async function gutterGeometry(page, sel) {
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
         const insertSel = await paragraphSelByText(page, 'Insert target text here.');
-        await clickInsertMenuItem(page, insertSel, '段落');
+        await clickInsertMenuItem(page, insertSel, '文字');
         assert.ok(
           await page.evaluate(() =>
             document.querySelector('.content').textContent.includes('Dirty target text here. EDITED')),
@@ -13221,7 +13234,7 @@ async function gutterGeometry(page, sel) {
         await page.goto(biUrl, { waitUntil: 'networkidle2' });
 
         const hSel = await paragraphSelByText(page, 'Heading anchor.');
-        await clickInsertMenuItem(page, hSel, '標題');
+        await clickInsertMenuItem(page, hSel, '標題 2');
         await page.waitForSelector('.ed-block[data-block-type="heading"]');
         assert.strictEqual(
           await page.evaluate(() =>
@@ -13231,7 +13244,7 @@ async function gutterGeometry(page, sel) {
         await page.keyboard.type('New Heading');
 
         const lSel = await paragraphSelByText(page, 'List anchor.');
-        await clickInsertMenuItem(page, lSel, '清單');
+        await clickInsertMenuItem(page, lSel, '項目符號列表');
         await page.waitForSelector('.ed-block[data-block-type="li"]');
         assert.ok(
           await page.evaluate(() =>
@@ -13322,8 +13335,8 @@ async function gutterGeometry(page, sel) {
           // the file and discarded again (discardPristineInsert()).
           assert.strictEqual(
             await page.evaluate(() => document.querySelectorAll('.ed-block[data-ed-transient]').length),
-            kind === '段落' ? 1 : 0, kind + ': transient count after the insert');
-          if (kind === '段落') {
+            kind === '文字' ? 1 : 0, kind + ': transient count after the insert');
+          if (kind === '文字') {
             assert.strictEqual(fs.readFileSync(biMdPath, 'utf8'), original,
               '段落: the abandoned transient never wrote a byte, even before it was abandoned');
           }
@@ -13343,9 +13356,9 @@ async function gutterGeometry(page, sel) {
             kind + ': an untouched abandoned insert must leave the saved file byte-identical to the pre-insert original, got:\n' + savedText);
         }
 
-        await abandonAndVerify('Paragraph anchor.', '段落', '.ed-block[data-block-type="paragraph"]');
-        await abandonAndVerify('Heading anchor.', '標題', '.ed-block[data-block-type="heading"]');
-        await abandonAndVerify('List anchor.', '清單', '.ed-block[data-block-type="li"]');
+        await abandonAndVerify('Paragraph anchor.', '文字', '.ed-block[data-block-type="paragraph"]');
+        await abandonAndVerify('Heading anchor.', '標題 2', '.ed-block[data-block-type="heading"]');
+        await abandonAndVerify('List anchor.', '項目符號列表', '.ed-block[data-block-type="li"]');
         await abandonAndVerify('Table anchor.', '表格', '.ed-block[data-block-type="table"]');
         await abandonAndVerify('Code anchor.', '程式碼', '.ed-block[data-block-type="code"]',
           '.ed-block[data-block-type="code"] textarea.ed-raw');
@@ -13391,7 +13404,7 @@ async function gutterGeometry(page, sel) {
         const anchorSel = await paragraphSelByText(page, 'Insert anchor.');
         const beforeCount = await page.evaluate(() =>
           document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length);
-        await clickInsertMenuItem(page, anchorSel, '段落');
+        await clickInsertMenuItem(page, anchorSel, '文字');
         await page.waitForFunction(
           (n) => document.querySelectorAll('.ed-block[data-block-type="paragraph"]').length === n,
           {}, beforeCount + 1
@@ -14972,7 +14985,7 @@ async function gutterGeometry(page, sel) {
           ta.value = 'x\n\ny';
           ta.dispatchEvent(new Event('input', { bubbles: true }));
         }, codeSel);
-        await clickInsertMenuItem(page, charlieSel, '段落');
+        await clickInsertMenuItem(page, charlieSel, '文字');
         await settleEditor(page);
         // v3.14.0 T1: a transient after the block it was pressed on (Charlie),
         // which the raw-edit commit renumbered.

@@ -380,8 +380,10 @@ function baseCtx(overrides) {
 {
   const base = { blockType: 'paragraph', indent: null, inList: false, hasSelection: false, dirty: false };
   const s = tm.deriveState(Object.assign({ transient: 'empty' }, base));
+  // v3.15.0 T2 (D11, R25): migrated from "disables only the five buttons" —
+  // quote, numbered and check now insert their skeleton on an empty one.
   eq(['quote', 'ordered-list', 'check', 'indent', 'outdent', 'table', 'list', 'code', 'line', 'image', 'insert-after'].map((id) => s[id].disabled),
-    [true, true, true, true, true, false, false, false, false, false, false], 'an empty transient disables only the five buttons');
+    [false, false, false, true, true, false, false, false, false, false, false], 'an empty transient disables only indent and outdent');
   const t = tm.deriveState(Object.assign({ transient: 'text' }, base));
   eq(['quote', 'ordered-list', 'check'].map((id) => t[id].disabled), [false, false, false], 'a transient with text disables nothing extra');
 }

@@ -642,7 +642,10 @@ async function armDetachProbe(page, itemSel, itemLabel) {
     // order, which is not necessarily the one this call means to press.
     document.querySelectorAll('[data-journey-target]')
       .forEach((el) => el.removeAttribute('data-journey-target'));
-    const hits = Array.from(document.querySelectorAll(s)).filter((e) => e.textContent.trim() === t);
+    // v3.15.0 T2: a "/" menu row's text is its label plus its hint, so it is
+    // matched by its .ed-slash-label.
+    const hits = Array.from(document.querySelectorAll(s)).filter((e) =>
+      (e.querySelector('.ed-slash-label') || e).textContent.trim() === t);
     if (!hits.length) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
     hits[hits.length - 1].setAttribute('data-journey-target', '1');
   }, itemSel, itemLabel);
@@ -4162,9 +4165,14 @@ async function main() {
   // 所以開選單用 page.click() 即可，被測的那一下才用 pressClick()。
   // `clicked` 是【真的抵達選單項的 click 事件數】——按壓期間被 detach 的
   // 按鈕收不到 click，這正是要測的量，不是事後再補一發合成點擊。
-  for (const [openBtn, itemSel, itemText, label] of [
-    ['.ed-handle', '.ed-handle-menu-btn', '建立副本', '⠿ 建立副本'],
-    ['.ed-insert', '.ed-insert-menu-btn', '段落', '＋ 段落'],
+  // v3.15.0 T2: migrated from ['.ed-insert', '.ed-insert-menu-btn', '段落',
+  // '＋ 段落']. ＋ now commits the dirty burst itself and opens the "/" menu
+  // (on document.body, not inside the block) on a new empty paragraph; the
+  // item pressed is 標題 2, whose insert is the gesture's render, so the
+  // detach precondition below still has a round trip to measure.
+  for (const [openBtn, itemSel, itemText, label, itemInBlock] of [
+    ['.ed-handle', '.ed-handle-menu-btn', '建立副本', '⠿ 建立副本', true],
+    ['.ed-insert', '.ed-slash-menu .ed-slash-item', '標題 2', '＋ 標題 2', false],
   ]) {
     for (const hold of [0, 80]) {
       const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
@@ -4177,7 +4185,7 @@ async function main() {
       await ctx.page.hover(one);
       await new Promise((r) => setTimeout(r, 120));
       await ctx.page.click(one + ' ' + openBtn);
-      await ctx.page.waitForSelector(one + ' ' + itemSel);
+      await ctx.page.waitForSelector(itemInBlock ? one + ' ' + itemSel : itemSel);
       await armDetachProbe(ctx.page, itemSel, itemText);
       const press = await pressClick(ctx.page, '[data-journey-target="1"]', hold);
       await new Promise((r) => setTimeout(r, 500));
@@ -4194,11 +4202,21 @@ async function main() {
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
         label + '（hold=' + hold + 'ms）：block 數應增加，got ' + before + ' → ' + after);
-      // v3.14.0 T1: ＋ 段落 adds a transient (an id-less .ed-block), never a
-      // ZWSP paragraph; 建立副本 adds a real block.
+      // 建立副本 adds a real block; ＋ 標題 2 turns the transient ＋ made into a
+      // real heading (v3.15.0 T2), so neither leaves a transient.
       assert.strictEqual(
         await ctx.page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length),
-        itemText === '段落' ? 1 : 0, label + '（hold=' + hold + 'ms）：transient 數');
+        0, label + '（hold=' + hold + 'ms）：transient 數');
+      if (!itemInBlock) {
+        // The click put the caret wherever the paragraph's centre is, so the
+        // typed 'zz' is read back by removing it, not at a fixed offset.
+        assert.deepStrictEqual(await ctx.page.evaluate(() => {
+          const t = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').textContent;
+          return { heading: document.querySelectorAll('.ed-block[data-block-type="heading"]').length,
+            zz: t.split('zz').length - 1, rest: t.replace('zz', '') };
+        }), { heading: 2, zz: 1, rest: 'Alpha paragraph.' },
+        label + '（hold=' + hold + 'ms）：the heading landed and the dirty typing was committed, not lost');
+      }
       assert.strictEqual(ctx.errs.length, 0,
         label + '（hold=' + hold + 'ms）：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
