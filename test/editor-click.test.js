@@ -6175,6 +6175,38 @@ check('list-keep: ＋ on a middle ordered item then 項目符號列表 splits th
   assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:x', 'li:bravo', 'paragraph:Omega.'], 'screen = file');
 }, { md: OL2_MD });
 
+// ── B2 fix round 3 (R68): a held Escape / Ctrl+Enter is for the raw box's
+// drain only; anywhere else it is dropped with the notice, never replayed ──
+check('raw-box: a held Escape whose box never takes focus is dropped, and text typed in the clicked paragraph is saved (R68)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('> quote'); await page.keyboard.press('Escape');
+  await page.locator('.ed-block', { hasText: 'Omega.' }).last().click();
+  await page.keyboard.press('End'); await page.keyboard.type('Q');
+  await renderIdle(page); await wait(500); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), '重新整理期間打的字沒有地方放，已略過');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n>\n\nOmega.Q\n');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'blockquote:', 'paragraph:Omega.Q'], 'screen = file');
+}, { md: BASE_MD });
+for (const [typed, after, shown, file] of [
+  ['> quote', 'zz', '> quotezz', '\\> quotezz'],
+  ['```', '', '```', '\\`\\`\\`'],
+]) {
+  check('failed-render: a held Escape after "' + typed + '" keeps the literal (R68)', DESKTOP, async (page, boot) => {
+    await newParaBelowAlpha(page);
+    await failFirstRender(page);
+    await page.keyboard.type(typed); await page.keyboard.press('Escape');
+    if (after) await page.keyboard.type(after);
+    await wait(1500); await renderIdle(page);
+    // The held Escape is dropped, not replayed (the literal and the keys
+    // after it stay). Its dropped-keys notice does not replace the failed
+    // render's red card, which stays up as the record of the failure.
+    assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed; the card stays');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:' + shown, 'paragraph:Omega.']);
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + file + '\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
