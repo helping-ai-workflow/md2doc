@@ -1,7 +1,7 @@
 'use strict';
 const assert = require('assert');
 const { marked } = require('marked');
-const { serializeInline, canWysiwyg, escapeText, escapeBlockStarts } = require('../lib/editor/inline-md.js');
+const { serializeInline, canWysiwyg, escapeText, escapeBlockStarts, normalizeHref, isPastedUrl } = require('../lib/editor/inline-md.js');
 
 // minimal element stub
 function el(name, attrs, ...children) {
@@ -428,5 +428,20 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
     assert.strictEqual(escapeBlockStarts(input), want, why + ': ' + JSON.stringify(input));
   });
 }
+
+// v3.15.0 T5: the URL field's href normaliser and the paste-a-URL test.
+assert.strictEqual(normalizeHref('  example.com/a b '), 'https://example.com/a%20b');
+assert.strictEqual(normalizeHref('https://x.y/(a)'), 'https://x.y/%28a%29');
+assert.strictEqual(normalizeHref('#sec-2'), '#sec-2');
+assert.strictEqual(normalizeHref('./doc.md'), './doc.md');
+assert.strictEqual(normalizeHref('../doc.md'), '../doc.md');
+assert.strictEqual(normalizeHref('/abs/doc.md'), '/abs/doc.md');
+assert.strictEqual(normalizeHref('mailto:a@b.c'), 'mailto:a@b.c');
+assert.strictEqual(normalizeHref('   '), '');
+assert.strictEqual(normalizeHref('https://x.y/<a>'), 'https://x.y/%3Ca%3E');
+assert.strictEqual(isPastedUrl(' https://x.y/a\n'), true);
+assert.strictEqual(isPastedUrl('see https://x.y'), false);
+assert.strictEqual(isPastedUrl('ftp://x.y'), false);
+assert.strictEqual(isPastedUrl('https://x.y a'), false);
 
 console.log('inline-md.test.js OK');

@@ -435,6 +435,21 @@ async function visibleBannerText(page) {
   });
 }
 
+// v3.15.0 T5: the link button opens the in-place `.ed-linkbar` field instead
+// of a native prompt. Waits for it (a bare timeout here would say nothing —
+// the failure names the missing field), replaces whatever it was pre-filled
+// with by `text` (empty clears it), and applies with Enter.
+async function answerLinkField(page, text) {
+  try {
+    await page.waitForSelector('.ed-linkbar input', { timeout: 4000 });
+  } catch (e) {
+    throw new Error('the URL field never opened (.ed-linkbar input)');
+  }
+  await page.$eval('.ed-linkbar input', (i) => { i.focus(); i.select(); });
+  if (text === '') await page.keyboard.press('Backspace');
+  else await page.keyboard.type(text);
+  await page.keyboard.press('Enter');
+}
 // v3.3.0 階段 0: 合成 .click() 對「dirty burst + 真人按壓時間」那一族缺陷是盲的
 // —— 真人按滑鼠有按壓時間，合成點擊沒有。實測（見 task-1 report 的量測表）
 // ⠿ / ＋ 選單項在 dirty burst ＋ 按壓 80 ms 時 clickFired = 0。
@@ -1288,16 +1303,9 @@ async function main() {
     ['link', '# Doc\n\nAlpha [*ital* bold](https://example.com) text here.\n', '**[', '連結'],
   ]) {
     const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
-    // 註冊在按下【之前】：window.prompt() 會擋住頁面直到有人回答它，所以一個
-    // 晚註冊的 handler 換來的不是一句看得懂的斷言失敗，而是掛住＋逾時。跑完再
-    // 斷言它真的被叫過 —— 否則對話框從沒開過的情況下這一列仍然可以綠。
-    let dialogFired = false;
-    if (tb === 'link') {
-      ctx.page.once('dialog', async (d) => {
-        dialogFired = true;
-        try { await d.accept('https://example.com'); } catch (e) { /* already gone */ }
-      });
-    }
+    // v3.15.0 T5: the 🔗 answer is typed into the in-place URL field (no native
+    // dialog any more). answerLinkField() throws a readable error when the
+    // field never opens, which is what the old `dialogFired` assertion said.
     await ctx.page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
       const em = el.querySelector('em');
@@ -1310,12 +1318,9 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 250));
     await pressClick(ctx.page, '[data-ed-tb="' + tb + '"]', 80);
+    if (tb === 'link') await answerLinkField(ctx.page, 'https://example.com');
     await new Promise((r) => setTimeout(r, 400));
     const disk = await saveAndRead(ctx);
-    if (tb === 'link') {
-      assert.strictEqual(dialogFired, true,
-        label + '：連結對話框從頭到尾沒有開過 —— 這一列什麼都沒量到，got:\n' + disk);
-    }
     assert.strictEqual(disk.indexOf(poison), -1,
       label + '：不得留下空標記的殘骸（' + poison + '），got:\n' + disk);
     assert.strictEqual(disk, expect, label + '：整份文件必須就是這樣，got:\n' + disk);
@@ -1813,10 +1818,8 @@ async function main() {
     // reachability is a layout question tracked separately, not an implicit
     // precondition of this matrix. 1000px gives every button clear margin.
     await setViewportSettled(ctx.page, { width: 1000, height: 600 });
-    // window.prompt() blocks the page until something answers it, and
-    // applyLinkToggle() opens one — measured: without this handler the
-    // 'link' row hangs until puppeteer's protocolTimeout kills the run.
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
+    // v3.15.0 T5: the 🔗 button opens the in-place URL field, not a native
+    // prompt; the 'link' row answers it through its `afterPress` hook.
     if (state === 'nest') {
       await ctx.page.evaluate(() => {
         const els = document.querySelectorAll('.ed-li-text');
@@ -2102,10 +2105,11 @@ async function main() {
       // 磁碟（[Alpha](https://example.com/)），activeElement 回到
       // P.ed-wys-armed、工具列 15 顆。
       { id: 'link',         state: 'sel',  answer: 'caret',
+        afterPress: (ctx) => answerLinkField(ctx.page, 'https://example.com/'),
         effect: (b, a) => a.marks === ' | A(Alpha) | ' ? null
           : '選取的字必須變成連結，而且不得多出別的標記，got ' + a.marks,
         disk: (d) => d === '# H\n\n[Alpha](https://example.com/) bravo charlie delta.\n\nBravo paragraph.\n'
-          ? null : '磁碟上必須是對話框回答的那個網址' },
+          ? null : '磁碟上必須是網址欄裡輸入的那個網址' },
       { id: 'outdent',      state: 'nest', answer: 'caret',
         effect: (b, a) => b.indents !== 'null,0,0,1,0,null'
           ? 'nest fixture 的縮排層級不是預期的樣子，got ' + b.indents
@@ -2212,6 +2216,10 @@ async function main() {
       const before = await docSnap(ctx.page);
       await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
+      if (row.afterPress) {
+        await row.afterPress(ctx);
+        await new Promise((r) => setTimeout(r, 450));
+      }
       // Review I3: read the file directly HERE, before anything below gets a
       // chance to press Ctrl+S of its own accord (saveAndRead(), which
       // `row.disk` runs through further down, issues its own Ctrl+S — a
@@ -2418,7 +2426,6 @@ async function main() {
   // 這一段就是當初缺的那個斷言：取消是最常見的手勢，而它比接受更不該有代價。
   {
     const ctx = await newPage(V2_SEL_MD);
-    ctx.page.on('dialog', async (d) => { try { await d.dismiss(); } catch (e) { /* already gone */ } });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await ctx.page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
@@ -2429,6 +2436,9 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 300));
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    // v3.15.0 T5: 取消 = Esc in the URL field (the dialog is gone).
+    await ctx.page.waitForSelector('.ed-linkbar input', { timeout: 4000 });
+    await ctx.page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 900));
     const held = await ctx.page.evaluate(() => {
       const s = window.getSelection();
@@ -2550,7 +2560,6 @@ async function main() {
     const ctx = await newPage('# H\n\n| A | B |\n| --- | --- |\n| alpha | bravo |\n\nTail para two.\n');
     if (primed) await primeOneCommit(ctx);
     await installPatchSpy(ctx);
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
     await ctx.page.click('.ed-wys-cell');
     await new Promise((r) => setTimeout(r, 250));
     await ctx.page.evaluate(() => {
@@ -2568,11 +2577,19 @@ async function main() {
     assert.strictEqual(linkDisabled, false,
       'V2d: 儲存格裡有非空選取時 🔗 必須是 enabled，否則這個情境什麼都沒點到');
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    await answerLinkField(ctx.page, 'https://example.com/');
     await new Promise((r) => setTimeout(r, 900));
-    assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
-    const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'bar-only');
+    // v3.15.0 T5 (migrated): applying the field is a DOM edit inside the open
+    // table burst, so it renders nothing and the caret goes back to the cell —
+    // the old 'bar-only' (focus lost to the prompt's render) is now 'caret',
+    // which is the stronger answer. The route assertion moves to the commit
+    // the save below causes.
+    assert.deepStrictEqual((await patchRoutes(ctx)).renders, 0,
+      'V2d(primed=' + primed + '): applying the URL field must not render');
+    const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'caret');
     assert.strictEqual(fail, null, 'V2d(primed=' + primed + '): ' + fail);
     const disk = await saveAndRead(ctx);
+    assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
     assert.ok(disk.indexOf('[bravo](https://example.com/)') !== -1,
       'V2d(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0, 'V2d: 不得有 pageerror: ' + ctx.errs.join(' | '));
@@ -2934,7 +2951,6 @@ async function main() {
     const ctx = await newPage('# H\n\nAlpha bravo charlie.\n\nTail para two.\n');
     if (primed) await primeOneCommit(ctx);
     await installPatchSpy(ctx);
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
     const pid = await ctx.page.evaluate(() => {
       const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
         .find((b) => (b.textContent || '').indexOf('Alpha bravo') !== -1);
@@ -2956,11 +2972,20 @@ async function main() {
     assert.strictEqual(dis, false,
       'V2i(primed=' + primed + ') 前提：有非空選取時 🔗 必須是 enabled，否則這一列什麼都沒點到');
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    await answerLinkField(ctx.page, 'https://example.com/');
     await new Promise((r) => setTimeout(r, 1100));
-    assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
-    const fail = await checkLeverage(ctx, '🔗 on a paragraph (primed=' + primed + ')', 'caret');
-    assert.strictEqual(fail, null, 'V2i(primed=' + primed + '): ' + fail);
+    // v3.15.0 T5 (migrated): the field edits the open burst's DOM and renders
+    // nothing; caret and bar are asserted right there, and AGAIN after the
+    // commit the save causes — which is the render whose route (patch when
+    // primed, fallback when not) this scenario is about.
+    assert.strictEqual((await patchRoutes(ctx)).renders, 0,
+      'V2i(primed=' + primed + '): applying the URL field must not render');
+    const failBefore = await checkLeverage(ctx, '🔗 on a paragraph, before the commit (primed=' + primed + ')', 'caret');
+    assert.strictEqual(failBefore, null, 'V2i(primed=' + primed + '): ' + failBefore);
     const disk = await saveAndRead(ctx);
+    assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
+    const fail = await checkLeverage(ctx, '🔗 on a paragraph, after the commit (primed=' + primed + ')', 'caret');
+    assert.strictEqual(fail, null, 'V2i(primed=' + primed + '): ' + fail);
     assert.ok(disk.indexOf('[Alpha](https://example.com/)') !== -1,
       'V2i(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0,
@@ -2969,8 +2994,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十八個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十八個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18）（另有若干處是註解裡的散文
+  // ══ V3: 十九個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十九個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -3023,6 +3048,9 @@ async function main() {
     // v3.15.0 T1 (R24): the "/" block menu sits at the caret's viewport
     // coordinates, so a scroll closes it (onAnyScroll). Its row is below.
     { sel: '.ed-slash-menu',           after: 'gone' },
+    // v3.15.0 T5 (R24): the URL field sits at the selection toolbar's place,
+    // so a scroll closes it (back to the toolbar, which repositions).
+    { sel: '.ed-linkbar',              after: 'gone' },
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
@@ -3729,6 +3757,26 @@ async function main() {
     assert.ok(isGone(after), '.ed-slash-menu 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-slash-menu vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-linkbar（v3.15.0 T5 的網址欄）─────────────────────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('Home');
+    await ctx.page.keyboard.down('Shift');
+    for (let i = 0; i < 6; i++) await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.up('Shift');
+    await ctx.page.keyboard.down('Control'); await ctx.page.keyboard.press('KeyK'); await ctx.page.keyboard.up('Control');
+    await ctx.page.waitForSelector('.ed-linkbar', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-linkbar');
+    assertRaised(before, '.ed-linkbar');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-linkbar');
+    assert.ok(isGone(after), '.ed-linkbar 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-linkbar vanishes on scroll — OK');
   }
 
   // ── V3b: onAnyScroll 的 `capture: true` ─────────────────────────────
@@ -7559,9 +7607,9 @@ async function main() {
     assert.strictEqual(inertPlain.bold.disabled, true, 'F2/INERT：全空白選取時 B 應停用');
     assert.strictEqual(inertPlain.italic.disabled, true, 'F2/INERT：全空白選取時 I 應停用');
     assert.strictEqual(inertPlain.bold.pressed, 'false', 'F2/INERT：停用的 B 仍應說 false，不得漏寫屬性');
-    // 🔗 不走 applyMarkToggle()：applyLinkToggleBody() 的第三支直接
-    // window.prompt() + extractRangeInto()，沿路沒有任何 trim 守衛，全空白選取
-    // 照樣開對話框並包出 <a> —— 停用它才是把一顆會動的按鈕畫死。
+    // 🔗 不走 applyMarkToggle()。v3.15.0 T5：applyLinkToggle() 在開網址欄
+    // 之前就用 trimRangeToText() 拒絕全空白選取（按下去什麼都不開、不寫），但
+    // 按鈕本身的 enabled 狀態仍是另一回事 —— 這一列釘的是按鈕不被畫死。
     assert.strictEqual(inertPlain.link.disabled, false,
       'F2/INERT：🔗 沒有 trim 守衛，全空白選取時不得停用');
     // ⚠ .ed-seltb 用 aria-disabled，不得用 disabled 屬性：B／I／S／U／<>／🔗

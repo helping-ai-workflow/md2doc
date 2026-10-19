@@ -707,6 +707,16 @@ async function awaitContentSwap(page, staleHandle) {
   await staleHandle.dispose();
 }
 
+// v3.15.0 T5: answers the in-place URL field the link button opens — waits for
+// it, replaces whatever it was pre-filled with by `text` (an empty `text`
+// clears it), and applies with Enter.
+async function answerLinkField(page, text) {
+  await page.waitForSelector('.ed-linkbar input');
+  await page.$eval('.ed-linkbar input', (i) => { i.focus(); i.select(); });
+  if (text === '') await page.keyboard.press('Backspace');
+  else await page.keyboard.type(text);
+  await page.keyboard.press('Enter');
+}
 // Task 4 (selection toolbar) helpers: select a specific word (or the whole
 // contents) of an element via document.createRange()/getSelection(), then
 // manually dispatch selectionchange — same pattern as the brief describes.
@@ -6045,16 +6055,12 @@ async function gutterGeometry(page, sel) {
       console.log('sel-toolbar: code button on backtick-containing text emits the double-backtick fence — OK');
     }
 
-    // ── Task 4: the link button prompts for a URL and wraps the selection
+    // ── Task 4: the link button opens the URL field and wraps the selection
     //    in <a href>; Enter commits it to `[text](url)` in the source.
-    //    window.prompt is stubbed via evaluateOnNewDocument (installed
-    //    before client.js's own script runs) rather than relying on a real
-    //    dialog, which is unreliable in some headless configs ────────────
+    //    v3.15.0 T5: the native prompt is gone — the answer is typed into the
+    //    in-place `.ed-linkbar` field and applied with Enter ─────────────
     {
       const page = await newPage(browser);
-      await page.evaluateOnNewDocument(() => {
-        window.prompt = () => 'https://example.org';
-      });
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Link target paragraph');
@@ -6063,13 +6069,14 @@ async function gutterGeometry(page, sel) {
       await selectWordInEl(page, editEl, 'target');
       await page.waitForSelector('.ed-seltb');
       await page.click('.ed-seltb-link');
+      await answerLinkField(page, 'https://example.org');
       assert.strictEqual(
         await page.evaluate((s) => {
           const a = document.querySelector(s + ' a');
           return a ? a.getAttribute('href') + '|' + a.textContent : null;
         }, editEl),
         'https://example.org|target',
-        'the link button must wrap the selection in <a href> using the (stubbed) prompt result'
+        'the link button must wrap the selection in <a href> using the URL typed into the field'
       );
 
       // v3.14.0 T2: the selection still stands here, and Enter with a
@@ -6096,10 +6103,6 @@ async function gutterGeometry(page, sel) {
     //    edits/clears it" ──────────────────────────────────────────────
     {
       const page = await newPage(browser);
-      await page.evaluateOnNewDocument(() => {
-        window.__promptQueue = ['https://edited.example', ''];
-        window.prompt = () => window.__promptQueue.shift();
-      });
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'A existing link');
@@ -6119,8 +6122,14 @@ async function gutterGeometry(page, sel) {
       await page.waitForSelector('.ed-seltb');
 
       // First click: the whole selection is inside the existing <a> -> the
-      // prompt (pre-filled with its href) supplies a NEW url -> EDIT.
+      // field (pre-filled with its href) is given a NEW url -> EDIT.
       await page.click('.ed-seltb-link');
+      assert.strictEqual(
+        await page.$eval('.ed-linkbar input', (i) => i.value),
+        'https://example.com',
+        'the field opens pre-filled with the existing href'
+      );
+      await answerLinkField(page, 'https://edited.example');
       assert.strictEqual(
         await page.evaluate((s) => {
           const a = document.querySelector(s + ' a');
@@ -6131,9 +6140,10 @@ async function gutterGeometry(page, sel) {
       );
 
       // Re-select the same text (still inside the now-edited <a>) and click
-      // again: an empty prompt result CLEARS (unwraps) the link.
+      // again: an emptied field CLEARS (unwraps) the link.
       await selectWordInEl(page, editEl, 'existing link');
       await page.click('.ed-seltb-link');
+      await answerLinkField(page, '');
       assert.strictEqual(
         await page.evaluate((s) => !document.querySelector(s + ' a'), editEl),
         true,
@@ -6155,15 +6165,11 @@ async function gutterGeometry(page, sel) {
     //    new-link branch never had the matching guard, so selecting just
     //    the ONE space between two words and clicking 🔗 wrote
     //    `<a href="..."> </a>` — an anchor whose entire content was that
-    //    space — to the surface. Also asserts the URL prompt is never even
-    //    opened (the guard now runs before window.prompt()) and that the
+    //    space — to the surface. Also asserts the URL field is never even
+    //    opened (the guard runs before it) and that the
     //    file on disk is untouched (no commit ever ran) ─────────────────
     {
       const page = await newPage(browser);
-      await page.evaluateOnNewDocument(() => {
-        window.__promptCalls = 0;
-        window.prompt = () => { window.__promptCalls++; return 'https://probe.example/'; };
-      });
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Whitespace only link target');
@@ -6180,8 +6186,8 @@ async function gutterGeometry(page, sel) {
       const wsHtml = await page.evaluate((s) => document.querySelector(s).innerHTML, editEl);
       assert.ok(!/<a[^>]*>\s*<\/a>/.test(wsHtml),
         '純空白不得被包進 <a>。Got ' + wsHtml);
-      assert.strictEqual(await page.evaluate(() => window.__promptCalls), 0,
-        'a whitespace-only selection must not even open the URL prompt');
+      assert.strictEqual(await page.evaluate(() => !document.querySelector('.ed-linkbar')), true,
+        'a whitespace-only selection must not even open the URL field');
       assert.strictEqual(fs.readFileSync(mdPath, 'utf8').includes('Whitespace only link target text.'), true,
         '被拒絕的手勢不得改到磁碟');
 
@@ -6197,7 +6203,6 @@ async function gutterGeometry(page, sel) {
     //    with the surrounding whitespace left outside the <a> ───────────
     {
       const page = await newPage(browser);
-      await page.evaluateOnNewDocument(() => { window.prompt = () => 'https://mixed.example/'; });
       await page.goto(url, { waitUntil: 'networkidle2' });
 
       const sel = await paragraphSelByText(page, 'Whitespace mixed link bold');
@@ -6208,6 +6213,7 @@ async function gutterGeometry(page, sel) {
       await selectWordInEl(page, editEl, ' bold ');
       await page.waitForSelector('.ed-seltb');
       await page.click('.ed-seltb-link');
+      await answerLinkField(page, 'https://mixed.example/');
       assert.strictEqual(
         await page.evaluate((s) => {
           const a = document.querySelector(s + ' a');

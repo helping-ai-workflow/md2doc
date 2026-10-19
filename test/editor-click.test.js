@@ -60,10 +60,10 @@ function check(name, viewport, fn, opts) { checks.push({ name, viewport, fn, opt
 // render the page starts on its own is never missed.
 const renderCounters = new WeakMap();
 function trackRenders(page) {
-  const c = { n: 0 };
+  const c = { n: 0, total: 0 };
   renderCounters.set(page, c);
   const isRender = (r) => { try { return new URL(r.url()).pathname === '/api/render'; } catch (e) { return false; } };
-  page.on('request', (r) => { if (isRender(r)) c.n++; });
+  page.on('request', (r) => { if (isRender(r)) { c.n++; c.total++; } });
   page.on('requestfinished', (r) => { if (isRender(r)) c.n--; });
   page.on('requestfailed', (r) => { if (isRender(r)) c.n--; });
 }
@@ -83,6 +83,8 @@ async function renderIdle(page) {
     if (c.n === 0) return;
   }
 }
+// Every `/api/render` request the page has made so far (never decremented).
+function renderTotal(page) { return renderCounters.get(page).total; }
 // Holds every `/api/render` for `ms` before letting it through: the window in
 // which a commit is in flight, made wide enough that no keystroke can miss it.
 async function delayRender(page, ms) {
@@ -6210,6 +6212,155 @@ for (const [typed, after, shown, file] of [
     assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + file + '\n\nOmega.\n');
   }, { md: BASE_MD });
 }
+
+
+// ── link-field / link-paste (v3.15.0 T5) ──
+const LINKS_MD = '# D\n\nPlain words here.\n\nSee [docs](https://a.example/) now.\n\n| A | B |\n|---|---|\n| alpha | bravo |\n';
+// Where `.ed-seltb` is right now, remembered so linkField() can say whether the
+// URL field opened over it.
+const rememberSeltb = (page) => page.evaluate(() => {
+  const t = document.querySelector('.ed-seltb');
+  const r = t && t.isConnected ? t.getBoundingClientRect() : null;
+  window.__seltbRect = r ? { top: r.top, left: r.left } : null;
+});
+const linkField = (page) => page.evaluate(() => {
+  const b = document.querySelector('.ed-linkbar');
+  if (!b || !b.isConnected) return { open: false, value: null, placeholder: null, overToolbar: false };
+  const i = b.querySelector('input');
+  const r = b.getBoundingClientRect();
+  const w = window.__seltbRect;
+  return { open: true, value: i.value, placeholder: i.placeholder,
+    overToolbar: !!w && Math.abs(r.top - w.top) <= 2 && Math.abs(r.left - w.left) <= 2 };
+});
+check('link-field: the link button turns the selection toolbar into the URL field; Enter links', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await rememberSeltb(page);
+  await page.click('.ed-seltb-link');
+  const f = await linkField(page);
+  assert.deepStrictEqual([f.open, f.value, f.placeholder, f.overToolbar], [true, '', '貼上或輸入網址', true]);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected), false, 'the selection toolbar is hidden under the field');
+  await page.keyboard.type('example.com'); await page.keyboard.press('Enter');
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](https://example.com) here.'));
+}, { md: LINKS_MD });
+check('link-field: the 套用 button applies like Enter', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('apply.example/a b');
+  await page.click('.ed-linkbar button');
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](https://apply.example/a%20b) here.'));
+}, { md: LINKS_MD });
+check('link-field: Ctrl+K opens it; Esc returns to the toolbar with the selection kept', DESKTOP, async (page) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).open, true);
+  await page.keyboard.press('Escape');
+  const r = await page.evaluate(() => ({ sel: String(window.getSelection()), bar: !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected, focus: document.activeElement.className.indexOf('ed-wys-armed') !== -1 }));
+  assert.deepStrictEqual([r.sel, r.bar, r.focus, (await linkField(page)).open], ['words', true, true, false]);
+}, { md: LINKS_MD });
+check('link-field: on an existing link it is pre-filled; emptied + Enter removes the link', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'See docs now.', 5, 8);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).value, 'https://a.example/');
+  await page.keyboard.press('Control+a'); await page.keyboard.press('Backspace'); await page.keyboard.press('Enter');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('[docs](https://a.example/)', 'docs'));
+}, { md: LINKS_MD });
+check('link-field: Ctrl+K on a caret inside a link edits the whole link', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See docs now.', 6);
+  await page.keyboard.press('Control+k');
+  assert.deepStrictEqual([(await linkField(page)).value, await page.evaluate(() => document.activeElement.tagName)], ['https://a.example/', 'INPUT']);
+  // Esc hands back the selection Ctrl+K made over the whole link text.
+  await page.keyboard.press('Escape');
+  assert.strictEqual(await page.evaluate(() => String(getSelection())), 'docs');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.press('Control+a'); await page.keyboard.type('https://b.example/'); await page.keyboard.press('Enter');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('https://a.example/', 'https://b.example/'));
+}, { md: LINKS_MD });
+check('link-field: Ctrl+K with a caret outside any link does nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Plain words here.', 3);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD);
+}, { md: LINKS_MD });
+check('link-field: an edited href lights the unsaved dot before the burst ends', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'See docs now.', 5, 8);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.press('Control+a'); await page.keyboard.type('https://dot.example/'); await page.keyboard.press('Enter');
+  await wait(200);
+  assert.strictEqual(await page.evaluate(() => document.title.charAt(0)), '\u25cf', 'the title carries the unsaved dot');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('https://a.example/', 'https://dot.example/'));
+}, { md: LINKS_MD });
+check('link-field: works in a table cell', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'bravo', 0, 5);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).open, true);
+  await page.keyboard.type('https://c.example'); await page.keyboard.press('Enter');
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('| bravo |', '| [bravo](https://c.example) |'));
+}, { md: LINKS_MD });
+check('link-field: Ctrl+Z in the field leaves the document alone', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Plain words here.', 17); await page.keyboard.type(' typed');
+  await selectInSurface(page, 'Plain words here. typed', 6, 11);
+  await page.keyboard.press('Control+k'); await page.keyboard.type('abc'); await page.keyboard.press('Control+z');
+  const f = await linkField(page);
+  assert.deepStrictEqual([f.open, f.value], [true, '']);
+  await page.keyboard.press('Escape');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain words here. typed'));
+}, { md: LINKS_MD });
+check('link-field: focusing the field commits nothing and leaves no render behind', DESKTOP, async (page) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await renderIdle(page);
+  const before = renderTotal(page);
+  await page.keyboard.press('Control+k'); await renderIdle(page);
+  assert.strictEqual(renderTotal(page) - before, 0, 'no /api/render while the field opens');
+  assert.strictEqual((await linkField(page)).open, true);
+}, { md: LINKS_MD });
+check('link-field: a click elsewhere closes it and the typed edit survives', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Plain words here.', 17); await page.keyboard.type('!');
+  await selectInSurface(page, 'Plain words here.!', 6, 11);
+  await page.keyboard.press('Control+k'); await page.keyboard.type('x.example');
+  await page.locator('.content p', { hasText: 'See' }).click();
+  await renderIdle(page);
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain words here.!'));
+}, { md: LINKS_MD });
+check('link-field: a scroll closes it', DESKTOP, async (page) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).open, true);
+  await page.evaluate(() => { document.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('scroll')); });
+  await wait(100);
+  assert.strictEqual((await linkField(page)).open, false);
+}, { md: LINKS_MD });
+check('link-paste: a URL over a selection makes a link', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await clipboardEvent(page, 'paste', 'https://p.example/', null);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](https://p.example/) here.'));
+}, { md: LINKS_MD });
+check('link-paste: a URL with html and a trailing newline over a selection makes a link', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await clipboardEvent(page, 'paste', 'https://p.example/\n', '<a href="https://p.example/">https://p.example/</a>');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](https://p.example/) here.'));
+}, { md: LINKS_MD });
+check('link-paste: a URL over a selection in a table cell makes a link', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'bravo', 0, 5);
+  await clipboardEvent(page, 'paste', 'https://p.example/', null);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('| bravo |', '| [bravo](https://p.example/) |'));
+}, { md: LINKS_MD });
+check('link-paste: a URL with no selection and other text over a selection paste as text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Plain words here.', 17);
+  await clipboardEvent(page, 'paste', 'https://p.example/', null);
+  await selectInSurface(page, 'Plain words here.https://p.example/', 6, 11);
+  await clipboardEvent(page, 'paste', 'not a url', null);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain not a url here.https://p.example/'));
+}, { md: LINKS_MD });
+check('link-paste: Ctrl+Shift+V keeps a URL over a selection as plain text', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, bubbles: true })));
+  await clipboardEvent(page, 'paste', 'https://p.example/', null);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain https://p.example/ here.'));
+}, { md: LINKS_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
