@@ -4766,6 +4766,10 @@ check('failed-render: Enter after a failed list Enter re-commits it, then adds a
   await liText(page, 'bravo').click(); await page.keyboard.press('End');
   await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
   await page.keyboard.press('Enter'); await page.keyboard.type('x'); await renderIdle(page);
+  // renderIdle can return between the retry's render and the replayed Enter's
+  // render, before the held x is replayed (measured: 8/48 under load read '').
+  // Wait the held render out, as the R51 checks do, then read.
+  await wait(1500); await renderIdle(page);
   assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'x', 'charlie']);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- new\n- x\n- charlie\n');
 }, { md: TIGHT_MD });
