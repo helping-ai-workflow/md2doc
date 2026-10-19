@@ -6114,6 +6114,67 @@ check('diagram-lib: an engine that fails to load is not asked for again on the n
   assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.mermaid').length), 2, 'both blocks are there, as their source');
 }, { md: BASE_MD });
 
+// ── B2 fix round 2 (R64, R66, R67) ──
+// R64: decided by the FILE. Enter in the emptied paragraph between two lists
+// commits its removal, which leaves ONE loose list (`- a\n\n- c`, R65). The
+// transient it leaves sits inside that list, so every path inserts the item
+// into it keeping its looseness — with or without text first.
+const R64_MD = '# D\n\n- a\n\nZ\n\n- c\n';
+const R64_WANT = '# D\n\n- a\n\n- x\n\n- c\n';
+async function transientInLooseRun(page) {
+  await focusSurface(page, 'Z', 1); await page.keyboard.press('Backspace');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', '~paragraph:', 'li:c'], 'a transient between the items');
+}
+check('list-keep: "/bullet" on the paragraph Enter left inside a loose list keeps it loose (R64)', DESKTOP, async (page, boot) => {
+  await transientInLooseRun(page);
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), R64_WANT);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:x', 'li:c'], 'screen = file');
+}, { md: R64_MD });
+check('shortcut: "- x" on the paragraph Enter left inside a loose list keeps it loose (R64)', DESKTOP, async (page, boot) => {
+  await transientInLooseRun(page);
+  await page.keyboard.type('- x');
+  assert.strictEqual(await commitAndRead(page, boot), R64_WANT);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:x', 'li:c'], 'screen = file');
+}, { md: R64_MD });
+check('shortcut: "x", Home, "- " on the paragraph Enter left inside a loose list keeps it loose (R64)', DESKTOP, async (page, boot) => {
+  await transientInLooseRun(page);
+  await page.keyboard.type('x'); await page.keyboard.press('Home'); await page.keyboard.type('- '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), R64_WANT);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:x', 'li:c'], 'screen = file');
+}, { md: R64_MD });
+// Restored from B2 fix round 1b (it was dropped there as unreachable; it is
+// the same file shape as the three above): 在上方插入 inside a loose list.
+check('list-keep: "/bullet" in a paragraph inserted inside a loose list keeps it loose (R64)', DESKTOP, async (page, boot) => {
+  await liText(page, 'c').click(); await renderIdle(page);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', '~paragraph:', 'li:c']);
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), R64_WANT);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:x', 'li:c'], 'screen = file');
+}, { md: '# D\n\n- a\n\n- c\n' });
+// R66: a held key the raw box's drain does not take is never dropped
+// silently.
+check('shortcut: "> quote" then Escape held during a slow render: the box keeps the text and the notice says what was dropped (R66)', DESKTOP, async (page) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('> quote'); await page.keyboard.press('Escape');
+  await renderIdle(page);
+  assert.deepStrictEqual(await rawBox(page), { value: '> quote', caret: 7, focused: true });
+  assert.strictEqual(await noticeText(page), '重新整理期間打的字沒有地方放，已略過');
+}, { md: BASE_MD });
+// R67: the cross-type insert on a MIDDLE item splits the run (lossless).
+check('list-keep: ＋ on a middle ordered item then 項目符號列表 splits the run around the bullet (R67)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'alpha');
+  await page.keyboard.type('bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n\n- x\n\n2. bravo\n\nOmega.\n');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:x', 'li:bravo', 'paragraph:Omega.'], 'screen = file');
+}, { md: OL2_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
