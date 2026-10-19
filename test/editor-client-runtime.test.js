@@ -4094,6 +4094,12 @@ async function gutterGeometry(page, sel) {
       // different data-list-type ENDS the run, so a bullet dropped into an
       // ordered run would split it in two), and §3.8's renumbering falls out
       // of the run re-serialization for free. Plus: exactly one undo op.
+      // MIGRATED by v3.15.0 B2 fix round 1 (R57): the menu item driving this
+      // row 項目符號列表 -> 編號列表. A bullet now continues only a bullet list
+      // (below an ordered one it starts its own list, pinned in
+      // test/editor-click.test.js `…below a tight ordered list…(R57)`); the
+      // ordered item is what continues an ordered run. Expected bytes and the
+      // one-undo assertion are unchanged.
       {
         const { srv: t7eSrv, url: t7eUrl, mdPath: t7eMd } =
           await setupTableDoc(['# Doc', '', '1. alpha', '2. bravo', '']);
@@ -4101,7 +4107,7 @@ async function gutterGeometry(page, sel) {
           const page = await newPage(browser);
           await page.goto(t7eUrl, { waitUntil: 'networkidle2' });
           const t7eBefore = fs.readFileSync(t7eMd, 'utf8');
-          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '項目符號列表');
+          await clickInsertMenuItem(page, await liBlockSelByText(page, 'alpha'), '編號列表');
           await page.waitForFunction(
             () => document.querySelectorAll('.ed-block[data-block-type="li"]').length === 3,
             { timeout: 5000 }).catch(() => {});

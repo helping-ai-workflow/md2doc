@@ -5944,6 +5944,163 @@ check('diagram-lib: a second Mermaid block loads nothing again and renders too',
   assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.mermaid svg').length), 2);
 }, { md: BASE_MD });
 
+// ── B2 fix round 1 (R56–R61) ──
+const newParaBelowAlpha = async (page) => { await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page); };
+// R58: a list marker next to a list of the same family joins it tight — above
+// or below, a real paragraph or a transient, with text or without.
+check('shortcut: "- " at the start of a paragraph below a tight list joins it tight (R58)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0); await page.keyboard.type('- '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- Omega.\n');
+}, { md: TIGHT2_MD });
+check('shortcut: "- " at the start of a paragraph above a tight list joins it as its first item (R58)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 0); await page.keyboard.type('- '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- Alpha.\n- a\n- b\n');
+}, { md: '# D\n\nAlpha.\n\n- a\n- b\n' });
+check('shortcut: "- x" in a paragraph inserted above a tight list joins it as its first item (R58)', DESKTOP, async (page, boot) => {
+  await liText(page, 'alpha').click(); await renderIdle(page);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', '~paragraph:', 'li:alpha', 'li:bravo', 'paragraph:Omega.']);
+  await page.keyboard.type('- x'); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- x\n- alpha\n- bravo\n\nOmega.\n');
+}, { md: TIGHT2_MD });
+check('shortcut: "- " before text in a paragraph below a tight list joins it tight (R58)', DESKTOP, async (page, boot) => {
+  await transientBelowList(page);
+  await page.keyboard.type('x'); await page.keyboard.press('Home'); await page.keyboard.type('- '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n\nOmega.\n');
+}, { md: TIGHT2_MD });
+check('shortcut: "- " between two lists joins the one above and keeps the blank line to the one below (R58)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Mid.', 0); await page.keyboard.type('- '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- Mid.\n\n- bravo\n');
+}, { md: '# D\n\n- alpha\n\nMid.\n\n- bravo\n' });
+check('shortcut: "1. " below a tight ordered list continues its numbering (R58)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0); await page.keyboard.type('1. '); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n3. Omega.\n');
+}, { md: '# D\n\n1. alpha\n2. bravo\n\nOmega.\n' });
+check('slash: "/bullet" in an emptied paragraph below a tight list joins it tight (R58)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Z', 1); await page.keyboard.press('Backspace');
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n\nOmega.\n');
+}, { md: '# D\n\n- alpha\n- bravo\n\nZ\n\nOmega.\n' });
+// R57: a bullet continues only a bullet (or to-do) list, a number only an
+// ordered one; the other family starts its own list.
+const OL2_MD = '# D\n\n1. alpha\n2. bravo\n\nOmega.\n';
+async function transientBelowOl(page) {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:alpha', 'li:bravo', '~paragraph:', 'paragraph:Omega.'], 'a transient below the list');
+}
+check('shortcut: "- " below a tight ordered list starts its own list after a blank line (R57)', DESKTOP, async (page, boot) => {
+  await transientBelowOl(page);
+  await page.keyboard.type('- x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n\n- x\n\nOmega.\n');
+}, { md: OL2_MD });
+check('list-keep: "/bullet" below a tight ordered list starts its own list after a blank line (R57)', DESKTOP, async (page, boot) => {
+  await transientBelowOl(page);
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n\n- x\n\nOmega.\n');
+}, { md: OL2_MD });
+check('shortcut: "1. " below a tight ordered list continues it (R57)', DESKTOP, async (page, boot) => {
+  await transientBelowOl(page);
+  await page.keyboard.type('1. x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n3. x\n\nOmega.\n');
+}, { md: OL2_MD });
+// R56: an empty to-do that is the last item of a nested list stays a to-do.
+check('shortcut: Enter at the end of a nested last to-do then typing keeps it a to-do (R56)', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - [ ] bravo\n  - [ ] x\n\nOmega.\n');
+}, { md: '# D\n\n- alpha\n  - [ ] bravo\n\nOmega.\n' });
+// R59: keys typed while the render that opens the raw box is out land in it.
+check('shortcut: "```js", Enter, "x = 1" typed straight on during a slow render land in the code box (R59)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('```js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
+  await renderIdle(page);
+  assert.deepStrictEqual(await rawBox(page), { value: '```js\nx = 1\n```', caret: 11, focused: true });
+  assert.strictEqual(await noticeText(page), null, 'nothing dropped');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+}, { md: BASE_MD });
+check('shortcut: "> quote" typed straight on during a slow render lands in the quote box (R59)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('> quote');
+  await renderIdle(page);
+  assert.deepStrictEqual(await rawBox(page), { value: '> quote', caret: 7, focused: true });
+  assert.strictEqual(await noticeText(page), null, 'nothing dropped');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n> quote\n\nOmega.\n');
+}, { md: BASE_MD });
+// R60 / D1: per kind, one Ctrl+Z gives the escaped literal with the caret
+// after it, a second the paragraph as it was. (A raw box is left with
+// Escape first.)
+for (const [typed, literal, caret] of [
+  ['## ', '\\##', { text: '##', offset: 2, transient: false }],
+  ['- ', '\\-', { text: '-', offset: 1, transient: false }],
+  ['[] ', '\\[\\]', { text: '[]', offset: 2, transient: false }],
+  ['1. ', '1\\.', { text: '1.', offset: 2, transient: false }],
+  ['```', '\\`\\`\\`', { text: '```', offset: 3, transient: false }],
+  ['> ', '\\>', { text: '>', offset: 1, transient: false }],
+  ['---', '\\---', { text: '---', offset: 3, transient: false }],
+]) {
+  check('shortcut: "' + typed + '" one Ctrl+Z gives the literal, a second the paragraph as it was (R60)', DESKTOP, async (page, boot) => {
+    await newParaBelowAlpha(page);
+    await page.keyboard.type(typed); await renderIdle(page);
+    if (await rawBox(page)) { await page.keyboard.press('Escape'); await renderIdle(page); }
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.deepStrictEqual(await caretNow(page), caret);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n' + literal + '\n\nOmega.\n');
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  }, { md: BASE_MD });
+}
+// R61: an IME composition never triggers a shortcut (D3). Chromium only: the
+// composition is driven through CDP.
+check('shortcut: a composed "## " does not convert', DESKTOP, async (page) => {
+  await newParaBelowAlpha(page);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: '##', selectionStart: 2, selectionEnd: 2 });
+  await cdp.send('Input.imeSetComposition', { text: '## ', selectionStart: 3, selectionEnd: 3 });
+  await cdp.send('Input.insertText', { text: '## ' });
+  await wait(300); await renderIdle(page);
+  const bl = await blockList(page);
+  assert.deepStrictEqual(bl.map((b) => b.replace(/ /g, ' ')), ['heading:D', 'paragraph:Alpha.', '~paragraph:## ', 'paragraph:Omega.']);
+}, { md: BASE_MD, engines: ['chromium'] });
+// R61: failed renders for the raw-box kinds and a list item.
+for (const [typed, shown, file] of [
+  ['```js', '```js', '\\`\\`\\`js'],
+  ['> quote', '> quote', '\\> quote'],
+  ['- item', '- item', '\\- item'],
+]) {
+  check('failed-render: a "' + typed + '" shortcut whose render fails keeps the literal and the keys after it', DESKTOP, async (page, boot) => {
+    await newParaBelowAlpha(page);
+    await failFirstRender(page);
+    await page.keyboard.type(typed); await wait(1500); await renderIdle(page);
+    assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed');
+    assert.strictEqual(await rawBox(page), null, 'no raw box');
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:' + shown, 'paragraph:Omega.']);
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + file + '\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
+
+// R61: an engine that fails to load is asked for once per page, not once per
+// render.
+check('diagram-lib: an engine that fails to load is not asked for again on the next render', DESKTOP, async (page) => {
+  const libLoads = [];
+  await page.route('**/api/lib/mermaid.js', (route) => { libLoads.push('mermaid.js'); route.fulfill({ status: 404, body: '{}' }); });
+  for (let i = 0; i < 2; i++) {
+    await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type('/mer'); await page.keyboard.press('Enter'); await renderIdle(page);
+    await wait(800);
+  }
+  assert.deepStrictEqual(libLoads, ['mermaid.js']);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.mermaid').length), 2, 'both blocks are there, as their source');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

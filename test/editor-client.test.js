@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1711,8 +1711,15 @@ function countInCode(source, needle) {
   // writes the literal and the conversion (commitShortcut(), D1) and renders
   // once; a failed render rolls back both, op 2 first (R35): two lines (+2).
   // 1 declaration + 26 call sites = 27.
-  assert.strictEqual(helperCalls, 27,
-    'the helper must be DECLARED once and used at all twenty-six ' +
+  // MIGRATED by v3.15.0 B2 fix round 1 (27 -> 28). ONE genuinely new
+  // commit-then-render site: insertJoinedAtTransient() — a "/" list item on a
+  // transient next to a list of its own family joins it tight (R58) through
+  // one commitTightInsert() and owns its rollback (+1). The shortcut's join
+  // goes through commitShortcutAt() and the real-paragraph one through
+  // replaceParagraphWithLines(), both already counted.
+  // 1 declaration + 27 call sites = 28.
+  assert.strictEqual(helperCalls, 28,
+    'the helper must be DECLARED once and used at all twenty-seven ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2657,6 +2664,38 @@ function countInCode(source, needle) {
   const sr = commitShortcut(same, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
   assert.deepStrictEqual(sr.ops.map((o) => o !== null), [false, true]);
   assert.deepStrictEqual(same.stack.undo(sr.lines).lines, ['# D', '', '\\## Alpha.']);
+}
+
+// -- v3.15.0 B2 fix round 1 (R58): a list item joining an adjacent list ----
+{
+  const B = (id, t, s, e) => ({ id, type: t, startLine: s, endLine: e });
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above'), [2, 4]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below'), [4, 5]);
+  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above'), [1, 1]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null), [3, 3]);
+  // A real paragraph below a list: op 1 the literal, op 2 the item over the
+  // separator too, so the list stays tight; one undo gives the literal back
+  // where it was.
+  const st = { lines: ['- a', '- b', '', 'Omega.'], blocks: [B(0, 'li', 1, 1), B(1, 'li', 2, 2), B(2, 'paragraph', 4, 4)], stack: new UndoStack() };
+  const r = commitShortcut(st, { blockId: 2 }, ['\\- Omega.'], ['- Omega.'], 'above');
+  assert.deepStrictEqual(r.lines, ['- a', '- b', '- Omega.']);
+  assert.strictEqual(r.newStartLine, 3);
+  assert.strictEqual(r.literalStartLine, 4);
+  const u = st.stack.undo(r.lines).lines;
+  assert.deepStrictEqual(u, ['- a', '- b', '', '\\- Omega.']);
+  // A transient above a list: the item becomes its first item.
+  const t = { lines: ['# D', '', '- a', '- b'], blocks: [B(0, 'heading', 1, 1), B(1, 'li', 3, 3), B(2, 'li', 4, 4)], stack: new UndoStack() };
+  const tr = commitShortcut(t, { anchorBlockId: 0 }, ['\\- x'], ['- x'], 'below');
+  assert.deepStrictEqual(tr.lines, ['# D', '', '- x', '- a', '- b']);
+  assert.strictEqual(tr.newStartLine, 3);
+  // The "/" menu's transient half: one tight line after / before a line.
+  const i = { lines: ['- a', '- b', '', 'Omega.'], blocks: [B(0, 'li', 1, 1), B(1, 'li', 2, 2), B(2, 'paragraph', 4, 4)], stack: new UndoStack() };
+  const ir = commitTightInsert(i, 2, ['-'], false);
+  assert.deepStrictEqual(ir.lines, ['- a', '- b', '-', '', 'Omega.']);
+  assert.strictEqual(ir.newStartLine, 3);
+  const jr = commitTightInsert({ lines: ['P', '', '- a'], blocks: [B(0, 'paragraph', 1, 1), B(1, 'li', 3, 3)], stack: new UndoStack() }, 3, ['- [ ] '], true);
+  assert.deepStrictEqual(jr.lines, ['P', '', '- [ ] ', '- a']);
+  assert.strictEqual(jr.newStartLine, 3);
 }
 
 console.log('editor-client.test.js OK');
