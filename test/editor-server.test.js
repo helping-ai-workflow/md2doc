@@ -1054,5 +1054,38 @@ function assertNoAutoCloseFor(server, ms) {
     console.log('server: (5) pinging alone (no connection) does not keep a session alive forever — OK');
   }
 
+  // v3.15.0 T4 (D12, R9): the diagram engines an edit page loads on demand —
+  // GET only, three names, everything else 404.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-lib-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Lib\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const m = await req(srv.port, 'GET', '/api/lib/mermaid.js');
+      assert.strictEqual(m.status, 200, 'mermaid.js is served');
+      assert.ok(/^application\/javascript/.test(m.headers['content-type']), 'content-type ' + m.headers['content-type']);
+      assert.ok(m.body.length > 1000000, 'the whole library, got ' + m.body.length + ' chars');
+      const w = await req(srv.port, 'GET', '/api/lib/wavedrom.js');
+      assert.strictEqual(w.status, 200, 'wavedrom.js is served');
+      assert.ok(/^application\/javascript/.test(w.headers['content-type']), 'content-type ' + w.headers['content-type']);
+      const skin = fs.readFileSync(require.resolve('wavedrom/skins/default.js'), 'utf8');
+      const lib = fs.readFileSync(require.resolve('wavedrom/wavedrom.min.js'), 'utf8');
+      assert.ok(w.body.indexOf(skin) === 0 && w.body.indexOf(lib) > skin.length - 1, 'the skin, then the library, in one body');
+      const k = await req(srv.port, 'GET', '/api/lib/katex.css');
+      assert.strictEqual(k.status, 200, 'katex.css is served');
+      assert.ok(/^text\/css/.test(k.headers['content-type']), 'content-type ' + k.headers['content-type']);
+      assert.ok(k.body.indexOf('.katex') !== -1, 'the KaTeX stylesheet');
+      assert.ok(k.body.indexOf('<style') === -1 && k.body.indexOf('</style>') === -1, 'the CSS text, not the tag');
+      assert.ok(k.body.indexOf('url(fonts/') === -1, 'fonts inlined, nothing fetched from disk paths');
+      assert.strictEqual((await req(srv.port, 'GET', '/api/lib/nope.js')).status, 404, 'any other name is a 404');
+      assert.strictEqual((await req(srv.port, 'GET', '/api/lib/../server.js')).status, 404, 'no path walking');
+      assert.strictEqual((await req(srv.port, 'POST', '/api/lib/mermaid.js', {})).status, 404, 'GET only');
+    } finally {
+      srv.close();
+    }
+    console.log('server: /api/lib serves mermaid.js, wavedrom.js and katex.css on demand, 404 otherwise — OK');
+  }
+
   console.log('editor-server.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });

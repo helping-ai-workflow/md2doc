@@ -5900,6 +5900,44 @@ check('shortcut: Enter at the end of a to-do item then typing keeps it a to-do (
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- [ ] alpha\n- [ ] x\n\nOmega.\n');
 }, { md: '# D\n\n- [ ] alpha\n\nOmega.\n' });
 
+// ── diagram-lib (v3.15.0 T4, D12): a document that had no diagram of a kind
+// at load gets that engine on demand the first time one is inserted. The
+// three items insert rendered, with no raw box (R23), so there is no Escape.
+check('diagram-lib: a Mermaid block inserted into a document without one renders', DESKTOP, async (page) => {
+  assert.strictEqual(await page.evaluate(() => typeof window.mermaid), 'undefined', 'guard: not loaded at start');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/mer'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await wait(1500);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.mermaid svg').length), 1);
+}, { md: BASE_MD });
+check('diagram-lib: a WaveDrom block inserted into a document without one renders', DESKTOP, async (page) => {
+  assert.strictEqual(await page.evaluate(() => typeof window.WaveDrom), 'undefined', 'guard: not loaded at start');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/wave'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await wait(1500);
+  assert.strictEqual(await page.evaluate(() =>
+    document.querySelectorAll('.content [id^="WaveDrom_Display_"] svg, .content .wavedrom-diagram svg').length), 1);
+}, { md: BASE_MD });
+check('diagram-lib: a math block inserted into a document without one is styled', DESKTOP, async (page) => {
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('style[data-md2doc-math]')), false, 'guard: no KaTeX css at start');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/公式'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await wait(1500);
+  const ff = await page.evaluate(() => { const k = document.querySelector('.katex'); return k ? getComputedStyle(k).fontFamily : null; });
+  assert.ok(ff && ff.indexOf('KaTeX') !== -1, 'font-family ' + JSON.stringify(ff));
+}, { md: BASE_MD });
+check('diagram-lib: a second Mermaid block loads nothing again and renders too', DESKTOP, async (page) => {
+  const libLoads = [];
+  page.on('request', (r) => { if (/\/api\/lib\//.test(r.url())) libLoads.push(new URL(r.url()).pathname); });
+  for (let i = 0; i < 2; i++) {
+    await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type('/mer'); await page.keyboard.press('Enter'); await renderIdle(page);
+    await wait(1500);
+  }
+  assert.deepStrictEqual(libLoads, ['/api/lib/mermaid.js']);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.mermaid svg').length), 2);
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
