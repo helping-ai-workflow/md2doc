@@ -5860,7 +5860,10 @@ check('shortcut: "## T" typed during an Enter\'s slow render still converts', DE
 check('failed-render: a shortcut whose render fails keeps the literal and the keys after it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   await failFirstRender(page);
-  await page.keyboard.type('## Ti'); await renderIdle(page);
+  // The failing render's request can reach node after renderIdle() looked
+  // (measured once in a full run: the card was not up yet), so the 800 ms the
+  // route holds it is waited out first, as the R51 checks below do.
+  await page.keyboard.type('## Ti'); await wait(1500); await renderIdle(page);
   assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed');
   assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', '~paragraph:## Ti', 'paragraph:Omega.']);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\## Ti\n\nOmega.\n');
@@ -5868,7 +5871,10 @@ check('failed-render: a shortcut whose render fails keeps the literal and the ke
 check('failed-render: a shortcut at the start of a real paragraph whose render fails keeps it as typed', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Omega.', 0);
   await failFirstRender(page);
-  await page.keyboard.type('## Ti'); await renderIdle(page);
+  // The failing render's request can reach node after renderIdle() looked
+  // (measured once in a full run: the card was not up yet), so the 800 ms the
+  // route holds it is waited out first, as the R51 checks below do.
+  await page.keyboard.type('## Ti'); await wait(1500); await renderIdle(page);
   assert.strictEqual(await errorCardUp(page), true, 'the conversion was tried and its render failed');
   assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:## TiOmega.']);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\## TiOmega.\n');
