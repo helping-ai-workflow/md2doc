@@ -2672,6 +2672,7 @@ function countInCode(source, needle) {
   assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above'), [2, 4]);
   assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below'), [4, 5]);
   assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above'), [1, 1]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both'), [2, 5], 'R62: both separators');
   assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null), [3, 3]);
   // A real paragraph below a list: op 1 the literal, op 2 the item over the
   // separator too, so the list stays tight; one undo gives the literal back

@@ -5968,10 +5968,23 @@ check('shortcut: "- " before text in a paragraph below a tight list joins it tig
   await page.keyboard.type('x'); await page.keyboard.press('Home'); await page.keyboard.type('- '); await renderIdle(page);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- x\n\nOmega.\n');
 }, { md: TIGHT2_MD });
-check('shortcut: "- " between two lists joins the one above and keeps the blank line to the one below (R58)', DESKTOP, async (page, boot) => {
+// MIGRATED by B2 fix round 1b (R62 supersedes R58's both-sides clause):
+// `…joins the one above and keeps the blank line to the one below` ->
+// `…joins both tight`. Once the paragraph between them is an item, markdown
+// cannot keep the two lists apart; a kept blank line made them one LOOSE list
+// (R42). Now one tight list, and the screen reads exactly the file.
+check('shortcut: "- " between two tight lists joins both tight (R62)', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Mid.', 0); await page.keyboard.type('- '); await renderIdle(page);
-  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- Mid.\n\n- bravo\n');
-}, { md: '# D\n\n- alpha\n\nMid.\n\n- bravo\n' });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- a\n- b\n- Mid.\n- c\n- d\n');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:b', 'li:Mid.', 'li:c', 'li:d'], 'screen = file');
+}, { md: '# D\n\n- a\n- b\n\nMid.\n\n- c\n- d\n' });
+check('slash: "/bullet" in an emptied paragraph between two tight lists joins both tight (R62)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Z', 1); await page.keyboard.press('Backspace');
+  await page.keyboard.type('/bullet'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- a\n- x\n- c\n');
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'li:a', 'li:x', 'li:c'], 'screen = file');
+}, { md: '# D\n\n- a\n\nZ\n\n- c\n' });
 check('shortcut: "1. " below a tight ordered list continues its numbering (R58)', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Omega.', 0); await page.keyboard.type('1. '); await renderIdle(page);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1. alpha\n2. bravo\n3. Omega.\n');
