@@ -5368,12 +5368,13 @@ check('edit-search: typing into a marked paragraph saves plain text', DESKTOP, a
   assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'no source box');
   assert.strictEqual(await noticeText(page), null);
 }, { md: SEARCH_MD });
-// R36 (v3.15.0 T10): on the edit page a heading inside a blockquote does not
-// end the section above it (sectionBoundary() looks for a heading only as a
-// direct child of a block wrapper), and the hit after it — which the section
-// index lists under B — is marked: B's walk starts at its block wrapper and
-// reaches the paragraph after the quote. (The reader's own walk starts at the
-// heading inside the quote and does not reach it; see the T10 report.)
+// R36 (v3.15.0 T10, R76): a heading inside a blockquote does not end the
+// section above it, and the section index lists the text after the quote under
+// that heading's own section (B). Its hit is marked: sectionBoundary() walks
+// from the top-level block that holds the heading (here a block wrapper; in
+// the reader the blockquote itself), so it reaches the paragraph after the
+// quote. The reader pins the same fixture (`search: a hit after a blockquote
+// heading is marked`).
 const BQ_HEADING_MD = '# D\n\n## A\n\ntext a\n\n> ## B\n\nmatch here\n';
 check('edit-search: a hit after a blockquote heading is marked (R36)', DESKTOP, async (page) => {
   await editSearch(page, 'match');
@@ -6828,21 +6829,103 @@ check('render-guard: a failed render card goes away once a later commit lands', 
 // unsupported-format check, before anything moves) and throws on the second —
 // joinIntoPrevious()'s serialize(), after joinSeam() has merged the two
 // paragraphs on screen and before anything was committed.
+// R78 (m1): the probe records what the screen held when it threw, and the
+// check asserts the throw really came after the merge — so a later change that
+// adds a serializeInline() call before joinSeam() fails here instead of
+// passing with nothing merged.
 check('failed-render: a structural key that throws after the merge re-renders to the file', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Bravo paragraph text.', 0);
   await page.evaluate(() => {
     const im = window.md2docInlineMd; const orig = im.serializeInline; let n = 0;
+    window.__probeAtThrow = null;
     im.serializeInline = function () {
-      if (++n === 2) { im.serializeInline = orig; throw new Error('probe'); }
+      if (++n === 2) {
+        im.serializeInline = orig;
+        window.__probeAtThrow = [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"] .ed-wys-armed')].map((e) => e.textContent);
+        throw new Error('probe');
+      }
       return orig.apply(this, arguments);
     };
   });
   await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => window.__probeAtThrow),
+    ['Alpha para one.Bravo paragraph text.', 'Omega.'], 'guard: the probe threw, after the merge');
   assert.ok(/未預期/.test(await noticeText(page) || ''), 'the error card: ' + await noticeText(page));
   assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
   await focusSurface(page, 'Bravo paragraph text.', 0); await page.keyboard.type('Q');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nQBravo paragraph text.\n\nOmega.\n');
 }, { md: P3_MD });
+
+// ── render-guard, fix round 1 (R77): after the last render settles, the
+// screen equals `lines` — even when the response that was dropped as
+// superseded was the last one that could have drawn them ──
+// Render k (0-based) is held holds[k] ms and answers with fails[k] ? 500 : the
+// real response; renders past the list go straight through.
+const scriptRenders = async (page, holds, fails) => {
+  let n = 0;
+  await page.route('**/api/render', async (route) => {
+    const k = n++;
+    if (k >= holds.length) { await route.continue(); return; }
+    await wait(holds[k]);
+    if (fails[k]) await route.fulfill({ status: 500, body: '{}' });
+    else await route.continue();
+  });
+};
+const allBlocksHaveIds = (page) => page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].every((b) => b.getAttribute('data-block-id') !== null));
+// The reviewer's probe (review-b5 C1): the split's render lands but is
+// superseded by the undo's, and the undo's fails, so undo() puts the split
+// back into `lines` — which no render ever drew.
+check('render-guard: a superseded split whose undo fails is drawn, and the next commit keeps every line (R77)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [1500, 2500], [false, true]);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+z');
+  await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo', 'paragraph text.', 'Omega.']);
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.X\n');
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo', 'paragraph text.', 'Omega.X'], 'DOM equals file');
+}, { md: P3_MD });
+// Both fail: the split's render (superseded, so ignored) and the undo's. The
+// rollback then covers the split too — no render of it ever landed — and the
+// screen is drawn from `lines` again.
+check('render-guard: a superseded split that fails and an undo that fails too leave screen = file (R77)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [1500, 2500], [true, true]);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+z');
+  await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), P3_MD.replace('Omega.', 'Omega.X'));
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.X'], 'DOM equals file');
+}, { md: P3_MD });
+// The raw box: its Ctrl+Enter render is superseded by a toolbar undo whose
+// render fails. undo() puts the raw edit back into `lines`; the screen must
+// show it, not the block as it was before the raw box opened.
+check('render-guard: a raw-box commit superseded by an undo that fails shows what the file holds (R77)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [1500, 2500], [false, true]);
+  await openRawBox(page);
+  await page.keyboard.press('Control+Enter');
+  await wait(200);
+  await tb(page, 'undo');
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  const screen = await page.evaluate(() => ({
+    raw: !!document.querySelector('textarea.ed-raw'),
+    paras: [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"]')].map((b) => b.textContent.trim()),
+  }));
+  // The undo failed, so its rollback put the raw edit back: the file holds it,
+  // and so must the screen.
+  assert.strictEqual(disk, '# D\n\nBeta **b**.\n\nOmega.\n');
+  assert.deepStrictEqual(screen, { raw: false, paras: ['Beta b.', 'Omega.'] }, 'screen = file');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
+  const after = await commitAndRead(page, boot);
+  assert.strictEqual(after, disk.replace('Omega.', 'Omega.X'));
+}, { md: BASE_MD });
 
 // ── followup (v3.15.0 T10) ──
 // R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.

@@ -1760,8 +1760,12 @@ function countInCode(source, needle) {
   // structure as two ops again (M3), so its rollback undoes both, newest
   // first (R32): one more line at an existing site (+1).
   // 1 declaration + 28 call lines = 29.
-  assert.strictEqual(helperCalls, 29,
-    'the helper must be DECLARED once and used on all twenty-eight ' +
+  // MIGRATED by v3.15.0 B5 fix round 1 (29 -> 30, R77). No new commit site:
+  // settleAfterFailedRender() rolls back, through the helper, the ops whose
+  // superseded render failed once the newer render failed too (+1).
+  // 1 declaration + 29 call lines = 30.
+  assert.strictEqual(helperCalls, 30,
+    'the helper must be DECLARED once and used on all twenty-nine ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
