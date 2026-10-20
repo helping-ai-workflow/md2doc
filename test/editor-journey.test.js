@@ -3003,7 +3003,7 @@ async function main() {
   console.log('journey: V2i 🔗 on a paragraph — URL field renders nothing, caret and bar kept, save commits on both routes — OK');
 
   // ══ V3: 二十個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有二十個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20）（另有若干處是註解裡的散文
+  // lib/md2doc.js 有二十二個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20；T8 加了 .ed-tb-addrow / .ed-tb-addcol → 22）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -3062,6 +3062,11 @@ async function main() {
     // v3.15.0 T6 (R24): the link card hangs under the link at viewport
     // coordinates, so a scroll closes it (onAnyScroll).
     { sel: '.ed-linkcard',             after: 'gone' },
+    // v3.15.0 T8 (R24): the trailing add bars are placed along the hovered
+    // table's grid at viewport coordinates and hide on scroll like the ＋
+    // bubbles (onAnyScroll); the next mousemove raises them again.
+    { sel: '.ed-tb-addrow',            after: 'gone' },
+    { sel: '.ed-tb-addcol',            after: 'gone' },
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
@@ -3751,6 +3756,32 @@ async function main() {
     assert.ok(isGone(after), '.ed-toolbar-menu 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-toolbar-menu vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-tb-addrow / .ed-tb-addcol（v3.15.0 T8 的表格尾端新增列／欄）──
+  {
+    const ctx = await newPage(V3_TABLE_MD);
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    const ts = await centreTable(ctx.page);
+    const cell = await ctx.page.evaluate((t) => {
+      const r = document.querySelector(t + ' table').tBodies[0].rows[0].cells[0].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, ts);
+    await ctx.page.mouse.move(cell.x, cell.y);
+    await ctx.page.mouse.move(cell.x + 2, cell.y);
+    await new Promise((r) => setTimeout(r, 300));
+    const rowBefore = await overlayState(ctx.page, '.ed-tb-addrow');
+    const colBefore = await overlayState(ctx.page, '.ed-tb-addcol');
+    assertRaised(rowBefore, '.ed-tb-addrow');
+    assertRaised(colBefore, '.ed-tb-addcol');
+    await scrollBy(ctx.page, 200);
+    const rowAfter = await overlayState(ctx.page, '.ed-tb-addrow');
+    const colAfter = await overlayState(ctx.page, '.ed-tb-addcol');
+    assert.ok(isGone(rowAfter), '.ed-tb-addrow 捲動後必須消失，got ' + JSON.stringify(rowAfter));
+    assert.ok(isGone(colAfter), '.ed-tb-addcol 捲動後必須消失，got ' + JSON.stringify(colAfter));
+    assert.strictEqual(ctx.errs.length, 0, 'add bars：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-tb-addrow / .ed-tb-addcol vanish on scroll — OK');
   }
 
   // ── gone：.ed-slash-menu（v3.15.0 T1 的「/」區塊選單）─────────────────
@@ -8321,12 +8352,14 @@ async function main() {
     console.log('journey: standing on the ＋ bubble no longer hides the row grip — OK');
   }
 
-  // ── F5/F6: Tab 走完表格就離開它，落點是「整格被選起來」 ──────────────────
+  // ── F5/F6: Tab 走完表格，落點是「整格被選起來」 ──────────────────────────
   //
   // F6 = 格內 Tab 的落點。舊行為把游標塞在目標格【結尾】，所以「Tab 過去直接
   // 打字」是附加而不是取代。
   // F5 = 最後一格的 Tab（與第一格的 Shift+Tab）是死鍵：索引被 clamp 回原格，
   // handler 照樣 preventDefault()，連瀏覽器自己的 Tab 巡覽都被吃掉。
+  // v3.15.0 T8 (D20)：最後一格的 Tab 改成【新增一列】、游標落在新列第一格；
+  // 往前離開表格改用最後一列的 ↓。落點仍要是下一個段落的內容起點。
   {
     const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
     await ctx.page.click('.ed-wys-table thead th');
@@ -8347,13 +8380,24 @@ async function main() {
     assert.strictEqual(atLast, 'c2',
       'F5 前提失敗：這一列要量的是【最後一格】的 Tab，可是走到的不是它，got ' + JSON.stringify(atLast));
     await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 300));
+    const added = await ctx.page.evaluate(() => {
+      const t = document.querySelector('.ed-wys-table');
+      const rows = t.tBodies[0].rows;
+      const a = document.activeElement;
+      return { rows: rows.length, inNewFirstCell: a === rows[rows.length - 1].cells[0],
+        txt: a ? a.textContent : null, title: document.title.indexOf('●') === 0 };
+    });
+    assert.deepStrictEqual(added, { rows: 2, inNewFirstCell: true, txt: '', title: true },
+      'F5 (v3.15.0 T8)：最後一格的 Tab 必須新增一列、游標落在新列第一格，got ' + JSON.stringify(added));
+    await ctx.page.keyboard.press('ArrowDown');
     await new Promise((r) => setTimeout(r, 900));
     const out = await ctx.page.evaluate(() => {
       const a = document.activeElement;
       return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
     });
     assert.ok(out.cls && out.cls.indexOf('ed-wys-armed') !== -1,
-      'F5：最後一格的 Tab 必須離開表格，落在下一個有可聚焦面的 block，got ' + JSON.stringify(out));
+      'F5：最後一列的 ↓ 必須離開表格，落在下一個有可聚焦面的 block，got ' + JSON.stringify(out));
     assert.strictEqual(out.txt, 'After paragraph.',
       'F5：落點必須是那個段落本身，got ' + JSON.stringify(out));
     // 跨 block 的落點是【內容起點的游標】，不是整段選取 —— 打字插在最前面。
@@ -8364,7 +8408,7 @@ async function main() {
       'F5：跨 block 的落點必須是內容起點的游標，got ' + JSON.stringify(typed));
     assert.strictEqual(ctx.errs.length, 0, 'F5/F6：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: Tab walks the cells, selects each one, then leaves the table — OK');
+    console.log('journey: Tab walks the cells, selects each one, adds a row at the end, and ↓ leaves the table — OK');
   }
 
   // 頭尾對稱：第一格的 Shift+Tab 要往回跨出去。這一列的表格是【乾淨的】，所以
@@ -8405,14 +8449,26 @@ async function main() {
   // landing's mark is spent by anything that is not another Tab, so the
   // heading-depth and list-indent contracts are untouched for a block the
   // user is actually working in.
+  //
+  // v3.15.0 T8: a Tab in the last cell adds a row now, so the forward walk
+  // starts from a landing ABOVE the heading instead: Shift+Tab out of the
+  // table's first cell walks back over 'After paragraph.' and the heading to
+  // 'Intro.' (each landing marked), then Tab ×2 walks forward over the heading
+  // again. Both directions pass over the heading; neither may retitle it.
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\nAfter paragraph.\n\n| A | B |\n|---|---|\n| c1 | c2 |\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('Tab');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 450));
+    }
+    const back = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(back, 'Intro.',
+      'T21 前提失敗：Shift+Tab ×3 必須從表格走回 Intro.，got ' + JSON.stringify(back));
+    for (let i = 0; i < 2; i++) {
       await ctx.page.keyboard.press('Tab');
       await new Promise((r) => setTimeout(r, 450));
     }
@@ -8465,16 +8521,19 @@ async function main() {
   }
 
   // The mark is spent by any key that is not Tab: type into the block you
-  // landed on and Tab means heading depth again.
+  // landed on and Tab means heading depth again. (v3.15.0 T8: the landing is
+  // a Shift+Tab out of the table's first cell — a Tab in its last cell adds a
+  // row now.)
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 450));
+    const landed = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(landed, 'Build snippet', 'T21 前提失敗：Shift+Tab 必須落在標題上，got ' + JSON.stringify(landed));
     await ctx.page.keyboard.type('X');
     await new Promise((r) => setTimeout(r, 300));
     await ctx.page.keyboard.press('Tab');
@@ -8491,14 +8550,15 @@ async function main() {
   // ...and by pointing at it. A click that lands on the same surface does not
   // open a new burst, so nothing else would clear the mark.
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 450));
+    const landed = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(landed, 'Build snippet', 'T21 前提失敗：Shift+Tab 必須落在標題上，got ' + JSON.stringify(landed));
     await pressClick(ctx.page, '.ed-block[data-block-type="heading"] .ed-wys-armed', 80);
     await new Promise((r) => setTimeout(r, 300));
     await ctx.page.keyboard.press('Tab');
@@ -8516,15 +8576,28 @@ async function main() {
 
   // 降級 block（圍欄、引言、分隔線）沒有可聚焦面，Tab 要跳過它們；下一個
   // 表格的落點是它的【第一格】。
+  // v3.15.0 T8：最後一格的 Tab 改成新增一列，所以往前走的起點換成表格之後
+  // 的落點：第二個表格第一格 Shift+Tab 先往回跳過三個降級 block、落在
+  // 'Landing.'（帶 landing 記號），再 Tab 往前跳過同樣三個、落在第二個表格
+  // 的第一格。
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n\n' +
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\nLanding.\n\n```js\nconst x = 1;\n```\n\n' +
       '> a quote\n\n---\n\n| P | Q |\n|---|---|\n| p1 | q1 |\n');
     await ctx.page.evaluate(() => {
-      const t = document.querySelectorAll('.ed-wys-table')[0];
-      const cells = t.querySelectorAll('th, td');
-      cells[cells.length - 1].focus();
+      const t = document.querySelectorAll('.ed-wys-table')[1];
+      t.querySelectorAll('th, td')[0].focus();
     });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 700));
+    const landed = await ctx.page.evaluate(() => {
+      const a = document.activeElement;
+      return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
+    });
+    assert.ok(landed.cls && landed.cls.indexOf('ed-wys-armed') !== -1 && landed.txt === 'Landing.',
+      'F5：Shift+Tab 必須往回跳過降級 block，落在 Landing.，got ' + JSON.stringify(landed));
     await ctx.page.keyboard.press('Tab');
     await new Promise((r) => setTimeout(r, 700));
     const out = await ctx.page.evaluate(() => {
@@ -8544,23 +8617,27 @@ async function main() {
 
   // T15-7：後面沒有任何有可聚焦面的 block 時原地不動，而且【繼續】
   // preventDefault() —— 交還給瀏覽器的 Tab 會走進每個區塊後面的 gutter 按鈕。
+  // v3.15.0 T8：最後一格的 Tab 改成新增一列，往前已經沒有「無處可去」；
+  // 這一列改量鏡像的那一支 —— 第一格的 Shift+Tab，前面只有降級的圍欄。
+  // 同一條 leaveTableByTab() → walkToAdjacentBlockByTab() 找不到落點的路。
   //
   // 這一列是【存活保證】，不是缺陷列：修之前它就是綠的，因為被 clamp 回原格的
   // 死鍵在螢幕上跟「找不到落點所以不動」長得一模一樣。它會紅的對象是一個把這
   // 個按鍵交還給瀏覽器的修法 —— 已用「Tab 分支不呼叫 preventDefault()」單獨
   // ablate 過，那一改就讓它紅。
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n');
+    const ctx = await newPage('```js\nconst x = 1;\n```\n\n| A | B |\n|---|---|\n| c1 | c2 |\n');
     await ctx.page.evaluate(() => {
       window.__tabPrevented = null;
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Tab') window.__tabPrevented = e.defaultPrevented;
       });
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
+      document.querySelectorAll('.ed-wys-cell')[0].focus();
     });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 600));
     const out = await ctx.page.evaluate(() => ({
       prevented: window.__tabPrevented,
@@ -8569,7 +8646,7 @@ async function main() {
     }));
     assert.strictEqual(out.prevented, true,
       'T15-7：找不到落點時 Tab 仍必須被吃掉，got ' + JSON.stringify(out));
-    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1 && out.txt === 'c2',
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1 && out.txt === 'A',
       'T15-7：找不到落點時必須原地不動，got ' + JSON.stringify(out));
     assert.strictEqual(ctx.errs.length, 0, 'T15-7：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();

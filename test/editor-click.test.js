@@ -2916,6 +2916,113 @@ check('table-menu: on a phone the row menu stays inside the viewport and the tab
   assert.ok(m.rect.l >= m.tableRect.l - 1 && m.rect.r <= m.tableRect.r + 1, 'inside the table box ' + JSON.stringify(m));
 }, { md: TBL_MD });
 
+// ── table-bar / table-tab (v3.15.0 T8) ──
+// Both trailing bars and the grid as plain values. The grid is the header
+// row's left/right/top and the last row's bottom (the table element itself is
+// a full-width display:block scroll box).
+const addBars = (page) => page.evaluate(() => {
+  const box = (sel) => {
+    const e = document.querySelector(sel);
+    if (!e || e.hidden || !e.getClientRects().length) return { shown: false };
+    const r = e.getBoundingClientRect();
+    return { shown: true, l: r.left, r: r.right, t: r.top, b: r.bottom, h: r.height, w: r.width };
+  };
+  const t = document.querySelector('.ed-block[data-block-type="table"] table');
+  const rows = t.querySelectorAll('tr');
+  const hr = t.tHead.rows[0].getBoundingClientRect();
+  const lr = rows[rows.length - 1].getBoundingClientRect();
+  return { row: box('.ed-tb-addrow'), col: box('.ed-tb-addcol'), grid: { l: hr.left, r: hr.right, t: hr.top, b: lr.bottom }, tableRight: t.getBoundingClientRect().right };
+});
+const hoverFirstBodyCell = async (page) => {
+  const box = await page.locator('.ed-block[data-block-type="table"] tbody td').first().boundingBox();
+  await page.mouse.move(box.x + 5, box.y + 5); await wait(150);
+};
+// A real click at a bar's centre, after asserting the browser's own hit test
+// answers the bar there.
+const clickAddBar = async (page, kind) => {
+  const sel = kind === 'row' ? '.ed-tb-addrow' : '.ed-tb-addcol';
+  const p = await page.evaluate((s) => {
+    const e = document.querySelector(s);
+    if (!e || e.hidden) return null;
+    const r = e.getBoundingClientRect(); const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, hit: !!hit && e.contains(hit) };
+  }, sel);
+  assert.ok(p && p.hit, 'guard: ' + sel + ' is up and answers its own centre ' + JSON.stringify(p));
+  await page.mouse.click(p.x, p.y); await wait(300);
+};
+check('table-bar: hovering the table shows both bars along the grid', DESKTOP, async (page) => {
+  await hoverFirstBodyCell(page);
+  const b = await addBars(page);
+  assert.deepStrictEqual([b.row.shown, b.col.shown], [true, true]);
+  assert.strictEqual(b.row.h, 22);
+  assert.strictEqual(b.col.w, 22);
+  assert.ok(Math.abs(b.row.l - b.grid.l) <= 1 && Math.abs(b.row.r - b.grid.r) <= 1 && b.row.t >= b.grid.b, 'row bar under the grid, same width ' + JSON.stringify(b));
+  assert.ok(b.col.l >= b.grid.r - 1 && Math.abs(b.col.t - b.grid.t) <= 1 && Math.abs(b.col.b - b.grid.b) <= 1, 'col bar right of the grid, same height ' + JSON.stringify(b));
+}, { md: TBL_MD });
+check('table-bar: bars hide 300 ms after the pointer leaves', DESKTOP, async (page) => {
+  await hoverFirstBodyCell(page);
+  await page.mouse.move(5, 5); await wait(100);
+  assert.strictEqual((await addBars(page)).row.shown, true, 'still shown at 100 ms');
+  await wait(350);
+  const b = await addBars(page);
+  assert.deepStrictEqual([b.row.shown, b.col.shown], [false, false]);
+}, { md: TBL_MD });
+check('table-bar: the bottom bar adds a row with the caret in its first cell', DESKTOP, async (page, boot) => {
+  await hoverFirstBodyCell(page);
+  await clickAddBar(page, 'row');
+  assert.strictEqual(await tbodyRowCount(page), 3);
+  await page.keyboard.type('z');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *a2 *\| *b2 *\|\n\| *z *\| *\|\n\nAfter\./.test(disk), 'a third body row starting with z — ' + disk);
+}, { md: TBL_MD });
+check('table-bar: the right bar adds a column with the caret in its header cell', DESKTOP, async (page, boot) => {
+  await hoverFirstBodyCell(page);
+  await clickAddBar(page, 'col');
+  await page.keyboard.type('C');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *A *\| *B *\| *C *\|\n/.test(disk), 'header row reads | A | B | C | — ' + disk);
+  assert.ok(/\| *a1 *\| *b1 *\| *\|\n\| *a2 *\| *b2 *\| *\|\n/.test(disk), 'every body row gained an empty cell — ' + disk);
+}, { md: TBL_MD });
+check('table-bar: one bar click is one undo step', DESKTOP, async (page) => {
+  await hoverFirstBodyCell(page);
+  await clickAddBar(page, 'row');
+  await hoverFirstBodyCell(page);
+  await clickAddBar(page, 'row');
+  assert.strictEqual(await tbodyRowCount(page), 4);
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.strictEqual(await tbodyRowCount(page), 3);
+}, { md: TBL_MD });
+check('table-bar: on a wide scrolled table the right bar sits at the visible right edge', DESKTOP, async (page) => {
+  const wide = await page.evaluate(() => { const t = document.querySelector('.ed-block[data-block-type="table"] table'); return t.scrollWidth > t.clientWidth + 50; });
+  assert.strictEqual(wide, true, 'guard: the table scrolls horizontally');
+  await hoverFirstBodyCell(page);
+  const b = await addBars(page);
+  assert.strictEqual(b.col.shown, true);
+  assert.ok(b.col.l <= b.tableRight + 1 && b.col.r <= await page.evaluate(() => innerWidth), 'col bar at the visible right edge ' + JSON.stringify(b));
+  assert.ok(b.row.r <= b.tableRight + 1, 'row bar clipped to the visible box ' + JSON.stringify(b));
+}, { md: '# D\n\n' + '| ' + Array.from({ length: 14 }, (_, i) => 'column_header_' + i).join(' | ') + ' |\n|' + '---|'.repeat(14) + '\n| ' + Array.from({ length: 14 }, () => 'cell_value_long').join(' | ') + ' |\n' });
+check('table-tab: Tab in the last cell adds a row; Shift+Tab in the first cell still leaves', DESKTOP, async (page, boot) => {
+  await page.locator('.ed-block[data-block-type="table"] tbody tr:last-child td:last-child').click();
+  await page.keyboard.press('Tab'); await wait(200);
+  assert.strictEqual(await tbodyRowCount(page), 3);
+  await page.keyboard.type('n');
+  await page.locator('.ed-block[data-block-type="table"] thead th').first().click();
+  await page.keyboard.press('Shift+Tab'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.closest('.ed-block').getAttribute('data-block-type')), 'heading');
+  assert.ok(/\| *n *\| *\|\n\nAfter\./.test(await saveAndRead(page, boot)));
+}, { md: TBL_MD });
+check('table-tab: the row Tab adds is one undo step', DESKTOP, async (page) => {
+  await page.locator('.ed-block[data-block-type="table"] tbody tr:last-child td:last-child').click();
+  await page.keyboard.press('Tab'); await wait(200);
+  const r = await page.evaluate(() => ({ rows: document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length, inNewFirstCell: document.activeElement === document.querySelector('.ed-block[data-block-type="table"] tbody tr:last-child td:first-child') }));
+  assert.deepStrictEqual(r, { rows: 3, inNewFirstCell: true });
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.strictEqual(await tbodyRowCount(page), 2);
+}, { md: TBL_MD });
+
 // ⠿ menu, the way a person drives it. `path` is the menu entry, or
 // ['轉換成', '<target>'] for the convert submenu.
 const blockByText = (page, text) => page.evaluate((t) => {
