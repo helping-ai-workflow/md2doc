@@ -6362,6 +6362,75 @@ check('link-paste: Ctrl+Shift+V keeps a URL over a selection as plain text', DES
   assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain https://p.example/ here.'));
 }, { md: LINKS_MD });
 
+
+// ── link-card (v3.15.0 T6) ──
+// The card as the user sees it: open, the href it shows, and whether it sits
+// below the link it names.
+const linkCard = (page) => page.evaluate(() => {
+  const c = document.querySelector('.ed-linkcard');
+  if (!c || !c.isConnected) return { open: false, href: null, belowLink: null };
+  const href = c.querySelector('.ed-linkcard-href').textContent;
+  const a = [...document.querySelectorAll('.content a')].find((x) => x.getAttribute('href') === href);
+  const r = c.getBoundingClientRect();
+  return { open: true, href, belowLink: !!a && r.top >= a.getBoundingClientRect().bottom - 0.5 };
+});
+check('link-card: a caret resting in a link for 300 ms shows its card under the link', DESKTOP, async (page) => {
+  await focusSurface(page, 'See docs now.', 6);
+  assert.strictEqual((await linkCard(page)).open, false, 'not before 300 ms');
+  await wait(450);
+  assert.deepStrictEqual(await linkCard(page), { open: true, href: 'https://a.example/', belowLink: true });
+}, { md: LINKS_MD });
+// GUARD (green before the change): hovering never shows a card.
+check('link-card: hovering a link shows nothing', DESKTOP, async (page) => {
+  const box = await page.locator('.content a[href="https://a.example/"]').boundingBox();
+  await page.mouse.move(box.x + 5, box.y + 5); await wait(600);
+  assert.strictEqual((await linkCard(page)).open, false);
+}, { md: LINKS_MD });
+check('link-card: leaving the link or Esc hides it, and Esc does not revert typing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See docs now.', 6); await wait(450);
+  assert.strictEqual((await linkCard(page)).open, true, 'precondition: the card is up');
+  await page.keyboard.press('End'); await wait(100);
+  assert.strictEqual((await linkCard(page)).open, false);
+  await page.keyboard.type('!'); await focusSurface(page, 'See docs now.!', 6); await wait(450);
+  assert.strictEqual((await linkCard(page)).open, true, 'precondition: the card is up again');
+  await page.keyboard.press('Escape');
+  assert.strictEqual((await linkCard(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('now.', 'now.!'));
+}, { md: LINKS_MD });
+check('link-card: a caret at the edge of a link shows nothing', DESKTOP, async (page) => {
+  await focusSurface(page, 'See docs now.', 4); await wait(450);
+  assert.strictEqual((await linkCard(page)).open, false, 'caret just before the link');
+  await focusSurface(page, 'See docs now.', 8); await wait(450);
+  assert.strictEqual((await linkCard(page)).open, false, 'caret just after the link');
+}, { md: LINKS_MD });
+check('link-card: a scroll closes it', DESKTOP, async (page) => {
+  await focusSurface(page, 'See docs now.', 6); await wait(450);
+  assert.strictEqual((await linkCard(page)).open, true);
+  await page.evaluate(() => { document.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('scroll')); });
+  await wait(100);
+  assert.strictEqual((await linkCard(page)).open, false);
+}, { md: LINKS_MD });
+check('link-card: 開啟 opens a new tab', DESKTOP, async (page) => {
+  await page.context().route('https://a.example/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>stub</title>' }));
+  await focusSurface(page, 'See docs now.', 6); await wait(450);
+  const [popup] = await Promise.all([page.waitForEvent('popup'), page.click('.ed-linkcard button:has-text("開啟")')]);
+  await popup.waitForLoadState().catch(() => {});
+  assert.strictEqual(popup.url(), 'https://a.example/');
+  await popup.close();
+}, { md: LINKS_MD });
+check('link-card: 編輯 opens the URL field on the link', DESKTOP, async (page) => {
+  await focusSurface(page, 'See docs now.', 6); await wait(450);
+  await page.click('.ed-linkcard button:has-text("編輯")');
+  const f = await linkField(page);
+  assert.deepStrictEqual([f.open, f.value, (await linkCard(page)).open], [true, 'https://a.example/', false]);
+}, { md: LINKS_MD });
+check('link-card: 移除 unwraps the link', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See docs now.', 6); await wait(450);
+  await page.click('.ed-linkcard button:has-text("移除")');
+  assert.strictEqual((await linkCard(page)).open, false);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('[docs](https://a.example/)', 'docs'));
+}, { md: LINKS_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

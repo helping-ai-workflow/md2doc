@@ -2994,8 +2994,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十九個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十九個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19）（另有若干處是註解裡的散文
+  // ══ V3: 二十個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有二十個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -3051,6 +3051,9 @@ async function main() {
     // v3.15.0 T5 (R24): the URL field sits at the selection toolbar's place,
     // so a scroll closes it (back to the toolbar, which repositions).
     { sel: '.ed-linkbar',              after: 'gone' },
+    // v3.15.0 T6 (R24): the link card hangs under the link at viewport
+    // coordinates, so a scroll closes it (onAnyScroll).
+    { sel: '.ed-linkcard',             after: 'gone' },
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
@@ -3777,6 +3780,23 @@ async function main() {
     assert.ok(isGone(after), '.ed-linkbar 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-linkbar vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-linkcard（v3.15.0 T6 的連結卡片）──────────────────────────
+  {
+    const ctx = await newPage('# H\n\nSee [docs](https://a.example/) now.\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('Home');
+    for (let i = 0; i < 6; i++) await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.waitForSelector('.ed-linkcard', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-linkcard');
+    assertRaised(before, '.ed-linkcard');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-linkcard');
+    assert.ok(isGone(after), '.ed-linkcard 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-linkcard vanishes on scroll — OK');
   }
 
   // ── V3b: onAnyScroll 的 `capture: true` ─────────────────────────────
