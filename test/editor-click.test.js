@@ -6904,7 +6904,11 @@ check('render-guard: a superseded split that fails and an undo that fails too le
 }, { md: P3_MD });
 // The raw box: its Ctrl+Enter render is superseded by a toolbar undo whose
 // render fails. undo() puts the raw edit back into `lines`; the screen must
-// show it, not the block as it was before the raw box opened.
+// show it, not the block as it was before the raw box opened. What makes it so
+// is the reconciliation redraw (R79): the toolbar undo resolves the box first
+// (switchAwayFrom()), so the raw commit's own superseded branch is not reached
+// here with the box still open (re-review b5 r1, measured). R81: the card the
+// undo's failure raised is still up after that redraw (R80).
 check('render-guard: a raw-box commit superseded by an undo that fails shows what the file holds (R77)', DESKTOP, async (page, boot) => {
   await scriptRenders(page, [1500, 2500], [false, true]);
   await openRawBox(page);
@@ -6922,10 +6926,66 @@ check('render-guard: a raw-box commit superseded by an undo that fails shows wha
   assert.strictEqual(disk, '# D\n\nBeta **b**.\n\nOmega.\n');
   assert.deepStrictEqual(screen, { raw: false, paras: ['Beta b.', 'Omega.'] }, 'screen = file');
   assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
   await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
   const after = await commitAndRead(page, boot);
   assert.strictEqual(after, disk.replace('Omega.', 'Omega.X'));
 }, { md: BASE_MD });
+
+// ── render-guard, fix round 2 (R79, R80): whenever the last render in
+// flight has answered — applied, dropped or failed and rolled back — a
+// screen that may differ from `lines` is drawn again from `lines` ──
+// re-review b5 r1 H1: a committed edit, then Enter at Bravo| (its render A
+// dropped), then two Ctrl+Z whose renders both fail. `lines` ends where the
+// last applied render left it, while the split's id-less right half is still
+// on screen; the next commit used to drop `paragraph text.` from the file.
+// H2 is the same keys with A answering last (2600 ms), dropped.
+for (const [label, holds, fails] of [
+  ['H1, A lands first', [1500, 2000, 2500], [false, true, true]],
+  ['H1, A fails first', [1500, 2000, 2500], [true, true, true]],
+  ['H2, A lands last', [2600, 1500, 1500], [false, true, true]],
+]) {
+  check('render-guard: a dropped split, then two failing undos, leave screen = file and lose no line (R79 ' + label + ')', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Z');
+    const f0 = await commitAndRead(page, boot);
+    assert.strictEqual(f0, P3_MD.replace('Omega.', 'Omega.Z'), 'guard: the first commit');
+    await scriptRenders(page, holds, fails);
+    await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+    await page.keyboard.press('Control+z');
+    await wait(100);
+    await page.keyboard.press('Control+z');
+    await renderIdle(page); await wait(300); await renderIdle(page);
+    const disk = await saveAndRead(page, boot);
+    assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one: ' + JSON.stringify(await paragraphs(page)));
+    const fileParas = disk.split('\n\n').slice(1).map((p) => p.replace(/\n$/, ''));
+    assert.deepStrictEqual(await paragraphs(page), fileParas, 'screen = file');
+    assert.strictEqual(disk.indexOf('paragraph text.') !== -1, true, 'the file keeps the text: ' + JSON.stringify(disk));
+    await focusSurface(page, 'Alpha para one.', 15); await page.keyboard.type('Q');
+    const after = await commitAndRead(page, boot);
+    assert.strictEqual(after, disk.replace('Alpha para one.', 'Alpha para one.Q'));
+    assert.deepStrictEqual(await paragraphs(page), fileParas.map((p) => p === 'Alpha para one.' ? 'Alpha para one.Q' : p), 'DOM equals file');
+  }, { md: P3_MD });
+}
+// R80 (re-review b5 r1, risk a): the split's render is dropped and a raw-box
+// commit made during it fails. The reconciliation redraw keeps the box and
+// its text (reopened from a by-value stash) and the failure card, and the next
+// save writes the text.
+check('render-guard: a raw box whose commit fails after a dropped render keeps its text and the card (R80)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [1500, 2500], [false, true]);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'guard: raw box open');
+  await page.focus('textarea.ed-raw');
+  await page.keyboard.press('End');
+  await page.keyboard.type(' typed');
+  await page.keyboard.press('Control+Enter');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const box = await rawBox(page);
+  assert.deepStrictEqual(box && box.value, 'Alpha para one. typed', 'the box and its text are back: ' + JSON.stringify(box));
+  assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one. typed\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+}, { md: P3_MD });
 
 // ── followup (v3.15.0 T10) ──
 // R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.
