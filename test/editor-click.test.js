@@ -6782,6 +6782,51 @@ check('link-paste: a real Ctrl+Shift+V of a copied URL over a cell selection pas
   assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('| bravo |', '| https://p.example/ |'));
 }, { md: LINKS_MD });
 
+// ── render-guard (v3.15.0 T9) ──
+// R28: the FIRST /api/render is held ~1500 ms and every later one ~100 ms, so
+// a response to an older request lands after the response to a newer one.
+const slowFirstRender = async (page) => {
+  let n = 0;
+  await page.route('**/api/render', async (route) => { await wait(n++ === 0 ? 1500 : 100); await route.continue(); });
+};
+check('render-guard: Ctrl+Z during a slow split render leaves screen = file = original', DESKTOP, async (page, boot) => {
+  await slowFirstRender(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+z');
+  await renderIdle(page);
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), P3_MD);
+}, { md: P3_MD });
+check('render-guard: a failed render card goes away once a later commit lands', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' x');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-conflict[data-level="error"]')), true, 'guard: card shown');
+  await focusSurface(page, 'Alpha. x', 8); await page.keyboard.type('y');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-conflict[data-level="error"]')), false);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha. xy\n\nOmega.\n');
+}, { md: BASE_MD });
+// The probe lets the first serializeInline() through (blockEdgeDelete()'s own
+// unsupported-format check, before anything moves) and throws on the second —
+// joinIntoPrevious()'s serialize(), after joinSeam() has merged the two
+// paragraphs on screen and before anything was committed.
+check('failed-render: a structural key that throws after the merge re-renders to the file', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Bravo paragraph text.', 0);
+  await page.evaluate(() => {
+    const im = window.md2docInlineMd; const orig = im.serializeInline; let n = 0;
+    im.serializeInline = function () {
+      if (++n === 2) { im.serializeInline = orig; throw new Error('probe'); }
+      return orig.apply(this, arguments);
+    };
+  });
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.ok(/未預期/.test(await noticeText(page) || ''), 'the error card: ' + await noticeText(page));
+  assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo paragraph text.', 'Omega.']);
+  await focusSurface(page, 'Bravo paragraph text.', 0); await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nQBravo paragraph text.\n\nOmega.\n');
+}, { md: P3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

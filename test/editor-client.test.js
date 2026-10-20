@@ -1506,6 +1506,32 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
       rollbackFailedRender(s3, { op: { startLine: 1, endLine: 1 } }, ['snapshot']),
       ['snapshot'], 'nothing left to undo -> the caller\'s prevLines');
   }
+  // (e) v3.15.0 T9 (D21): the failed op is not on top of the stack — a later
+  //     commit landed over it, or it was undone already — so the rollback
+  //     leaves both `lines` and the stack exactly as they are.
+  {
+    const s4 = mkState();
+    const before = s4.lines;
+    const failed = { op: { startLine: 2, endLine: 2, before: ['b'], after: ['B'] } };
+    const out = rollbackFailedRender(s4, failed, ['snapshot']);
+    assert.strictEqual(out, before, 'a different op on top: `lines` stays the array it was');
+    assert.strictEqual(s4.stack._done.length, 1, 'the stack keeps the op on top');
+    assert.deepStrictEqual(s4.stack.redoTail(), [], 'and nothing moved to the redo side');
+  }
+  // (f) …and with the failed op on top it undoes exactly that op: the one
+  //     below it stays, and the failed one is what moves to the redo side.
+  {
+    const s5 = mkState();
+    const real = commitRangeEdit(
+      { lines: s5.lines, blocks: [{ id: 0, startLine: 3, endLine: 3 }], stack: s5.stack },
+      3, 3, 'C');
+    s5.lines = real.lines;
+    assert.deepStrictEqual(s5.lines, ['A', 'b', 'C'], 'sanity: the commit pushed');
+    const out = rollbackFailedRender(s5, real, ['snapshot']);
+    assert.deepStrictEqual(out, ['A', 'b', 'c'], 'exactly the failed op is undone');
+    assert.strictEqual(s5.stack._done.length, 1, 'the earlier op stays on the stack');
+    assert.deepStrictEqual(s5.stack.redoTail(), [real.op], 'the failed op is the one undone');
+  }
 }
 
 // -- T8 review MEDIUM-1 (mechanical): every rollback goes through the helper --
