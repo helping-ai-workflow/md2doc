@@ -4863,8 +4863,9 @@ check('toolbar-transient: 清單 on an empty one right below a list continues th
 check('toolbar-transient: 圖片 on an empty one replaces it with the picked image', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
-  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
-  await renderIdle(page);
+  // MIGRATED by v3.15.0 T10 (R41): setFiles + renderIdle -> pickImage(), which
+  // also waits for the /api/asset upload renderIdle does not count.
+  await pickImage(page, chooser);
   assert.strictEqual(await transientCount(page), 0);
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
@@ -4930,11 +4931,16 @@ check('paste-transient: two paragraphs replace it in one undo step', DESKTOP, as
 }, { md: BASE_MD });
 check('paste-transient: an image replaces it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
-  await page.evaluate((b64) => {
-    const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-    const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
-    document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-  }, PNG_1PX);
+  // MIGRATED by v3.15.0 T10 (R41): the paste is also waited out through its
+  // /api/asset upload, which renderIdle alone does not count.
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    page.evaluate((b64) => {
+      const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
+      document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, PNG_1PX),
+  ]);
   await renderIdle(page);
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
@@ -4979,8 +4985,8 @@ check('toolbar-transient: 圖片 on an empty one survives a window blur while th
   });
   await wait(300);
   assert.strictEqual(await transientCount(page), 1, 'the transient is still there');
-  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
-  await renderIdle(page);
+  // MIGRATED by v3.15.0 T10 (R41): setFiles + renderIdle -> pickImage().
+  await pickImage(page, chooser);
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
 }, { md: BASE_MD });
@@ -5362,6 +5368,17 @@ check('edit-search: typing into a marked paragraph saves plain text', DESKTOP, a
   assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), false, 'no source box');
   assert.strictEqual(await noticeText(page), null);
 }, { md: SEARCH_MD });
+// R36 (v3.15.0 T10): on the edit page a heading inside a blockquote does not
+// end the section above it (sectionBoundary() looks for a heading only as a
+// direct child of a block wrapper), and the hit after it — which the section
+// index lists under B — is marked: B's walk starts at its block wrapper and
+// reaches the paragraph after the quote. (The reader's own walk starts at the
+// heading inside the quote and does not reach it; see the T10 report.)
+const BQ_HEADING_MD = '# D\n\n## A\n\ntext a\n\n> ## B\n\nmatch here\n';
+check('edit-search: a hit after a blockquote heading is marked (R36)', DESKTOP, async (page) => {
+  await editSearch(page, 'match');
+  assert.deepStrictEqual(await editMarks(page), { text: 'match', types: ['paragraph'] });
+}, { md: BQ_HEADING_MD });
 check('edit-search: an untouched marked paragraph stays byte-identical', DESKTOP, async (page, boot) => {
   await editSearch(page, 'bravo');
   assert.ok(await editMarksInSurface(page) > 0, 'a mark stands inside the paragraph surface');
@@ -6826,6 +6843,91 @@ check('failed-render: a structural key that throws after the merge re-renders to
   await focusSurface(page, 'Bravo paragraph text.', 0); await page.keyboard.type('Q');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.\n\nQBravo paragraph text.\n\nOmega.\n');
 }, { md: P3_MD });
+
+// ── followup (v3.15.0 T10) ──
+// R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.
+check('failed-render: after a failed split the retry keeps typing and split as two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type(' x');
+  await failFirstRender(page);
+  await page.keyboard.press('ArrowLeft'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nx\n\nOmega.\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha. x\n\nOmega.\n', 'first undo removes only the split');
+}, { md: BASE_MD });
+// R28 (D22): the first `nFail` renders are held 800 ms and fail; every later
+// one is held 800 ms and goes through.
+const failThenHold = async (page, nFail) => {
+  let left = nFail;
+  await page.route('**/api/render', async (route) => {
+    await wait(800);
+    if (left > 0) { left--; await route.fulfill({ status: 500, body: '{}' }); return; }
+    await route.continue();
+  });
+};
+const TWO_LISTS_MD = '# D\n\n- alpha\n- bravo\n- charlie\n\nMid.\n\n- xray\n- yank\n';
+// The other block is a list item, so its commit adds its own run's line map
+// (resolveBurst()'s list branch). The key is held after a click into the new
+// item DURING that commit's render: it carries the new item's tag, found again
+// only through the structure's half of the map.
+check('failed-render: a key typed into the new item while another list commits lands in it (R28 merge)', DESKTOP, async (page, boot) => {
+  await failThenHold(page, 2);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await clickChar(page, 'xray', 2); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlie', 'xray', 'yank'], 'guard: the screen keeps the new item');
+  await page.keyboard.press('End'); await page.keyboard.type('X');
+  await page.keyboard.press('Control+s');
+  await wait(100);
+  await clickChar(page, 'new', 2); await page.keyboard.type('Q');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'neQw', 'charlie', 'xrayX', 'yank']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- neQw\n- charlie\n\nMid.\n\n- xrayX\n- yank\n');
+}, { md: TWO_LISTS_MD });
+// The other block sits ABOVE the list and its commit changes the number of
+// lines (its source holds a soft line break, and replacing its text writes one
+// line), so every line the structure's map names is one off. The held key
+// lands in the new item or is dropped with the notice; it never lands on the
+// line the stale map names (`charlie`, one below). (A Shift+Enter
+// break would not do: it is written as an inline `<br>` on the same
+// line, measured.)
+check('failed-render: a key held for the new item while a block above changes its line count never lands on a wrong line (R28)', DESKTOP, async (page, boot) => {
+  await failThenHold(page, 2);
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await page.keyboard.type('new'); await renderIdle(page);
+  await clickChar(page, 'Top.\nsecond', 2); await renderIdle(page);
+  assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'new', 'charlie'], 'guard: the screen keeps the new item');
+  const selected = await page.evaluate(() => {
+    const s = document.activeElement;
+    if (!s || s.textContent !== 'Top.\nsecond') return false;
+    getSelection().selectAllChildren(s);
+    return true;
+  });
+  assert.strictEqual(selected, true, 'guard: the paragraph above is focused');
+  await page.keyboard.type('Z');
+  await page.keyboard.press('Control+s');
+  await wait(100);
+  await clickChar(page, 'new', 2); await page.keyboard.type('Q');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const r = { items: await liTexts(page), notice: await noticeText(page) };
+  const landed = JSON.stringify(r.items) === JSON.stringify(['alpha', 'bravo', 'neQw', 'charlie']);
+  const dropped = JSON.stringify(r.items) === JSON.stringify(['alpha', 'bravo', 'new', 'charlie']) && /略過/.test(r.notice || '');
+  assert.strictEqual(landed || dropped, true, 'the key is in the new item, or dropped with the notice: ' + JSON.stringify(r));
+  assert.strictEqual(await commitAndRead(page, boot),
+    '# D\n\nZ\n\n- alpha\n- bravo\n- ' + (landed ? 'neQw' : 'new') + '\n- charlie\n');
+}, { md: '# D\n\nTop.\nsecond\n\n- alpha\n- bravo\n- charlie\n' });
+// R54: a transient left holding `#` + NBSP commits the escaped literal, not a
+// heading. Composed through CDP, so the shortcut (never during an IME
+// composition, D3) stays out of it. Chromium only.
+check('transient-model: a composed "#" + NBSP left in a transient saves escaped (R54)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: '#', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.imeSetComposition', { text: '#\u00a0', selectionStart: 2, selectionEnd: 2 });
+  await cdp.send('Input.insertText', { text: '#\u00a0' });
+  await wait(300); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('[data-ed-transient] .ed-wys-armed').textContent), '#\u00a0', 'guard: the transient holds # and an NBSP');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\#\n\nOmega.\n');
+}, { md: BASE_MD, engines: ['chromium'] });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

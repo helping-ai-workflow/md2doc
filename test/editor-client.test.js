@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1533,6 +1533,17 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
     assert.deepStrictEqual(s5.stack.redoTail(), [real.op], 'the failed op is the one undone');
   }
 }
+// R54 (v3.15.0 T10): transientCommitMd() trims before it escapes: a trailing
+// NBSP (U+00A0, what a browser types for a trailing space) no longer hides a
+// block marker from the escape.
+{
+  const esc = require('../lib/editor/inline-md.js').escapeBlockStarts;
+  assert.strictEqual(transientCommitMd('#\u00a0', esc), '\\#', '# + NBSP -> the escaped literal');
+  assert.strictEqual(transientCommitMd('1.\u00a0', esc), '1\\.', '1. + NBSP -> the escaped literal');
+  assert.strictEqual(transientCommitMd('# ', esc), '\\#', '# + space -> the escaped literal');
+  assert.strictEqual(transientCommitMd('Alpha.\u00a0 ', esc), 'Alpha.', 'trailing whitespace goes');
+  assert.strictEqual(transientCommitMd('a\u00a0b', esc), 'a\u00a0b', 'an inner NBSP stays');
+}
 
 // -- T8 review MEDIUM-1 (mechanical): every rollback goes through the helper --
 // The helper only helps if it is the only route. `stack.undo(lines)` is
@@ -1744,8 +1755,13 @@ function countInCode(source, needle) {
   // goes through commitShortcutAt() and the real-paragraph one through
   // replaceParagraphWithLines(), both already counted.
   // 1 declaration + 27 call sites = 28.
-  assert.strictEqual(helperCalls, 28,
-    'the helper must be DECLARED once and used at all twenty-seven ' +
+  // MIGRATED by v3.15.0 T10 (28 -> 29). No new commit-then-render site:
+  // retryPendingStructure() now writes a failed commit's typing and its
+  // structure as two ops again (M3), so its rollback undoes both, newest
+  // first (R32): one more line at an existing site (+1).
+  // 1 declaration + 28 call lines = 29.
+  assert.strictEqual(helperCalls, 29,
+    'the helper must be DECLARED once and used on all twenty-eight ' +
     'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
 }
 
