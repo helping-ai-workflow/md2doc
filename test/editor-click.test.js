@@ -6987,6 +6987,111 @@ check('render-guard: a raw box whose commit fails after a dropped render keeps i
   assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
 }, { md: P3_MD });
 
+// ── render-guard, fix round 3 (R83, R84) ──
+// R83: a response that arrives late but was REQUESTED before the render
+// already on screen is no reason to redraw. Here the split's render (A) is
+// held 2000 ms and the undo's (B) 300 ms, both succeed: B lands first, A
+// arrives late and is dropped. Measured before the fix: a third, full render
+// that closed the raw box opened meanwhile (and lost what was typed in it).
+for (const typed of ['', ' ab']) {
+  check('render-guard: responses that all succeed out of order cost no extra render and keep an open raw box (R83, typed=' + JSON.stringify(typed) + ')', DESKTOP, async (page, boot) => {
+    await scriptRenders(page, [2000, 300], [false, false]);
+    const t0 = renderTotal(page);
+    await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+    await wait(100); await page.keyboard.press('Control+z');
+    await wait(500);
+    await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+    await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
+    if (typed) await page.keyboard.type(typed);
+    await renderIdle(page); await wait(300); await renderIdle(page);
+    assert.strictEqual(renderTotal(page) - t0, 2, 'two renders, no redraw');
+    const box = await rawBox(page);
+    assert.strictEqual(box && box.value, 'Alpha para one.' + typed, 'the box is still open as it was: ' + JSON.stringify(box));
+    await page.focus('textarea.ed-raw'); await page.keyboard.type('!'); await page.keyboard.press('Control+Enter');
+    await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), P3_MD.replace('Alpha para one.', 'Alpha para one.' + typed + '!'));
+  }, { md: P3_MD });
+}
+// R83: text typed into an open raw box WHILE a reconciliation redraw is out
+// survives it — the box is stashed when the redraw is applied, not when it is
+// requested, and an untouched box is stashed and reopened too. Order: the
+// split's render (A, 300 ms, ok) is dropped by the undo; the undo's (B,
+// 2000 ms) fails, undo() puts the split back, and the reconciliation redraw
+// (1000 ms, ok) draws it. ' cd' is typed during that redraw.
+for (const before of ['', ' ab']) {
+  check('render-guard: text typed into a raw box during a reconciliation redraw survives it (R83, before=' + JSON.stringify(before) + ')', DESKTOP, async (page, boot) => {
+    await scriptRenders(page, [300, 2000, 1000], [false, true, false]);
+    const t0 = renderTotal(page);
+    await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+    await wait(100); await page.keyboard.press('Control+z');
+    await wait(600);
+    await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+    await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
+    if (before) await page.keyboard.type(before);
+    const deadline = Date.now() + 8000;
+    while (renderTotal(page) - t0 < 3 && Date.now() < deadline) await wait(10);
+    assert.strictEqual(renderTotal(page) - t0, 3, 'guard: the reconciliation redraw is out');
+    await wait(150);
+    await page.keyboard.type(' cd');
+    await renderIdle(page); await wait(300); await renderIdle(page);
+    const box = await rawBox(page);
+    assert.strictEqual(box && box.value, 'Alpha para one.' + before + ' cd', 'the box holds everything typed: ' + JSON.stringify(box));
+    assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
+    assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
+    await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.' + before + ' cd\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+  }, { md: P3_MD });
+}
+// R84: the reconciliation redraw itself fails (the server is down), so the
+// split's id-less right half stays on screen and `blocks` is stale. When the
+// server is back, the next press into a surface runs the owed reconciliation
+// before anything can commit; the commit then writes the right line, and the
+// card stays up until a commit lands. Measured before the fix: Q typed into
+// Omega committed over `paragraph text.`.
+for (const [target, offset] of [['Omega.', 6], ['Bravo', 5]]) {
+  check('render-guard: after a failed reconciliation, the next commit waits for the screen to match and writes the right line (R84, ' + target + ')', DESKTOP, async (page, boot) => {
+    await scriptRenders(page, [1500, 2000, 300], [false, true, true]);
+    const t0 = renderTotal(page);
+    await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+    await page.keyboard.press('Control+z');
+    await renderIdle(page); await wait(300); await renderIdle(page);
+    assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the reconciliation that failed');
+    assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'guard: the card is up');
+    // The server is back (renders past the script go through).
+    await clickChar(page, target, 2); await renderIdle(page); await wait(300); await renderIdle(page);
+    assert.strictEqual(await allBlocksHaveIds(page), true, 'the screen was drawn again before anything committed');
+    assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo', 'paragraph text.', 'Omega.'], 'screen = lines');
+    assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the card stays until a commit lands');
+    await focusSurface(page, target, offset); await page.keyboard.type('Q');
+    const want = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.\n'.replace('\n' + target + '\n', '\n' + target + 'Q\n');
+    assert.strictEqual(await commitAndRead(page, boot), want);
+    assert.deepStrictEqual(await paragraphs(page), ['Alpha para one.', 'Bravo', 'paragraph text.', 'Omega.'].map((p) => p === target ? p + 'Q' : p), 'DOM equals file');
+    assert.strictEqual(await noticeText(page), null, 'the commit that landed took the card away');
+  }, { md: P3_MD });
+}
+
+// R84, the gutter: a ⠿ gesture picked on the stale screen (its block found
+// by id and line in the last drawn document) runs the owed reconciliation
+// first, and then must not re-find "its" block by a line that now holds a
+// different one. It deletes the block that was picked, or is refused with the
+// notice; `paragraph text.` is never the one deleted.
+check('render-guard: a ⠿ delete picked after a failed reconciliation never deletes another block (R84)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [1500, 2000, 300], [false, true, true]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+z');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the reconciliation that failed');
+  await gutterMenu(page, await blockByText(page, 'Omega.'), '刪除');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const r = { disk: await saveAndRead(page, boot), notice: await noticeText(page), ids: await allBlocksHaveIds(page) };
+  const deleted = r.disk === '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n';
+  const refused = r.disk === '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.\n' && r.notice === '文件已更新，請重試這個操作';
+  assert.strictEqual(deleted || refused, true, 'Omega. deleted, or the gesture refused with the notice: ' + JSON.stringify(r));
+  assert.strictEqual(r.ids, true, 'every block is a rendered one');
+}, { md: P3_MD });
+
 // ── followup (v3.15.0 T10) ──
 // R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.
 check('failed-render: after a failed split the retry keeps typing and split as two undo steps', DESKTOP, async (page, boot) => {
