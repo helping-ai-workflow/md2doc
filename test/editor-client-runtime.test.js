@@ -6867,10 +6867,12 @@ async function gutterGeometry(page, sel) {
     // above) in Notion form: click a column's TOP edge (or a row's LEFT
     // edge) to select it and show a floating menu.
 
-    // Column menu: click shows the menu (highlighted column, 刪除欄/對齊
-    // buttons), 對齊 cycles left->center->right without closing the menu,
-    // 刪除欄 removes the column and closes the menu, and deleting the LAST
-    // remaining column is refused with a banner (column untouched).
+    // Column menu: click shows the menu (highlighted column; v3.15.0 T7: a
+    // vertical list 左側插入欄 / 右側插入欄 / 靠左|置中|靠右 / 刪除欄), the
+    // alignment buttons set the alignment directly without closing the menu
+    // (aria-pressed follows), 刪除欄 removes the column and closes the menu,
+    // and deleting the LAST remaining column is refused with a banner (column
+    // untouched).
     {
       const { srv: tsrv, url: turl, mdPath: tmdPath } = await setupTableDoc([
         '| A | B |', '|---|---|', '| 1 | 2 |', '',
@@ -6888,7 +6890,13 @@ async function gutterGeometry(page, sel) {
           'the column menu\'s delete button must read 刪除欄');
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), false,
-          'the column menu must show the 對齊 button');
+          'the column menu must show the alignment row');
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+            .filter((b) => b.getClientRects().length > 0)
+            .map((b) => b.getAttribute('aria-label') || b.textContent.trim())),
+          ['左側插入欄', '右側插入欄', '靠左', '置中', '靠右', '刪除欄'],
+          'the column menu\'s visible items, in order');
         assert.strictEqual(
           await page.evaluate((s) => {
             const cells = document.querySelectorAll(s + ' thead th, ' + s + ' tbody td');
@@ -6906,35 +6914,42 @@ async function gutterGeometry(page, sel) {
         // lands on the toolbar instead. This fixture's table IS the first
         // block, which is the shape that puts the menu closest to that band,
         // so this row is where the occlusion shows up first.
-        assert.strictEqual(
-          await page.evaluate(() => {
-            const b = document.querySelector('.ed-te-menu-align');
-            const r = b.getBoundingClientRect();
-            const hit = document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)[0];
-            return hit === b ? true : (hit ? hit.tagName + '.' + hit.className : null);
-          }),
-          true,
-          'the column menu\'s 對齊 button must be the topmost element at its own ' +
+        // v3.15.0 T7: every one of the menu's buttons, the three alignment
+        // buttons included, must answer a hit at its own centre.
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+            .filter((b) => b.getClientRects().length > 0)
+            .map((b) => {
+              const r = b.getBoundingClientRect();
+              const hit = document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2)[0];
+              return hit && b.contains(hit) ? true : (hit ? hit.tagName + '.' + hit.className : null);
+            })),
+          [true, true, true, true, true, true],
+          'each column-menu button must be the topmost element at its own ' +
           'centre — anything else there means the button is painted over and no ' +
           'click can reach it');
 
-        // 對齊: cycle left -> center -> right, each click keeping the menu
-        // (an overlay element) open and NOT ending the burst — the menu
-        // button's own mousedown preventDefault() must keep whatever cell
-        // was focused (none, here) from stealing/losing focus.
-        await page.click('.ed-te-menu-align');
-        await page.waitForFunction(
-          (s) => /text-align:\s*left/.test(document.querySelector(s + ' thead th:nth-child(2)').getAttribute('style') || ''),
-          {}, table0
-        );
-        assert.strictEqual(
-          await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), false,
-          'clicking 對齊 must NOT close the menu (repeated clicks keep cycling)');
-        await page.click('.ed-te-menu-align');
-        await page.waitForFunction(
-          (s) => /text-align:\s*center/.test(document.querySelector(s + ' thead th:nth-child(2)').getAttribute('style') || ''),
-          {}, table0
-        );
+        // 靠左 then 置中: each press sets the alignment directly, keeps the
+        // menu (an overlay element) open with aria-pressed on the pressed
+        // button, and does NOT end the burst — the menu button's own
+        // mousedown preventDefault() must keep whatever cell was focused
+        // (none, here) from stealing/losing focus.
+        const alignState = () => page.evaluate((s) => ({
+          style: document.querySelector(s + ' thead th:nth-child(2)').getAttribute('style') || '',
+          hidden: document.querySelector('.ed-te-menu').hidden,
+          pressed: Array.from(document.querySelectorAll('.ed-te-menu-align [aria-pressed="true"]'))
+            .map((b) => b.getAttribute('aria-label')),
+        }), table0);
+        await page.click('.ed-te-menu button[aria-label="靠左"]');
+        await new Promise((r) => setTimeout(r, 300));
+        assert.deepStrictEqual(await alignState(),
+          { style: 'text-align:left', hidden: false, pressed: ['靠左'] },
+          '靠左 must set left, keep the menu open and press 靠左');
+        await page.click('.ed-te-menu button[aria-label="置中"]');
+        await new Promise((r) => setTimeout(r, 300));
+        assert.deepStrictEqual(await alignState(),
+          { style: 'text-align:center', hidden: false, pressed: ['置中'] },
+          '置中 must set center, keep the menu open and press 置中');
 
         // 刪除欄: removes column B entirely (header + body cell) and closes
         // the menu; committed to the file once the table burst is left.
@@ -6987,7 +7002,13 @@ async function gutterGeometry(page, sel) {
           'the row menu\'s delete button must read 刪除列');
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-menu-align').hidden), true,
-          'the row menu must NOT show the 對齊 button');
+          'the row menu must NOT show the alignment row');
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+            .filter((b) => b.getClientRects().length > 0)
+            .map((b) => b.getAttribute('aria-label') || b.textContent.trim())),
+          ['上方插入列', '下方插入列', '刪除列'],
+          'the row menu\'s visible items, in order (v3.15.0 T7)');
         assert.strictEqual(
           await page.evaluate((s) => {
             const cells = document.querySelector(s + ' tbody tr:first-child').cells;
@@ -7527,6 +7548,12 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(
           await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), false,
           'clicking the header grip opens the row menu');
+        assert.deepStrictEqual(
+          await page.evaluate(() => Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+            .filter((b) => b.getClientRects().length > 0)
+            .map((b) => b.getAttribute('aria-label') || b.textContent.trim())),
+          ['下方插入列', '刪除列'],
+          'the header row\'s menu has no 上方插入列 (v3.15.0 T7, R12)');
         assert.strictEqual(
           await page.evaluate((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'), table0),
           true, 'clicking the header grip highlights the header row\'s cells');

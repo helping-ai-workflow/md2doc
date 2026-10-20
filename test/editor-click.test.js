@@ -2765,6 +2765,157 @@ check('tables: the last column still refuses, and says how to remove the table',
   assert.ok(t.includes('最後一欄') && t.includes('⠿'), t);
 }, { md: '# T\n\n| a |\n|---|\n| 1 |\n' });
 
+// ── table-menu (v3.15.0 T7) ──
+// The tableMenu() sequence without the item press: hover the cell, press the
+// grip that comes up. openColMenu() takes a header column index,
+// openRowMenu() a row selector inside the first table.
+const openTeMenuByGrip = async (page, kind, target) => {
+  await page.evaluate(() => document.querySelector('.ed-block[data-block-type="table"]').scrollIntoView({ block: 'center' }));
+  const box = await target.boundingBox();
+  await page.mouse.move(box.x + 12, box.y + box.height / 2); await wait(300);
+  const g = await page.evaluate((k) => { const e = document.querySelector('.ed-te-grip-' + k); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, kind);
+  assert.ok(g, 'guard: the ' + kind + ' grip is showing');
+  await page.mouse.click(g.x, g.y); await wait(300);
+};
+const openColMenu = (page, colIndex) =>
+  openTeMenuByGrip(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').nth(colIndex));
+const openRowMenu = (page, rowSelector) =>
+  openTeMenuByGrip(page, 'row', page.locator('.ed-block[data-block-type="table"] ' + rowSelector).first());
+// The open menu as plain values: the visible items in order (a button's text,
+// the alignment row as its three aria-labels joined by '|', separators left
+// out), the pressed alignment, the keyboard cursor's label, and the boxes.
+const teMenu = (page) => page.evaluate(() => {
+  const m = document.querySelector('.ed-te-menu');
+  const t = document.querySelector('.ed-block[data-block-type="table"] table');
+  const shown = (el) => !!el && el.getClientRects().length > 0;
+  const label = (el) => (el ? (el.getAttribute('aria-label') || el.textContent.trim()) : null);
+  const open = !!m && !m.hidden && shown(m);
+  const items = [];
+  if (open) {
+    for (const c of m.children) {
+      if (!shown(c) || c.classList.contains('ed-te-menu-sep')) continue;
+      if (c.classList.contains('ed-te-menu-align')) items.push([...c.querySelectorAll('button')].map(label).join('|'));
+      else items.push(c.textContent.trim());
+    }
+  }
+  const pressed = open ? [...m.querySelectorAll('[aria-pressed="true"]')].filter(shown) : [];
+  const cur = open ? m.querySelector('[data-ed-te-cursor]') : null;
+  const r = m ? m.getBoundingClientRect() : { left: 0, top: 0, right: 0, bottom: 0 };
+  const tr = t ? t.getBoundingClientRect() : { left: 0, right: 0 };
+  return {
+    open, items, pressed: pressed.length ? label(pressed[0]) : null, cursor: label(cur),
+    rect: { l: r.left, t: r.top, r: r.right, b: r.bottom }, tableRect: { l: tr.left, r: tr.right },
+    vw: innerWidth, vh: innerHeight,
+  };
+});
+const TBL_MD = '# D\n\n| A | B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n\nAfter.\n';
+const tbodyRowCount = (page) => page.evaluate(() => document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr').length);
+check('table-menu: the column menu is a vertical list inside the table and the viewport', DESKTOP, async (page) => {
+  await openColMenu(page, 1);
+  const m = await teMenu(page);
+  assert.deepStrictEqual(m.items, ['左側插入欄', '右側插入欄', '靠左|置中|靠右', '刪除欄']);
+  assert.ok(m.rect.l >= m.tableRect.l - 1 && m.rect.r <= m.tableRect.r + 1, 'inside the table box horizontally (the table element is a full-width scroll box)');
+  assert.ok(m.rect.t >= 0 && m.rect.b <= m.vh && m.rect.l >= 0 && m.rect.r <= m.vw, 'inside the viewport');
+}, { md: TBL_MD });
+check('table-menu: the column menu opens under the column grip at the column\'s left edge; the row menu right of the row grip at the row\'s top', DESKTOP, async (page) => {
+  await openColMenu(page, 1);
+  const c = await page.evaluate(() => {
+    const m = document.querySelector('.ed-te-menu').getBoundingClientRect();
+    const g = document.querySelector('.ed-te-grip-col').getBoundingClientRect();
+    const th = document.querySelectorAll('.ed-block[data-block-type="table"] thead th')[1].getBoundingClientRect();
+    return { dl: Math.round(m.left - th.left), below: m.top >= g.bottom - 0.5, near: m.top - g.bottom < 12 };
+  });
+  assert.deepStrictEqual(c, { dl: 0, below: true, near: true });
+  await page.keyboard.press('Escape');
+  await openRowMenu(page, 'tbody tr:nth-child(2)');
+  const r = await page.evaluate(() => {
+    const m = document.querySelector('.ed-te-menu').getBoundingClientRect();
+    const g = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
+    const tr = document.querySelectorAll('.ed-block[data-block-type="table"] tbody tr')[1].getBoundingClientRect();
+    return { dt: Math.round(m.top - tr.top), right: m.left >= g.right - 0.5, near: m.left - g.right < 12 };
+  });
+  assert.deepStrictEqual(r, { dt: 0, right: true, near: true });
+}, { md: TBL_MD });
+check('table-menu: 右側插入欄 / 左側插入欄 add a column at the right place', DESKTOP, async (page, boot) => {
+  await openColMenu(page, 0); await page.locator('.ed-te-menu button', { hasText: '右側插入欄' }).click(); await wait(300);
+  await openColMenu(page, 0); await page.locator('.ed-te-menu button', { hasText: '左側插入欄' }).click(); await wait(300);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\|\s*\|\s*A\s*\|\s*\|\s*B\s*\|\n/.test(disk), 'header order: new, A, new, B — ' + disk);
+}, { md: TBL_MD });
+check('table-menu: alignment is set directly and the menu stays open', DESKTOP, async (page, boot) => {
+  await openColMenu(page, 1);
+  await page.locator('.ed-te-menu button[aria-label="置中"]').click(); await wait(200);
+  const m = await teMenu(page);
+  assert.deepStrictEqual([m.open, m.pressed], [true, '置中']);
+  await page.locator('.ed-te-menu button[aria-label="靠右"]').click(); await wait(200);
+  const m2 = await teMenu(page);
+  assert.deepStrictEqual([m2.open, m2.pressed], [true, '靠右']);
+  await page.locator('.ed-te-menu button[aria-label="置中"]').click(); await wait(200);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.ok(/\|[-:]+\|:-+:\|/.test(await saveAndRead(page, boot)), 'column B centred');
+}, { md: TBL_MD });
+check('table-menu: the row menu inserts above and below; the header row has no 上方插入列', DESKTOP, async (page, boot) => {
+  await openRowMenu(page, 'thead tr');
+  assert.deepStrictEqual((await teMenu(page)).items, ['下方插入列', '刪除列']);
+  await page.keyboard.press('Escape');
+  await openRowMenu(page, 'tbody tr:nth-child(2)');
+  assert.deepStrictEqual((await teMenu(page)).items, ['上方插入列', '下方插入列', '刪除列']);
+  await page.locator('.ed-te-menu button', { hasText: '上方插入列' }).click(); await wait(300);
+  assert.strictEqual(await tbodyRowCount(page), 3);
+  await openRowMenu(page, 'thead tr');
+  await page.locator('.ed-te-menu button', { hasText: '下方插入列' }).click(); await wait(300);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/\| *A *\| *B *\|\n\|[-: |]+\|\n\| *\| *\|\n\| *a1 *\| *b1 *\|\n\| *\| *\|\n\| *a2 *\| *b2 *\|\n/.test(disk),
+    'header, new, a1, new, a2 — ' + disk);
+}, { md: TBL_MD });
+check('table-menu: ↑↓ move, Enter runs, Esc closes', DESKTOP, async (page, boot) => {
+  await openRowMenu(page, 'tbody tr:nth-child(1)');
+  await page.keyboard.press('ArrowDown');
+  assert.strictEqual((await teMenu(page)).cursor, '上方插入列');
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter'); await wait(300);   // 下方插入列
+  assert.strictEqual(await tbodyRowCount(page), 3);
+  await openRowMenu(page, 'tbody tr:nth-child(1)'); await page.keyboard.press('Escape');
+  assert.strictEqual((await teMenu(page)).open, false);
+}, { md: TBL_MD });
+check('table-menu: the alignment row is three keyboard stops; ←→ move within it and Enter sets it', DESKTOP, async (page, boot) => {
+  await openColMenu(page, 1);
+  const cursors = [];
+  for (let i = 0; i < 5; i++) { await page.keyboard.press('ArrowDown'); cursors.push((await teMenu(page)).cursor); }
+  assert.deepStrictEqual(cursors, ['左側插入欄', '右側插入欄', '靠左', '置中', '靠右']);
+  await page.keyboard.press('ArrowLeft');
+  assert.strictEqual((await teMenu(page)).cursor, '置中');
+  await page.keyboard.press('Enter'); await wait(200);
+  const m = await teMenu(page);
+  assert.deepStrictEqual([m.open, m.pressed, m.cursor], [true, '置中', '置中']);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+  assert.strictEqual((await teMenu(page)).cursor, '刪除欄');
+  await page.keyboard.press('Escape');
+  assert.strictEqual((await teMenu(page)).open, false);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.ok(/\|[-:]+\|:-+:\|/.test(await saveAndRead(page, boot)), 'column B centred by the keyboard');
+}, { md: TBL_MD });
+check('table-menu: one menu insert is one undo step', DESKTOP, async (page) => {
+  await openRowMenu(page, 'tbody tr:nth-child(1)');
+  await page.locator('.ed-te-menu button', { hasText: '下方插入列' }).click(); await wait(300);
+  assert.strictEqual(await tbodyRowCount(page), 3);
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.strictEqual(await tbodyRowCount(page), 2);
+}, { md: TBL_MD });
+check('table-menu: 刪除欄 is red', DESKTOP, async (page) => {
+  await openColMenu(page, 1);
+  const c = await page.evaluate(() => { const p = document.createElement('span'); p.style.color = 'var(--md-ed-err)'; document.body.appendChild(p); const w = getComputedStyle(p).color; p.remove(); return getComputedStyle(document.querySelector('.ed-te-menu-delete')).color === w; });
+  assert.strictEqual(c, true);
+}, { md: TBL_MD });
+check('table-menu: on a phone the row menu stays inside the viewport and the table', PHONE, async (page) => {
+  await openRowMenu(page, 'tbody tr:nth-child(1)');
+  const m = await teMenu(page);
+  assert.deepStrictEqual(m.items, ['上方插入列', '下方插入列', '刪除列']);
+  assert.ok(m.rect.t >= 0 && m.rect.b <= m.vh && m.rect.l >= 0 && m.rect.r <= m.vw, 'inside the viewport ' + JSON.stringify(m));
+  assert.ok(m.rect.l >= m.tableRect.l - 1 && m.rect.r <= m.tableRect.r + 1, 'inside the table box ' + JSON.stringify(m));
+}, { md: TBL_MD });
+
 // ⠿ menu, the way a person drives it. `path` is the menu entry, or
 // ['轉換成', '<target>'] for the convert submenu.
 const blockByText = (page, text) => page.evaluate((t) => {

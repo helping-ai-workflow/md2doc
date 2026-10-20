@@ -1618,8 +1618,10 @@ async function main() {
     //    vacuous-green trap: a table already sitting at max scroll makes
     //    scrollBy() silently do nothing, and every assertion below would
     //    then be exercising the NO-scroll path instead of the fix.
+    // v3.15.0 T7: the cycling 對齊 button became 靠左 / 置中 / 靠右, set
+    // directly; the scroll survival is runSetAlign()'s now.
     const scrollBefore = await page.evaluate(() => window.scrollY);
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="靠左"]');
     await new Promise((r) => setTimeout(r, 300));
     const scrollAfter = await page.evaluate(() => window.scrollY);
     assert.notStrictEqual(scrollAfter, scrollBefore,
@@ -1633,6 +1635,7 @@ async function main() {
         menuHidden: menu.hidden,
         style: th.getAttribute('style'),
         hlCount: document.querySelectorAll('.ed-te-hl').length,
+        pressed: Array.from(menu.querySelectorAll('[aria-pressed="true"]')).map((b) => b.getAttribute('aria-label')),
       };
     }, table0);
     // 2) the menu itself must still be showing.
@@ -1643,17 +1646,21 @@ async function main() {
     //    highlight and no working buttons (see the next scenario below).
     assert.ok(state1.hlCount > 0,
       '選單顯示但沒有欄位高亮，是殭屍選單而非活的選單，got hlCount=' + state1.hlCount);
-    assert.ok(/left/.test(state1.style || ''),
-      '第一次點擊必須套用 left 對齊，got style=' + state1.style);
+    assert.strictEqual(state1.style, 'text-align:left',
+      '靠左 必須套用 left 對齊，got style=' + state1.style);
+    assert.deepStrictEqual(state1.pressed, ['靠左'],
+      '靠左 必須是按下的那一顆，got ' + JSON.stringify(state1.pressed));
 
-    // 4) a second click must actually cycle — not silently no-op on a
+    // 4) a second press must actually apply — not silently no-op on a
     //    detached teMenuColIndex/teMenuKind.
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="置中"]');
     await new Promise((r) => setTimeout(r, 300));
-    const style2 = await page.evaluate((ts) =>
-      document.querySelector(ts + ' thead th:nth-child(2)').getAttribute('style'), table0);
-    assert.ok(/center/.test(style2 || ''),
-      '第二次點擊必須把對齊循環到 center，got style=' + style2);
+    const state2 = await page.evaluate((ts) => ({
+      style: document.querySelector(ts + ' thead th:nth-child(2)').getAttribute('style'),
+      pressed: Array.from(document.querySelectorAll('.ed-te-menu [aria-pressed="true"]')).map((b) => b.getAttribute('aria-label')),
+    }), table0);
+    assert.deepStrictEqual(state2, { style: 'text-align:center', pressed: ['置中'] },
+      '第二次按 置中 必須把對齊設成 center，got ' + JSON.stringify(state2));
 
     await page.close(); b.srv.close();
     console.log('journey: the align menu survives a scroll that interrupts its own opening — OK');
@@ -1738,7 +1745,7 @@ async function main() {
       '測試前提失敗：那段文字已經進了磁碟 —— burst 已經被結算掉了，' +
       '這個場景就不再測到 burst-elsewhere 路徑（見 resolveBurst()：它不 blur）');
 
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="靠左"]');
     await new Promise((r) => setTimeout(r, 300));
     // Settle past the guarded requestAnimationFrame tick.
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -1752,11 +1759,11 @@ async function main() {
         style: th ? th.getAttribute('style') : null,
       };
     }, table0);
-    // The align itself still applies (runCycleAlign() captured tableEl/
-    // colIndex as locals before the await, same defence
-    // runDeleteColumn()/runDeleteRow() already use) — only the MENU's
-    // resurrection is what round 2 must prevent.
-    assert.ok(/left/.test(state.style || ''),
+    // The align itself still applies (runSetAlign(), runCycleAlign() before
+    // v3.15.0 T7, captured tableEl/colIndex as locals before the await, same
+    // defence runDeleteColumn()/runDeleteRow() already use) — only the
+    // MENU's resurrection is what round 2 must prevent.
+    assert.strictEqual(state.style, 'text-align:left',
       '對齊本身必須仍然套用（用呼叫當下捕捉的區域變數），got style=' + state.style);
     assert.strictEqual(state.menuHidden, true,
       '無關的 burst 收尾合法關閉選單後，選單不可被復活成殭屍，got: ' + JSON.stringify(state));
@@ -3649,7 +3656,7 @@ async function main() {
   // 幾何實測（1400×800、V3_TABLE_MD、centreTable() 之後）：grip 20×28、
   // left 落在表格左緣減去自己一半寬（80 → 70），縱向對齊被 hover 的那一列
   // 的中線（列 382..419 時 top=386；指標移到 419..456 那一列時變成 424）。
-  // 按下去之後看得到的選單項目是「刪除列」。
+  // 按下去之後看得到的選單項目是「上方插入列」「下方插入列」「刪除列」（v3.15.0 T7）。
   {
     const ctx = await newPage(V3_TABLE_MD);
     await setViewportSettled(ctx.page, { width: 1400, height: 800 });
@@ -3697,10 +3704,10 @@ async function main() {
       '.ed-te-grip-row 換一列 hover 之後必須移動，got ' + JSON.stringify({ g0: g0, g1: g1 }));
     assert.ok(Math.abs(g1.gripMid - g1.rowMid) <= 1,
       '.ed-te-grip-row 必須跟著指標所在的那一列走，got ' + JSON.stringify(g1));
-    // 按下去：量的是使用者【看得到】的項目。showRowMenu() 把 teAlignBtn 設成
-    // hidden（對齊是欄軸的事），而它仍留在 .ed-te-menu 的 children 裡 ——
-    // 實測 [{刪除列,shown:true},{對齊,shown:false}]，所以照 children 數就會
-    // 把一顆看不到的按鈕算進來。
+    // 按下去：量的是使用者【看得到】的項目。showRowMenu() 把對齊那一排設成
+    // hidden（對齊是欄軸的事），而它仍留在 .ed-te-menu 裡 —— 所以照
+    // children 數就會把看不到的按鈕算進來。v3.15.0 T7：選單改成直排，項目
+    // 是 .ed-te-menu-btn（分隔線不是項目），名字取 aria-label 或文字。
     const gp = await ctx.page.evaluate(() => {
       const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -3711,9 +3718,9 @@ async function main() {
     const menuBefore = await overlayState(ctx.page, '.ed-te-menu');
     assertRaised(menuBefore, '.ed-te-menu（列軸）');
     const items = await ctx.page.evaluate(() =>
-      Array.from(document.querySelector('.ed-te-menu').children)
-        .map((c) => ({ label: c.textContent.trim(), shown: c.offsetParent !== null })));
-    assert.deepStrictEqual(items.filter((i) => i.shown).map((i) => i.label), ['刪除列'],
+      Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+        .map((c) => ({ label: c.getAttribute('aria-label') || c.textContent.trim(), shown: c.offsetParent !== null })));
+    assert.deepStrictEqual(items.filter((i) => i.shown).map((i) => i.label), ['上方插入列', '下方插入列', '刪除列'],
       '列 grip 按下去之後看得到的選單項目變了，got ' + JSON.stringify(items));
     await scrollBy(ctx.page, 200);
     const gripAfter = await overlayState(ctx.page, '.ed-te-grip-row');
@@ -6520,8 +6527,8 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: N5-two-saves a reply that lands after a newer request still counts — OK');
   }
-  // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
-  // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
+  // 邊緣選單的「置中」寫一個屬性，其他什麼都不動：runSetAlign() 只 snap()
+  // burst 的歷史，setColumnAlign() 把 `style="text-align:…"` 寫進整欄的
   // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提
   // 斷言把這件事釘住），所以只盯著文字與子節點的監看看不見它。
   // 實測（把監看的 attributes 那一項拿掉、其餘不動、同樣用真滑鼠驅動）：
@@ -6543,7 +6550,9 @@ async function main() {
     await ctx.page.mouse.move(grip.x, grip.y);
     await ctx.page.mouse.down(); await ctx.page.mouse.up();
     await ctx.page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 5000 });
-    await ctx.page.click('.ed-te-menu-align');
+    // v3.15.0 T7: the alignment row's 置中 (the old single 對齊 button cycled
+    // to left on its first press).
+    await ctx.page.click('.ed-te-menu button[aria-label="置中"]');
     await new Promise((r) => setTimeout(r, 500));
     const shape = await ctx.page.evaluate(() => {
       const table = document.querySelector('.ed-block[data-block-type="table"] table');
@@ -6560,7 +6569,7 @@ async function main() {
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 600));
     assert.deepStrictEqual(shape,
-      { cells: ['text-align:left', 'text-align:left'], menuOpen: true, text: '\n\nAB\nonetwo\n' },
+      { cells: ['text-align:center', 'text-align:center'], menuOpen: true, text: '\n\nAB\nonetwo\n' },
       'N5 對齊 前提失敗：整欄的 style 必須真的被寫進去、選單必須還開著、而且' +
       '面上的文字一個字都不能動（否則這一列量到的就不是「只寫屬性」），got ' +
       JSON.stringify(shape));
@@ -7509,12 +7518,16 @@ async function main() {
         const r = c.getBoundingClientRect();
         return r.bottom > window.innerHeight || r.top < 0;
       }).length;
-      return { childCount: menu.children.length, off: off };
+      // v3.15.0 T7: the vertical menu itself, all four edges.
+      const m = menu.getBoundingClientRect();
+      const menuOut = m.top < 0 || m.left < 0 || m.bottom > window.innerHeight || m.right > window.innerWidth;
+      return { childCount: menu.children.length, off: off, menuOut: menuOut };
     });
     // Ruling T9-1：選單是空的話 off === 0 會白過，先斷選單真的有項目。
     assert.ok(result.childCount > 0,
       'F6 前提失敗：列選單必須先有項目，斷言才有意義，got childCount=' + result.childCount);
     assert.strictEqual(result.off, 0, '列選單有 ' + result.off + ' 項落在視窗外');
+    assert.strictEqual(result.menuOut, false, '列選單本身越出視窗');
     assert.strictEqual(ctx.errs.length, 0, 'F6：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
