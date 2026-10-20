@@ -2975,17 +2975,18 @@ async function main() {
     await answerLinkField(ctx.page, 'https://example.com/');
     await new Promise((r) => setTimeout(r, 1100));
     // v3.15.0 T5 (migrated): the field edits the open burst's DOM and renders
-    // nothing; caret and bar are asserted right there, and AGAIN after the
-    // commit the save causes — which is the render whose route (patch when
-    // primed, fallback when not) this scenario is about.
+    // nothing; caret and bar are asserted right there, and the route (patch
+    // when primed, fallback when not) is asserted on the commit the save causes.
     assert.strictEqual((await patchRoutes(ctx)).renders, 0,
       'V2i(primed=' + primed + '): applying the URL field must not render');
     const failBefore = await checkLeverage(ctx, '🔗 on a paragraph, before the commit (primed=' + primed + ')', 'caret');
     assert.strictEqual(failBefore, null, 'V2i(primed=' + primed + '): ' + failBefore);
     const disk = await saveAndRead(ctx);
     assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
-    const fail = await checkLeverage(ctx, '🔗 on a paragraph, after the commit (primed=' + primed + ')', 'caret');
-    assert.strictEqual(fail, null, 'V2i(primed=' + primed + '): ' + fail);
+    // No caret check after the save: Ctrl+S resolves the burst and the surface
+    // gives up focus whatever the gesture was (measured: BODY, 3 buttons). The
+    // old post-render caret answer belonged to the render the prompt caused,
+    // which the in-place field no longer starts.
     assert.ok(disk.indexOf('[Alpha](https://example.com/)') !== -1,
       'V2i(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0,
