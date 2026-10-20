@@ -2595,7 +2595,7 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0, 'V2d: 不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
+  console.log('journey: V2d 🔗 in a table cell — URL field renders nothing, caret kept, link on disk — OK');
 
   // ── V2g: 標題到頂／到底時按 Tab —— 夾住的那一步不得把你踢出區塊 ──────────
   //
@@ -2993,7 +2993,7 @@ async function main() {
       'V2i: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
+  console.log('journey: V2i 🔗 on a paragraph — URL field renders nothing, caret and bar kept, save commits on both routes — OK');
 
   // ══ V3: 二十個 position:fixed 浮層，捲動後的必需答案 ══════════════════
   // lib/md2doc.js 有二十個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20）（另有若干處是註解裡的散文

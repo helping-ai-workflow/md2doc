@@ -6260,6 +6260,10 @@ check('link-field: Ctrl+K opens it; Esc returns to the toolbar with the selectio
   assert.deepStrictEqual([r.sel, r.bar, r.focus, (await linkField(page)).open], ['words', true, true, false]);
 }, { md: LINKS_MD });
 check('link-field: on an existing link it is pre-filled; emptied + Enter removes the link', DESKTOP, async (page, boot) => {
+  // 5..8, not 4..8: selectInSurface puts an offset on a text-node boundary at
+  // the END of the earlier node, so 4 would start outside the link (a partial
+  // overlap, which unwraps). A real keyboard or double-click selection of
+  // exactly "docs" starts inside the link and opens this same pre-filled field.
   await selectInSurface(page, 'See docs now.', 5, 8);
   await page.keyboard.press('Control+k');
   assert.strictEqual((await linkField(page)).value, 'https://a.example/');
@@ -6332,6 +6336,9 @@ check('link-field: a scroll closes it', DESKTOP, async (page) => {
   await page.evaluate(() => { document.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('scroll')); });
   await wait(100);
   assert.strictEqual((await linkField(page)).open, false);
+  // Closed by a scroll means back to the toolbar with the selection kept.
+  const r = await page.evaluate(() => ({ sel: String(getSelection()), bar: !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected }));
+  assert.deepStrictEqual([r.sel, r.bar], ['words', true]);
 }, { md: LINKS_MD });
 check('link-paste: a URL over a selection makes a link', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Plain words here.', 6, 11);
@@ -6429,6 +6436,92 @@ check('link-card: 移除 unwraps the link', DESKTOP, async (page, boot) => {
   await page.click('.ed-linkcard button:has-text("移除")');
   assert.strictEqual((await linkCard(page)).open, false);
   assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('[docs](https://a.example/)', 'docs'));
+}, { md: LINKS_MD });
+
+
+// ── link-field long URLs / click-back / plain paste in a cell (v3.15.0 B3 fix round 1) ──
+const LONG_URL = 'https://example.com/' + 'a'.repeat(60);
+check('link-field: a URL longer than the field, typed, links on disk (R71)', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type(LONG_URL);
+  assert.deepStrictEqual([(await linkField(page)).open, (await linkField(page)).value], [true, LONG_URL]);
+  await page.keyboard.press('Enter');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](' + LONG_URL + ') here.'));
+}, { md: LINKS_MD });
+check('link-field: a long URL pasted into the field links on disk (R71)', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.insertText(LONG_URL);
+  await wait(100);
+  assert.deepStrictEqual([(await linkField(page)).open, (await linkField(page)).value], [true, LONG_URL]);
+  await page.keyboard.press('Enter');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain [words](' + LONG_URL + ') here.'));
+}, { md: LINKS_MD });
+const LONG_LINK_MD = '# D\n\nSee [docs](' + LONG_URL + ') now.\n';
+check('link-field: Ctrl+K on a link with a long href, End, edit, Enter (R71)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'See docs now.', 6);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).value, LONG_URL);
+  await page.keyboard.press('End'); await page.keyboard.type('Z');
+  await wait(100);
+  assert.deepStrictEqual([(await linkField(page)).open, (await linkField(page)).value], [true, LONG_URL + 'Z']);
+  await page.keyboard.press('Enter');
+  assert.strictEqual(await commitAndRead(page, boot), LONG_LINK_MD.replace(LONG_URL, LONG_URL + 'Z'));
+}, { md: LONG_LINK_MD });
+check('link-field: a click back into the same paragraph keeps the burst, renders nothing, and the next key lands (R72)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Plain words here.', 17); await page.keyboard.type('!');
+  await selectInSurface(page, 'Plain words here.!', 6, 11);
+  await renderIdle(page);
+  const before = renderTotal(page);
+  await page.keyboard.press('Control+k'); await page.keyboard.type('x.ex');
+  await focusSurface(page, 'Plain words here.!', 18);
+  await page.keyboard.type('Q');
+  await renderIdle(page);
+  assert.strictEqual((await linkField(page)).open, false);
+  assert.strictEqual(renderTotal(page) - before, 0, 'no /api/render for the click back');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.className.indexOf('ed-wys-armed') !== -1), true, 'focus stays on the surface');
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain words here.!Q'));
+}, { md: LINKS_MD });
+// The system clipboard is shared by every page of one browser, and an earlier
+// check (baseline paste: Ctrl+Shift+V) leaves 'PASTED<b>RICH</b>TEXT' on it.
+// A real Ctrl+Shift+V keystroke pastes whatever is there, so a check that
+// presses it must set the clipboard itself first.
+async function seedClipboard(page, plain) {
+  await page.evaluate((t) => {
+    window.__seedCopy = (e) => {
+      e.clipboardData.setData('text/plain', t === null ? '' : t);
+      e.preventDefault(); e.stopImmediatePropagation();
+    };
+    window.addEventListener('copy', window.__seedCopy, true);
+  }, plain);
+  await page.keyboard.press('Control+c');
+  await page.evaluate(() => window.removeEventListener('copy', window.__seedCopy, true));
+}
+check('link-paste: a real Ctrl+Shift+V keystroke in a cell keeps a URL plain even after the keystroke\'s empty paste', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'bravo', 0, 5);
+  // Something on the clipboard first, then emptied, so the keystroke's own
+  // paste is the empty one whatever ran before.
+  await seedClipboard(page, 'JUNK');
+  await seedClipboard(page, null);
+  await page.evaluate(() => { window.__pastes = []; document.addEventListener('paste', (e) => window.__pastes.push(e.clipboardData.getData('text/plain')), true); });
+  await page.keyboard.press('Control+Shift+V');
+  await renderIdle(page);
+  // The keystroke pasted nothing, and nothing was done with it: the selection
+  // is still there. (Treating it as a paste deleted "bravo" and used up the
+  // plain-paste arming.)
+  const r = await page.evaluate(() => ({ pastes: window.__pastes.slice(), sel: String(getSelection()) }));
+  assert.deepStrictEqual([r.pastes, r.sel], [[''], 'bravo']);
+  await clipboardEvent(page, 'paste', 'https://p.example/', null);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('| bravo |', '| https://p.example/ |'));
+}, { md: LINKS_MD });
+
+check('link-paste: a real Ctrl+Shift+V of a copied URL over a cell selection pastes it as plain text', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'bravo', 0, 5);
+  await seedClipboard(page, 'https://p.example/');
+  await page.keyboard.press('Control+Shift+V');
+  await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('| bravo |', '| https://p.example/ |'));
 }, { md: LINKS_MD });
 
 (async () => {
