@@ -7620,13 +7620,25 @@ async function gutterGeometry(page, sel) {
         await page.waitForFunction((s) => !!document.querySelector(s + ' table thead tr th.ed-te-hl'),
           { timeout: 3000 }, table0);
 
+        // v3.15.0 T7 (D19): the row menu now opens right of the row grip at
+        // the header's top, over the first column's cells, so the first body
+        // cell's centre is under the menu (pressing there pressed 刪除列 and
+        // promoted the first body row). Press a body cell the menu does not
+        // cover, and prove it with the browser's own hit test first.
         const cell = await page.evaluate((s) => {
-          const r = document.querySelector(s + ' table tbody tr td').getBoundingClientRect();
-          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          const td = document.querySelector(s + ' table tbody tr:last-child td:last-child');
+          const r = td.getBoundingClientRect();
+          const x = r.left + r.width / 2; const y = r.top + r.height / 2;
+          const hit = document.elementFromPoint(x, y);
+          return { x, y, onCell: !!hit && td.contains(hit) };
         }, table0);
+        assert.strictEqual(cell.onCell, true,
+          'precondition: the un-highlight press must land on a body cell, not on the open menu');
         await pressReleaseAt(page, cell.x, cell.y); // un-highlight
         await page.waitForFunction((s) => !document.querySelector(s + ' table .ed-te-hl'),
           { timeout: 3000 }, table0);
+        assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-te-menu').hidden), true,
+          'the press elsewhere closes the row menu too');
 
         // Sanity: neither the header <tr> nor any of its cells may be left
         // with a dangling empty `class=""` attribute. (S3 moved the
