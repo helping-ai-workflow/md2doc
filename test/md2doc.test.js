@@ -711,7 +711,7 @@ console.log('md2doc dot WASM test passed');
   console.log('md2doc section index test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
 
-// v3.16.0: the reader's TOC header carries the screenshot-mode button, between
+// v3.14.2: the reader's TOC header carries the screenshot-mode button, between
 // Collapse all and the sidebar toggle; the edit page does not offer it.
 (async () => {
   const { renderMarkdown } = require('../lib/md2doc.js');

@@ -441,7 +441,7 @@ check('focus: TOC header button shows inset ring (no clipping)', async () => {
   const { htmlPath } = render(SIDE_MD);
   const page = await openPage(htmlPath);
   await page.focus('#toc-collapse-all');
-  // v3.16.0: the screenshot-mode button sits between Collapse all and the
+  // v3.14.2: the screenshot-mode button sits between Collapse all and the
   // sidebar toggle, so Tab reaches it first; both carry the inset ring.
   for (const id of ['capture-mode-toggle', 'toc-collapse-toggle']) {
     await page.keyboard.press('Tab');

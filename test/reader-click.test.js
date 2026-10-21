@@ -347,7 +347,7 @@ check('desktop: a diagram opens in the lightbox; ✕ and Esc close it', DESKTOP,
   await wait(200);
   assert.ok(!(await isOpen()), 'Esc closes');
 });
-// Screenshot mode (v3.16.0): the reader minus everything a scroll-and-stitch
+// Screenshot mode (v3.14.2): the reader minus everything a scroll-and-stitch
 // capture would repeat, the document kept at the width it was read at.
 async function readerShape(page) {
   return page.evaluate(() => {
