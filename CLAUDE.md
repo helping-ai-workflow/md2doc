@@ -131,6 +131,22 @@ smoke render → `npm publish`. The registry updates within a couple of minutes.
 
 Feature branches that aren't ready to ship: just push the branch (no version bump, no tag).
 
+### Docs-Only Pull Requests
+
+A PR that changes nothing but `README.md`, `CLAUDE.md` and `docs/**` skips the
+whole gate: no local `npm test` / `test:browser`, no version bump, no tag. Both
+CI jobs still run but `.github/docs-only.sh` turns off every step after the
+checkout, so `test` and `click` go green in about a minute and the PR can merge.
+GitHub shows the new README at merge; the npm page keeps the old one until the
+next release that ships code. Ask the user before turning a docs-only change
+into a release. (v3.14.1 shipped a README rewrite through the full flow: about
+1.5 hours, and the user called it too long.)
+
+`CHANGELOG.md` is not on the list: `test/editor-client-runtime.test.js` edits
+the real `CHANGELOG.md` as a fixture, so a change to it runs the suites. Adding
+a path to the list in `docs-only.sh` means first grepping `test/` for every
+read of it.
+
 If the repository ever becomes private, the free plan loses branch protection and
 the "tested once on the PR" guarantee with it — restore the `push: main` trigger in
 `ci.yml` and `browser.yml` and the `npm test` step in `publish.yml` first.
