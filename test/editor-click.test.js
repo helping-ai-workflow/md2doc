@@ -7445,6 +7445,29 @@ check('checkbox-settle: a checkbox clicked after typing into a new paragraph abo
     { notice: null, disk: ffTasks('Alpha para one.\n\nnew\n\n', 'x') });
 }, { md: FF_TASK_MD });
 
+// R93, a press as long as a person's: the mouse is held 100 ms. The press's
+// blur used to start the new paragraph's commit, whose render replaced the
+// checkbox before the button came up, and the browser then sent no click at
+// all (both engines; measured with a 25–200 ms hold after the settle fix:
+// nothing toggled, no notice). The instant Playwright click above never
+// showed it.
+for (const hold of [100, 250]) {
+  check('checkbox-settle: a ' + hold + ' ms press on a checkbox right after typing into a new paragraph above the list toggles the item clicked (R93, T)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha para one.', 15); await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type('new');
+    const pt = await page.evaluate(() => {
+      const li = [...document.querySelectorAll('.ed-block[data-block-type="li"]')].find((b) => b.textContent.trim() === 'two');
+      const b = li.querySelector(':scope > .ed-li-check').getBoundingClientRect();
+      return [b.left + b.width / 2, b.top + b.height / 2];
+    });
+    await page.mouse.move(pt[0], pt[1]); await page.mouse.down(); await wait(hold); await page.mouse.up();
+    await settleR86(page);
+    assert.deepStrictEqual(await ffChecks(page), ['one:0', 'two:1', 'three:0'], 'screen');
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: null, disk: ffTasks('Alpha para one.\n\nnew\n\n', 'x') });
+  }, { md: FF_TASK_MD });
+}
+
 // R94 (I2, L208b): a ⠿ gesture picked while another commit renders waits for
 // it, then acts on the block it was opened on — or refuses with the notice
 // when that block was redrawn. Never on the block one paragraph up. Measured
