@@ -7358,6 +7358,106 @@ check('transient-model: a composed "#" + NBSP left in a transient saves escaped 
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n\\#\n\nOmega.\n');
 }, { md: BASE_MD, engines: ['chromium'] });
 
+// ── v3.15.0 final fix wave (R93–R98) ──
+// R93 (C1, I1/R90): a task checkbox resolves nothing until every commit in
+// flight has landed. Then the pressed item itself when its node is still on
+// screen, else (an edit sat above it at the press) the same position counted
+// from the end, else its id; and only if that item still reads as it did at
+// the press. Measured at ffbdd7c: T, P1b and P1c checked `one`; P1 deleted
+// `para one.` and wrote the list twice.
+const FF_TASK_MD = '# D\n\nAlpha para one.\n\n- [ ] one\n- [ ] two\n- [ ] three\n';
+const ffTasks = (head, two) => '# D\n\n' + head + '- [ ] one\n- [' + two + '] two\n- [ ] three\n';
+async function ffClickCheck(page, text) {
+  const pt = await page.evaluate((t) => {
+    const li = [...document.querySelectorAll('.ed-block[data-block-type="li"]')].find((b) => b.textContent.trim() === t);
+    const c = li && li.querySelector(':scope > .ed-li-check');
+    if (!c) return null;
+    const b = c.getBoundingClientRect();
+    return [b.left + b.width / 2, b.top + b.height / 2];
+  }, text);
+  assert.ok(pt, 'guard: ' + text + ' has a checkbox');
+  await page.mouse.click(pt[0], pt[1]);
+}
+const ffChecks = (page) => page.evaluate(() => [...document.querySelectorAll('.ed-block[data-block-type="li"]')].map((b) => b.textContent.trim() + ':' + b.querySelector(':scope > .ed-li-check').getAttribute('data-checked')));
+check('checkbox-settle: a checkbox clicked right after typing into a new paragraph above the list toggles the item clicked (R93, T)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha para one.', 15); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new');
+  await ffClickCheck(page, 'two');
+  await settleR86(page);
+  assert.deepStrictEqual(await ffChecks(page), ['one:0', 'two:1', 'three:0'], 'screen');
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: ffTasks('Alpha para one.\n\nnew\n\n', 'x') });
+}, { md: FF_TASK_MD });
+check('checkbox-settle: a checkbox clicked while a split above the list renders toggles the item clicked and writes nothing else (R93, C1)', DESKTOP, async (page, boot) => {
+  await delayRender(page, 1500);
+  await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
+  await ffClickCheck(page, 'two');
+  await wait(2000); await settleR86(page); await wait(1600); await settleR86(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual(await ffChecks(page), ['one:0', 'two:1', 'three:0'], 'screen');
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: ffTasks('Alpha\n\npara one.\n\n', 'x') });
+}, { md: FF_TASK_MD });
+check('checkbox-settle: a checkbox clicked while a new paragraph above the list commits toggles the item clicked (R93, P1b)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha para one.', 15); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new');
+  await delayRender(page, 1500);
+  await page.keyboard.press('Enter'); await wait(100);
+  await ffClickCheck(page, 'two');
+  await wait(2000); await settleR86(page); await wait(1600); await settleR86(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual(await ffChecks(page), ['one:0', 'two:1', 'three:0'], 'screen');
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: ffTasks('Alpha para one.\n\nnew\n\n', 'x') });
+}, { md: FF_TASK_MD });
+check('checkbox-settle: a checkbox clicked after typing into a new paragraph above the list on a slow render toggles the item clicked (R93, P1c)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha para one.', 15); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new');
+  await delayRender(page, 1200);
+  await ffClickCheck(page, 'two');
+  await wait(1600); await settleR86(page); await wait(1300); await settleR86(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual(await ffChecks(page), ['one:0', 'two:1', 'three:0'], 'screen');
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: ffTasks('Alpha para one.\n\nnew\n\n', 'x') });
+}, { md: FF_TASK_MD });
+
+// R94 (I2, L208b): a ⠿ gesture picked while another commit renders waits for
+// it, then acts on the block it was opened on — or refuses with the notice
+// when that block was redrawn. Never on the block one paragraph up. Measured
+// at ffbdd7c: ⠿ 刪除 on `Omega.` deleted `Middle.`.
+const FF_GUTTER_MD = '# D\n\nAlpha para one.\n\nMiddle.\n\nOmega.\n';
+const FF_SPLIT = '# D\n\nAlpha\n\npara one.\n\nMiddle.\n';
+check('gutter-settle: ⠿ 刪除 picked while a split above renders deletes the block it was opened on (R94)', DESKTOP, async (page, boot) => {
+  await delayRender(page, 2500);
+  await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
+  await gutterMenu(page, await blockByText(page, 'Omega.'), '刪除');
+  await wait(2500); await settleR86(page); await wait(2600); await settleR86(page);
+  await page.unroute('**/api/render');
+  const r = { disk: await saveAndRead(page, boot), notice: await noticeText(page) };
+  const deleted = r.disk === FF_SPLIT && r.notice === null;
+  const refused = r.disk === FF_SPLIT + '\nOmega.\n' && r.notice === '文件已更新，請重試這個操作';
+  assert.strictEqual(deleted || refused, true, 'Omega. deleted, or the gesture refused with the notice: ' + JSON.stringify(r));
+}, { md: FF_GUTTER_MD });
+check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders edits the block it was opened on (R94, L208b)', DESKTOP, async (page, boot) => {
+  await delayRender(page, 2500);
+  await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
+  await gutterMenu(page, await blockByText(page, 'Omega.'), 'MD 原始碼');
+  await wait(2500); await settleR86(page); await wait(2600); await settleR86(page);
+  await page.unroute('**/api/render');
+  const box = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+  if (box === null) {
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: '文件已更新，請重試這個操作', disk: FF_SPLIT + '\nOmega.\n' }, 'refused with the notice');
+    return;
+  }
+  assert.strictEqual(box, 'Omega.', 'the raw box holds the block ⠿ was opened on');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+End'); await page.keyboard.type('X');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), FF_SPLIT + '\nOmega.X\n');
+}, { md: FF_GUTTER_MD });
+
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
