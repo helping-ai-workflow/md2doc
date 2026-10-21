@@ -7092,6 +7092,161 @@ check('render-guard: a ⠿ delete picked after a failed reconciliation never del
   assert.strictEqual(r.ids, true, 'every block is a rendered one');
 }, { md: P3_MD });
 
+// ── render-guard, fix round 4 (R86) ──
+// The R84 order again: the split lands, its undo fails, and the
+// reconciliation that would draw `lines` fails too, so the split's id-less
+// right half is on screen and `blocks` is stale. Renders past the script go
+// through (the server is back).
+const R86_CARD = '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。';
+const R86_SPLIT_MD = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\nOmega.\n';
+const R86_SPLIT_PARAS = ['Alpha para one.', 'Bravo', 'paragraph text.', 'Omega.'];
+const R86_TASK_MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n- [ ] one\n- [ ] two\n- [ ] three\n';
+const settleR86 = async (page) => { await renderIdle(page); await wait(300); await renderIdle(page); };
+async function staleAfterFailedReconcile(page, holds, fails) {
+  await scriptRenders(page, holds, fails);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await page.keyboard.press('Control+z');
+  await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the reconciliation that failed');
+  assert.strictEqual(await noticeText(page), R86_CARD, 'guard: the card is up');
+  return t0;
+}
+// R86 (1): the item a checkbox click toggles is the one clicked, taken from
+// the clicked node after the gate, never re-found by an id read before the
+// reconciliation moved every id below the split. The reconciliation is a full
+// redraw, so the clicked node is gone and the click is refused; the next one
+// toggles `two`. Measured before the fix: `one` was checked.
+check('render-guard: a task checkbox clicked after a failed reconciliation never toggles another item (R86)', DESKTOP, async (page, boot) => {
+  await staleAfterFailedReconcile(page, [1500, 2000, 300], [false, true, true]);
+  const checkPt = () => page.evaluate(() => {
+    const li = [...document.querySelectorAll('.ed-block[data-block-type="li"]')].find((b) => b.textContent.indexOf('two') !== -1);
+    const c = li && li.querySelector(':scope > .ed-li-check');
+    if (!c) return null;
+    const b = c.getBoundingClientRect();
+    return [b.left + b.width / 2, b.top + b.height / 2];
+  });
+  let pt = await checkPt();
+  assert.ok(pt, 'guard: two has a checkbox');
+  await page.mouse.click(pt[0], pt[1]);
+  await settleR86(page);
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'the screen was drawn again before anything committed');
+  const notice = await noticeText(page);
+  const tasks = (two) => R86_SPLIT_MD.replace('Omega.\n', '- [ ] one\n- [' + two + '] two\n- [ ] three\n');
+  assert.deepStrictEqual({ disk: await saveAndRead(page, boot), notice },
+    { disk: tasks(' '), notice: '文件已更新，請重試這個操作' }, 'the click on the stale screen is refused');
+  pt = await checkPt();
+  assert.ok(pt, 'guard: two still has a checkbox');
+  await page.mouse.click(pt[0], pt[1]);
+  await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), tasks('x'), 'the next click toggles the item clicked');
+}, { md: R86_TASK_MD });
+// R86 (1) guards: the everyday case, no failure anywhere. A checkbox clicked
+// while another block holds uncommitted typing commits that typing first and
+// still toggles the item clicked: from a paragraph above the list, and from
+// an item of the same list.
+for (const [label, surface, offset, from, to] of [
+  ['a paragraph above', 'Bravo paragraph text.', 15, 'Bravo paragraph text.', 'Bravo paragraphX text.'],
+  ['an item of the same list', 'one', 3, '[ ] one', '[ ] oneX']]) {
+  check('render-guard: a task checkbox clicked while ' + label + ' holds typing toggles the item clicked (R86 guard)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, surface, offset); await page.keyboard.type('X');
+    const pt = await page.evaluate(() => {
+      const li = [...document.querySelectorAll('.ed-block[data-block-type="li"]')].find((b) => b.textContent.indexOf('two') !== -1);
+      const c = li && li.querySelector(':scope > .ed-li-check');
+      if (!c) return null;
+      const b = c.getBoundingClientRect();
+      return [b.left + b.width / 2, b.top + b.height / 2];
+    });
+    assert.ok(pt, 'guard: two has a checkbox');
+    await page.mouse.click(pt[0], pt[1]);
+    await settleR86(page);
+    const notice = await noticeText(page);
+    assert.deepStrictEqual({ notice, disk: await saveAndRead(page, boot) },
+      { notice: null, disk: R86_TASK_MD.replace(from, to).replace('[ ] two', '[x] two') });
+  }, { md: R86_TASK_MD });
+}
+// R86 (2): the press into `Omega.` runs the owed reconciliation and it fails
+// as well. No burst opens on that stale screen, and what is typed there is
+// dropped, so a shortcut has nothing to convert. Measured before the fix: the
+// burst opened, `# ` committed through the stale `blocks`, and the file got
+// `# Omega.` in place of `paragraph text.`.
+check('render-guard: "# " typed where the reconciliation failed again writes nothing, and converts once the screen is drawn (R86)', DESKTOP, async (page, boot) => {
+  const t0 = await staleAfterFailedReconcile(page, [1500, 2000, 300, 300], [false, true, true, true]);
+  await focusSurface(page, 'Omega.', 0); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the press ran the owed reconciliation, and it failed too');
+  await page.keyboard.type('# '); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'nothing was committed');
+  assert.deepStrictEqual(await paragraphs(page), R86_SPLIT_PARAS, 'the keys did not reach the stale screen');
+  assert.strictEqual(await noticeText(page), R86_CARD, 'the card stays up');
+  assert.strictEqual(await saveAndRead(page, boot), R86_SPLIT_MD, 'paragraph text. is kept');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'Ctrl+S ran the reconciliation');
+  await focusSurface(page, 'Omega.', 0); await page.keyboard.type('# '); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), R86_SPLIT_MD.replace('\nOmega.\n', '\n# Omega.\n'));
+}, { md: P3_MD });
+// R86 (2): the "/" menu on a paragraph that holds nothing but the query.
+// Measured before the fix: the pick replaced `paragraph text.`.
+check('render-guard: "/表" on an emptied surface where the reconciliation failed again writes nothing (R86)', DESKTOP, async (page, boot) => {
+  const t0 = await staleAfterFailedReconcile(page, [1500, 2000, 300, 300], [false, true, true, true]);
+  await focusSurface(page, 'Omega.', 6); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the press ran the owed reconciliation, and it failed too');
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await page.keyboard.type('/表'); await wait(300);
+  const menu = await page.evaluate(() => !!document.querySelector('.ed-slash-menu'));
+  const paras = await paragraphs(page);
+  await page.keyboard.press('Enter'); await settleR86(page);
+  const r = { menu, paras,
+    tables: await page.evaluate(() => document.querySelectorAll('.content .ed-block[data-block-type="table"]').length),
+    disk: await saveAndRead(page, boot) };
+  assert.deepStrictEqual(r, { menu: false, paras: R86_SPLIT_PARAS, tables: 0, disk: R86_SPLIT_MD });
+}, { md: P3_MD });
+// R86 (2): a plain key typed there is dropped too, not kept for later and
+// never written on another line; a press into the same (focused) surface runs
+// the reconciliation again, and typing then lands. Measured before the fix:
+// the key went into the stale burst and was carried to `Omega.Q` (the
+// re-review r3 "carry" gesture, which therefore no longer reaches the carry).
+check('render-guard: a key typed where the reconciliation failed again is dropped, and a press into that surface draws the screen (R86)', DESKTOP, async (page, boot) => {
+  const t0 = await staleAfterFailedReconcile(page, [1500, 2000, 300, 300], [false, true, true, true]);
+  await focusSurface(page, 'Omega.', 6); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the press ran the owed reconciliation, and it failed too');
+  await page.keyboard.type('Q'); await settleR86(page);
+  assert.deepStrictEqual(await paragraphs(page), R86_SPLIT_PARAS, 'the key did not reach the stale screen');
+  assert.strictEqual(await noticeText(page), R86_CARD, 'the card stays up');
+  await clickChar(page, 'Omega.', 3); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 5, 'the press ran the reconciliation');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'the screen was drawn');
+  assert.deepStrictEqual(await paragraphs(page), R86_SPLIT_PARAS, 'screen = lines');
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), R86_SPLIT_MD.replace('Omega.', 'Omega.Q'));
+}, { md: P3_MD });
+// Guard (green before R86; the re-review r3 found the gesture): a raw box
+// opened while the undo renders, its commit tried after the reconciliation
+// failed. The commit is refused, the reconciliation runs, the box comes back
+// on its text, and the next Ctrl+Enter writes the right line.
+check('render-guard: a raw-box commit after a failed reconciliation waits for the redraw and writes the right line (R86 guard)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [300, 2000, 1000], [false, true, true]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
+  await page.keyboard.type(' ab');
+  await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the reconciliation that failed');
+  assert.strictEqual(await noticeText(page), R86_CARD, 'guard: the card is up');
+  assert.strictEqual((await rawBox(page) || {}).value, 'Alpha para one. ab', 'guard: the box is open');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
+  await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'the commit was refused and ran the reconciliation');
+  assert.strictEqual((await rawBox(page) || {}).value, 'Alpha para one. ab', 'the box is back on its text');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  assert.strictEqual(await noticeText(page), R86_CARD, 'the card stays up');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
+  await settleR86(page);
+  assert.strictEqual(await rawBox(page), null, 'the second commit closed the box');
+  assert.strictEqual(await saveAndRead(page, boot), R86_SPLIT_MD.replace('Alpha para one.', 'Alpha para one. ab'));
+}, { md: P3_MD });
+
 // ── followup (v3.15.0 T10) ──
 // R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.
 check('failed-render: after a failed split the retry keeps typing and split as two undo steps', DESKTOP, async (page, boot) => {
