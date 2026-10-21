@@ -15,7 +15,9 @@ on:
 
 jobs:
   click:
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-26.04 (ubuntu-latest since Oct 2026) Playwright's WebKit
+    # cannot load libicudata.so.74 and the first WebKit launch dies (PR #55).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
