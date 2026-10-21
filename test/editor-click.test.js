@@ -6977,6 +6977,18 @@ for (const [label, holds, fails] of [
     assert.deepStrictEqual(await paragraphs(page), fileParas.map((p) => p === 'Alpha para one.' ? 'Alpha para one.Q' : p), 'DOM equals file');
   }, { md: P3_MD });
 }
+// v3.15.0 final fix wave (R94): ⠿ MD 原始碼 now waits for a render in
+// flight before it reads its block, so the raw-box checks below (R80, R83,
+// R86 guard) open their box mid-render with the one open-raw gesture that
+// still runs then: a click on a degraded block, here a blockquote above the
+// split. Every assertion is the one these checks made through ⠿, on the
+// quote's source (`> Alpha para one.`).
+const Q3_MD = P3_MD.replace('Alpha para one.', '> Alpha para one.');
+async function openQuoteBox(page) {
+  const box = await page.locator('.ed-block[data-block-type="blockquote"]').first().boundingBox();
+  assert.ok(box, 'openQuoteBox: no blockquote');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await wait(200);
+}
 // R80 (re-review b5 r1, risk a): the split's render is dropped and a raw-box
 // commit made during it fails. The reconciliation redraw keeps the box and
 // its text (reopened from a by-value stash) and the failure card, and the next
@@ -6984,7 +6996,7 @@ for (const [label, holds, fails] of [
 check('render-guard: a raw box whose commit fails after a dropped render keeps its text and the card (R80)', DESKTOP, async (page, boot) => {
   await scriptRenders(page, [1500, 2500], [false, true]);
   await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
-  await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+  await openQuoteBox(page);
   assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'guard: raw box open');
   await page.focus('textarea.ed-raw');
   await page.keyboard.press('End');
@@ -6992,11 +7004,11 @@ check('render-guard: a raw box whose commit fails after a dropped render keeps i
   await page.keyboard.press('Control+Enter');
   await renderIdle(page); await wait(300); await renderIdle(page);
   const box = await rawBox(page);
-  assert.deepStrictEqual(box && box.value, 'Alpha para one. typed', 'the box and its text are back: ' + JSON.stringify(box));
+  assert.deepStrictEqual(box && box.value, '> Alpha para one. typed', 'the box and its text are back: ' + JSON.stringify(box));
   assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one. typed\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Alpha para one. typed\n\nBravo\n\nparagraph text.\n\nOmega.\n');
   assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
-}, { md: P3_MD });
+}, { md: Q3_MD });
 
 // ── render-guard, fix round 3 (R83, R84) ──
 // R83: a response that arrives late but was REQUESTED before the render
@@ -7011,17 +7023,17 @@ for (const typed of ['', ' ab']) {
     await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
     await wait(100); await page.keyboard.press('Control+z');
     await wait(500);
-    await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+    await openQuoteBox(page);
     await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
     if (typed) await page.keyboard.type(typed);
     await renderIdle(page); await wait(300); await renderIdle(page);
     assert.strictEqual(renderTotal(page) - t0, 2, 'two renders, no redraw');
     const box = await rawBox(page);
-    assert.strictEqual(box && box.value, 'Alpha para one.' + typed, 'the box is still open as it was: ' + JSON.stringify(box));
+    assert.strictEqual(box && box.value, '> Alpha para one.' + typed, 'the box is still open as it was: ' + JSON.stringify(box));
     await page.focus('textarea.ed-raw'); await page.keyboard.type('!'); await page.keyboard.press('Control+Enter');
     await renderIdle(page);
-    assert.strictEqual(await saveAndRead(page, boot), P3_MD.replace('Alpha para one.', 'Alpha para one.' + typed + '!'));
-  }, { md: P3_MD });
+    assert.strictEqual(await saveAndRead(page, boot), Q3_MD.replace('> Alpha para one.', '> Alpha para one.' + typed + '!'));
+  }, { md: Q3_MD });
 }
 // R83: text typed into an open raw box WHILE a reconciliation redraw is out
 // survives it — the box is stashed when the redraw is applied, not when it is
@@ -7036,7 +7048,7 @@ for (const before of ['', ' ab']) {
     await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
     await wait(100); await page.keyboard.press('Control+z');
     await wait(600);
-    await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+    await openQuoteBox(page);
     await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
     if (before) await page.keyboard.type(before);
     const deadline = Date.now() + 8000;
@@ -7046,13 +7058,13 @@ for (const before of ['', ' ab']) {
     await page.keyboard.type(' cd');
     await renderIdle(page); await wait(300); await renderIdle(page);
     const box = await rawBox(page);
-    assert.strictEqual(box && box.value, 'Alpha para one.' + before + ' cd', 'the box holds everything typed: ' + JSON.stringify(box));
+    assert.strictEqual(box && box.value, '> Alpha para one.' + before + ' cd', 'the box holds everything typed: ' + JSON.stringify(box));
     assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
     assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
     await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
     await renderIdle(page);
-    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.' + before + ' cd\n\nBravo\n\nparagraph text.\n\nOmega.\n');
-  }, { md: P3_MD });
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Alpha para one.' + before + ' cd\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+  }, { md: Q3_MD });
 }
 // R84: the reconciliation redraw itself fails (the server is down), so the
 // split's id-less right half stays on screen and `blocks` is stale. When the
@@ -7265,24 +7277,24 @@ check('render-guard: a raw-box commit after a failed reconciliation waits for th
   await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
   await wait(100); await page.keyboard.press('Control+z');
   await wait(600);
-  await gutterMenu(page, await blockByText(page, 'Alpha para one.'), 'MD 原始碼');
+  await openQuoteBox(page);
   await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
   await page.keyboard.type(' ab');
   await settleR86(page);
   assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the reconciliation that failed');
   assert.strictEqual(await noticeText(page), R86_CARD, 'guard: the card is up');
-  assert.strictEqual((await rawBox(page) || {}).value, 'Alpha para one. ab', 'guard: the box is open');
+  assert.strictEqual((await rawBox(page) || {}).value, '> Alpha para one. ab', 'guard: the box is open');
   await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
   await settleR86(page);
   assert.strictEqual(renderTotal(page) - t0, 4, 'the commit was refused and ran the reconciliation');
-  assert.strictEqual((await rawBox(page) || {}).value, 'Alpha para one. ab', 'the box is back on its text');
+  assert.strictEqual((await rawBox(page) || {}).value, '> Alpha para one. ab', 'the box is back on its text');
   assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
   assert.strictEqual(await noticeText(page), R86_CARD, 'the card stays up');
   await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
   await settleR86(page);
   assert.strictEqual(await rawBox(page), null, 'the second commit closed the box');
-  assert.strictEqual(await saveAndRead(page, boot), R86_SPLIT_MD.replace('Alpha para one.', 'Alpha para one. ab'));
-}, { md: P3_MD });
+  assert.strictEqual(await saveAndRead(page, boot), R86_SPLIT_MD.replace('Alpha para one.', '> Alpha para one. ab'));
+}, { md: Q3_MD });
 
 // ── followup (v3.15.0 T10) ──
 // R29: no check for joinTransientIntoBlock()'s `empty` — no gesture reaches it.
