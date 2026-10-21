@@ -710,3 +710,19 @@ console.log('md2doc dot WASM test passed');
     ['T lead sub tailpara', 'T lead tailpara sub'], 'a paragraph after a nested list (edit draws the nested list after the item)');
   console.log('md2doc section index test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.16.0: the reader's TOC header carries the screenshot-mode button, between
+// Collapse all and the sidebar toggle; the edit page does not offer it.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'capture.md');
+  const md = '# Doc\n\n## One\n\nx\n\n## Two\n\ny\n';
+  const { html } = await renderMarkdown(md, fake, {});
+  const order = ['toc-expand-all', 'toc-collapse-all', 'capture-mode-toggle', 'toc-collapse-toggle'].map((id) => html.indexOf('<button id="' + id + '"'));
+  assert.ok(order.every((at) => at > 0), 'all four header buttons present: ' + order);
+  assert.deepStrictEqual([...order].sort((a, b) => a - b), order, 'button order in the header: ' + order);
+  assert.match(html, /<button id="capture-mode-toggle" type="button" aria-label="Screenshot mode" title="[^"]*Esc[^"]*"><svg/);
+  const edit = await renderMarkdown(md, fake, { editMode: true });
+  assert.ok(!edit.html.includes('<button id="capture-mode-toggle"'), 'edit mode has no screenshot-mode button');
+  console.log('md2doc screenshot mode button render test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
