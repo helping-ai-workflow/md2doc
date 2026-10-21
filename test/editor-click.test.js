@@ -2955,7 +2955,11 @@ check('table-bar: hovering the table shows both bars along the grid', DESKTOP, a
   await hoverFirstBodyCell(page);
   const b = await addBars(page);
   assert.deepStrictEqual([b.row.shown, b.col.shown], [true, true]);
-  assert.strictEqual(b.row.h, 22);
+  // R97: the bottom bar's height is the gap above the block under the table,
+  // floored and kept within 8–22 px (22 with nothing below: its own check).
+  const nextTop = await page.evaluate(() => [...document.querySelectorAll('.ed-block')].find((x) => x.textContent.trim() === 'After.').getBoundingClientRect().top);
+  assert.strictEqual(b.row.h, Math.max(8, Math.min(22, Math.floor(nextTop - b.row.t))), 'row bar height ' + JSON.stringify({ row: b.row, nextTop }));
+  assert.ok(b.row.b <= nextTop, 'row bar ends above the next block');
   assert.strictEqual(b.col.w, 22);
   assert.ok(Math.abs(b.row.l - b.grid.l) <= 1 && Math.abs(b.row.r - b.grid.r) <= 1 && b.row.t >= b.grid.b, 'row bar under the grid, same width ' + JSON.stringify(b));
   assert.ok(b.col.l >= b.grid.r - 1 && Math.abs(b.col.t - b.grid.t) <= 1 && Math.abs(b.col.b - b.grid.b) <= 1, 'col bar right of the grid, same height ' + JSON.stringify(b));
@@ -7523,6 +7527,37 @@ check('slash: after "/" an IME composition keeps the list until its commit, whic
   assert.deepStrictEqual({ m1: [m1.open, m1.labels.length, m1.empty], m2: [m2.open, m2.labels] },
     { m1: [true, 16, null], m2: [true, ['表格']] });
 }, { md: '# D\n\nAlpha.\n\nOmega.\n', engines: ['chromium'] });
+
+// R97 (I5, R75): the bottom add bar stops above the block under the table:
+// its height is the gap, clamped to 8–22 px, and 22 px with nothing below.
+// Measured at ffbdd7c: the 22 px bar covered the next paragraph's first text
+// line, so a click there added a row.
+const ffNextLineHits = (page) => page.evaluate(() => {
+  const next = [...document.querySelectorAll('.ed-block')].find((b) => b.textContent.trim() === 'After.');
+  const surf = next.querySelector('.ed-wys-armed');
+  const range = document.createRange(); range.selectNodeContents(surf);
+  const line = range.getClientRects()[0];
+  const x = line.left + 3;
+  return [line.top + 0.5, (line.top + line.bottom) / 2, line.bottom - 0.5].map((y) => {
+    const hit = document.elementFromPoint(x, y);
+    return !!hit && !!hit.closest && hit.closest('.ed-block') === next;
+  });
+});
+check('table-bar: the bottom bar never covers the first line of the block under the table (R97)', DESKTOP, async (page) => {
+  await hoverFirstBodyCell(page);
+  const b = await addBars(page);
+  assert.strictEqual(b.row.shown, true, 'guard: the bar is up');
+  const nextTop = await page.evaluate(() => [...document.querySelectorAll('.ed-block')].find((x) => x.textContent.trim() === 'After.').getBoundingClientRect().top);
+  assert.ok(b.row.b <= nextTop, 'the bar ends above the next block ' + JSON.stringify({ row: b.row, nextTop }));
+  assert.deepStrictEqual(await ffNextLineHits(page), [true, true, true], 'the next paragraph answers its first text line');
+  await clickAddBar(page, 'row');
+  assert.strictEqual(await tbodyRowCount(page), 3, 'the bar still adds a row');
+}, { md: TBL_MD });
+check('table-bar: with nothing under the table the bottom bar is 22 px (R97)', DESKTOP, async (page) => {
+  await hoverFirstBodyCell(page);
+  const b = await addBars(page);
+  assert.deepStrictEqual([b.row.shown, b.row.h], [true, 22]);
+}, { md: '# D\n\n| A | B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n' });
 
 
 (async () => {
