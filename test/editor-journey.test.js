@@ -3002,10 +3002,10 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph — URL field renders nothing, caret and bar kept, save commits on both routes — OK');
 
-  // ══ V3: 二十個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // ══ V3: 二十二個 position:fixed 浮層，捲動後的必需答案 ════════════════
   // lib/md2doc.js 有二十二個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20；T8 加了 .ed-tb-addrow / .ed-tb-addcol → 22）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
-  // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
+  // 每個浮層各自變成什麼」是一個族群，而不是二十二個互不相干的問題。
   //
   // 必需答案三種：
   //   live               捲動後仍在、仍可見。這些浮層的幾何是【捲動不變】的
@@ -3038,7 +3038,7 @@ async function main() {
   //                      必須收乾淨，而且此後的捲動不得讓它復活。
   //
   // 覆蓋率守衛：直接從 lib/md2doc.js 掃出所有 `position: fixed` 宣告並比對
-  // 下表的 selector 集合。有人加第十五個浮層時這裡會紅，逼他決定它的必需
+  // 下表的 selector 集合。有人加第二十三個浮層時這裡會紅，逼他決定它的必需
   // 答案，而不是安靜地多一個沒人測過的浮層。
   const OVERLAY_RULES = [
     { sel: '.ed-toolbar',              after: 'live' },

@@ -3648,13 +3648,20 @@ check('enter-type: a failed render keeps keys typed after a click in the clicked
   assert.deepStrictEqual(texts, ['D', 'Alpha para one.1', 'BravoZZ paragraph text.', 'Omega.']);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha para one.1\n\nBravoZZ paragraph text.\n\nOmega.\n');
 }, { md: P3_MD });
-check('enter-type: a failed render keeps the new item\'s keys and the clicked item\'s keys apart', DESKTOP, async (page) => {
+// R98 (ledger L213): the WebKit flake. The failed render's retry starts only
+// after the held click's focus lands, which WebKit makes asynchronous, so a
+// renderIdle right after the keys can see no render out yet and read the
+// screen before the retry. The check waits 1500 ms more, then reads the
+// screen AND the file (40/40 isolated in the final review; the file was
+// never read before).
+check('enter-type: a failed render keeps the new item\'s keys and the clicked item\'s keys apart', DESKTOP, async (page, boot) => {
   await failFirstRender(page);
   await liText(page, 'bravo').click(); await page.keyboard.press('End');
   await page.keyboard.press('Enter'); await page.keyboard.type('ab');
   await clickChar(page, 'charlie', 2); await page.keyboard.type('Z');
-  await renderIdle(page);
+  await renderIdle(page); await wait(1500); await renderIdle(page);
   assert.deepStrictEqual(await liTexts(page), ['alpha', 'bravo', 'ab', 'chZarlie']);
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n- bravo\n- ab\n- chZarlie\n\nOmega.\n');
 }, { md: LIST_PARA_MD });
 check('enter-type: Ctrl+Z mid-render drops held typing but keeps a held arrow', DESKTOP, async (page, boot) => {
   await delayRender(page, 800);
@@ -7559,6 +7566,31 @@ check('table-bar: with nothing under the table the bottom bar is 22 px (R97)', D
   assert.deepStrictEqual([b.row.shown, b.row.h], [true, 22]);
 }, { md: '# D\n\n| A | B |\n|---|---|\n| a1 | b1 |\n| a2 | b2 |\n' });
 
+// R98 (M-b): 開啟 opens http(s) and mailto only; `#…` scrolls in place;
+// anything else (a relative path, javascript:) gets a notice and never
+// reaches window.open.
+const FF_OPEN_MD = '# D\n\nGo [web](https://a.example/) now.\n\nRun [js](javascript:alert(1)) now.\n\nSee [rel](./x.md) now.\n\nJump [sec](#far) now.\n\n' + Array.from({ length: 40 }, (_, i) => 'Filler ' + i + '.\n\n').join('') + '## Far\n\n' + Array.from({ length: 30 }, (_, i) => 'Tail ' + i + '.\n\n').join('') + 'End.\n';
+for (const [label, surface, wantOpen] of [
+  ['https opens', 'Go web now.', 'https://a.example/'],
+  ['javascript: never reaches window.open', 'Run js now.', null],
+  ['a relative path does not open', 'See rel now.', null],
+  ['#… does not open a tab', 'Jump sec now.', null]]) {
+  check('link-card: 開啟 — ' + label + ' (R98)', DESKTOP, async (page) => {
+    await page.evaluate(() => { window.__ffOpened = []; window.open = (u) => { window.__ffOpened.push(String(u)); return null; }; });
+    const href = await page.evaluate((s) => { const el = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === s); const a = el && el.querySelector('a'); return a ? a.getAttribute('href') : null; }, surface);
+    assert.ok(href, 'guard: the link is on screen with an href');
+    await focusSurface(page, surface, surface.indexOf(' ') + 2); await wait(450);
+    assert.strictEqual((await linkCard(page)).open, true, 'guard: the card is up');
+    await page.click('.ed-linkcard button:has-text("開啟")'); await wait(300);
+    const opened = await page.evaluate(() => window.__ffOpened);
+    assert.deepStrictEqual(opened, wantOpen ? [wantOpen] : []);
+    if (!wantOpen && href.charAt(0) !== '#') assert.ok(await noticeText(page), 'a notice says why nothing opened');
+    if (href.charAt(0) === '#') {
+      const top = await page.evaluate(() => { const h = document.getElementById('far'); return h ? h.getBoundingClientRect().top : null; });
+      assert.ok(top !== null && top >= -1 && top < 300, 'the page scrolled to #far: ' + top);
+    }
+  }, { md: FF_OPEN_MD });
+}
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
