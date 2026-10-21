@@ -7018,7 +7018,7 @@ check('render-guard: a quote clicked during a split\'s render is refused once it
   await page.keyboard.press('Control+Enter');
   await renderIdle(page); await wait(300); await renderIdle(page);
   const box = await rawBox(page);
-  assert.deepStrictEqual(box && box.value, '> Alpha para one. typed', 'the box and its text are back: ' + JSON.stringify(box));
+  assert.deepStrictEqual(box && box.value, '> Alpha para one. typed', 'the box keeps its text after the failed commit: ' + JSON.stringify(box));
   assert.strictEqual(await noticeText(page), '這次修改沒有套用：HTTP 500。文件維持修改前的樣子。', 'the failure card stays up');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Alpha para one. typed\n\nBravo\n\nparagraph text.\n\nOmega.\n');
   assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
@@ -7563,6 +7563,106 @@ for (const [label, md, type, seed, typed, want] of [
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\npara one.\n\nMiddle.\n\n' + want + '\n');
   }, { md });
 }
+
+// R102 (final re-review 2, I-R1): the R100 settle let a degraded-block click
+// through when the flight ended with a reconciliation owed (the undo's render
+// failed and so did the redraw). The quote below the split was still on
+// screen, so the box opened seeded from the stale `blocks` against the new
+// `lines` — `paragraph text.` — and its second Ctrl+Enter deleted that
+// paragraph (measured at 6208f4c, both engines). Now that click is refused;
+// the next clicks run the owed redraw and then open the quote's own lines.
+check('raw-box: a quote below a split clicked while the undo renders, whose redraw then fails, is refused and writes nothing over another block (R102, I-R1)', DESKTOP, async (page, boot) => {
+  const MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n> Omega.\n';
+  const SPLIT = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\n';
+  const rawValue = () => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+  const clickQuote = async () => {
+    const box = await page.locator('.ed-block[data-block-type="blockquote"]').first().boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  };
+  await scriptRenders(page, [300, 2000, 1000], [false, true, true]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  await clickQuote(); await wait(200);
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
+    { box: null, notice: '文件已更新，請重試這個操作' }, 'refused: no box on the stale screen');
+  assert.strictEqual(await saveAndRead(page, boot), SPLIT + '> Omega.\n', 'nothing written');
+  let opened = null;
+  for (let k = 0; k < 3 && opened === null; k++) { await clickQuote(); await settleR86(page); opened = await rawValue(); }
+  assert.strictEqual(opened, '> Omega.', 'a later click opens the quote\'s own lines');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+  await page.keyboard.press('Control+Enter'); await settleR86(page);
+  if (await rawValue() !== null) { await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter'); await settleR86(page); }
+  assert.strictEqual(await saveAndRead(page, boot), SPLIT + '> NEW\n', 'the quote is written; paragraph text. survives');
+}, { md: '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n> Omega.\n' });
+// R102 (M-R2): the everyday click. Typing in a paragraph and then clicking
+// a quote or code block: the paragraph's own commit render replaces the
+// block before the click is resolved. With nothing in flight at the press,
+// the block's identity is taken then and the block is found again by it, so
+// the first click opens it. Measured at 6208f4c: no box, the retry notice.
+for (const [label, md, type, seed, typed] of [
+  ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW'],
+  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', '\x60\x60\x60\ncode\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
+  check('raw-box: ' + label + ' clicked right after typing in a paragraph opens on the first click (R102, M-R2)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha para one.', 2); await page.keyboard.type('X');
+    const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await renderIdle(page); await wait(300);
+    const raw = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+    assert.deepStrictEqual({ box: raw, notice: await noticeText(page) }, { box: seed, notice: null }, 'the box opened on the first click');
+    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
+    await page.keyboard.press('Control+Enter'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n' + typed + '\n');
+  }, { md });
+}
+// R102 (M-R2), the ⠿ entry: the same everyday shape — typing in a paragraph,
+// then ⠿ MD 原始碼 on a quote. The paragraph's commit (run by the gesture's
+// own switchAwayFrom()) redrew the quote, and R94's settle then refused.
+// Measured at 6208f4c: no box, the retry notice, both engines.
+check('gutter-settle: ⠿ MD 原始碼 right after typing in another paragraph opens on the first click (R102, M-R2)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha para one.', 2); await page.keyboard.type('X');
+  await gutterMenu(page, await blockByText(page, 'Omega.'), 'MD 原始碼');
+  await renderIdle(page); await wait(300);
+  const raw = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+  assert.deepStrictEqual({ box: raw, notice: await noticeText(page) }, { box: '> Omega.', notice: null }, 'the box opened on the first gesture');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n> NEW\n');
+}, { md: '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n' });
+// R102 (M-R1): the R83 apply-time stash, on the R86 path where it is still
+// reachable: the quote above the split opens on the screen a failed
+// reconciliation left (its lines read the same there and in `lines`); its
+// commit runs the owed redraw (held 1500 ms), and what is typed into the box
+// while that redraw is out survives it and is written.
+check('render-guard: text typed into a raw box while the redraw its commit started is out survives it (R83, R86 path, R102)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [300, 2000, 1000, 1500], [false, true, true, false]);
+  const t0 = renderTotal(page);
+  const rawValue = () => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  await openQuoteBox(page);
+  await page.waitForSelector('textarea.ed-raw', { timeout: 10000 });
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('End'); await page.keyboard.type(' ab');
+  await settleR86(page);
+  assert.strictEqual(await rawValue(), '> Alpha para one. ab', 'guard: the box is open on the stale screen');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter');
+  const deadline = Date.now() + 8000;
+  while (renderTotal(page) - t0 < 4 && Date.now() < deadline) await wait(10);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the redraw the commit started is out');
+  await wait(200);
+  assert.deepStrictEqual({ box: await rawValue(), focused: await page.evaluate(() => document.activeElement && document.activeElement.classList.contains('ed-raw')) },
+    { box: '> Alpha para one. ab', focused: true }, 'guard: the box is open and focused while the redraw is out');
+  await page.keyboard.press('End'); await page.keyboard.type(' cd');
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(await rawValue(), '> Alpha para one. ab cd', 'what was typed during the redraw survives it');
+  assert.strictEqual(await allBlocksHaveIds(page), true, 'every block is a rendered one');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+Enter'); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Alpha para one. ab cd\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+}, { md: Q3_MD });
 
 // R95 (I3, L130): a real paragraph emptied and left commits as its removal
 // (one op), never as a `<br>` line. Measured at ffbdd7c: `<br>` on disk.
