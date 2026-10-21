@@ -1764,9 +1764,13 @@ function countInCode(source, needle) {
   // settleAfterFailedRender() rolls back, through the helper, the ops whose
   // superseded render failed once the newer render failed too (+1).
   // 1 declaration + 29 call lines = 30.
-  assert.strictEqual(helperCalls, 30,
-    'the helper must be DECLARED once and used on all twenty-nine ' +
-    'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
+  // MIGRATED by the v3.15.0 final fix wave (30 -> 31, R95). ONE genuinely new
+  // commit-then-render site: removeEmptiedParagraph() — a real paragraph left
+  // with no text and no image is removed by one commitRangeRemoval() and owns
+  // its rollback (+1). 1 declaration + 30 call lines = 31.
+  assert.strictEqual(helperCalls, 31,
+    'the helper must be DECLARED once and used on all thirty ' +
+    'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');
 }
 
 // -- S4 Task 3: planBlockMove() / commitBlockMove() --------------------------

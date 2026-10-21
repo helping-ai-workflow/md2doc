@@ -7457,6 +7457,39 @@ check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders edits 
   assert.strictEqual(await saveAndRead(page, boot), FF_SPLIT + '\nOmega.X\n');
 }, { md: FF_GUTTER_MD });
 
+// R95 (I3, L130): a real paragraph emptied and left commits as its removal
+// (one op), never as a `<br>` line. Measured at ffbdd7c: `<br>` on disk.
+const FF_EMPTY_MD = '# D\n\nAlpha.\n\nOmega.\n\nZulu.\n';
+const ffEmptyOmega = {
+  'Backspace ×6': async (page) => { for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace'); },
+  'Shift+Home then Delete': async (page) => {
+    await page.keyboard.down('Shift'); await page.keyboard.press('Home'); await page.keyboard.up('Shift');
+    await page.keyboard.press('Delete');
+  },
+};
+for (const [how, act] of Object.entries(ffEmptyOmega)) {
+  check('emptied-para: a paragraph emptied by ' + how + ' and left is removed, no <br>, one undo step (R95)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Omega.', 6);
+    await act(page); await wait(200);
+    assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), '', 'guard: the surface is empty');
+    await page.locator('.ed-block[data-block-type="heading"] .ed-wys-armed').click(); await renderIdle(page);
+    assert.deepStrictEqual(await paragraphs(page), ['Alpha.', 'Zulu.'], 'screen = file');
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nZulu.\n');
+    await page.evaluate(() => document.activeElement && document.activeElement.blur()); await renderIdle(page);
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), FF_EMPTY_MD, 'one Ctrl+Z brings it back');
+  }, { md: FF_EMPTY_MD });
+}
+check('emptied-para: Ctrl+S in an emptied paragraph writes no <br> and keeps the caret there (R95)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nZulu.\n');
+  await renderIdle(page);
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nZulu.\n');
+}, { md: FF_EMPTY_MD });
+
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
