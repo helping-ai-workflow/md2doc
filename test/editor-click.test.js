@@ -7165,6 +7165,32 @@ for (const [label, surface, offset, from, to] of [
       { notice: null, disk: R86_TASK_MD.replace(from, to).replace('[ ] two', '[x] two') });
   }, { md: R86_TASK_MD });
 }
+// R89 (re-review b5 r4 N1): the paragraph above is hard-wrapped, so the commit
+// of the typing in it (started by the press's own blur) joins it into one line
+// and every item moves up a line. The item clicked is the one toggled. Measured
+// at 5caa780: an identity mixing the old start line with the new source
+// re-found the item below — `three` (A5), or item 3 of three identical ones (A2).
+for (const [label, items, idx, want] of [
+  ['A5, distinct items', ['one', 'two', 'three'], 1, ['one', 'two', 'three']],
+  ['A2, three identical items', ['a', 'a', 'a'], 1, ['a', 'a', 'a']]]) {
+  check('render-guard: a task checkbox clicked after typing in a hard-wrapped paragraph above toggles the item clicked (R89, ' + label + ')', DESKTOP, async (page, boot) => {
+    const list = (marks) => items.map((t, i) => '- [' + marks[i] + '] ' + t + '\n').join('');
+    await focusSurface(page, 'Bravo\nparagraph text.', 5); await page.keyboard.type('X');
+    const pt = await page.evaluate((i) => {
+      const li = [...document.querySelectorAll('.ed-block[data-block-type="li"]')][i];
+      const c = li && li.querySelector(':scope > .ed-li-check');
+      if (!c) return null;
+      const b = c.getBoundingClientRect();
+      return [b.left + b.width / 2, b.top + b.height / 2];
+    }, idx);
+    assert.ok(pt, 'guard: item ' + (idx + 1) + ' has a checkbox');
+    await page.mouse.click(pt[0], pt[1]);
+    await settleR86(page);
+    const notice = await noticeText(page);
+    assert.deepStrictEqual({ notice, disk: await saveAndRead(page, boot) },
+      { notice: null, disk: '# D\n\nAlpha para one.\n\nBravoX paragraph text.\n\n' + list(want.map((t, i) => i === idx ? 'x' : ' ')) });
+  }, { md: '# D\n\nAlpha para one.\n\nBravo\nparagraph text.\n\n' + items.map((t) => '- [ ] ' + t + '\n').join('') });
+}
 // R86 (2): the press into `Omega.` runs the owed reconciliation and it fails
 // as well. No burst opens on that stale screen, and what is typed there is
 // dropped, so a shortcut has nothing to convert. Measured before the fix: the
