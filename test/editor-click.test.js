@@ -7490,6 +7490,40 @@ check('emptied-para: Ctrl+S in an emptied paragraph writes no <br> and keeps the
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nZulu.\n');
 }, { md: FF_EMPTY_MD });
 
+// R96 (I4): the "/" menu is not re-filtered while an IME composes; the
+// committed text filters it. Measured at ffbdd7c: ＋'s menu closed at the
+// first composition keystroke. Chromium only (CDP drives the composition).
+check('slash: ＋\'s menu stays open through an IME composition and filters on its commit (R96)', DESKTOP, async (page) => {
+  await plusClick(page, 'Alpha.'); await wait(200);
+  const m0 = await slashMenu(page);
+  assert.deepStrictEqual([m0.open, m0.labels.length], [true, 16], 'guard: the menu is open on all 16 items');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄅ', selectionStart: 1, selectionEnd: 1 });
+  await wait(150);
+  const m1 = await slashMenu(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄅㄧㄠˇ', selectionStart: 4, selectionEnd: 4 });
+  await wait(150);
+  const m2 = await slashMenu(page);
+  await cdp.send('Input.insertText', { text: '表' });
+  await wait(300);
+  const m3 = await slashMenu(page);
+  assert.deepStrictEqual({ m1: [m1.open, m1.labels.length], m2: [m2.open, m2.labels.length], m3: [m3.open, m3.labels] },
+    { m1: [true, 16], m2: [true, 16], m3: [true, ['表格']] });
+}, { md: '# D\n\nAlpha.\n\nOmega.\n', engines: ['chromium'] });
+check('slash: after "/" an IME composition keeps the list until its commit, which filters it (R96)', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/'); await wait(150);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄅ', selectionStart: 1, selectionEnd: 1 });
+  await wait(150);
+  const m1 = await slashMenu(page);
+  await cdp.send('Input.insertText', { text: '表' });
+  await wait(300);
+  const m2 = await slashMenu(page);
+  assert.deepStrictEqual({ m1: [m1.open, m1.labels.length, m1.empty], m2: [m2.open, m2.labels] },
+    { m1: [true, 16, null], m2: [true, ['表格']] });
+}, { md: '# D\n\nAlpha.\n\nOmega.\n', engines: ['chromium'] });
+
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
