@@ -7664,6 +7664,72 @@ check('render-guard: text typed into a raw box while the redraw its commit start
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Alpha para one. ab cd\n\nBravo\n\nparagraph text.\n\nOmega.\n');
 }, { md: Q3_MD });
 
+// R104 (final re-review 3, I-R2 / M-R4): R102's re-locate matched start line
+// + type + source, and R95's removal of an emptied paragraph shifts the
+// lines without the shift being logged, so the second of two identical
+// quotes landed on the first one's start line and was opened and written
+// instead (measured at 63d1bcb, both engines; ⠿ MD 原始碼 there opened
+// nothing and said nothing). Now a block found again by content must be the
+// ONLY block of its type with that source: uniqueness is the proof of
+// position. Two identical quotes → refused with the notice; one → it opens.
+const ffNthBox = async (page, type, nth) => {
+  const box = await page.locator('.ed-block[data-block-type="' + type + '"]').nth(nth).boundingBox();
+  assert.ok(box, 'guard: ' + type + ' #' + nth);
+  return box;
+};
+const ffRaw = (page) => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+const ffGutterNth = async (page, type, nth, label) => {
+  const sel = await page.evaluate(([t, n]) => {
+    const q = document.querySelectorAll('.content .ed-block[data-block-type="' + t + '"]')[n];
+    q.setAttribute('data-ff-gut', '1'); return '[data-ff-gut="1"]';
+  }, [type, nth]);
+  await gutterMenu(page, sel, label);
+};
+for (const via of ['click', '⠿ MD 原始碼']) {
+  check('raw-box: after emptying the paragraph above, ' + via + ' on the first of two identical quotes is refused and writes nothing (R104, I-R2)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    if (via === 'click') { const b = await ffNthBox(page, 'blockquote', 0); await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); }
+    else await ffGutterNth(page, 'blockquote', 0, 'MD 原始碼');
+    await settleR86(page);
+    assert.deepStrictEqual({ box: await ffRaw(page), notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { box: null, notice: '文件已更新，請重試這個操作', disk: '# D\n\n> Q\n\n> Q\n\nEnd.\n' });
+  }, { md: '# D\n\nAlpha.\n\n> Q\n\n> Q\n\nEnd.\n' });
+  check('raw-box: after emptying the paragraph above, ' + via + ' on a quote that is the only one opens it on the first try (R104, I-R2)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    if (via === 'click') { const b = await ffNthBox(page, 'blockquote', 0); await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); }
+    else await ffGutterNth(page, 'blockquote', 0, 'MD 原始碼');
+    await settleR86(page);
+    assert.deepStrictEqual({ box: await ffRaw(page), notice: await noticeText(page) }, { box: '> Q', notice: null }, 'the box opened on the quote');
+    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+    await page.keyboard.press('Control+Enter'); await settleR86(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> NEW\n\nEnd.\n');
+  }, { md: '# D\n\nAlpha.\n\n> Q\n\nEnd.\n' });
+}
+// R104 (I-R3): the R80 stash reopen after a forced redraw, with two identical
+// quotes in the R86 failure order. The click on the SECOND quote opens (its
+// lines read the same on screen and in `lines`, by coincidence); its commit
+// runs the owed redraw, and the box was reopened on the FIRST quote (same id,
+// start line and source) and its next commit wrote there (measured at
+// 63d1bcb, identical back to a13af72). Now the reopen needs a unique match:
+// with two `> Q`, no box reopens and the text goes to the failure card.
+check('render-guard: a raw box reopened after a forced redraw needs a unique block; two identical quotes put its text on the card, not on the other quote (R104, I-R3)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [300, 2000, 1000], [false, true, true]);
+  await focusSurface(page, 'Bravo para.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  const b = await ffNthBox(page, 'blockquote', 1); await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2); await wait(200);
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(await ffRaw(page), '> Q', 'guard: the box opened on the stale screen');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+  await page.keyboard.press('Control+Enter'); await settleR86(page);
+  const notice = await noticeText(page);
+  assert.deepStrictEqual({ box: await ffRaw(page), textOnCard: !!notice && notice.indexOf('「> NEW」') !== -1 },
+    { box: null, textOnCard: true }, 'no box reopened on a guessed quote; the text is on the card: ' + notice);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha para one.\n\nBravo\n\npara.\n\n> Q\n\n> Q\n', 'nothing written to either quote');
+}, { md: '# D\n\nAlpha para one.\n\nBravo para.\n\n> Q\n\n> Q\n' });
+
 // R95 (I3, L130): a real paragraph emptied and left commits as its removal
 // (one op), never as a `<br>` line. Measured at ffbdd7c: `<br>` on disk.
 const FF_EMPTY_MD = '# D\n\nAlpha.\n\nOmega.\n\nZulu.\n';
