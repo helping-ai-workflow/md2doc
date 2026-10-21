@@ -2966,8 +2966,8 @@ async function main() {
   }
   console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
 
-  // ══ V3: 十六個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十六個 `position: fixed` 宣告（另有若干處是註解裡的散文
+  // ══ V3: 十八個 position:fixed 浮層，捲動後的必需答案 ══════════════════
+  // lib/md2doc.js 有十八個 `position: fixed` 宣告（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
   // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
   //
@@ -3046,6 +3046,10 @@ async function main() {
     //   在 batch 2 已經為「一個 fixed 浮層蓋掉它」付過一次代價。
     { sel: '.ed-wave-edit-btn',        after: 'gone' },
     { sel: '.ed-wave-overlay',         after: 'live' },
+    // v3.16.0 長截圖模式的提示。只在閱讀頁出現（編輯頁不輸出開它的按鈕），
+    // 幾何捲動不變、2 秒後自己移除；由 reader-click.test.js 的 screenshot
+    // mode 檢查斷言（2 秒後捲動時沒有任何東西停在原地）。
+    { sel: '.capture-toast',           after: 'reader-only' },
   ];
   {
     // 宣告 vs 散文：先把註解整個抹掉，再找 `position: fixed`。
