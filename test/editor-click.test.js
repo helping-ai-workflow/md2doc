@@ -8492,14 +8492,321 @@ check('diagram-btn: a plain code block and a WaveDrom block show no 編輯圖表
   assert.strictEqual(await diagBtnState(page, '[id^="WaveDrom_Display_"], .wavedrom-diagram'), null, 'no button on a WaveDrom block');
   assert.strictEqual(await page.evaluate(() => { const b = document.querySelector('.ed-wave-edit-btn'); return !!b && !b.hidden; }), true, 'guard: the wave button is the one shown');
 }, { md: DIAG_MIX_MD });
-// T5 REPLACES this check: once openDiagramPanel exists the click must open it
-// (.ed-diagram-panel present, the button hidden). Until then it pins the stub.
-check('diagram-btn: clicking the button before the panel exists changes nothing', DESKTOP, async (page) => {
+// T5 (R56 (b)): the click opens the panel in place, with no raw box.
+check('diagram-btn: clicking the button opens the diagram panel in place', DESKTOP, async (page) => {
   await page.hover('.graphviz svg'); await wait(250);
   await page.locator('.ed-diagram-edit-btn').click(); await wait(300);
-  const s = await page.evaluate(() => ({ raw: document.querySelectorAll('.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length }));
-  assert.deepStrictEqual(s, { raw: 0, panel: 0 }, 'no raw box and no panel opened by the stub');
+  const s = await page.evaluate(() => {
+    const p = document.querySelector('.ed-diagram-panel');
+    const b = document.querySelector('.ed-diagram-edit-btn');
+    return { raw: document.querySelectorAll('.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length,
+      inBlock: !!p && !!p.closest('.content .ed-block[data-block-type="code"]'), btnHidden: !b || b.hidden,
+      graphvizLeft: document.querySelectorAll('.content .graphviz').length };
+  });
+  assert.deepStrictEqual(s, { raw: 0, panel: 1, inBlock: true, btnHidden: true, graphvizLeft: 0 },
+    'one panel inside the block, the diagram replaced by it, no raw box');
 }, { md: DIAG_MD });
+
+// ── diagram-panel (v3.17.0 T5, D15): the source and a live preview in place ──
+// The open panel, read in the page: the textarea's value / selection / focus,
+// the preview's svg text, whether it is stale, the message line (and its
+// kind), and the header text. null when no panel is open.
+const diagPanel = (page) => page.evaluate(() => {
+  const p = document.querySelector('.ed-diagram-panel');
+  if (!p) return null;
+  const ta = p.querySelector('textarea.ed-diagram-src');
+  const pv = p.querySelector('.ed-diagram-preview');
+  const er = p.querySelector('.ed-diagram-error');
+  const svg = pv ? pv.querySelector('svg') : null;
+  return {
+    value: ta ? ta.value : null, caret: ta ? ta.selectionStart : null, focused: !!ta && document.activeElement === ta,
+    // The drawn labels only (a Mermaid svg also holds its <style> text).
+    svg: svg ? [...svg.querySelectorAll('text, foreignObject')].map((t) => t.textContent.trim()).filter(Boolean).join(' ') : null, stale: !!pv && pv.classList.contains('is-stale'),
+    error: er && !er.hidden ? er.textContent : null, errorKind: er && !er.hidden ? er.getAttribute('data-kind') : null,
+    head: (p.querySelector('.ed-diagram-head') || {}).textContent || null,
+  };
+});
+// Polls the panel until `pred` holds (or 6 s pass) and returns what it last
+// read; the caller asserts the value (diskUntil's shape).
+async function diagPanelUntil(page, pred) {
+  const deadline = Date.now() + 6000;
+  for (;;) {
+    const s = await diagPanel(page);
+    if ((s && pred(s)) || Date.now() > deadline) return s;
+    await wait(50);
+  }
+}
+async function openDiagPanel(page, sel) {
+  if (sel === '.mermaid svg') await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  await page.hover(sel); await wait(250);
+  await page.locator('.ed-diagram-edit-btn').click();
+  return diagPanelUntil(page, (s) => s.svg !== null);
+}
+// Selects [from, to) of the panel's source (to defaults to from).
+const diagSelect = (page, from, to) => page.evaluate(([a, b]) => {
+  const ta = document.querySelector('textarea.ed-diagram-src');
+  ta.focus(); ta.setSelectionRange(a, b === undefined ? a : b);
+}, [from, to]);
+const DOT_SRC = 'digraph { a -> b }';
+const DOT_B = DOT_SRC.lastIndexOf('b');
+check('diagram-panel: 編輯圖表 opens source and preview in place', DESKTOP, async (page) => {
+  const s = await openDiagPanel(page, '.graphviz svg');
+  assert.ok(s, 'a panel opened');
+  assert.deepStrictEqual({ value: s.value, focused: s.focused, svg: !!s.svg && /\ba\b/.test(s.svg) && /\bb\b/.test(s.svg), stale: s.stale, error: s.error },
+    { value: DOT_SRC, focused: true, svg: true, stale: false, error: null });
+  assert.ok(s.head.indexOf('Graphviz') !== -1 && s.head.indexOf('預覽在停止輸入 0.5 秒後更新') !== -1 && s.head.indexOf('完成') !== -1,
+    'header: ' + JSON.stringify(s.head));
+  const g = await page.evaluate(() => {
+    const p = document.querySelector('.ed-diagram-panel');
+    const pv = p.querySelector('.ed-diagram-preview');
+    return { inBlock: !!p.closest('.content .ed-block[data-block-type="code"]'), position: getComputedStyle(p).position,
+      border: getComputedStyle(p).borderTopWidth, previewTab: pv.getAttribute('tabindex'),
+      previewClass: pv.matches('.graphviz, .mermaid') || !!pv.closest('.graphviz, .mermaid'),
+      lightbox: (() => { const l = document.querySelector('.lightbox'); return !!l && !l.hidden; })() };
+  });
+  assert.deepStrictEqual(g, { inBlock: true, position: 'static', border: '2px', previewTab: '-1', previewClass: false, lightbox: false });
+  // A click on the preview does not open the lightbox, and the panel stays.
+  await page.click('.ed-diagram-preview svg'); await wait(300);
+  assert.deepStrictEqual({ lightbox: await page.evaluate(() => { const l = document.querySelector('.lightbox'); return !!l && !l.hidden; }),
+    open: !!(await diagPanel(page)) }, { lightbox: false, open: true });
+}, { md: DIAG_MD });
+check('diagram-panel: renaming a node updates the preview within 1.5 s', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await wait(1500);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, zeta: /\bzeta\b/.test(s.svg || ''), stale: s.stale, error: s.error },
+    { value: 'digraph { a -> zeta }', zeta: true, stale: false, error: null });
+}, { md: DIAG_MD });
+check('diagram-panel: a syntax error keeps the last preview and shows the first error line', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.press('Backspace');
+  await wait(1500);
+  const bad = await diagPanel(page);
+  assert.strictEqual(bad.value, 'digraph { a -> b ', 'guard: the brace is gone');
+  assert.ok(/syntax error/.test(bad.error || ''), 'error line: ' + JSON.stringify(bad.error));
+  assert.strictEqual(bad.error.indexOf('\n'), -1, 'one line only');
+  assert.deepStrictEqual({ stale: bad.stale, kept: !!bad.svg && /\bb\b/.test(bad.svg), kind: bad.errorKind }, { stale: true, kept: true, kind: 'error' });
+  await page.keyboard.type('}');
+  await wait(1500);
+  const fixed = await diagPanel(page);
+  assert.deepStrictEqual({ value: fixed.value, error: fixed.error, stale: fixed.stale, svg: !!fixed.svg },
+    { value: DOT_SRC, error: null, stale: false, svg: true });
+}, { md: DIAG_MD });
+check('diagram-panel: 完成 writes the file in one undo step; Esc discards', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  const after = await page.evaluate(() => ({ panel: document.querySelectorAll('.ed-diagram-panel').length,
+    svg: (document.querySelector('.content .graphviz svg') || {}).textContent || '' }));
+  assert.deepStrictEqual({ panel: after.panel, zeta: /zeta/.test(after.svg) }, { panel: 0, zeta: true });
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD, 'one Ctrl+Z takes the whole panel edit back');
+  // Esc: nothing written, no render, the diagram back as it was, no theme
+  // listener left behind.
+  const listeners = await page.evaluate(() => window.md2docTheme.__listenerCount());
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
+  const before = renderTotal(page);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  const esc = await page.evaluate(() => ({ panel: document.querySelectorAll('.ed-diagram-panel').length,
+    svg: (document.querySelector('.content .graphviz svg') || {}).textContent || '',
+    status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    listeners: window.md2docTheme.__listenerCount() }));
+  assert.deepStrictEqual({ panel: esc.panel, b: /\bb\b/.test(esc.svg), omega: /omega/.test(esc.svg), status: esc.status,
+    listeners: esc.listeners, renders: renderTotal(page) - before },
+  { panel: 0, b: true, omega: false, status: 'clean', listeners, renders: 0 });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD);
+}, { md: DIAG_MD });
+check('diagram-panel: a click elsewhere commits', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await clickText(page, 'Omega.'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null, 'the panel closed');
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// Review Focus 4: the first preview request is held 1200 ms, every later one
+// answers at once; the slow older answer lands after the newer one and must
+// not replace it.
+check('diagram-panel: a slow older preview never replaces a newer one', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  let n = 0;
+  await page.route('**/api/preview', async (route) => {
+    if (n++ === 0) await wait(1200);
+    await route.continue();
+  });
+  await diagSelect(page, DOT_B + 1);
+  await page.keyboard.type('x'); await wait(600); await page.keyboard.type('y');
+  await wait(2000);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, requests: n, newest: /\bbxy\b/.test(s.svg || ''), stale: s.stale, error: s.error },
+    { value: 'digraph { a -> bxy }', requests: 2, newest: true, stale: false, error: null });
+}, { md: DIAG_MD });
+check('diagram-panel: Mermaid previews in the browser and commits', DESKTOP, async (page, boot) => {
+  const previews = [];
+  page.on('request', (r) => { if (/\/api\/preview$/.test(r.url())) previews.push(r.url()); });
+  const s = await openDiagPanel(page, '.mermaid svg');
+  assert.ok(s, 'a panel opened');
+  assert.deepStrictEqual({ value: s.value, svg: !!s.svg && /\bA\b/.test(s.svg) && /\bB\b/.test(s.svg), head: s.head.indexOf('Mermaid') !== -1 },
+    { value: 'graph TD\n  A --> B', svg: true, head: true });
+  await diagSelect(page, s.value.length - 1, s.value.length); await page.keyboard.type('Zed');
+  await wait(1500);
+  const t = await diagPanel(page);
+  assert.deepStrictEqual({ value: t.value, zed: /Zed/.test(t.svg || ''), stale: t.stale, error: t.error },
+    { value: 'graph TD\n  A --> Zed', zed: true, stale: false, error: null });
+  assert.deepStrictEqual(previews, [], 'Mermaid never asks the server');
+  // A Mermaid syntax error keeps the preview too.
+  await page.keyboard.type(' -->'); await wait(1500);
+  const bad = await diagPanel(page);
+  assert.deepStrictEqual({ stale: bad.stale, kept: /Zed/.test(bad.svg || ''), error: !!bad.error && bad.error.indexOf('\n') === -1 },
+    { stale: true, kept: true, error: true });
+  await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null, 'the panel closed');
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('A --> B', 'A --> Zed'));
+}, { md: DIAG_MD });
+check('diagram-panel: the preview follows dark mode', DESKTOP, async (page) => {
+  // A real press on the toggle: it keeps focus where it is and its click is
+  // not "outside any block", so the panel stays open across the switch.
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await openDiagPanel(page, '.graphviz svg');
+  await toggle(); await wait(400);
+  assert.deepStrictEqual(await diagPanel(page).then((s) => s && s.focused), true, 'guard: the panel is open and keeps focus');
+  const g = await page.evaluate(() => {
+    const svg = document.querySelector('.ed-diagram-preview svg');
+    return { dark: document.documentElement.getAttribute('data-md2doc-theme'), recoloured: !!svg && svg.hasAttribute('data-md2doc-recoloured') };
+  });
+  assert.deepStrictEqual(g, { dark: 'dark', recoloured: true });
+  await toggle(); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-diagram-preview svg').hasAttribute('data-md2doc-recoloured')), false,
+    'back to light: the recolour is taken off');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  // Mermaid: drawn again in the new theme (a new svg node), with focus left
+  // on the preview itself: the redraw writes its children, never the
+  // preview, so no focus event at all (detach census row).
+  await openDiagPanel(page, '.mermaid svg');
+  await page.evaluate(() => {
+    const pv = document.querySelector('.ed-diagram-preview');
+    pv.querySelector('svg').__old = true;
+    pv.focus();
+    window.__diagFocusouts = 0;
+    document.addEventListener('focusout', () => { window.__diagFocusouts++; }, true);
+  });
+  await toggle(); await wait(1500);
+  const m = await page.evaluate(() => {
+    const pv = document.querySelector('.ed-diagram-preview');
+    const svg = pv && pv.querySelector('svg');
+    return { svg: !!svg, replaced: !!svg && !svg.__old, focusouts: window.__diagFocusouts, active: document.activeElement === pv };
+  });
+  assert.deepStrictEqual(m, { svg: true, replaced: true, focusouts: 0, active: true });
+  assert.ok(await diagPanel(page), 'the panel is still open');
+}, { md: DIAG_MD });
+// R56 (a): an empty answer is "nothing to show": the last preview stays,
+// marked stale, and the line says so — never a blank success.
+check('diagram-panel: an empty source or an empty svg answer keeps the last preview', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await page.route('**/api/preview', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"svg":""}' }));
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('c');
+  await wait(1500);
+  const a = await diagPanel(page);
+  assert.deepStrictEqual({ kept: !!a.svg && /\bb\b/.test(a.svg), stale: a.stale, error: a.error, kind: a.errorKind },
+    { kept: true, stale: true, error: '沒有可預覽的內容', kind: 'empty' });
+  await page.unroute('**/api/preview');
+  await page.keyboard.press('Control+a'); await page.keyboard.press('Backspace');
+  await wait(1500);
+  const b = await diagPanel(page);
+  assert.deepStrictEqual({ value: b.value, kept: !!b.svg, stale: b.stale, error: b.error, kind: b.errorKind },
+    { value: '', kept: true, stale: true, error: '沒有可預覽的內容', kind: 'empty' });
+  // Any other answer is the generic line (R31).
+  await page.route('**/api/preview', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }));
+  await page.keyboard.type(DOT_SRC); await wait(1500);
+  const c = await diagPanel(page);
+  assert.deepStrictEqual({ error: c.error, kind: c.errorKind, stale: c.stale }, { error: '預覽失敗（伺服器沒有回應）', kind: 'error', stale: true });
+}, { md: DIAG_MD });
+// R56 (c) / R48: Ctrl+S saves and the panel stays open where the caret was;
+// keys typed while that render is out land in the source in order.
+check('diagram-panel: Ctrl+S saves and keeps the panel open; typing on lands in the source', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'the save landed');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD.replace('a -> b', 'a -> zeta'));
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, caret: s.caret, focused: s.focused }, { value: 'digraph { a -> zeta }', caret: 19, focused: true },
+    'the panel is open again at the same caret');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('rs'); await page.keyboard.press('Enter'); await page.keyboard.type('t');
+  await renderIdle(page);
+  const t = await diagPanel(page);
+  assert.deepStrictEqual({ value: t.value, caret: t.caret, focused: t.focused, notice: await noticeText(page) },
+    { value: 'digraph { a -> zetars\nt }', caret: 23, focused: true, notice: null });
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, DIAG_MD.replace('a -> b', 'a -> zetars\nt')), DIAG_MD.replace('a -> b', 'a -> zetars\nt'));
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean');
+}, { md: DIAG_MD });
+// R56 (d) / R47: typed source not yet committed is unsaved work.
+check('diagram-panel: typing in the open panel marks the document unsaved (R47)', DESKTOP, async (page) => {
+  const state = () => page.evaluate(() => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return { title: document.title.charAt(0) === '●', status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+      guard: ev.defaultPrevented };
+  });
+  await openDiagPanel(page, '.graphviz svg');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'guard: clean on open');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.type('q');
+  assert.deepStrictEqual(await state(), { title: true, status: 'dirty', guard: true }, 'typed, not left');
+  await page.keyboard.press('Backspace');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'back to the opened text');
+  await page.keyboard.type('q');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'Esc discarded it');
+}, { md: DIAG_MD });
+// R36 / R25: Tab inserts two spaces; Ctrl+Z steps the textarea's own text and
+// never the document; a press on the header keeps the panel open.
+check('diagram-panel: Tab inserts two spaces and Ctrl+Z never reaches the document', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length - 1);
+  await page.keyboard.press('Tab');
+  assert.deepStrictEqual(await diagPanel(page).then((s) => ({ value: s.value, caret: s.caret, focused: s.focused })),
+    { value: 'digraph { a -> b   }', caret: DOT_SRC.length + 1, focused: true });
+  await page.keyboard.press('Control+z'); await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual((await diagPanel(page)).value, DOT_SRC, 'the textarea stepped its own text');
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === 'Omega.X')),
+    true, 'the paragraph keeps its edit: the document stack was not touched');
+  await page.click('.ed-diagram-hint'); await wait(200);
+  assert.deepStrictEqual(await diagPanel(page).then((s) => ({ open: true, focused: s.focused })), { open: true, focused: true },
+    'a press on the header keeps the panel and its focus');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('Omega.', 'Omega.X'));
+}, { md: DIAG_MD });
+// R27 (3): a commit whose render fails keeps the panel open on its text.
+check('diagram-panel: a commit whose render fails keeps the panel open with its text (R27)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await failFirstRender(page);
+  await page.click('.ed-diagram-done'); await wait(1200); await renderIdle(page);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ card: await errorCardUp(page), value: s && s.value }, { card: true, value: 'digraph { a -> zeta }' });
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// R44: a page with no Mermaid at load: the engine arrives with the first
+// inserted block, and the panel previews through it.
+check('diagram-panel: a Mermaid block added to a page without Mermaid previews in the panel', DESKTOP, async (page) => {
+  assert.strictEqual(await page.evaluate(() => typeof window.mermaid), 'undefined', 'guard: not loaded at start');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/mer'); await page.keyboard.press('Enter'); await renderIdle(page);
+  const s = await openDiagPanel(page, '.mermaid svg');
+  assert.ok(s && s.svg && s.error === null && !s.stale, 'previewed: ' + JSON.stringify(s));
+  assert.ok(s.head.indexOf('Mermaid') !== -1);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null);
+}, { md: BASE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
