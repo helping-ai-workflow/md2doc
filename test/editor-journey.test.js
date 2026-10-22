@@ -8817,7 +8817,8 @@ async function main() {
       // v3.17.0 T2 (found by the T3 batch-end EJ run): a fenced code block's
       // editing surface is the in-place edit now, the pre itself, not a box.
       if (id === 'code') {
-        const inPlace = await c.page.evaluate(() => document.activeElement.matches('pre[data-ed-code-edit]'));
+        const inPlace = await c.page.evaluate(() => document.activeElement.matches('pre[data-ed-code-edit]') &&
+          !!document.activeElement.closest('.ed-block[data-block-type="code"]'));
         assert.strictEqual(inPlace, true,
           'T9-6 (code)：caret 必須落在該 block 自己的就地編輯（pre[data-ed-code-edit]）裡，got ' + JSON.stringify({ tag }));
       } else {

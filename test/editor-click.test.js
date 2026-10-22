@@ -8384,6 +8384,41 @@ check('code-chips: a refused clipboard selects the code and says Press Ctrl+C', 
   assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleq', 'the edit is untouched');
 }, { md: CODE_MD });
 
+check('code-chips: the language chip right after typing in a paragraph opens the menu', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('x');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await renderIdle(page); await wait(300);
+  const m = await langMenu(page);
+  assert.ok(m, 'the menu opened (notice: ' + (await noticeText(page)) + ')');
+  assert.strictEqual(m.focused, true, 'the filter holds focus');
+  assert.strictEqual(await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }),
+    'module m;\nendmodule', 'the edit is open');
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.x').replace('```verilog', '```python'));
+}, { md: CODE_MD });
+check('code-chips: a typed filter starts on its first match, not on the current language (M3)', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.type('j'); await wait(100);
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ items: m.items, cursor: m.cursor }, { items: ['JSON', 'JavaScript'], cursor: 'JSON' });
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('```verilog', '```json'));
+}, { md: CODE_MD.replace('```verilog', '```javascript') });
+check('code-chips: the chips come back when an edit ends with the pointer still over the block (M6)', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  await page.keyboard.press('Escape'); await renderIdle(page); await wait(400);
+  assert.strictEqual(await codeEdit(page), null, 'guard: the edit ended');
+  assert.ok(await chipsState(page), 'chips shown again');
+}, { md: CODE_MD });
+check('code-chips: scrolling the block sideways keeps its chips (M1)', DESKTOP, async (page) => {
+  await hoverCodeBlock(page);
+  assert.ok(await chipsState(page), 'guard: shown');
+  const sc = await page.evaluate(() => { const p = document.querySelector('.ed-block[data-block-type="code"] > pre'); p.scrollLeft = 200; return p.scrollLeft; });
+  assert.ok(sc > 0, 'guard: the block scrolled sideways: ' + sc);
+  await wait(300);
+  assert.ok(await chipsState(page), 'still shown');
+}, { md: CODE_MD.replace('module m;', 'module m; // ' + 'x'.repeat(400)) });
 const CODE_SCROLL_MD = '# D\n\n' + Array.from({ length: 30 }, (_, i) => 'Filler ' + i + '.').join('\n\n') +
   '\n\n```verilog\nmodule m;\nendmodule\n```\n\n' + Array.from({ length: 30 }, (_, i) => 'Tail ' + i + '.').join('\n\n') + '\n';
 check('code-chips: a scroll hides the chips of a block that is not edited and moves an edit\'s with it', DESKTOP, async (page) => {
