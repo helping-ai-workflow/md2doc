@@ -15,8 +15,10 @@ on:
 
 jobs:
   click:
-    # Pinned: on ubuntu-26.04 (ubuntu-latest since Oct 2026) Playwright's WebKit
-    # cannot load libicudata.so.74 and the first WebKit launch dies (PR #55).
+    # Pinned, not ubuntu-latest: the label moved to Ubuntu 26.04 in October 2026
+    # and the cached WebKit (built for 24.04) could not start there for want of
+    # libicudata.so.74 (PR #54, PR #55). The CI WebKit budget in wave-canvas.test.js
+    # was also measured on 24.04. Move this on purpose, with the cache key below.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -37,14 +39,18 @@ jobs:
       - name: Playwright version
         if: steps.scope.outputs.docs_only != 'true'
         id: pw
-        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
       - name: Cache Playwright browsers
         if: steps.scope.outputs.docs_only != 'true'
         id: cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-cw-${{ runner.os }}-${{ steps.pw.outputs.version }}
+          # The runner image is in the key: browsers cached on one Ubuntu release
+          # link against libraries another release may not ship.
+          key: playwright-cw-${{ runner.os }}-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}
       - name: Install Chromium and WebKit
         if: steps.scope.outputs.docs_only != 'true' && steps.cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium webkit
