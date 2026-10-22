@@ -1066,6 +1066,13 @@ function assertNoAutoCloseFor(server, ms) {
       assert.strictEqual(m.status, 200, 'mermaid.js is served');
       assert.ok(/^application\/javascript/.test(m.headers['content-type']), 'content-type ' + m.headers['content-type']);
       assert.ok(m.body.length > 1000000, 'the whole library, got ' + m.body.length + ' chars');
+      const hj = await req(srv.port, 'GET', '/api/lib/highlight.js');
+      assert.strictEqual(hj.status, 200, 'highlight.js is served');
+      assert.ok(/^application\/javascript/.test(hj.headers['content-type']), 'content-type ' + hj.headers['content-type']);
+      assert.ok(hj.body.indexOf('md2docHljs') !== -1, 'the browser build of the highlighter');
+      const pg = await req(srv.port, 'GET', '/edit/0');
+      assert.ok(pg.body.includes('md2docCodeEdit'), 'v3.17.0 T1: code-edit runtime inlined');
+      assert.ok(pg.body.indexOf('md2docBlockCatalog') < pg.body.indexOf('md2docCodeEdit'), 'code-edit follows block-catalog');
       const w = await req(srv.port, 'GET', '/api/lib/wavedrom.js');
       assert.strictEqual(w.status, 200, 'wavedrom.js is served');
       assert.ok(/^application\/javascript/.test(w.headers['content-type']), 'content-type ' + w.headers['content-type']);
