@@ -347,7 +347,7 @@ check('desktop: a diagram opens in the lightbox; ✕ and Esc close it', DESKTOP,
   await wait(200);
   assert.ok(!(await isOpen()), 'Esc closes');
 });
-// Screenshot mode (v3.14.2): the reader minus everything a scroll-and-stitch
+// Screenshot mode (v3.16.0): the reader minus everything a scroll-and-stitch
 // capture would repeat, the document kept at the width it was read at.
 async function readerShape(page) {
   return page.evaluate(() => {
@@ -513,6 +513,19 @@ async function searchFor(page, q) {
   await wait(300);
   return selectedMarks(page);
 }
+// R36 (v3.15.0 T10, R76): a heading inside a blockquote (`> ## B`) does not
+// end the section above it, and the section index lists the text after the
+// quote under B. The hit is marked: sectionBoundary() walks from the top-level
+// block that holds the heading (the blockquote), not from the heading's own
+// siblings inside it, so it reaches the paragraph after the quote. The edit
+// page pins the same fixture (`edit-search: a hit after a blockquote heading
+// is marked`).
+const BQ_HEADING_URL = fixtureUrl('bq-heading', ['# D', '', '## A', '', 'text a', '', '> ## B', '', 'match here', '']);
+check('search: a hit after a blockquote heading is marked (R36)', DESKTOP, async (page) => {
+  await page.goto(BQ_HEADING_URL, { waitUntil: 'load' }); await wait(400);
+  const r = await searchFor(page, 'match');
+  assert.deepStrictEqual([r.text, r.count, r.onScreen], ['match', 1, true]);
+});
 check('search: a phrase across a heading number and its title', DESKTOP, async (page) => {
   await page.goto(FOLLOWUP_URL, { waitUntil: 'load' }); await wait(400);
   const r = await searchFor(page, '4.2 assumptions');

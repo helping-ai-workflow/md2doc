@@ -114,6 +114,10 @@ function assertNoAutoCloseFor(server, ms) {
     assert.ok(page.body.indexOf('md2docListMd') < page.body.indexOf('/*client*/'),
       'list-md must be injected before the client runtime (client depends on window.md2docListMd)');
     assert.ok(page.body.includes('/*client*/'), 'client runtime inlined');
+    // v3.15.0 T1 (R43 M7): the "/" menu's catalogue, ahead of the client.
+    assert.ok(page.body.includes('root.md2docBlockCatalog = factory()'), 'block-catalog runtime inlined');
+    assert.ok(page.body.indexOf('root.md2docBlockCatalog = factory()') < page.body.indexOf('/*client*/'),
+      'block-catalog must be injected before the client runtime (client reads window.md2docBlockCatalog)');
     assert.strictEqual(page.headers['cache-control'], 'no-store',
       'edit page must never be cached — it embeds a code+mtime snapshot');
 
@@ -1048,6 +1052,39 @@ function assertNoAutoCloseFor(server, ms) {
       srv.close();
     }
     console.log('server: (5) pinging alone (no connection) does not keep a session alive forever — OK');
+  }
+
+  // v3.15.0 T4 (D12, R9): the diagram engines an edit page loads on demand —
+  // GET only, three names, everything else 404.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-lib-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# Lib\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const m = await req(srv.port, 'GET', '/api/lib/mermaid.js');
+      assert.strictEqual(m.status, 200, 'mermaid.js is served');
+      assert.ok(/^application\/javascript/.test(m.headers['content-type']), 'content-type ' + m.headers['content-type']);
+      assert.ok(m.body.length > 1000000, 'the whole library, got ' + m.body.length + ' chars');
+      const w = await req(srv.port, 'GET', '/api/lib/wavedrom.js');
+      assert.strictEqual(w.status, 200, 'wavedrom.js is served');
+      assert.ok(/^application\/javascript/.test(w.headers['content-type']), 'content-type ' + w.headers['content-type']);
+      const skin = fs.readFileSync(require.resolve('wavedrom/skins/default.js'), 'utf8');
+      const lib = fs.readFileSync(require.resolve('wavedrom/wavedrom.min.js'), 'utf8');
+      assert.ok(w.body.indexOf(skin) === 0 && w.body.indexOf(lib) > skin.length - 1, 'the skin, then the library, in one body');
+      const k = await req(srv.port, 'GET', '/api/lib/katex.css');
+      assert.strictEqual(k.status, 200, 'katex.css is served');
+      assert.ok(/^text\/css/.test(k.headers['content-type']), 'content-type ' + k.headers['content-type']);
+      assert.ok(k.body.indexOf('.katex') !== -1, 'the KaTeX stylesheet');
+      assert.ok(k.body.indexOf('<style') === -1 && k.body.indexOf('</style>') === -1, 'the CSS text, not the tag');
+      assert.ok(k.body.indexOf('url(fonts/') === -1, 'fonts inlined, nothing fetched from disk paths');
+      assert.strictEqual((await req(srv.port, 'GET', '/api/lib/nope.js')).status, 404, 'any other name is a 404');
+      assert.strictEqual((await req(srv.port, 'GET', '/api/lib/../server.js')).status, 404, 'no path walking');
+      assert.strictEqual((await req(srv.port, 'POST', '/api/lib/mermaid.js', {})).status, 404, 'GET only');
+    } finally {
+      srv.close();
+    }
+    console.log('server: /api/lib serves mermaid.js, wavedrom.js and katex.css on demand, 404 otherwise — OK');
   }
 
   console.log('editor-server.test.js OK');

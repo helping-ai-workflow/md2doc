@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1506,6 +1506,43 @@ function duplicateFunctionDeclarations(source, onlyIndent) {
       rollbackFailedRender(s3, { op: { startLine: 1, endLine: 1 } }, ['snapshot']),
       ['snapshot'], 'nothing left to undo -> the caller\'s prevLines');
   }
+  // (e) v3.15.0 T9 (D21): the failed op is not on top of the stack — a later
+  //     commit landed over it, or it was undone already — so the rollback
+  //     leaves both `lines` and the stack exactly as they are.
+  {
+    const s4 = mkState();
+    const before = s4.lines;
+    const failed = { op: { startLine: 2, endLine: 2, before: ['b'], after: ['B'] } };
+    const out = rollbackFailedRender(s4, failed, ['snapshot']);
+    assert.strictEqual(out, before, 'a different op on top: `lines` stays the array it was');
+    assert.strictEqual(s4.stack._done.length, 1, 'the stack keeps the op on top');
+    assert.deepStrictEqual(s4.stack.redoTail(), [], 'and nothing moved to the redo side');
+  }
+  // (f) …and with the failed op on top it undoes exactly that op: the one
+  //     below it stays, and the failed one is what moves to the redo side.
+  {
+    const s5 = mkState();
+    const real = commitRangeEdit(
+      { lines: s5.lines, blocks: [{ id: 0, startLine: 3, endLine: 3 }], stack: s5.stack },
+      3, 3, 'C');
+    s5.lines = real.lines;
+    assert.deepStrictEqual(s5.lines, ['A', 'b', 'C'], 'sanity: the commit pushed');
+    const out = rollbackFailedRender(s5, real, ['snapshot']);
+    assert.deepStrictEqual(out, ['A', 'b', 'c'], 'exactly the failed op is undone');
+    assert.strictEqual(s5.stack._done.length, 1, 'the earlier op stays on the stack');
+    assert.deepStrictEqual(s5.stack.redoTail(), [real.op], 'the failed op is the one undone');
+  }
+}
+// R54 (v3.15.0 T10): transientCommitMd() trims before it escapes: a trailing
+// NBSP (U+00A0, what a browser types for a trailing space) no longer hides a
+// block marker from the escape.
+{
+  const esc = require('../lib/editor/inline-md.js').escapeBlockStarts;
+  assert.strictEqual(transientCommitMd('#\u00a0', esc), '\\#', '# + NBSP -> the escaped literal');
+  assert.strictEqual(transientCommitMd('1.\u00a0', esc), '1\\.', '1. + NBSP -> the escaped literal');
+  assert.strictEqual(transientCommitMd('# ', esc), '\\#', '# + space -> the escaped literal');
+  assert.strictEqual(transientCommitMd('Alpha.\u00a0 ', esc), 'Alpha.', 'trailing whitespace goes');
+  assert.strictEqual(transientCommitMd('a\u00a0b', esc), 'a\u00a0b', 'an inner NBSP stays');
 }
 
 // -- T8 review MEDIUM-1 (mechanical): every rollback goes through the helper --
@@ -1692,9 +1729,48 @@ function countInCode(source, needle) {
   // no longer owns a rollback — the Enter split commits through
   // commitTypingThenStructure() (the old commitEdgeStructure(), renamed),
   // which was already counted (-2). 1 declaration + 22 call sites = 23.
-  assert.strictEqual(helperCalls, 23,
-    'the helper must be DECLARED once and used at all twenty-two ' +
-    'commit-then-render sites; found ' + helperCalls + ' code lines mentioning it');
+  // MIGRATED by v3.15.0 T1 (23 -> 24). ONE genuinely new commit-then-render
+  // site: replaceParagraphWithItem() — a "/" menu item chosen in a real
+  // paragraph that holds nothing but the "/query" becomes that item through
+  // one commitRangeEdit() over the paragraph's own lines, and owns its
+  // rollback (+1). The menu's other insertion paths go through
+  // commitLinesAtTransient(), already counted. 1 declaration + 23 call sites = 24.
+  // MIGRATED by v3.15.0 B1 fix round 1 (24 -> 25), checked rather than
+  // assumed: replaceParagraphWithItem()'s site moved into
+  // replaceParagraphWithLines() (shared with the 圖片 replacement; 0), and
+  // insertTaskSiblingAfter() — 待辦清單 written tight under a bullet item —
+  // is a genuinely new commit-then-render site that owns its rollback (+1).
+  // (B1 fix round 2 renamed it insertListLineAfter(), which also writes R47's
+  // nested cross-type item; still one site.)
+  // 1 declaration + 24 call sites = 25.
+  // MIGRATED by v3.15.0 T3 (25 -> 27). ONE genuinely new commit-then-render
+  // site that rolls back two ops: commitShortcutAt() — a Markdown shortcut
+  // writes the literal and the conversion (commitShortcut(), D1) and renders
+  // once; a failed render rolls back both, op 2 first (R35): two lines (+2).
+  // 1 declaration + 26 call sites = 27.
+  // MIGRATED by v3.15.0 B2 fix round 1 (27 -> 28). ONE genuinely new
+  // commit-then-render site: insertJoinedAtTransient() — a "/" list item on a
+  // transient next to a list of its own family joins it tight (R58) through
+  // one commitTightInsert() and owns its rollback (+1). The shortcut's join
+  // goes through commitShortcutAt() and the real-paragraph one through
+  // replaceParagraphWithLines(), both already counted.
+  // 1 declaration + 27 call sites = 28.
+  // MIGRATED by v3.15.0 T10 (28 -> 29). No new commit-then-render site:
+  // retryPendingStructure() now writes a failed commit's typing and its
+  // structure as two ops again (M3), so its rollback undoes both, newest
+  // first (R32): one more line at an existing site (+1).
+  // 1 declaration + 28 call lines = 29.
+  // MIGRATED by v3.15.0 B5 fix round 1 (29 -> 30, R77). No new commit site:
+  // settleAfterFailedRender() rolls back, through the helper, the ops whose
+  // superseded render failed once the newer render failed too (+1).
+  // 1 declaration + 29 call lines = 30.
+  // MIGRATED by the v3.15.0 final fix wave (30 -> 31, R95). ONE genuinely new
+  // commit-then-render site: removeEmptiedParagraph() — a real paragraph left
+  // with no text and no image is removed by one commitRangeRemoval() and owns
+  // its rollback (+1). 1 declaration + 30 call lines = 31.
+  assert.strictEqual(helperCalls, 31,
+    'the helper must be DECLARED once and used on all thirty ' +
+    'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');
 }
 
 // -- S4 Task 3: planBlockMove() / commitBlockMove() --------------------------
@@ -2601,6 +2677,76 @@ function countInCode(source, needle) {
   assert.deepStrictEqual(st.stack.undo(r.lines).lines, st.lines);
   const h = commitSplit({ lines: ['a\\', 'b'], blocks: [{ id: 0, type: 'paragraph', startLine: 1, endLine: 2 }], stack: new UndoStack() }, 0, 'a\\\nb', 'c');
   assert.strictEqual(h.rightStartLine, 4, 'a two-line left half');
+}
+
+// -- v3.15.0 T3: commitShortcut() — a Markdown shortcut is two ops ---------
+// D1 / R1: op 1 writes the literal the user typed (escaped), op 2 the
+// conversion, over the same range. One undo shows the literal, a second the
+// paragraph as it was. On a transient, op 1 inserts the literal where the
+// transient's commit would land (commitInsertionAt()).
+{
+  const B = (id, s, e) => ({ id, type: 'paragraph', startLine: s, endLine: e });
+  const st = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const r = commitShortcut(st, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
+  assert.deepStrictEqual(r.lines, ['# D', '', '## Alpha.', '', 'Omega.']);
+  assert.strictEqual(r.ops.length, 2);
+  assert.strictEqual(r.newStartLine, 3);
+  const u1 = st.stack.undo(r.lines).lines;
+  assert.deepStrictEqual(u1, ['# D', '', '\\## Alpha.', '', 'Omega.'], 'one undo → the literal');
+  assert.deepStrictEqual(st.stack.undo(u1).lines, st.lines, 'two undos → the original');
+  const t = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const tr = commitShortcut(t, { anchorBlockId: 1 }, ['\\-'], ['-']);
+  assert.deepStrictEqual(tr.lines, ['# D', '', 'Alpha.', '', '-', '', 'Omega.']);
+  assert.strictEqual(tr.newStartLine, 5);
+  assert.deepStrictEqual(t.stack.undo(tr.lines).lines, ['# D', '', 'Alpha.', '', '\\-', '', 'Omega.']);
+  // A skeleton longer than the literal shifts the blocks below it.
+  const c = { lines: ['# D', '', 'Alpha.', '', 'Omega.'], blocks: [B(0, 1, 1), B(1, 3, 3), B(2, 5, 5)], stack: new UndoStack() };
+  const cr = commitShortcut(c, { anchorBlockId: 1 }, ['\\`\\`\\`'], ['\x60\x60\x60', '', '\x60\x60\x60']);
+  assert.deepStrictEqual(cr.lines, ['# D', '', 'Alpha.', '', '\x60\x60\x60', '', '\x60\x60\x60', '', 'Omega.']);
+  assert.strictEqual(cr.blocks.find((b) => b.id === 2).startLine, 9, 'Omega moved down by the literal and the skeleton');
+  // A transient that opens the document (no anchor).
+  const n = { lines: ['# D', '', 'Alpha.'], blocks: [B(0, 1, 1), B(1, 3, 3)], stack: new UndoStack() };
+  const nr = commitShortcut(n, { anchorBlockId: null }, ['\\##'], ['##']);
+  assert.deepStrictEqual(nr.lines, ['##', '', '# D', '', 'Alpha.']);
+  assert.strictEqual(nr.newStartLine, 1);
+  // The literal equals what the file already holds: op 1 is null, op 2 alone.
+  const same = { lines: ['# D', '', '\\## Alpha.'], blocks: [B(0, 1, 1), B(1, 3, 3)], stack: new UndoStack() };
+  const sr = commitShortcut(same, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
+  assert.deepStrictEqual(sr.ops.map((o) => o !== null), [false, true]);
+  assert.deepStrictEqual(same.stack.undo(sr.lines).lines, ['# D', '', '\\## Alpha.']);
+}
+
+// -- v3.15.0 B2 fix round 1 (R58): a list item joining an adjacent list ----
+{
+  const B = (id, t, s, e) => ({ id, type: t, startLine: s, endLine: e });
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above'), [2, 4]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below'), [4, 5]);
+  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above'), [1, 1]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both'), [2, 5], 'R62: both separators');
+  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null), [3, 3]);
+  // A real paragraph below a list: op 1 the literal, op 2 the item over the
+  // separator too, so the list stays tight; one undo gives the literal back
+  // where it was.
+  const st = { lines: ['- a', '- b', '', 'Omega.'], blocks: [B(0, 'li', 1, 1), B(1, 'li', 2, 2), B(2, 'paragraph', 4, 4)], stack: new UndoStack() };
+  const r = commitShortcut(st, { blockId: 2 }, ['\\- Omega.'], ['- Omega.'], 'above');
+  assert.deepStrictEqual(r.lines, ['- a', '- b', '- Omega.']);
+  assert.strictEqual(r.newStartLine, 3);
+  assert.strictEqual(r.literalStartLine, 4);
+  const u = st.stack.undo(r.lines).lines;
+  assert.deepStrictEqual(u, ['- a', '- b', '', '\\- Omega.']);
+  // A transient above a list: the item becomes its first item.
+  const t = { lines: ['# D', '', '- a', '- b'], blocks: [B(0, 'heading', 1, 1), B(1, 'li', 3, 3), B(2, 'li', 4, 4)], stack: new UndoStack() };
+  const tr = commitShortcut(t, { anchorBlockId: 0 }, ['\\- x'], ['- x'], 'below');
+  assert.deepStrictEqual(tr.lines, ['# D', '', '- x', '- a', '- b']);
+  assert.strictEqual(tr.newStartLine, 3);
+  // The "/" menu's transient half: one tight line after / before a line.
+  const i = { lines: ['- a', '- b', '', 'Omega.'], blocks: [B(0, 'li', 1, 1), B(1, 'li', 2, 2), B(2, 'paragraph', 4, 4)], stack: new UndoStack() };
+  const ir = commitTightInsert(i, 2, ['-'], false);
+  assert.deepStrictEqual(ir.lines, ['- a', '- b', '-', '', 'Omega.']);
+  assert.strictEqual(ir.newStartLine, 3);
+  const jr = commitTightInsert({ lines: ['P', '', '- a'], blocks: [B(0, 'paragraph', 1, 1), B(1, 'li', 3, 3)], stack: new UndoStack() }, 3, ['- [ ] '], true);
+  assert.deepStrictEqual(jr.lines, ['P', '', '- [ ] ', '- a']);
+  assert.strictEqual(jr.newStartLine, 3);
 }
 
 console.log('editor-client.test.js OK');

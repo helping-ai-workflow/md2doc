@@ -17,8 +17,8 @@ jobs:
   click:
     # Pinned, not ubuntu-latest: the label moved to Ubuntu 26.04 in October 2026
     # and the cached WebKit (built for 24.04) could not start there for want of
-    # libicudata.so.74 (PR #54). The CI WebKit budget in wave-canvas.test.js was
-    # also measured on 24.04. Move this on purpose, with the cache key below.
+    # libicudata.so.74 (PR #54, PR #55). The CI WebKit budget in wave-canvas.test.js
+    # was also measured on 24.04. Move this on purpose, with the cache key below.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

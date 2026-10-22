@@ -559,4 +559,15 @@ assert.deepStrictEqual(
     JSON.stringify(blocks));
 }
 
+// v3.15.0 B2 fix round 1 (R56): the editor's block map reads an item whose
+// whole text is `[ ]` / `[x]` / `[X]` as an empty to-do (marked trims the space
+// after the box on the last item of a nested list).
+{
+  const { blocks } = buildBlockMap('- a\n  - [ ] \n\nAfter.\n');
+  assert.deepStrictEqual(blocks.filter((b) => b.type === 'li').map((b) => [b.indent, b.task, b.checked]),
+    [[0, false, undefined], [1, true, false]]);
+  const x = buildBlockMap('- [x]\n- \\[ \\]\n').blocks.map((b) => [b.task, b.checked]);
+  assert.deepStrictEqual(x, [[true, true], [false, undefined]], 'checked box; an escaped box stays text');
+}
+
 console.log('blockmap.test.js OK');

@@ -23,7 +23,7 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
-Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the last two since v3.13.0):
+Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the last one since v3.15.0):
 
 | File | Purpose | Anchor |
 |---|---|---|
@@ -31,6 +31,7 @@ Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the last two since
 | `lib/editor/icons.js` | The Lucide icons the editor draws (UMD: `window.md2docIcons`, injected by `lib/editor/server.js`) | `function svg(name, size)` |
 | `lib/editor/wave-canvas.js` | The wave editor's canvas, drawn by the WaveDrom engine itself (`RenderWaveForm` at scale 1.5, dark recolour via `window.md2docTheme.recolourSvg`), plus the client-coordinate bridge the interaction layer uses (`cellAt`, `boundaryAt`, `cellRectClient`, `anchorClient`, `labelBoxes`, `overflow`). Injected by `lib/editor/server.js` as `window.__md2docWave['wave-canvas.js']`; tested by `test/wave-canvas.test.js` (Playwright, in `test:browser`) | `function createCanvas(opts)` |
 | `lib/wave-overflow.js` | Data-label width estimate (Helvetica AFM table) and the labels wider than their segment: the CLI's stderr overflow warning (`renderMarkdown`'s `warnWaveOverflow` option) and the editor's 「改每拍 K×」 suggestion. In the browser it lands at `window.__md2docWave['wave-overflow.js']` (the server's CommonJS shim) | `function overflowOf(doc)` |
+| `lib/editor/block-catalog.js` | The block catalogue behind the editor's "/" menu (＋ and the toolbar's 在上方／在下方插入 open the same menu): the 16 items in four groups (基本 / 清單 / 區塊 / 圖表), the menu filter (case-insensitive prefix match on each word of an item's label and keywords), the empty skeleton each item writes (`TABLE_SKELETON` is the one 3 × 2 table for every entry point), and the Markdown-shortcut matcher (`matchShortcut`, `shortcutLines`). Pure UMD, no DOM: `window.md2docBlockCatalog`, injected by `lib/editor/server.js` the same way as `convert-md.js`, interpolated raw into a `<script>` (so never a closing script tag in it); tested by `test/block-catalog.test.js` | `function filterSlashItems(` |
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
@@ -433,6 +434,13 @@ overflow warning): **358** every backtick byte, **4** `` \` `` escapes (one line
 that lib), **354** structural. Counted with node, a backslash directly before the backtick
 counting as an escape.
 
+**Measured at v3.15.0** (`lib/md2doc.js` as last changed in `ec0b386`, unchanged at the
+release commit; this release's edits to it — editor CSS, the reader's search fix — added
+no backtick, and v3.14.1 measured the same): **358** every backtick
+byte, **4** `` \` `` escapes (one line, 5283 in that lib, a 6822-line file), **354** structural —
+unchanged from v3.13.0. Counted with node over the file's characters, a backslash directly
+before the backtick counting as an escape.
+
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader
 re-litigates it.
@@ -539,7 +547,7 @@ create a real worktree with `git worktree add`.
 
 Markdown cannot hold an empty block: a blank line is a separator, so an empty paragraph has no bytes to live in. The editor therefore keeps an empty paragraph as a **transient**: a DOM-only `.ed-block` marked `data-ed-transient` with **no `data-block-id`**, which owns no line until it has text. Every render drops it (`applyFullRender` clears the state), and it is discarded when left empty.
 
-Gestures that create one — every caller of `createTransient(` in `lib/editor/client.js`, which is the list to trust over this sentence: Enter at the end or start of a block, Enter in an emptied paragraph or heading, Enter on an empty list item, Backspace on an empty top-level item or an empty heading, ＋ 段落 and 在上方／在下方插入, 分隔線 on a transient, a click below the last block, and a blank file or the deletion of the last block (`ensureEmptyDocTransient` after every render; the only block there, never removed).
+Gestures that create one — every caller of `createTransient(` in `lib/editor/client.js`, which is the list to trust over this sentence: Enter at the end or start of a block, Enter in an emptied paragraph or heading, Enter on an empty list item, Backspace on an empty top-level item or an empty heading, ＋ (Alt+＋ above) and the toolbar's 在上方／在下方插入 — which since v3.15.0 also open the "/" menu on the new transient (`openInsertMenuAt`) —, a "/" item picked in a paragraph that has other text (the paragraph commits and the item goes into a transient below it), 分隔線 on a transient, a divider or a diagram (Mermaid / Graphviz / WaveDrom / math) landed by "/", or a divider by the `---` shortcut (a focused transient below it), a real paragraph emptied and committed while focus stays inside it, e.g. Ctrl+S (`removeEmptiedParagraph`), a click below the last block, and a blank file or the deletion of the last block (`ensureEmptyDocTransient` after every render; the only block there, never removed).
 
 Walker rule: any new code that walks `.ed-block` must decide to skip or include a transient, and any reader of `data-block-id` must survive `null` (`Number(null) === 0` silently binds to block 0, which is how a failed split render could once overwrite line 1).
 
