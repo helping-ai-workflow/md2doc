@@ -8438,6 +8438,67 @@ check('code-chips: a scroll hides the chips of a block that is not edited and mo
   assert.strictEqual(after.hit, true, 'and hit-testable');
 }, { md: CODE_SCROLL_MD });
 
+// v3.17.0 T4: the 編輯圖表 button on Graphviz and Mermaid blocks (D6/E8).
+const DIAG_MD = '# D\n\n```dot\ndigraph { a -> b }\n```\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nOmega.\n';
+const DIAG_MIX_MD = '# D\n\n```js\nvar a = 1;\n```\n\n```wavedrom\n{ signal: [{ name: "a", wave: "01" }] }\n```\n\nOmega.\n';
+const diagBtnState = (page, sel) => page.evaluate((s) => {
+  const b = document.querySelector('.ed-diagram-edit-btn');
+  const d = document.querySelector(s);
+  if (!b || b.hidden || !d) return null;
+  const r = b.getBoundingClientRect(), p = d.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return {
+    text: b.textContent.trim(), right: Math.round(p.right - r.right), top: Math.round(r.top - p.top),
+    hit: !!hit && !!hit.closest('.ed-diagram-edit-btn'), icon: !!b.querySelector('svg'),
+    inContent: !!b.closest('.content'), chips: !!(document.querySelector('.ed-code-chips') || {}).hidden === false,
+  };
+}, sel);
+check('diagram-btn: hovering a Graphviz block shows 編輯圖表 at its top-right; Mermaid too', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await diagBtnState(page, '.graphviz'), null, 'guard: no button while the pointer is elsewhere');
+  await page.hover('.graphviz svg'); await wait(250);
+  const g = await diagBtnState(page, '.graphviz');
+  assert.ok(g, 'button shown over the Graphviz block');
+  assert.ok(g.right >= 4 && g.right <= 10 && g.top >= 4 && g.top <= 10, 'inset from the diagram corner: ' + JSON.stringify(g));
+  assert.deepStrictEqual({ text: g.text, hit: g.hit, icon: g.icon, inContent: g.inContent }, { text: '編輯圖表', hit: true, icon: true, inContent: false });
+  assert.strictEqual(await page.evaluate(() => { const c = document.querySelector('.ed-code-chips'); return !c || c.hidden; }), true, 'no code chips on a diagram block');
+  await page.mouse.move(5, 5); await wait(250);
+  assert.strictEqual(await diagBtnState(page, '.graphviz'), null, 'hidden again when the pointer leaves');
+  await page.hover('.ed-block .mermaid svg'); await wait(250);
+  const m = await diagBtnState(page, '.mermaid');
+  assert.ok(m, 'button shown over the Mermaid block');
+  assert.ok(m.right >= 4 && m.right <= 10 && m.top >= 4 && m.top <= 10, 'inset from the diagram corner: ' + JSON.stringify(m));
+  assert.strictEqual(m.text, '編輯圖表');
+  assert.strictEqual(await page.evaluate(() => { const c = document.querySelector('.ed-code-chips'); return !c || c.hidden; }), true, 'no code chips on a Mermaid block');
+  // The button itself keeps the pointer: moving onto it does not hide it.
+  const box = await page.locator('.ed-diagram-edit-btn').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await wait(250);
+  assert.ok(await diagBtnState(page, '.mermaid'), 'still shown with the pointer on it');
+}, { md: DIAG_MD });
+check('diagram-btn: a click on the diagram itself still opens the lightbox', DESKTOP, async (page) => {
+  await page.hover('.graphviz svg'); await wait(250);
+  await page.click('.graphviz svg'); await wait(300);
+  const s = await page.evaluate(() => {
+    const l = document.querySelector('.lightbox');
+    return { open: !!l && !l.hidden, raw: document.querySelectorAll('.ed-raw').length };
+  });
+  assert.deepStrictEqual(s, { open: true, raw: 0 }, 'lightbox open, no raw box');
+}, { md: DIAG_MD });
+check('diagram-btn: a plain code block and a WaveDrom block show no 編輯圖表', DESKTOP, async (page) => {
+  await page.hover(CODE_PRE); await wait(250);
+  assert.strictEqual(await diagBtnState(page, CODE_PRE), null, 'no button on a plain code block');
+  await page.waitForSelector('.wavedrom-diagram, [id^="WaveDrom_Display_"]', { timeout: 20000 });
+  await page.hover('[id^="WaveDrom_Display_"] svg, .wavedrom-diagram svg'); await wait(250);
+  assert.strictEqual(await diagBtnState(page, '[id^="WaveDrom_Display_"], .wavedrom-diagram'), null, 'no button on a WaveDrom block');
+  assert.strictEqual(await page.evaluate(() => { const b = document.querySelector('.ed-wave-edit-btn'); return !!b && !b.hidden; }), true, 'guard: the wave button is the one shown');
+}, { md: DIAG_MIX_MD });
+check('diagram-btn: clicking the button before the panel exists changes nothing', DESKTOP, async (page) => {
+  await page.hover('.graphviz svg'); await wait(250);
+  await page.locator('.ed-diagram-edit-btn').click(); await wait(300);
+  const s = await page.evaluate(() => ({ raw: document.querySelectorAll('.ed-raw').length, dirty: !!document.querySelector('.ed-dirty, [data-dirty="true"]') }));
+  assert.strictEqual(s.raw, 0, 'no raw box opened by the button');
+}, { md: DIAG_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

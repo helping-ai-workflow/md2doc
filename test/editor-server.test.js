@@ -210,7 +210,7 @@ function assertNoAutoCloseFor(server, ms) {
     }
 
     // Finding 3(a): missing/wrong content-type on a state-changing POST → 415
-    for (const p of ['/api/render', '/api/save', '/api/ping']) {
+    for (const p of ['/api/render', '/api/save', '/api/ping', '/api/preview']) {
       const bare = await new Promise((resolve, reject) => {
         const r = http.request(
           { host: '127.0.0.1', port: srv.port, method: 'POST', path: p, headers: {} },
@@ -1092,6 +1092,93 @@ function assertNoAutoCloseFor(server, ms) {
       srv.close();
     }
     console.log('server: /api/lib serves mermaid.js, wavedrom.js and katex.css on demand, 404 otherwise — OK');
+  }
+
+  // v3.17.0 T4 (D11, R31): POST /api/preview is the stateless Graphviz preview.
+  // R31 status codes (a later ruling than the brief's 404): an unknown or
+  // non-integer fileId is 400 (the /api/asset rule), a bad Host 403, a
+  // non-dot lang 400, a dot syntax error 422 with the first engine line.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-preview-'));
+    const mdPath = path.join(dir, 'p.md');
+    const drawioPath = path.join(dir, 'x.drawio');
+    fs.writeFileSync(drawioPath, fs.readFileSync(path.join(__dirname, 'fixtures', 'single.drawio'), 'utf8'), 'utf8');
+    fs.writeFileSync(mdPath, '# P\n\n![d](x.drawio)\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      const ok = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph { a -> b }' });
+      assert.strictEqual(ok.status, 200, 'dot preview: ' + ok.body);
+      const svg = JSON.parse(ok.body).svg;
+      assert.ok(svg.startsWith('<svg'), 'bare svg, got ' + svg.slice(0, 40));
+      assert.ok(svg.includes('>a<') && svg.includes('>b<'), 'node labels in the svg');
+      const bad = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph {' });
+      assert.strictEqual(bad.status, 422, 'syntax error is 422, got ' + bad.status + ' ' + bad.body);
+      const err = JSON.parse(bad.body).error;
+      assert.ok(/syntax error/.test(err), 'error names the syntax error, got ' + err);
+      assert.ok(err.indexOf('\n') === -1, 'only the first line of the engine message');
+      assert.strictEqual((await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'mermaid', source: 'graph TD' })).status, 400, 'lang must be dot');
+      assert.strictEqual((await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 5 })).status, 400, 'source must be a string');
+      for (const fid of [99, 'length', null, -1, 1.5]) {
+        const r = await req(srv.port, 'POST', '/api/preview', { fileId: fid, lang: 'dot', source: 'digraph { a }' });
+        assert.strictEqual(r.status, 400, 'fileId ' + JSON.stringify(fid) + ' must be 400, got ' + r.status);
+      }
+      const big = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'a'.repeat(1024 * 1024 + 10) }).catch((e) => ({ status: 'closed', err: e }));
+      assert.ok(big.status !== 200, 'a source over 1 MB is not rendered');
+      // Host check runs first.
+      const badHost = await new Promise((resolve, reject) => {
+        const r = http.request({ host: '127.0.0.1', port: srv.port, method: 'POST', path: '/api/preview',
+          headers: { host: 'evil.example:' + srv.port, 'content-type': 'application/json' } },
+          (res) => { let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode, body: b })); });
+        r.on('error', reject);
+        r.write(JSON.stringify({ fileId: 0, lang: 'dot', source: 'digraph { a }' }));
+        r.end();
+      });
+      assert.strictEqual(badHost.status, 403, 'bad Host is 403 before anything else');
+
+      // Source pin: the handler neither tracks drawio refs nor renders markdown.
+      const code = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'server.js'), 'utf8');
+      const at = code.indexOf("url.pathname === '/api/preview'");
+      assert.ok(at > 0, 'the /api/preview route exists');
+      const start = code.lastIndexOf('if (', at);
+      const end = code.indexOf("\n      if (req.method", at);
+      const handler = code.slice(start, end);
+      assert.ok(handler.length > 50 && handler.length < 3000, 'handler slice sane, ' + handler.length);
+      assert.ok(handler.indexOf('trackDrawioRefs') === -1, 'the preview handler must not call trackDrawioRefs');
+      assert.ok(handler.indexOf('renderMarkdown') === -1, 'the preview handler must not call renderMarkdown');
+    } finally {
+      srv.close();
+    }
+
+    // No tracking: previewing must leave drawio staleness exactly as it was.
+    // A positive control proves the probe can see tracking at all: a render
+    // whose content has no drawio ref empties the tracked set, and then the
+    // same touch reports nothing.
+    for (const mode of ['preview', 'render-without-drawio']) {
+      const srv2 = await createEditorServer({ files: [mdPath], clientJs: '' });
+      try {
+        const page = await req(srv2.port, 'GET', '/edit/0');
+        const cid = clientIdOf(page.body);
+        if (mode === 'preview') {
+          const r = await req(srv2.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph { a -> b }' });
+          assert.strictEqual(r.status, 200);
+        } else {
+          const r = await req(srv2.port, 'POST', '/api/render', { fileId: 0, content: '# no drawio\n' });
+          assert.strictEqual(r.status, 200);
+        }
+        const t = new Date(Date.now() + 5000);
+        fs.utimesSync(drawioPath, t, t);
+        const ping = await req(srv2.port, 'POST', '/api/ping', { fileId: 0, drawioClientId: cid });
+        if (mode === 'preview') {
+          assert.strictEqual(ping.status, 200, 'after a preview the touched drawio is still reported stale, got ' + ping.status);
+          assert.strictEqual(JSON.parse(ping.body).stale, true);
+        } else {
+          assert.strictEqual(ping.status, 204, 'positive control: a render without drawio stops the staleness report, got ' + ping.status);
+        }
+      } finally {
+        srv2.close();
+      }
+    }
+    console.log('server: POST /api/preview — 200/422/400/403/415 and no drawio tracking — OK');
   }
 
   console.log('editor-server.test.js OK');
