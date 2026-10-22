@@ -8010,20 +8010,140 @@ check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKT
   assert.deepStrictEqual(Object.assign(s, { renders: renderTotal(page) - before }), { editable: false, status: 'clean', title: false, renders: 0 });
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
   // The next Ctrl+Z undoes the edit made before the visit, so the visit
-  // pushed nothing on top of it.
+  // pushed nothing on top of it. The paragraph is committed by Ctrl+S first
+  // rather than by the press on the code block: a press whose blur-commit
+  // render lands before the button comes up loses its click (the race
+  // wireBlockSelection()'s comment measures) — measured once here under a
+  // full-suite load, never in six isolated runs.
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'guard: the paragraph edit is committed and saved');
   await clickText(page, 'endmodule'); await renderIdle(page);
   assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the edit is open');
   await page.keyboard.press('Escape'); await renderIdle(page);
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
 }, { md: CODE_MD });
+// Fix round 1 (R49 M6): waits are on what the page and the disk say, never a
+// fixed sleep. `diskUntil` polls the file until it reads `want` (or 10 s
+// pass) and returns what it last read; `saveStateUntil` does the same for the
+// toolbar's save status. The caller asserts the returned value.
+async function diskUntil(boot, want) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const d = fs.readFileSync(boot.mdPath, 'utf8');
+    if (d === want || Date.now() > deadline) return d;
+    await wait(50);
+  }
+}
+async function saveStateUntil(page, want) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const st = await page.evaluate(() => document.querySelector('.ed-toolbar-status').getAttribute('data-state'));
+    if (st === want || Date.now() > deadline) return st;
+    await wait(50);
+  }
+}
+// R48: Ctrl+S commits and saves, and the edit stays open where the caret was.
 check('code-edit: Ctrl+S commits the edit and saves', DESKTOP, async (page, boot) => {
   await clickText(page, 'endmodule'); await page.keyboard.type('q');
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'the save landed');
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
-  assert.strictEqual(await codeEdit(page), null, 'the commit closed the edit');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true },
+    'the edit is open again at the same caret');
 }, { md: CODE_MD });
+// R48: keys typed while the Ctrl+S render is out land in the code, in order.
+check('code-edit: typing straight on after Ctrl+S lands in the code', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('rs'); await page.keyboard.press('Enter'); await page.keyboard.type('t');
+  await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleq')), CODE_MD.replace('endmodule', 'endmoduleq'),
+    'the first save wrote what was there at Ctrl+S');
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) },
+    { edit: { text: 'module m;\nendmoduleqrs\nt', caret: 24, focused: true }, notice: null });
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleqrs\nt')), CODE_MD.replace('endmodule', 'endmoduleqrs\nt'));
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean');
+}, { md: CODE_MD });
+// R47: typed code that has not left the edit is unsaved work — the dot, the
+// status and the beforeunload guard all say so; back to the opened text, all
+// clean again.
+check('code-edit: typing in the open edit marks the document unsaved (R47)', DESKTOP, async (page) => {
+  const state = () => page.evaluate(() => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return { title: document.title.charAt(0) === '●', status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+      guard: ev.defaultPrevented };
+  });
+  await clickText(page, 'endmodule');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'guard: clean on open');
+  await page.keyboard.type('q');
+  assert.deepStrictEqual(await state(), { title: true, status: 'dirty', guard: true }, 'typed, not left');
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: still editing');
+  await page.keyboard.press('Backspace');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'back to the opened text');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'left unchanged');
+}, { md: CODE_MD });
+// R49 (M5a): an unterminated fence on the in-place path — an untouched visit
+// writes nothing, an edit writes the closing fence (R37's repair).
+check('code-edit: an unterminated fence: an untouched visit writes nothing, an edit closes it (R37)', DESKTOP, async (page, boot) => {
+  const MD = '# D\n\nAlpha.\n\n```\ncode\n';
+  const before = renderTotal(page);
+  await clickText(page, 'code');
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the in-place edit opened');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ renders: renderTotal(page) - before, disk: await saveAndRead(page, boot) }, { renders: 0, disk: MD });
+  await clickText(page, 'code'); await page.keyboard.type('x');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\ncodex\n```\n');
+}, { md: '# D\n\nAlpha.\n\n```\ncode\n' });
+// R49 (M5b) / R27 (8): an untouched "/" 程式碼 insert left by a click
+// elsewhere is taken away again — file unchanged, no undo step left.
+check('code-edit: an untouched "/" 程式碼 insert abandoned by a click elsewhere is discarded (R27)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
+  await clickText(page, 'Omega.'); await renderIdle(page);
+  const s = await page.evaluate(() => ({ status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    codeBlocks: document.querySelectorAll('.content .ed-block[data-block-type="code"]').length }));
+  assert.deepStrictEqual(s, { status: 'clean', codeBlocks: 0 });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'no undo step was left behind');
+}, { md: BASE_MD });
+// R49 (M4) / R23: a reconciliation that lands while the code edit is open
+// reopens the block as a raw box holding the fences and the typed text. The
+// R83 / R86 order: the split renders, its undo's render fails and so does
+// the redraw (a reconciliation is owed); the code block above the split
+// reads the same on screen and in `lines`, so it opens; its commit runs the
+// owed redraw, which captures the edit's snapshot and reopens it.
+check('code-edit: a reconciliation that lands while the edit is open reopens it as a raw box with the fences and the typed text (R23)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [300, 2000, 1000, 1500], [false, true, true, false]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  // Clicked while the undo renders, as R83's quote is: the click settles
+  // first, and the block opens once the redraw has failed too.
+  await clickText(page, 'code');
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  await page.keyboard.press('End'); await page.keyboard.type(' ab');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'code ab', caret: 7, focused: true }, 'guard: the edit is open on the stale screen');
+  await page.keyboard.press('Escape');
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the commit ran the owed redraw');
+  assert.deepStrictEqual({ raw: await rawBox(page), edit: await codeEdit(page) },
+    { raw: { value: '```\ncode ab\n```', caret: 11, focused: true }, edit: null });
+  await page.keyboard.press('Control+Enter'); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\ncode ab\n```\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+}, { md: '# D\n\n```\ncode\n```\n\nBravo paragraph text.\n\nOmega.\n' });
 check('code-edit: keys typed right after the click land at the click point', DESKTOP, async (page) => {
   await clickText(page, 'endmodule', 'start'); await page.keyboard.type('zz');
   assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nzzendmodule', caret: 12, focused: true });
