@@ -8202,7 +8202,8 @@ check('code-edit: a click inside the open edit keeps it and writes nothing (R24)
 check('code-edit: a click in the blank area right of a line, and on an empty body, opens the edit (R26)', DESKTOP, async (page, boot) => {
   const pt = await page.evaluate(() => {
     const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
-    const kw = pre.querySelector('.hljs-keyword');
+    // The last line: the first line's right end is under the chips (v3.17.0 T3).
+    const kw = [...pre.querySelectorAll('.hljs-keyword')].pop();
     const p = pre.getBoundingClientRect(); const k = kw.getBoundingClientRect();
     const x = p.right - 30; const y = k.top + k.height / 2;
     const hit = document.elementFromPoint(x, y);
@@ -8210,7 +8211,7 @@ check('code-edit: a click in the blank area right of a line, and on an empty bod
   });
   assert.strictEqual(pt.inPre, true, 'guard: the point is inside the pre');
   await page.mouse.click(pt.x, pt.y);
-  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 9, focused: true }, 'blank area: the end of that line');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 19, focused: true }, 'blank area: the end of that line');
   await page.keyboard.press('Escape'); await renderIdle(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
 }, { md: CODE_MD });
@@ -8248,6 +8249,159 @@ check('code-edit: "```js" and an Escape held during a slow render land in the bo
   assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) }, { edit: null, notice: null });
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\njs\n```\n\nOmega.\n');
 }, { md: BASE_MD });
+
+// ── code-chips (v3.17.0 T3): the language chip and the copy chip ──
+const CODE_PRE = '.ed-block[data-block-type="code"] > pre';
+// Same recorder / refuser as reader-click's stubClipboard (R34): both engines,
+// and the assertion reads what was handed over.
+async function stubClipboard(page, refuse) {
+  await page.evaluate((no) => {
+    window.__copied = null;
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: (t) => { if (no) return Promise.reject(new Error('denied')); window.__copied = t; return Promise.resolve(); },
+    } });
+    if (no) document.execCommand = () => false;
+  }, !!refuse);
+}
+const chipsState = (page) => page.evaluate(() => {
+  const c = document.querySelector('.ed-code-chips');
+  const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+  if (!c || c.hidden) return null;
+  const r = c.getBoundingClientRect(), p = pre.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const lang = c.querySelector('.ed-code-lang'), copy = c.querySelector('.ed-code-copy');
+  return {
+    right: Math.round(p.right - r.right), top: Math.round(r.top - p.top), h: Math.round(r.height),
+    label: lang.textContent.trim(), copyLabel: copy.getAttribute('aria-label'), copyText: copy.textContent.trim(),
+    hit: !!hit && !!hit.closest('.ed-code-chips'), copied: window.__copied,
+  };
+});
+const langMenu = (page) => page.evaluate(() => {
+  const m = document.querySelector('.ed-code-langmenu');
+  if (!m) return null;
+  const f = m.querySelector('input');
+  return { items: [...m.querySelectorAll('.ed-code-langitem')].map((b) => b.textContent.trim()),
+    focused: document.activeElement === f, w: Math.round(m.getBoundingClientRect().width),
+    cursor: (m.querySelector('[data-ed-lang-cursor]') || {}).textContent || null };
+});
+const hoverCodeBlock = async (page) => { await page.hover(CODE_PRE); await wait(200); };
+check('code-chips: hovering a code block shows Verilog and copy at its top-right', DESKTOP, async (page) => {
+  assert.strictEqual(await chipsState(page), null, 'guard: no chips while the pointer is elsewhere');
+  await hoverCodeBlock(page);
+  const s = await chipsState(page);
+  assert.ok(s, 'chips shown');
+  assert.ok(s.right >= 4 && s.right <= 10, 'right inset: ' + s.right);
+  assert.ok(s.top >= 4 && s.top <= 10, 'top inset: ' + s.top);
+  assert.deepStrictEqual({ label: s.label, h: s.h, hit: s.hit, copyLabel: s.copyLabel }, { label: 'Verilog', h: 24, hit: true, copyLabel: 'Copy code' });
+  await page.mouse.move(5, 5); await wait(200);
+  assert.strictEqual(await chipsState(page), null, 'hidden again when the pointer leaves');
+}, { md: CODE_MD });
+check('code-chips: picking Python rewrites only the fence word, one undo step', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  // R40: the chip opened the edit (caret at 0) and then the menu, whose filter holds focus.
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ n: m.items.length, first: m.items[0], last: m.items[11], focused: m.focused, w: m.w, cursor: m.cursor },
+    { n: 12, first: 'Verilog', last: '純文字', focused: true, w: 220, cursor: 'Verilog' });
+  assert.strictEqual(await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }), 'module m;\nendmodule', 'the chip opened the edit');
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.strictEqual(await langMenu(page), null, 'the menu closed');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 0, focused: true }, 'the edit is open again');
+  assert.strictEqual((await chipsState(page)).label, 'Python');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;\nendmodule\n```\n\nOmega.\n');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await wait(900); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'one undo restores the old language');
+}, { md: CODE_MD });
+check('code-chips: picking while editing keeps the typing and the caret', DESKTOP, async (page, boot) => {
+  await clickText(page, 'module', 'start');
+  await page.keyboard.press('End'); await page.keyboard.type('x');
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;x\nendmodule', caret: 10, focused: true });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;x\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-chips: the language filter takes 「py」 and Enter picks', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.type('py'); await wait(100);
+  assert.deepStrictEqual((await langMenu(page)).items, ['Python']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-chips: the arrow keys move the cursor, Esc closes the menu and keeps the edit', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+  assert.strictEqual((await langMenu(page)).cursor, 'Bash');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await langMenu(page), null, 'Esc closed the menu');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'focus is back in the edit, typing kept');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD, 'nothing was written');
+  await page.keyboard.type('r');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleqr', 'typing goes on in the code');
+}, { md: CODE_MD });
+check('code-chips: 純文字 removes the language word', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("純文字")'); await renderIdle(page);
+  assert.strictEqual((await chipsState(page)).label, '純文字');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-chips: 純文字 keeps the words after the first', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("純文字")'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```title="a"\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD.replace('```verilog', '```verilog title="a"') });
+check('code-chips: copy writes the edit text, uncommitted typing included, and shows Copied', DESKTOP, async (page) => {
+  await stubClipboard(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-copy'); await wait(150);
+  const s = await chipsState(page);
+  assert.deepStrictEqual({ copied: s.copied, label: s.copyLabel, text: s.copyText },
+    { copied: 'module m;\nendmoduleq', label: 'Copied', text: 'Copied' });
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'the edit keeps focus and text');
+  await wait(2200);
+  const back = await chipsState(page);
+  assert.deepStrictEqual([back.copyLabel, back.copyText], ['Copy code', ''], 'reverts after two seconds');
+}, { md: CODE_MD });
+check('code-chips: copy on a block that is not being edited copies its code', DESKTOP, async (page) => {
+  await stubClipboard(page);
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-copy'); await wait(150);
+  assert.strictEqual((await chipsState(page)).copied, 'module m;\nendmodule');
+  assert.strictEqual(await codeEdit(page), null, 'copying does not open the edit');
+}, { md: CODE_MD });
+check('code-chips: a refused clipboard selects the code and says Press Ctrl+C', DESKTOP, async (page) => {
+  await stubClipboard(page, true);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-copy'); await wait(200);
+  const r = await page.evaluate(() => ({ sel: String(window.getSelection()), label: document.querySelector('.ed-code-copy').getAttribute('aria-label'),
+    want: /Mac|iPhone|iPad/.test(navigator.platform || '') ? 'Press Cmd+C' : 'Press Ctrl+C' }));
+  assert.strictEqual(r.sel.replace(/\n$/, ''), 'module m;\nendmoduleq', 'the whole code is selected');
+  assert.strictEqual(r.label, r.want);
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleq', 'the edit is untouched');
+}, { md: CODE_MD });
+
+const CODE_SCROLL_MD = '# D\n\n' + Array.from({ length: 30 }, (_, i) => 'Filler ' + i + '.').join('\n\n') +
+  '\n\n```verilog\nmodule m;\nendmodule\n```\n\n' + Array.from({ length: 30 }, (_, i) => 'Tail ' + i + '.').join('\n\n') + '\n';
+check('code-chips: a scroll hides the chips of a block that is not edited and moves an edit\'s with it', DESKTOP, async (page) => {
+  await page.evaluate(() => document.querySelector('.ed-block[data-block-type="code"]').scrollIntoView({ block: 'center' }));
+  await wait(200);
+  await hoverCodeBlock(page);
+  assert.ok(await chipsState(page), 'guard: chips shown on hover');
+  await page.evaluate(() => window.scrollBy(0, 40)); await wait(300);
+  assert.strictEqual(await chipsState(page), null, 'hidden by the scroll');
+  await clickText(page, 'endmodule');
+  const before = await chipsState(page);
+  assert.ok(before, 'chips shown while editing');
+  await page.evaluate(() => window.scrollBy(0, 60)); await wait(300);
+  const after = await chipsState(page);
+  assert.ok(after, 'chips still shown while editing');
+  assert.ok(after.top >= 4 && after.top <= 10 && after.right >= 4 && after.right <= 10, 'still at the block corner: ' + JSON.stringify(after));
+  assert.strictEqual(after.hit, true, 'and hit-testable');
+}, { md: CODE_SCROLL_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
