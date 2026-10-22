@@ -1122,8 +1122,11 @@ function assertNoAutoCloseFor(server, ms) {
         const r = await req(srv.port, 'POST', '/api/preview', { fileId: fid, lang: 'dot', source: 'digraph { a }' });
         assert.strictEqual(r.status, 400, 'fileId ' + JSON.stringify(fid) + ' must be 400, got ' + r.status);
       }
-      const big = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'a'.repeat(1024 * 1024 + 10) }).catch((e) => ({ status: 'closed', err: e }));
-      assert.ok(big.status !== 200, 'a source over 1 MB is not rendered');
+      // Over the 1 MB limit readJson rejects and destroys the request: the
+      // connection closes without a 200 (a lost limit would answer 200 or 400).
+      const big = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'a'.repeat(1024 * 1024 + 10) })
+        .then((r) => ({ closed: false, status: r.status }), (e) => ({ closed: true, code: e.code }));
+      assert.ok(big.closed || big.status === 500, 'a source over 1 MB is refused, got ' + JSON.stringify(big));
       // Host check runs first.
       const badHost = await new Promise((resolve, reject) => {
         const r = http.request({ host: '127.0.0.1', port: srv.port, method: 'POST', path: '/api/preview',

@@ -8450,7 +8450,7 @@ const diagBtnState = (page, sel) => page.evaluate((s) => {
   return {
     text: b.textContent.trim(), right: Math.round(p.right - r.right), top: Math.round(r.top - p.top),
     hit: !!hit && !!hit.closest('.ed-diagram-edit-btn'), icon: !!b.querySelector('svg'),
-    inContent: !!b.closest('.content'), chips: !!(document.querySelector('.ed-code-chips') || {}).hidden === false,
+    inContent: !!b.closest('.content'),
   };
 }, sel);
 check('diagram-btn: hovering a Graphviz block shows 編輯圖表 at its top-right; Mermaid too', DESKTOP, async (page) => {
@@ -8492,11 +8492,13 @@ check('diagram-btn: a plain code block and a WaveDrom block show no 編輯圖表
   assert.strictEqual(await diagBtnState(page, '[id^="WaveDrom_Display_"], .wavedrom-diagram'), null, 'no button on a WaveDrom block');
   assert.strictEqual(await page.evaluate(() => { const b = document.querySelector('.ed-wave-edit-btn'); return !!b && !b.hidden; }), true, 'guard: the wave button is the one shown');
 }, { md: DIAG_MIX_MD });
+// T5 REPLACES this check: once openDiagramPanel exists the click must open it
+// (.ed-diagram-panel present, the button hidden). Until then it pins the stub.
 check('diagram-btn: clicking the button before the panel exists changes nothing', DESKTOP, async (page) => {
   await page.hover('.graphviz svg'); await wait(250);
   await page.locator('.ed-diagram-edit-btn').click(); await wait(300);
-  const s = await page.evaluate(() => ({ raw: document.querySelectorAll('.ed-raw').length, dirty: !!document.querySelector('.ed-dirty, [data-dirty="true"]') }));
-  assert.strictEqual(s.raw, 0, 'no raw box opened by the button');
+  const s = await page.evaluate(() => ({ raw: document.querySelectorAll('.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length }));
+  assert.deepStrictEqual(s, { raw: 0, panel: 0 }, 'no raw box and no panel opened by the stub');
 }, { md: DIAG_MD });
 
 (async () => {
