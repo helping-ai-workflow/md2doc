@@ -435,6 +435,21 @@ async function visibleBannerText(page) {
   });
 }
 
+// v3.15.0 T5: the link button opens the in-place `.ed-linkbar` field instead
+// of a native prompt. Waits for it (a bare timeout here would say nothing —
+// the failure names the missing field), replaces whatever it was pre-filled
+// with by `text` (empty clears it), and applies with Enter.
+async function answerLinkField(page, text) {
+  try {
+    await page.waitForSelector('.ed-linkbar input', { timeout: 4000 });
+  } catch (e) {
+    throw new Error('the URL field never opened (.ed-linkbar input)');
+  }
+  await page.$eval('.ed-linkbar input', (i) => { i.focus(); i.select(); });
+  if (text === '') await page.keyboard.press('Backspace');
+  else await page.keyboard.type(text);
+  await page.keyboard.press('Enter');
+}
 // v3.3.0 階段 0: 合成 .click() 對「dirty burst + 真人按壓時間」那一族缺陷是盲的
 // —— 真人按滑鼠有按壓時間，合成點擊沒有。實測（見 task-1 report 的量測表）
 // ⠿ / ＋ 選單項在 dirty burst ＋ 按壓 80 ms 時 clickFired = 0。
@@ -642,7 +657,10 @@ async function armDetachProbe(page, itemSel, itemLabel) {
     // order, which is not necessarily the one this call means to press.
     document.querySelectorAll('[data-journey-target]')
       .forEach((el) => el.removeAttribute('data-journey-target'));
-    const hits = Array.from(document.querySelectorAll(s)).filter((e) => e.textContent.trim() === t);
+    // v3.15.0 T2: a "/" menu row's text is its label plus its hint, so it is
+    // matched by its .ed-slash-label.
+    const hits = Array.from(document.querySelectorAll(s)).filter((e) =>
+      (e.querySelector('.ed-slash-label') || e).textContent.trim() === t);
     if (!hits.length) throw new Error('前提失敗：選單開了但找不到項目 ' + t);
     hits[hits.length - 1].setAttribute('data-journey-target', '1');
   }, itemSel, itemLabel);
@@ -1285,16 +1303,9 @@ async function main() {
     ['link', '# Doc\n\nAlpha [*ital* bold](https://example.com) text here.\n', '**[', '連結'],
   ]) {
     const ctx = await newPage('# Doc\n\nAlpha *ital* bold text here.\n');
-    // 註冊在按下【之前】：window.prompt() 會擋住頁面直到有人回答它，所以一個
-    // 晚註冊的 handler 換來的不是一句看得懂的斷言失敗，而是掛住＋逾時。跑完再
-    // 斷言它真的被叫過 —— 否則對話框從沒開過的情況下這一列仍然可以綠。
-    let dialogFired = false;
-    if (tb === 'link') {
-      ctx.page.once('dialog', async (d) => {
-        dialogFired = true;
-        try { await d.accept('https://example.com'); } catch (e) { /* already gone */ }
-      });
-    }
+    // v3.15.0 T5: the 🔗 answer is typed into the in-place URL field (no native
+    // dialog any more). answerLinkField() throws a readable error when the
+    // field never opens, which is what the old `dialogFired` assertion said.
     await ctx.page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
       const em = el.querySelector('em');
@@ -1307,12 +1318,9 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 250));
     await pressClick(ctx.page, '[data-ed-tb="' + tb + '"]', 80);
+    if (tb === 'link') await answerLinkField(ctx.page, 'https://example.com');
     await new Promise((r) => setTimeout(r, 400));
     const disk = await saveAndRead(ctx);
-    if (tb === 'link') {
-      assert.strictEqual(dialogFired, true,
-        label + '：連結對話框從頭到尾沒有開過 —— 這一列什麼都沒量到，got:\n' + disk);
-    }
     assert.strictEqual(disk.indexOf(poison), -1,
       label + '：不得留下空標記的殘骸（' + poison + '），got:\n' + disk);
     assert.strictEqual(disk, expect, label + '：整份文件必須就是這樣，got:\n' + disk);
@@ -1610,8 +1618,10 @@ async function main() {
     //    vacuous-green trap: a table already sitting at max scroll makes
     //    scrollBy() silently do nothing, and every assertion below would
     //    then be exercising the NO-scroll path instead of the fix.
+    // v3.15.0 T7: the cycling 對齊 button became 靠左 / 置中 / 靠右, set
+    // directly; the scroll survival is runSetAlign()'s now.
     const scrollBefore = await page.evaluate(() => window.scrollY);
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="靠左"]');
     await new Promise((r) => setTimeout(r, 300));
     const scrollAfter = await page.evaluate(() => window.scrollY);
     assert.notStrictEqual(scrollAfter, scrollBefore,
@@ -1625,6 +1635,7 @@ async function main() {
         menuHidden: menu.hidden,
         style: th.getAttribute('style'),
         hlCount: document.querySelectorAll('.ed-te-hl').length,
+        pressed: Array.from(menu.querySelectorAll('[aria-pressed="true"]')).map((b) => b.getAttribute('aria-label')),
       };
     }, table0);
     // 2) the menu itself must still be showing.
@@ -1635,17 +1646,21 @@ async function main() {
     //    highlight and no working buttons (see the next scenario below).
     assert.ok(state1.hlCount > 0,
       '選單顯示但沒有欄位高亮，是殭屍選單而非活的選單，got hlCount=' + state1.hlCount);
-    assert.ok(/left/.test(state1.style || ''),
-      '第一次點擊必須套用 left 對齊，got style=' + state1.style);
+    assert.strictEqual(state1.style, 'text-align:left',
+      '靠左 必須套用 left 對齊，got style=' + state1.style);
+    assert.deepStrictEqual(state1.pressed, ['靠左'],
+      '靠左 必須是按下的那一顆，got ' + JSON.stringify(state1.pressed));
 
-    // 4) a second click must actually cycle — not silently no-op on a
+    // 4) a second press must actually apply — not silently no-op on a
     //    detached teMenuColIndex/teMenuKind.
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="置中"]');
     await new Promise((r) => setTimeout(r, 300));
-    const style2 = await page.evaluate((ts) =>
-      document.querySelector(ts + ' thead th:nth-child(2)').getAttribute('style'), table0);
-    assert.ok(/center/.test(style2 || ''),
-      '第二次點擊必須把對齊循環到 center，got style=' + style2);
+    const state2 = await page.evaluate((ts) => ({
+      style: document.querySelector(ts + ' thead th:nth-child(2)').getAttribute('style'),
+      pressed: Array.from(document.querySelectorAll('.ed-te-menu [aria-pressed="true"]')).map((b) => b.getAttribute('aria-label')),
+    }), table0);
+    assert.deepStrictEqual(state2, { style: 'text-align:center', pressed: ['置中'] },
+      '第二次按 置中 必須把對齊設成 center，got ' + JSON.stringify(state2));
 
     await page.close(); b.srv.close();
     console.log('journey: the align menu survives a scroll that interrupts its own opening — OK');
@@ -1730,7 +1745,7 @@ async function main() {
       '測試前提失敗：那段文字已經進了磁碟 —— burst 已經被結算掉了，' +
       '這個場景就不再測到 burst-elsewhere 路徑（見 resolveBurst()：它不 blur）');
 
-    await page.click('.ed-te-menu-align');
+    await page.click('.ed-te-menu button[aria-label="靠左"]');
     await new Promise((r) => setTimeout(r, 300));
     // Settle past the guarded requestAnimationFrame tick.
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
@@ -1744,11 +1759,11 @@ async function main() {
         style: th ? th.getAttribute('style') : null,
       };
     }, table0);
-    // The align itself still applies (runCycleAlign() captured tableEl/
-    // colIndex as locals before the await, same defence
-    // runDeleteColumn()/runDeleteRow() already use) — only the MENU's
-    // resurrection is what round 2 must prevent.
-    assert.ok(/left/.test(state.style || ''),
+    // The align itself still applies (runSetAlign(), runCycleAlign() before
+    // v3.15.0 T7, captured tableEl/colIndex as locals before the await, same
+    // defence runDeleteColumn()/runDeleteRow() already use) — only the
+    // MENU's resurrection is what round 2 must prevent.
+    assert.strictEqual(state.style, 'text-align:left',
       '對齊本身必須仍然套用（用呼叫當下捕捉的區域變數），got style=' + state.style);
     assert.strictEqual(state.menuHidden, true,
       '無關的 burst 收尾合法關閉選單後，選單不可被復活成殭屍，got: ' + JSON.stringify(state));
@@ -1810,10 +1825,8 @@ async function main() {
     // reachability is a layout question tracked separately, not an implicit
     // precondition of this matrix. 1000px gives every button clear margin.
     await setViewportSettled(ctx.page, { width: 1000, height: 600 });
-    // window.prompt() blocks the page until something answers it, and
-    // applyLinkToggle() opens one — measured: without this handler the
-    // 'link' row hangs until puppeteer's protocolTimeout kills the run.
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
+    // v3.15.0 T5: the 🔗 button opens the in-place URL field, not a native
+    // prompt; the 'link' row answers it through its `afterPress` hook.
     if (state === 'nest') {
       await ctx.page.evaluate(() => {
         const els = document.querySelectorAll('.ed-li-text');
@@ -2099,10 +2112,11 @@ async function main() {
       // 磁碟（[Alpha](https://example.com/)），activeElement 回到
       // P.ed-wys-armed、工具列 15 顆。
       { id: 'link',         state: 'sel',  answer: 'caret',
+        afterPress: (ctx) => answerLinkField(ctx.page, 'https://example.com/'),
         effect: (b, a) => a.marks === ' | A(Alpha) | ' ? null
           : '選取的字必須變成連結，而且不得多出別的標記，got ' + a.marks,
         disk: (d) => d === '# H\n\n[Alpha](https://example.com/) bravo charlie delta.\n\nBravo paragraph.\n'
-          ? null : '磁碟上必須是對話框回答的那個網址' },
+          ? null : '磁碟上必須是網址欄裡輸入的那個網址' },
       { id: 'outdent',      state: 'nest', answer: 'caret',
         effect: (b, a) => b.indents !== 'null,0,0,1,0,null'
           ? 'nest fixture 的縮排層級不是預期的樣子，got ' + b.indents
@@ -2209,6 +2223,10 @@ async function main() {
       const before = await docSnap(ctx.page);
       await pressClick(ctx.page, '[data-ed-tb="' + row.id + '"]', 80);
       await new Promise((r) => setTimeout(r, 450));
+      if (row.afterPress) {
+        await row.afterPress(ctx);
+        await new Promise((r) => setTimeout(r, 450));
+      }
       // Review I3: read the file directly HERE, before anything below gets a
       // chance to press Ctrl+S of its own accord (saveAndRead(), which
       // `row.disk` runs through further down, issues its own Ctrl+S — a
@@ -2415,7 +2433,6 @@ async function main() {
   // 這一段就是當初缺的那個斷言：取消是最常見的手勢，而它比接受更不該有代價。
   {
     const ctx = await newPage(V2_SEL_MD);
-    ctx.page.on('dialog', async (d) => { try { await d.dismiss(); } catch (e) { /* already gone */ } });
     await ctx.page.click('.ed-block[data-block-id="1"] .ed-wys-armed');
     await ctx.page.evaluate(() => {
       const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
@@ -2426,6 +2443,9 @@ async function main() {
     });
     await new Promise((r) => setTimeout(r, 300));
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    // v3.15.0 T5: 取消 = Esc in the URL field (the dialog is gone).
+    await ctx.page.waitForSelector('.ed-linkbar input', { timeout: 4000 });
+    await ctx.page.keyboard.press('Escape');
     await new Promise((r) => setTimeout(r, 900));
     const held = await ctx.page.evaluate(() => {
       const s = window.getSelection();
@@ -2547,7 +2567,6 @@ async function main() {
     const ctx = await newPage('# H\n\n| A | B |\n| --- | --- |\n| alpha | bravo |\n\nTail para two.\n');
     if (primed) await primeOneCommit(ctx);
     await installPatchSpy(ctx);
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
     await ctx.page.click('.ed-wys-cell');
     await new Promise((r) => setTimeout(r, 250));
     await ctx.page.evaluate(() => {
@@ -2565,17 +2584,25 @@ async function main() {
     assert.strictEqual(linkDisabled, false,
       'V2d: 儲存格裡有非空選取時 🔗 必須是 enabled，否則這個情境什麼都沒點到');
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    await answerLinkField(ctx.page, 'https://example.com/');
     await new Promise((r) => setTimeout(r, 900));
-    assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
-    const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'bar-only');
+    // v3.15.0 T5 (migrated): applying the field is a DOM edit inside the open
+    // table burst, so it renders nothing and the caret goes back to the cell —
+    // the old 'bar-only' (focus lost to the prompt's render) is now 'caret',
+    // which is the stronger answer. The route assertion moves to the commit
+    // the save below causes.
+    assert.deepStrictEqual((await patchRoutes(ctx)).renders, 0,
+      'V2d(primed=' + primed + '): applying the URL field must not render');
+    const fail = await checkLeverage(ctx, '🔗 in a table cell (primed=' + primed + ')', 'caret');
     assert.strictEqual(fail, null, 'V2d(primed=' + primed + '): ' + fail);
     const disk = await saveAndRead(ctx);
+    assertRoute(await patchRoutes(ctx), primed, 'V2d(primed=' + primed + ')');
     assert.ok(disk.indexOf('[bravo](https://example.com/)') !== -1,
       'V2d(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0, 'V2d: 不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  console.log('journey: V2d 🔗 in a table cell — bar-only, link on disk — OK');
+  console.log('journey: V2d 🔗 in a table cell — URL field renders nothing, caret kept, link on disk — OK');
 
   // ── V2g: 標題到頂／到底時按 Tab —— 夾住的那一步不得把你踢出區塊 ──────────
   //
@@ -2931,7 +2958,6 @@ async function main() {
     const ctx = await newPage('# H\n\nAlpha bravo charlie.\n\nTail para two.\n');
     if (primed) await primeOneCommit(ctx);
     await installPatchSpy(ctx);
-    ctx.page.on('dialog', async (d) => { try { await d.accept('https://example.com/'); } catch (e) { /* already gone */ } });
     const pid = await ctx.page.evaluate(() => {
       const el = Array.from(document.querySelectorAll('.ed-block[data-block-type="paragraph"]'))
         .find((b) => (b.textContent || '').indexOf('Alpha bravo') !== -1);
@@ -2953,23 +2979,33 @@ async function main() {
     assert.strictEqual(dis, false,
       'V2i(primed=' + primed + ') 前提：有非空選取時 🔗 必須是 enabled，否則這一列什麼都沒點到');
     await pressClick(ctx.page, '[data-ed-tb="link"]', 80);
+    await answerLinkField(ctx.page, 'https://example.com/');
     await new Promise((r) => setTimeout(r, 1100));
-    assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
-    const fail = await checkLeverage(ctx, '🔗 on a paragraph (primed=' + primed + ')', 'caret');
-    assert.strictEqual(fail, null, 'V2i(primed=' + primed + '): ' + fail);
+    // v3.15.0 T5 (migrated): the field edits the open burst's DOM and renders
+    // nothing; caret and bar are asserted right there, and the route (patch
+    // when primed, fallback when not) is asserted on the commit the save causes.
+    assert.strictEqual((await patchRoutes(ctx)).renders, 0,
+      'V2i(primed=' + primed + '): applying the URL field must not render');
+    const failBefore = await checkLeverage(ctx, '🔗 on a paragraph, before the commit (primed=' + primed + ')', 'caret');
+    assert.strictEqual(failBefore, null, 'V2i(primed=' + primed + '): ' + failBefore);
     const disk = await saveAndRead(ctx);
+    assertRoute(await patchRoutes(ctx), primed, 'V2i(primed=' + primed + ')');
+    // No caret check after the save: Ctrl+S resolves the burst and the surface
+    // gives up focus whatever the gesture was (measured: BODY, 3 buttons). The
+    // old post-render caret answer belonged to the render the prompt caused,
+    // which the in-place field no longer starts.
     assert.ok(disk.indexOf('[Alpha](https://example.com/)') !== -1,
       'V2i(primed=' + primed + '): 連結必須真的寫進磁碟，got:\n' + disk);
     assert.strictEqual(ctx.errs.length, 0,
       'V2i: 不得有 pageerror / unhandledrejection: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
-  console.log('journey: V2i 🔗 on a paragraph keeps caret AND bar on both render routes — OK');
+  console.log('journey: V2i 🔗 on a paragraph — URL field renders nothing, caret and bar kept, save commits on both routes — OK');
 
-  // ══ V3: 十六個 position:fixed 浮層，捲動後的必需答案 ══════════════════
-  // lib/md2doc.js 有十六個 `position: fixed` 宣告（另有若干處是註解裡的散文
+  // ══ V3: 二十二個 position:fixed 浮層，捲動後的必需答案 ════════════════
+  // lib/md2doc.js 有二十二個 `position: fixed` 宣告（v3.15.0 T1 重數：加了 .ed-slash-menu 之後，以下方守衛同一套掃法量得 18；T5 加了 .ed-linkbar → 19；T6 加了 .ed-linkcard → 20；T8 加了 .ed-tb-addrow / .ed-tb-addcol → 22）（另有若干處是註解裡的散文
   // 提及）。client.js 只有【一個】捲動監聽器（onAnyScroll），所以「捲動之後
-  // 每個浮層各自變成什麼」是一個族群，而不是十四個互不相干的問題。
+  // 每個浮層各自變成什麼」是一個族群，而不是二十二個互不相干的問題。
   //
   // 必需答案三種：
   //   live               捲動後仍在、仍可見。這些浮層的幾何是【捲動不變】的
@@ -3002,7 +3038,7 @@ async function main() {
   //                      必須收乾淨，而且此後的捲動不得讓它復活。
   //
   // 覆蓋率守衛：直接從 lib/md2doc.js 掃出所有 `position: fixed` 宣告並比對
-  // 下表的 selector 集合。有人加第十五個浮層時這裡會紅，逼他決定它的必需
+  // 下表的 selector 集合。有人加第二十三個浮層時這裡會紅，逼他決定它的必需
   // 答案，而不是安靜地多一個沒人測過的浮層。
   const OVERLAY_RULES = [
     { sel: '.ed-toolbar',              after: 'live' },
@@ -3017,6 +3053,20 @@ async function main() {
     { sel: '.ed-te-menu',              after: 'gone' },
     { sel: '.ed-tb-insert',            after: 'gone' },
     { sel: '.ed-toolbar-menu',         after: 'gone' },
+    // v3.15.0 T1 (R24): the "/" block menu sits at the caret's viewport
+    // coordinates, so a scroll closes it (onAnyScroll). Its row is below.
+    { sel: '.ed-slash-menu',           after: 'gone' },
+    // v3.15.0 T5 (R24): the URL field sits at the selection toolbar's place,
+    // so a scroll closes it (back to the toolbar, which repositions).
+    { sel: '.ed-linkbar',              after: 'gone' },
+    // v3.15.0 T6 (R24): the link card hangs under the link at viewport
+    // coordinates, so a scroll closes it (onAnyScroll).
+    { sel: '.ed-linkcard',             after: 'gone' },
+    // v3.15.0 T8 (R24): the trailing add bars are placed along the hovered
+    // table's grid at viewport coordinates and hide on scroll like the ＋
+    // bubbles (onAnyScroll); the next mousemove raises them again.
+    { sel: '.ed-tb-addrow',            after: 'gone' },
+    { sel: '.ed-tb-addcol',            after: 'gone' },
     { sel: '.ed-te-drop-indicator',    after: 'gone-on-drag-end' },
     { sel: '.ed-block-drop-indicator', after: 'gone-on-drag-end' },
     { sel: '.ed-seltb',                after: 'reposition-or-gone' },
@@ -3611,7 +3661,7 @@ async function main() {
   // 幾何實測（1400×800、V3_TABLE_MD、centreTable() 之後）：grip 20×28、
   // left 落在表格左緣減去自己一半寬（80 → 70），縱向對齊被 hover 的那一列
   // 的中線（列 382..419 時 top=386；指標移到 419..456 那一列時變成 424）。
-  // 按下去之後看得到的選單項目是「刪除列」。
+  // 按下去之後看得到的選單項目是「上方插入列」「下方插入列」「刪除列」（v3.15.0 T7）。
   {
     const ctx = await newPage(V3_TABLE_MD);
     await setViewportSettled(ctx.page, { width: 1400, height: 800 });
@@ -3659,10 +3709,10 @@ async function main() {
       '.ed-te-grip-row 換一列 hover 之後必須移動，got ' + JSON.stringify({ g0: g0, g1: g1 }));
     assert.ok(Math.abs(g1.gripMid - g1.rowMid) <= 1,
       '.ed-te-grip-row 必須跟著指標所在的那一列走，got ' + JSON.stringify(g1));
-    // 按下去：量的是使用者【看得到】的項目。showRowMenu() 把 teAlignBtn 設成
-    // hidden（對齊是欄軸的事），而它仍留在 .ed-te-menu 的 children 裡 ——
-    // 實測 [{刪除列,shown:true},{對齊,shown:false}]，所以照 children 數就會
-    // 把一顆看不到的按鈕算進來。
+    // 按下去：量的是使用者【看得到】的項目。showRowMenu() 把對齊那一排設成
+    // hidden（對齊是欄軸的事），而它仍留在 .ed-te-menu 裡 —— 所以照
+    // children 數就會把看不到的按鈕算進來。v3.15.0 T7：選單改成直排，項目
+    // 是 .ed-te-menu-btn（分隔線不是項目），名字取 aria-label 或文字。
     const gp = await ctx.page.evaluate(() => {
       const r = document.querySelector('.ed-te-grip-row').getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -3673,9 +3723,9 @@ async function main() {
     const menuBefore = await overlayState(ctx.page, '.ed-te-menu');
     assertRaised(menuBefore, '.ed-te-menu（列軸）');
     const items = await ctx.page.evaluate(() =>
-      Array.from(document.querySelector('.ed-te-menu').children)
-        .map((c) => ({ label: c.textContent.trim(), shown: c.offsetParent !== null })));
-    assert.deepStrictEqual(items.filter((i) => i.shown).map((i) => i.label), ['刪除列'],
+      Array.from(document.querySelectorAll('.ed-te-menu .ed-te-menu-btn'))
+        .map((c) => ({ label: c.getAttribute('aria-label') || c.textContent.trim(), shown: c.offsetParent !== null })));
+    assert.deepStrictEqual(items.filter((i) => i.shown).map((i) => i.label), ['上方插入列', '下方插入列', '刪除列'],
       '列 grip 按下去之後看得到的選單項目變了，got ' + JSON.stringify(items));
     await scrollBy(ctx.page, 200);
     const gripAfter = await overlayState(ctx.page, '.ed-te-grip-row');
@@ -3706,6 +3756,86 @@ async function main() {
     assert.ok(isGone(after), '.ed-toolbar-menu 捲動後必須消失，got ' + JSON.stringify(after));
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: V3 .ed-toolbar-menu vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-tb-addrow / .ed-tb-addcol（v3.15.0 T8 的表格尾端新增列／欄）──
+  {
+    const ctx = await newPage(V3_TABLE_MD);
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    const ts = await centreTable(ctx.page);
+    const cell = await ctx.page.evaluate((t) => {
+      const r = document.querySelector(t + ' table').tBodies[0].rows[0].cells[0].getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }, ts);
+    await ctx.page.mouse.move(cell.x, cell.y);
+    await ctx.page.mouse.move(cell.x + 2, cell.y);
+    await new Promise((r) => setTimeout(r, 300));
+    const rowBefore = await overlayState(ctx.page, '.ed-tb-addrow');
+    const colBefore = await overlayState(ctx.page, '.ed-tb-addcol');
+    assertRaised(rowBefore, '.ed-tb-addrow');
+    assertRaised(colBefore, '.ed-tb-addcol');
+    await scrollBy(ctx.page, 200);
+    const rowAfter = await overlayState(ctx.page, '.ed-tb-addrow');
+    const colAfter = await overlayState(ctx.page, '.ed-tb-addcol');
+    assert.ok(isGone(rowAfter), '.ed-tb-addrow 捲動後必須消失，got ' + JSON.stringify(rowAfter));
+    assert.ok(isGone(colAfter), '.ed-tb-addcol 捲動後必須消失，got ' + JSON.stringify(colAfter));
+    assert.strictEqual(ctx.errs.length, 0, 'add bars：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-tb-addrow / .ed-tb-addcol vanish on scroll — OK');
+  }
+
+  // ── gone：.ed-slash-menu（v3.15.0 T1 的「/」區塊選單）─────────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('End');
+    await ctx.page.keyboard.type(' /');
+    await ctx.page.waitForSelector('.ed-slash-menu', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-slash-menu');
+    assertRaised(before, '.ed-slash-menu');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-slash-menu');
+    assert.ok(isGone(after), '.ed-slash-menu 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-slash-menu vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-linkbar（v3.15.0 T5 的網址欄）─────────────────────────────
+  {
+    const ctx = await newPage('# H\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('Home');
+    await ctx.page.keyboard.down('Shift');
+    for (let i = 0; i < 6; i++) await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.keyboard.up('Shift');
+    await ctx.page.keyboard.down('Control'); await ctx.page.keyboard.press('KeyK'); await ctx.page.keyboard.up('Control');
+    await ctx.page.waitForSelector('.ed-linkbar', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-linkbar');
+    assertRaised(before, '.ed-linkbar');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-linkbar');
+    assert.ok(isGone(after), '.ed-linkbar 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-linkbar vanishes on scroll — OK');
+  }
+
+  // ── gone：.ed-linkcard（v3.15.0 T6 的連結卡片）──────────────────────────
+  {
+    const ctx = await newPage('# H\n\nSee [docs](https://a.example/) now.\n\n' + V3_FILL + '\n');
+    await setViewportSettled(ctx.page, { width: 1400, height: 800 });
+    await ctx.page.click('.ed-block[data-block-type="paragraph"] .ed-wys-armed');
+    await ctx.page.keyboard.press('Home');
+    for (let i = 0; i < 6; i++) await ctx.page.keyboard.press('ArrowRight');
+    await ctx.page.waitForSelector('.ed-linkcard', { timeout: 4000 });
+    const before = await overlayState(ctx.page, '.ed-linkcard');
+    assertRaised(before, '.ed-linkcard');
+    await scrollBy(ctx.page, 300);
+    const after = await overlayState(ctx.page, '.ed-linkcard');
+    assert.ok(isGone(after), '.ed-linkcard 捲動後必須消失，got ' + JSON.stringify(after));
+    await ctx.page.close(); ctx.srv.close();
+    console.log('journey: V3 .ed-linkcard vanishes on scroll — OK');
   }
 
   // ── V3b: onAnyScroll 的 `capture: true` ─────────────────────────────
@@ -4142,9 +4272,14 @@ async function main() {
   // 所以開選單用 page.click() 即可，被測的那一下才用 pressClick()。
   // `clicked` 是【真的抵達選單項的 click 事件數】——按壓期間被 detach 的
   // 按鈕收不到 click，這正是要測的量，不是事後再補一發合成點擊。
-  for (const [openBtn, itemSel, itemText, label] of [
-    ['.ed-handle', '.ed-handle-menu-btn', '建立副本', '⠿ 建立副本'],
-    ['.ed-insert', '.ed-insert-menu-btn', '段落', '＋ 段落'],
+  // v3.15.0 T2: migrated from ['.ed-insert', '.ed-insert-menu-btn', '段落',
+  // '＋ 段落']. ＋ now commits the dirty burst itself and opens the "/" menu
+  // (on document.body, not inside the block) on a new empty paragraph; the
+  // item pressed is 標題 2, whose insert is the gesture's render, so the
+  // detach precondition below still has a round trip to measure.
+  for (const [openBtn, itemSel, itemText, label, itemInBlock] of [
+    ['.ed-handle', '.ed-handle-menu-btn', '建立副本', '⠿ 建立副本', true],
+    ['.ed-insert', '.ed-slash-menu .ed-slash-item', '標題 2', '＋ 標題 2', false],
   ]) {
     for (const hold of [0, 80]) {
       const ctx = await newPage('# Doc\n\nAlpha paragraph.\n\nBravo paragraph.\n');
@@ -4157,7 +4292,7 @@ async function main() {
       await ctx.page.hover(one);
       await new Promise((r) => setTimeout(r, 120));
       await ctx.page.click(one + ' ' + openBtn);
-      await ctx.page.waitForSelector(one + ' ' + itemSel);
+      await ctx.page.waitForSelector(itemInBlock ? one + ' ' + itemSel : itemSel);
       await armDetachProbe(ctx.page, itemSel, itemText);
       const press = await pressClick(ctx.page, '[data-journey-target="1"]', hold);
       await new Promise((r) => setTimeout(r, 500));
@@ -4174,11 +4309,21 @@ async function main() {
         label + '（hold=' + hold + 'ms）：選單在 mouseup 前就消失了');
       assert.ok(after > before,
         label + '（hold=' + hold + 'ms）：block 數應增加，got ' + before + ' → ' + after);
-      // v3.14.0 T1: ＋ 段落 adds a transient (an id-less .ed-block), never a
-      // ZWSP paragraph; 建立副本 adds a real block.
+      // 建立副本 adds a real block; ＋ 標題 2 turns the transient ＋ made into a
+      // real heading (v3.15.0 T2), so neither leaves a transient.
       assert.strictEqual(
         await ctx.page.evaluate(() => document.querySelectorAll('[data-ed-transient]').length),
-        itemText === '段落' ? 1 : 0, label + '（hold=' + hold + 'ms）：transient 數');
+        0, label + '（hold=' + hold + 'ms）：transient 數');
+      if (!itemInBlock) {
+        // The click put the caret wherever the paragraph's centre is, so the
+        // typed 'zz' is read back by removing it, not at a fixed offset.
+        assert.deepStrictEqual(await ctx.page.evaluate(() => {
+          const t = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed').textContent;
+          return { heading: document.querySelectorAll('.ed-block[data-block-type="heading"]').length,
+            zz: t.split('zz').length - 1, rest: t.replace('zz', '') };
+        }), { heading: 2, zz: 1, rest: 'Alpha paragraph.' },
+        label + '（hold=' + hold + 'ms）：the heading landed and the dirty typing was committed, not lost');
+      }
       assert.strictEqual(ctx.errs.length, 0,
         label + '（hold=' + hold + 'ms）：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
@@ -6413,8 +6558,8 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: N5-two-saves a reply that lands after a newer request still counts — OK');
   }
-  // 邊緣選單的「對齊」寫一個屬性，其他什麼都不動：runCycleAlign() 只 snap()
-  // burst 的歷史，cycleColumnAlign() 把 `style="text-align:…"` 寫進整欄的
+  // 邊緣選單的「置中」寫一個屬性，其他什麼都不動：runSetAlign() 只 snap()
+  // burst 的歷史，setColumnAlign() 把 `style="text-align:…"` 寫進整欄的
   // 儲存格，然後 burst 就那樣開著。面上的文字與子節點沒有變化（下面的前提
   // 斷言把這件事釘住），所以只盯著文字與子節點的監看看不見它。
   // 實測（把監看的 attributes 那一項拿掉、其餘不動、同樣用真滑鼠驅動）：
@@ -6436,7 +6581,9 @@ async function main() {
     await ctx.page.mouse.move(grip.x, grip.y);
     await ctx.page.mouse.down(); await ctx.page.mouse.up();
     await ctx.page.waitForSelector('.ed-te-menu:not([hidden])', { timeout: 5000 });
-    await ctx.page.click('.ed-te-menu-align');
+    // v3.15.0 T7: the alignment row's 置中 (the old single 對齊 button cycled
+    // to left on its first press).
+    await ctx.page.click('.ed-te-menu button[aria-label="置中"]');
     await new Promise((r) => setTimeout(r, 500));
     const shape = await ctx.page.evaluate(() => {
       const table = document.querySelector('.ed-block[data-block-type="table"] table');
@@ -6453,7 +6600,7 @@ async function main() {
       .catch(() => {});
     await new Promise((r) => setTimeout(r, 600));
     assert.deepStrictEqual(shape,
-      { cells: ['text-align:left', 'text-align:left'], menuOpen: true, text: '\n\nAB\nonetwo\n' },
+      { cells: ['text-align:center', 'text-align:center'], menuOpen: true, text: '\n\nAB\nonetwo\n' },
       'N5 對齊 前提失敗：整欄的 style 必須真的被寫進去、選單必須還開著、而且' +
       '面上的文字一個字都不能動（否則這一列量到的就不是「只寫屬性」），got ' +
       JSON.stringify(shape));
@@ -7402,12 +7549,16 @@ async function main() {
         const r = c.getBoundingClientRect();
         return r.bottom > window.innerHeight || r.top < 0;
       }).length;
-      return { childCount: menu.children.length, off: off };
+      // v3.15.0 T7: the vertical menu itself, all four edges.
+      const m = menu.getBoundingClientRect();
+      const menuOut = m.top < 0 || m.left < 0 || m.bottom > window.innerHeight || m.right > window.innerWidth;
+      return { childCount: menu.children.length, off: off, menuOut: menuOut };
     });
     // Ruling T9-1：選單是空的話 off === 0 會白過，先斷選單真的有項目。
     assert.ok(result.childCount > 0,
       'F6 前提失敗：列選單必須先有項目，斷言才有意義，got childCount=' + result.childCount);
     assert.strictEqual(result.off, 0, '列選單有 ' + result.off + ' 項落在視窗外');
+    assert.strictEqual(result.menuOut, false, '列選單本身越出視窗');
     assert.strictEqual(ctx.errs.length, 0, 'F6：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
   }
@@ -7521,9 +7672,9 @@ async function main() {
     assert.strictEqual(inertPlain.bold.disabled, true, 'F2/INERT：全空白選取時 B 應停用');
     assert.strictEqual(inertPlain.italic.disabled, true, 'F2/INERT：全空白選取時 I 應停用');
     assert.strictEqual(inertPlain.bold.pressed, 'false', 'F2/INERT：停用的 B 仍應說 false，不得漏寫屬性');
-    // 🔗 不走 applyMarkToggle()：applyLinkToggleBody() 的第三支直接
-    // window.prompt() + extractRangeInto()，沿路沒有任何 trim 守衛，全空白選取
-    // 照樣開對話框並包出 <a> —— 停用它才是把一顆會動的按鈕畫死。
+    // 🔗 不走 applyMarkToggle()。v3.15.0 T5：applyLinkToggle() 在開網址欄
+    // 之前就用 trimRangeToText() 拒絕全空白選取（按下去什麼都不開、不寫），但
+    // 按鈕本身的 enabled 狀態仍是另一回事 —— 這一列釘的是按鈕不被畫死。
     assert.strictEqual(inertPlain.link.disabled, false,
       'F2/INERT：🔗 沒有 trim 守衛，全空白選取時不得停用');
     // ⚠ .ed-seltb 用 aria-disabled，不得用 disabled 屬性：B／I／S／U／<>／🔗
@@ -8201,12 +8352,14 @@ async function main() {
     console.log('journey: standing on the ＋ bubble no longer hides the row grip — OK');
   }
 
-  // ── F5/F6: Tab 走完表格就離開它，落點是「整格被選起來」 ──────────────────
+  // ── F5/F6: Tab 走完表格，落點是「整格被選起來」 ──────────────────────────
   //
   // F6 = 格內 Tab 的落點。舊行為把游標塞在目標格【結尾】，所以「Tab 過去直接
   // 打字」是附加而不是取代。
   // F5 = 最後一格的 Tab（與第一格的 Shift+Tab）是死鍵：索引被 clamp 回原格，
   // handler 照樣 preventDefault()，連瀏覽器自己的 Tab 巡覽都被吃掉。
+  // v3.15.0 T8 (D20)：最後一格的 Tab 改成【新增一列】、游標落在新列第一格；
+  // 往前離開表格改用最後一列的 ↓。落點仍要是下一個段落的內容起點。
   {
     const ctx = await newPage('# Doc\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
     await ctx.page.click('.ed-wys-table thead th');
@@ -8227,13 +8380,24 @@ async function main() {
     assert.strictEqual(atLast, 'c2',
       'F5 前提失敗：這一列要量的是【最後一格】的 Tab，可是走到的不是它，got ' + JSON.stringify(atLast));
     await ctx.page.keyboard.press('Tab');
+    await new Promise((r) => setTimeout(r, 300));
+    const added = await ctx.page.evaluate(() => {
+      const t = document.querySelector('.ed-wys-table');
+      const rows = t.tBodies[0].rows;
+      const a = document.activeElement;
+      return { rows: rows.length, inNewFirstCell: a === rows[rows.length - 1].cells[0],
+        txt: a ? a.textContent : null, title: document.title.indexOf('●') === 0 };
+    });
+    assert.deepStrictEqual(added, { rows: 2, inNewFirstCell: true, txt: '', title: true },
+      'F5 (v3.15.0 T8)：最後一格的 Tab 必須新增一列、游標落在新列第一格，got ' + JSON.stringify(added));
+    await ctx.page.keyboard.press('ArrowDown');
     await new Promise((r) => setTimeout(r, 900));
     const out = await ctx.page.evaluate(() => {
       const a = document.activeElement;
       return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
     });
     assert.ok(out.cls && out.cls.indexOf('ed-wys-armed') !== -1,
-      'F5：最後一格的 Tab 必須離開表格，落在下一個有可聚焦面的 block，got ' + JSON.stringify(out));
+      'F5：最後一列的 ↓ 必須離開表格，落在下一個有可聚焦面的 block，got ' + JSON.stringify(out));
     assert.strictEqual(out.txt, 'After paragraph.',
       'F5：落點必須是那個段落本身，got ' + JSON.stringify(out));
     // 跨 block 的落點是【內容起點的游標】，不是整段選取 —— 打字插在最前面。
@@ -8244,7 +8408,7 @@ async function main() {
       'F5：跨 block 的落點必須是內容起點的游標，got ' + JSON.stringify(typed));
     assert.strictEqual(ctx.errs.length, 0, 'F5/F6：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: Tab walks the cells, selects each one, then leaves the table — OK');
+    console.log('journey: Tab walks the cells, selects each one, adds a row at the end, and ↓ leaves the table — OK');
   }
 
   // 頭尾對稱：第一格的 Shift+Tab 要往回跨出去。這一列的表格是【乾淨的】，所以
@@ -8285,14 +8449,26 @@ async function main() {
   // landing's mark is spent by anything that is not another Tab, so the
   // heading-depth and list-indent contracts are untouched for a block the
   // user is actually working in.
+  //
+  // v3.15.0 T8: a Tab in the last cell adds a row now, so the forward walk
+  // starts from a landing ABOVE the heading instead: Shift+Tab out of the
+  // table's first cell walks back over 'After paragraph.' and the heading to
+  // 'Intro.' (each landing marked), then Tab ×2 walks forward over the heading
+  // again. Both directions pass over the heading; neither may retitle it.
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\nAfter paragraph.\n\n| A | B |\n|---|---|\n| c1 | c2 |\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 3; i++) {
+      await ctx.page.keyboard.down('Shift');
+      await ctx.page.keyboard.press('Tab');
+      await ctx.page.keyboard.up('Shift');
+      await new Promise((r) => setTimeout(r, 450));
+    }
+    const back = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(back, 'Intro.',
+      'T21 前提失敗：Shift+Tab ×3 必須從表格走回 Intro.，got ' + JSON.stringify(back));
+    for (let i = 0; i < 2; i++) {
       await ctx.page.keyboard.press('Tab');
       await new Promise((r) => setTimeout(r, 450));
     }
@@ -8345,16 +8521,19 @@ async function main() {
   }
 
   // The mark is spent by any key that is not Tab: type into the block you
-  // landed on and Tab means heading depth again.
+  // landed on and Tab means heading depth again. (v3.15.0 T8: the landing is
+  // a Shift+Tab out of the table's first cell — a Tab in its last cell adds a
+  // row now.)
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 450));
+    const landed = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(landed, 'Build snippet', 'T21 前提失敗：Shift+Tab 必須落在標題上，got ' + JSON.stringify(landed));
     await ctx.page.keyboard.type('X');
     await new Promise((r) => setTimeout(r, 300));
     await ctx.page.keyboard.press('Tab');
@@ -8371,14 +8550,15 @@ async function main() {
   // ...and by pointing at it. A click that lands on the same surface does not
   // open a new burst, so nothing else would clear the mark.
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n### Build snippet\n\nAfter paragraph.\n');
-    await ctx.page.evaluate(() => {
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
-    });
+    const ctx = await newPage('Intro.\n\n### Build snippet\n\n| A | B |\n|---|---|\n| c1 | c2 |\n\nAfter paragraph.\n');
+    await ctx.page.evaluate(() => { document.querySelectorAll('.ed-wys-cell')[0].focus(); });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 450));
+    const landed = await ctx.page.evaluate(() => (document.activeElement ? document.activeElement.textContent.trim() : null));
+    assert.strictEqual(landed, 'Build snippet', 'T21 前提失敗：Shift+Tab 必須落在標題上，got ' + JSON.stringify(landed));
     await pressClick(ctx.page, '.ed-block[data-block-type="heading"] .ed-wys-armed', 80);
     await new Promise((r) => setTimeout(r, 300));
     await ctx.page.keyboard.press('Tab');
@@ -8396,15 +8576,28 @@ async function main() {
 
   // 降級 block（圍欄、引言、分隔線）沒有可聚焦面，Tab 要跳過它們；下一個
   // 表格的落點是它的【第一格】。
+  // v3.15.0 T8：最後一格的 Tab 改成新增一列，所以往前走的起點換成表格之後
+  // 的落點：第二個表格第一格 Shift+Tab 先往回跳過三個降級 block、落在
+  // 'Landing.'（帶 landing 記號），再 Tab 往前跳過同樣三個、落在第二個表格
+  // 的第一格。
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n\n' +
+    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\nLanding.\n\n```js\nconst x = 1;\n```\n\n' +
       '> a quote\n\n---\n\n| P | Q |\n|---|---|\n| p1 | q1 |\n');
     await ctx.page.evaluate(() => {
-      const t = document.querySelectorAll('.ed-wys-table')[0];
-      const cells = t.querySelectorAll('th, td');
-      cells[cells.length - 1].focus();
+      const t = document.querySelectorAll('.ed-wys-table')[1];
+      t.querySelectorAll('th, td')[0].focus();
     });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
+    await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
+    await new Promise((r) => setTimeout(r, 700));
+    const landed = await ctx.page.evaluate(() => {
+      const a = document.activeElement;
+      return { cls: a ? a.className : null, txt: a ? a.textContent.trim() : null };
+    });
+    assert.ok(landed.cls && landed.cls.indexOf('ed-wys-armed') !== -1 && landed.txt === 'Landing.',
+      'F5：Shift+Tab 必須往回跳過降級 block，落在 Landing.，got ' + JSON.stringify(landed));
     await ctx.page.keyboard.press('Tab');
     await new Promise((r) => setTimeout(r, 700));
     const out = await ctx.page.evaluate(() => {
@@ -8424,23 +8617,27 @@ async function main() {
 
   // T15-7：後面沒有任何有可聚焦面的 block 時原地不動，而且【繼續】
   // preventDefault() —— 交還給瀏覽器的 Tab 會走進每個區塊後面的 gutter 按鈕。
+  // v3.15.0 T8：最後一格的 Tab 改成新增一列，往前已經沒有「無處可去」；
+  // 這一列改量鏡像的那一支 —— 第一格的 Shift+Tab，前面只有降級的圍欄。
+  // 同一條 leaveTableByTab() → walkToAdjacentBlockByTab() 找不到落點的路。
   //
   // 這一列是【存活保證】，不是缺陷列：修之前它就是綠的，因為被 clamp 回原格的
   // 死鍵在螢幕上跟「找不到落點所以不動」長得一模一樣。它會紅的對象是一個把這
   // 個按鍵交還給瀏覽器的修法 —— 已用「Tab 分支不呼叫 preventDefault()」單獨
   // ablate 過，那一改就讓它紅。
   {
-    const ctx = await newPage('| A | B |\n|---|---|\n| c1 | c2 |\n\n```js\nconst x = 1;\n```\n');
+    const ctx = await newPage('```js\nconst x = 1;\n```\n\n| A | B |\n|---|---|\n| c1 | c2 |\n');
     await ctx.page.evaluate(() => {
       window.__tabPrevented = null;
       document.addEventListener('keydown', (e) => {
         if (e.key === 'Tab') window.__tabPrevented = e.defaultPrevented;
       });
-      const cells = document.querySelectorAll('.ed-wys-cell');
-      cells[cells.length - 1].focus();
+      document.querySelectorAll('.ed-wys-cell')[0].focus();
     });
     await new Promise((r) => setTimeout(r, 250));
+    await ctx.page.keyboard.down('Shift');
     await ctx.page.keyboard.press('Tab');
+    await ctx.page.keyboard.up('Shift');
     await new Promise((r) => setTimeout(r, 600));
     const out = await ctx.page.evaluate(() => ({
       prevented: window.__tabPrevented,
@@ -8449,7 +8646,7 @@ async function main() {
     }));
     assert.strictEqual(out.prevented, true,
       'T15-7：找不到落點時 Tab 仍必須被吃掉，got ' + JSON.stringify(out));
-    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1 && out.txt === 'c2',
+    assert.ok(out.cls && out.cls.indexOf('ed-wys-cell') !== -1 && out.txt === 'A',
       'T15-7：找不到落點時必須原地不動，got ' + JSON.stringify(out));
     assert.strictEqual(ctx.errs.length, 0, 'T15-7：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();

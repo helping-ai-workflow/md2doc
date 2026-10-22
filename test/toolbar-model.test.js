@@ -374,14 +374,18 @@ function baseCtx(overrides) {
   // and leak into the block's textContent (measured: 6 spaces per block).
   ok(icons.NAMES.every((n) => !/>\s+</.test(icons.svg(n, 16))), 'icon markup has no whitespace text nodes');
   ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/icons.js'), 'utf8')), 'icons.js is inlined into a script tag');
+  // v3.15.0 T1 (R43 M7): the "/" menu's catalogue is inlined the same way.
+  ok(!/<\/script/i.test(require('fs').readFileSync(require.resolve('../lib/editor/block-catalog.js'), 'utf8')), 'block-catalog.js is inlined into a script tag');
 }
 
 // --- v3.14.0 T4: the toolbar on a transient paragraph ----------------------------
 {
   const base = { blockType: 'paragraph', indent: null, inList: false, hasSelection: false, dirty: false };
   const s = tm.deriveState(Object.assign({ transient: 'empty' }, base));
+  // v3.15.0 T2 (D11, R25): migrated from "disables only the five buttons" —
+  // quote, numbered and check now insert their skeleton on an empty one.
   eq(['quote', 'ordered-list', 'check', 'indent', 'outdent', 'table', 'list', 'code', 'line', 'image', 'insert-after'].map((id) => s[id].disabled),
-    [true, true, true, true, true, false, false, false, false, false, false], 'an empty transient disables only the five buttons');
+    [false, false, false, true, true, false, false, false, false, false, false], 'an empty transient disables only indent and outdent');
   const t = tm.deriveState(Object.assign({ transient: 'text' }, base));
   eq(['quote', 'ordered-list', 'check'].map((id) => t[id].disabled), [false, false, false], 'a transient with text disables nothing extra');
 }

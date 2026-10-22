@@ -979,29 +979,50 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
 
   // (d) NO child to attach to: the prefix is flushed onto a line of its own
-  // rather than merged into a SIBLING, which would invent nesting. The
-  // checkbox degrades to literal text there — but that is what a task item
-  // with no content and no child already meant.
+  // rather than merged into a SIBLING, which would invent nesting.
+  // MIGRATED by v3.15.0 T3 (R44): '- [ ]\n- b' -> '- [ ] \n- b'. The flushed
+  // line keeps the one space after its checkbox: without it marked reads the
+  // item as a plain one whose text is "[ ]" (measured), the next commit of it
+  // writes `- \[ \]`, and an Enter at the end of a to-do item followed by
+  // typing saved `- x\[ \]`.
   {
     const r = serializeBlocks([
       liBlock({ id: '0', task: true, checked: false, indent: 0 }),
       liBlock({ id: '1', indent: 0 }, 'b'),
     ]);
-    assert.strictEqual(r.md, '- [ ]\n- b',
+    assert.strictEqual(r.md, '- [ ] \n- b',
       'an empty task item with no child must not swallow its sibling, got:\n' +
       JSON.stringify(r.md));
     assert.strictEqual(r.lineMeta.length, 2, 'both items still own a line');
     assert.deepStrictEqual(r.lineMeta.map((m) => m.blockId), ['0', '1']);
+    const items = marked.lexer(r.md)[0].items;
+    assert.deepStrictEqual(items.map((i) => [i.task, i.text]), [[true, ''], [false, 'b']],
+      'the empty item still reads back as a task, and the sibling stays a sibling');
   }
 
   // (e) trailing flush: an empty task item as the LAST block of the run.
+  // MIGRATED by v3.15.0 T3 (R44): '- a\n- [x]' -> '- a\n- [x] ', same reason.
   {
     const r = serializeBlocks([
       liBlock({ id: '0', indent: 0 }, 'a'),
       liBlock({ id: '1', task: true, checked: true, indent: 0 }),
     ]);
-    assert.strictEqual(r.md, '- a\n- [x]', 'a trailing empty task item still emits, got:\n' + r.md);
+    assert.strictEqual(r.md, '- a\n- [x] ', 'a trailing empty task item still emits, got:\n' + JSON.stringify(r.md));
     assert.strictEqual(r.lineMeta.length, r.md.split('\n').length, 'parallel');
+    const items = marked.lexer(r.md)[0].items;
+    assert.deepStrictEqual(items.map((i) => [i.task, i.checked]), [[false, undefined], [true, true]],
+      'the empty item reads back as a checked task');
+  }
+
+  // (e2) v3.15.0 T3 (R44): the shape an Enter at the end of a to-do item
+  // commits — its new, empty sibling — round-trips as a task.
+  {
+    const r = serializeBlocks([
+      liBlock({ id: '0', task: true, checked: false, indent: 0 }, 'alpha'),
+      liBlock({ id: '1', task: true, checked: false, indent: 0 }),
+    ]);
+    assert.strictEqual(r.md, '- [ ] alpha\n- [ ] ', 'got:\n' + JSON.stringify(r.md));
+    assert.deepStrictEqual(marked.lexer(r.md)[0].items.map((i) => i.task), [true, true]);
   }
 
   // (f) a PLAIN content-free item is unchanged by all of the above — it still

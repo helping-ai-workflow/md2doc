@@ -557,6 +557,18 @@ console.log('md2doc dot WASM test passed');
   // to run on into a nested blockquote and strike it).
   const bq = await render('- [x] a\n  > q\n');
   assert.ok(/<span class="task-text">a<\/span><blockquote>/.test(bq), 'span stops before a block child: ' + bq);
+  // v3.15.0 B2 fix round 1 (R56): an item whose whole text is `[ ]` / `[x]` is
+  // an empty to-do. marked trims the space after the box when the item is the
+  // last of a nested list, so `- a\n  - [ ] ` lexes the child as a plain item
+  // "[ ]"; the shared token normalizer reads it as a task, for the reader and
+  // the editor's block map alike.
+  const nested = await render('- a\n  - [ ] \n\nAfter.\n');
+  assert.ok(/<li class="task-item"><input[^>]*>\s*<span class="task-text"><\/span><\/li>/.test(nested), 'nested-last empty to-do: ' + nested);
+  assert.ok(nested.indexOf('[ ]') === -1, 'no literal box text: ' + nested);
+  const checkedEmpty = await render('- a\n  - [X]\n');
+  assert.ok(/<li class="task-item is-checked"><input[^>]*checked/.test(checkedEmpty), '[X] reads as checked: ' + checkedEmpty);
+  const escaped = await render('- \\[ \\]\n');
+  assert.ok(/<li>\[ \]<\/li>/.test(escaped), 'an escaped box stays text: ' + escaped);
   console.log('md2doc task-item rendering test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
 
