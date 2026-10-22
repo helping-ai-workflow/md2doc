@@ -362,20 +362,16 @@ const STALE_NODE_RE =
 // RAW-TEXTAREA mechanics (Ctrl+Enter, textarea.value, network failure
 // banners) and don't care which route got them there.
 async function openBlockEditor(page, sel) {
-  await page.click(sel);
-  // page.click() only waits for the click EVENT to be dispatched, not for
-  // client.js's own async focus handling (which may itself be awaiting an
-  // in-flight switchAwayFrom() resolving a DIFFERENT block first — see
-  // startBurst()'s comment) to settle. Wait for that to actually land
-  // (either this block is now the focused burst, or — a degraded block —
-  // its raw textarea already opened) before touching the DOM further, or a
-  // race can hand back a soon-to-be-detached node (a commit's rerenderAll()
-  // swap landing mid-hover/click).
-  await page.waitForFunction(
-    (s) => !!document.querySelector(s + ' textarea.ed-raw') ||
-      document.activeElement === document.querySelector(s + ' > *'),
-    {}, sel
-  );
+  // v3.17.0 T2 (R29): a click on a fenced code block opens the in-place code
+  // edit now, not the raw box. These scenarios exercise the RAW box on code
+  // (its fences, its textarea), so a fenced code block goes straight to the
+  // kept raw route, ⠿ → MD 原始碼, below.
+  const fencedCode = await page.evaluate((s) => {
+    const b = document.querySelector(s);
+    return !!b && b.getAttribute('data-block-type') === 'code' && !!b.firstElementChild &&
+      b.firstElementChild.nodeName === 'PRE';
+  }, sel);
+  if (!fencedCode) await openBlockEditorByClick(page, sel);
   const hasRaw = await page.evaluate((s) => !!document.querySelector(s + ' textarea.ed-raw'), sel);
   if (!hasRaw) {
     // The click above may itself have triggered an auto-commit of a
@@ -394,6 +390,22 @@ async function openBlockEditor(page, sel) {
       }
     }
   }
+}
+async function openBlockEditorByClick(page, sel) {
+  await page.click(sel);
+  // page.click() only waits for the click EVENT to be dispatched, not for
+  // client.js's own async focus handling (which may itself be awaiting an
+  // in-flight switchAwayFrom() resolving a DIFFERENT block first — see
+  // startBurst()'s comment) to settle. Wait for that to actually land
+  // (either this block is now the focused burst, or — a degraded block —
+  // its raw textarea already opened) before touching the DOM further, or a
+  // race can hand back a soon-to-be-detached node (a commit's rerenderAll()
+  // swap landing mid-hover/click).
+  await page.waitForFunction(
+    (s) => !!document.querySelector(s + ' textarea.ed-raw') ||
+      document.activeElement === document.querySelector(s + ' > *'),
+    {}, sel
+  );
 }
 
 // Hovers a block to reveal its ⠿ handle, opens its menu, and clicks the menu
@@ -13314,7 +13326,8 @@ async function gutterGeometry(page, sel) {
 
         const cSel = await paragraphSelByText(page, 'Code anchor.');
         await clickInsertMenuItem(page, cSel, '程式碼');
-        await page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw');
+        // v3.17.0 T2 (R21): the inserted code block opens the in-place edit.
+        await page.waitForSelector('.ed-block[data-block-type="code"] > pre[data-ed-code-edit]');
         assert.ok(
           await page.evaluate(() =>
             // Task 4: read the .ed-li-text surface — the block itself now
@@ -13323,16 +13336,22 @@ async function gutterGeometry(page, sel) {
               .textContent === 'New item text'),
           'the list insert must have been committed by the code insert\'s own switchAwayFrom()'
         );
-        // Caret must sit on the blank BODY line between the two fences, not
-        // after the closing fence — otherwise typing would land outside
-        // (or merge onto the same line as) the code block.
-        const taState = await page.evaluate(() => {
-          const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
-          return { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+        // Caret must sit in the empty BODY of the skeleton (v3.17.0 T2: the
+        // in-place edit shows the body only, so that is offset 0 of an empty
+        // host that has focus) — otherwise typing would land outside the
+        // code block.
+        const edState = await page.evaluate(() => {
+          const h = document.querySelector('.ed-block[data-block-type="code"] > pre[data-ed-code-edit]');
+          const sel = getSelection();
+          const r = sel.rangeCount ? sel.getRangeAt(0) : null;
+          const off = (n, o) => { const x = document.createRange(); x.setStart(h, 0); x.setEnd(n, o); return x.toString().length; };
+          return { text: h.textContent, focused: document.activeElement === h,
+            inHost: !!r && h.contains(r.startContainer) && h.contains(r.endContainer),
+            start: r ? off(r.startContainer, r.startOffset) : null, end: r ? off(r.endContainer, r.endOffset) : null,
+            raw: document.querySelectorAll('textarea.ed-raw').length };
         });
-        assert.strictEqual(taState.value, '```\n\n```', 'the code skeleton is a fence pair with one empty body line');
-        assert.strictEqual(taState.start, 4, 'caret must sit on the blank body line, not at the end');
-        assert.strictEqual(taState.end, 4);
+        assert.deepStrictEqual(edState, { text: '', focused: true, inHost: true, start: 0, end: 0, raw: 0 },
+          'the code skeleton opens the in-place edit on its empty body, caret in it');
         await page.keyboard.type('console.log(1);');
 
         const savedText = await saveAndRead(page, biMdPath);
@@ -13412,7 +13431,7 @@ async function gutterGeometry(page, sel) {
         await abandonAndVerify('List anchor.', '項目符號列表', '.ed-block[data-block-type="li"]');
         await abandonAndVerify('Table anchor.', '表格', '.ed-block[data-block-type="table"]');
         await abandonAndVerify('Code anchor.', '程式碼', '.ed-block[data-block-type="code"]',
-          '.ed-block[data-block-type="code"] textarea.ed-raw');
+          '.ed-block[data-block-type="code"] > pre[data-ed-code-edit]');
 
         await page.close();
         console.log('§10 review fix: abandoned inserts (all 5 kinds) auto-remove, zero net undo ops, byte-identical file ' +
@@ -25316,14 +25335,12 @@ async function gutterGeometry(page, sel) {
         await page.keyboard.press('Escape');
         await settleEditor(page);
 
-        // Surface B: a degraded code block, opened directly (no gutter menu
-        // needed — code blocks are never WYSIWYG-eligible).
+        // Surface B: a code block's RAW box. v3.17.0 T2 (R29): a click opens
+        // the in-place edit now, whose Esc commits (D3) — the discard this
+        // scenario pins is the raw box's, so it is opened through the kept
+        // raw route, ⠿ → MD 原始碼.
         const codeSel = '.ed-block[data-block-type="code"]';
-        await page.click(codeSel);
-        await settleEditor(page);
-        const codeHasRaw = await page.evaluate(
-          (s) => !!document.querySelector(s + ' textarea.ed-raw'), codeSel);
-        if (!codeHasRaw) await page.click(codeSel); // first click may only resolve surface A's leftover state
+        await clickGutterMenuItem(page, codeSel, 'MD 原始碼');
         await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
         await page.focus(codeSel + ' textarea.ed-raw');
         await page.keyboard.type('RAWWORDS');
@@ -25391,8 +25408,10 @@ async function gutterGeometry(page, sel) {
         // Repair the swallowed fence: add the closing marker right after the
         // one real line of code — this is what frees the trailing paragraph
         // back into its own block.
+        // v3.17.0 T2 (R29): through ⠿ → MD 原始碼 — the repair rewrites the
+        // fence lines themselves, which only the raw box shows.
         const codeSel = '.ed-block[data-block-type="code"]';
-        await page.click(codeSel);
+        await clickGutterMenuItem(page, codeSel, 'MD 原始碼');
         await page.waitForSelector(codeSel + ' textarea.ed-raw', { timeout: 5000 });
         const repaired = "```js\nconsole.log('a');\n```\n\nTrailing paragraph text.";
         await page.evaluate((sel, val) => {

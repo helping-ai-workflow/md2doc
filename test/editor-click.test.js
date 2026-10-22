@@ -4883,7 +4883,9 @@ check('toolbar-transient: 圖片 on an empty one replaces it with the picked ima
 }, { md: BASE_MD });
 check('empty-doc: the code button inserts a fenced block at the top', DESKTOP, async (page, boot) => {
   await tb(page, 'code');
-  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'raw box open');
+  // v3.17.0 T2: the in-place code edit, on the skeleton's empty body.
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: '', caret: 0, focused: true }, raw: null }, 'the code edit is open on the empty body');
   await page.keyboard.type('x');
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '```\nx\n```\n');
@@ -5455,6 +5457,20 @@ const rawBox = (page) => page.evaluate(() => {
   const t = document.querySelector('textarea.ed-raw');
   return t ? { value: t.value, caret: t.selectionStart, focused: document.activeElement === t } : null;
 });
+// The open in-place code edit: its text, the caret's character offset in it
+// (null when the selection is elsewhere) and whether it has focus; null when
+// no code block is being edited.
+const codeEdit = (page) => page.evaluate(() => {
+  const h = document.querySelector('pre[data-ed-code-edit]');
+  if (!h) return null;
+  const sel = getSelection();
+  let caret = null;
+  if (sel.rangeCount && h.contains(sel.focusNode)) {
+    const r = document.createRange(); r.setStart(h, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+    caret = r.toString().length;
+  }
+  return { text: h.textContent, caret, focused: document.activeElement === h };
+});
 const inBase = (block) => '# D\n\nAlpha.\n\n' + block + '\n\nOmega.\n';
 const TABLE_3X2_X = '| A | B | C |\n|---|---|---|\n| x |  |  |\n|  |  |  |';
 const TABLE_3X2 = '| A | B | C |\n|---|---|---|\n|  |  |  |\n|  |  |  |';
@@ -5553,7 +5569,7 @@ const SLASH_EVERY = [
   ['text', 'text', null],
   ['h1', 'h1', 'heading'], ['h2', 'h2', 'heading'], ['h3', 'h3', 'heading'],
   ['ul', 'bullet', 'li'], ['ol', 'ordered', 'li'], ['task', 'todo', 'li'],
-  ['quote', 'quote', 'raw'], ['code', 'code', 'raw'],
+  ['quote', 'quote', 'raw'], ['code', 'code', 'code-edit'],
   ['divider', 'divider', null], ['table', 'table', 'table'],
   ['mermaid', 'mermaid', null], ['graphviz', 'graphviz', null], ['wavedrom', 'wavedrom', null], ['math', 'math', null],
 ];
@@ -5583,7 +5599,9 @@ for (const [id, kw] of SLASH_EVERY) {
       await page.keyboard.type('T'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
       assert.strictEqual(await saveAndRead(page, boot), inBase('> T'));
     } else if (id === 'code') {
-      assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 4, focused: true });
+      // v3.17.0 T2: the in-place code edit on the empty body, not the raw box.
+      assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+        { edit: { text: '', caret: 0, focused: true }, raw: null });
       await page.keyboard.type('x'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
       assert.strictEqual(await saveAndRead(page, boot), inBase('```\nx\n```'));
     } else if (id === 'divider') {
@@ -6088,14 +6106,18 @@ check('shortcut: at the start of an existing paragraph the text after the caret 
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n\\## Omega.\n');
 }, { md: BASE_MD });
-// The raw box commits with Ctrl+Enter (openRawEditor()'s own keydown).
-check('shortcut: "```" opens a code box with the caret on the fence line', DESKTOP, async (page, boot) => {
+// v3.17.0 T2 (R21): ``` opens the in-place code edit on the empty body (the
+// language is the chip's, no longer typed on the fence line); Enter is a
+// newline in the body, and Ctrl+Enter commits (D3).
+check('shortcut: "```" opens the code edit in place with the caret on the empty body', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('```'); await renderIdle(page);
-  assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 3, focused: true });
-  await page.keyboard.type('js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: '', caret: 0, focused: true }, raw: null });
+  await page.keyboard.type('x = 1'); await page.keyboard.press('Enter'); await page.keyboard.type('y');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'x = 1\ny', caret: 7, focused: true });
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nx = 1\ny\n```\n\nOmega.\n');
 }, { md: BASE_MD });
 check('shortcut: "---" writes a divider and opens a paragraph below it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
@@ -6321,15 +6343,18 @@ check('shortcut: Enter at the end of a nested last to-do then typing keeps it a 
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - [ ] bravo\n  - [ ] x\n\nOmega.\n');
 }, { md: '# D\n\n- alpha\n  - [ ] bravo\n\nOmega.\n' });
 // R59: keys typed while the render that opens the raw box is out land in it.
-check('shortcut: "```js", Enter, "x = 1" typed straight on during a slow render land in the code box (R59)', DESKTOP, async (page, boot) => {
+// v3.17.0 T2 (R28): for ``` that is the in-place code edit, and everything
+// typed after the marker is body text — "js" included.
+check('shortcut: "```js", Enter, "x = 1" typed straight on during a slow render land in the code body (R59, R28)', DESKTOP, async (page, boot) => {
   await newParaBelowAlpha(page);
   await delayRender(page, 800);
   await page.keyboard.type('```js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
   await renderIdle(page);
-  assert.deepStrictEqual(await rawBox(page), { value: '```js\nx = 1\n```', caret: 11, focused: true });
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: 'js\nx = 1', caret: 8, focused: true }, raw: null });
   assert.strictEqual(await noticeText(page), null, 'nothing dropped');
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\njs\nx = 1\n```\n\nOmega.\n');
 }, { md: BASE_MD });
 check('shortcut: "> quote" typed straight on during a slow render lands in the quote box (R59)', DESKTOP, async (page, boot) => {
   await newParaBelowAlpha(page);
@@ -6342,8 +6367,8 @@ check('shortcut: "> quote" typed straight on during a slow render lands in the q
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n> quote\n\nOmega.\n');
 }, { md: BASE_MD });
 // R60 / D1: per kind, one Ctrl+Z gives the escaped literal with the caret
-// after it, a second the paragraph as it was. (A raw box is left with
-// Escape first.)
+// after it, a second the paragraph as it was. (A raw box, or since v3.17.0
+// the in-place code edit, is left with Escape first.)
 for (const [typed, literal, caret] of [
   ['## ', '\\##', { text: '##', offset: 2, transient: false }],
   ['- ', '\\-', { text: '-', offset: 1, transient: false }],
@@ -6356,7 +6381,7 @@ for (const [typed, literal, caret] of [
   check('shortcut: "' + typed + '" one Ctrl+Z gives the literal, a second the paragraph as it was (R60)', DESKTOP, async (page, boot) => {
     await newParaBelowAlpha(page);
     await page.keyboard.type(typed); await renderIdle(page);
-    if (await rawBox(page)) { await page.keyboard.press('Escape'); await renderIdle(page); }
+    if (await rawBox(page) || await codeEdit(page)) { await page.keyboard.press('Escape'); await renderIdle(page); }
     await page.keyboard.press('Control+z'); await renderIdle(page);
     assert.deepStrictEqual(await caretNow(page), caret);
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n' + literal + '\n\nOmega.\n');
@@ -7538,16 +7563,26 @@ check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders is ref
 // both engines; identical at ffbdd7c). Now the click waits for the render;
 // the split's render replaces every block below it, so the click is refused
 // with the notice, and the next click opens the block's own lines.
+// v3.17.0 T2 (R21): a code block's click opens the in-place edit on its body
+// (`seed` is that body), a quote's the raw box; `opened` reads whichever is
+// open, so "no box" also means "no code edit".
+const openedEditorText = (page) => page.evaluate(() => {
+  const t = document.querySelector('textarea.ed-raw');
+  if (t) return t.value;
+  const h = document.querySelector('pre[data-ed-code-edit]');
+  return h ? h.textContent : null;
+});
+const openedEditorSel = (type) => (type === 'code' ? 'pre[data-ed-code-edit]' : 'textarea.ed-raw');
 for (const [label, md, type, seed, typed, want] of [
   ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
-  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', '\x60\x60\x60\ncode\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
+  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
   check('raw-box: ' + label + ' clicked below a split that is still rendering is refused, and the next click edits its own lines (R100)', DESKTOP, async (page, boot) => {
     const clickBlock = async () => {
       const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
       assert.ok(box, 'guard: the ' + type + ' block is on screen');
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     };
-    const rawValue = () => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+    const rawValue = () => openedEditorText(page);
     await delayRender(page, 2500);
     await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
     await clickBlock(); await wait(300);
@@ -7557,7 +7592,7 @@ for (const [label, md, type, seed, typed, want] of [
       { box: null, notice: '文件已更新，請重試這個操作' }, 'the click is refused once the render lands');
     await clickBlock(); await wait(300);
     assert.strictEqual(await rawValue(), seed, 'the next click opens the block\'s own lines');
-    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
+    await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
     await page.unroute('**/api/render');
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\npara one.\n\nMiddle.\n\n' + want + '\n');
@@ -7603,19 +7638,21 @@ check('raw-box: a quote below a split clicked while the undo renders, whose redr
 // block before the click is resolved. With nothing in flight at the press,
 // the block's identity is taken then and the block is found again by it, so
 // the first click opens it. Measured at 6208f4c: no box, the retry notice.
-for (const [label, md, type, seed, typed] of [
-  ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW'],
-  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', '\x60\x60\x60\ncode\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
+// v3.17.0 T2: the code block's click opens the in-place edit on its body
+// (`seed`), and `want` is what its commit writes.
+for (const [label, md, type, seed, typed, want] of [
+  ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
+  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
   check('raw-box: ' + label + ' clicked right after typing in a paragraph opens on the first click (R102, M-R2)', DESKTOP, async (page, boot) => {
     await focusSurface(page, 'Alpha para one.', 2); await page.keyboard.type('X');
     const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await renderIdle(page); await wait(300);
-    const raw = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+    const raw = await openedEditorText(page);
     assert.deepStrictEqual({ box: raw, notice: await noticeText(page) }, { box: seed, notice: null }, 'the box opened on the first click');
-    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
+    await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
-    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n' + typed + '\n');
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n' + want + '\n');
   }, { md });
 }
 // R102 (M-R2), the ⠿ entry: the same everyday shape — typing in a paragraph,
@@ -7853,6 +7890,244 @@ for (const [label, surface, wantOpen] of [
     }
   }, { md: FF_OPEN_MD });
 }
+
+// ── code-edit (v3.17.0 T2): a fenced code block edits in place ──
+const CODE_MD = '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\n```\n\nOmega.\n';
+// Clicks the start or the end of `text`, which must sit inside one text node
+// under `.content`: the point is read from a Range over its first or last
+// character, and the element the browser hit-tests there must belong to the
+// same block (never a rectangle guess about what was pressed).
+async function clickText(page, text, where = 'end') {
+  const pt = await page.evaluate(([t, w]) => {
+    const root = document.querySelector('.content');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = n.data.indexOf(t);
+      if (i === -1) continue;
+      n.parentElement.scrollIntoView({ block: 'center' });
+      const r = document.createRange();
+      const at = w === 'start' ? i : i + t.length - 1;
+      r.setStart(n, at); r.setEnd(n, at + 1);
+      const b = r.getBoundingClientRect();
+      const x = w === 'start' ? b.left + 1 : b.right - 1;
+      const y = b.top + b.height / 2;
+      const block = n.parentElement.closest('.ed-block');
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, same: !!(block && hit && block.contains(hit)), hit: hit ? hit.nodeName + '.' + hit.className : null };
+    }
+    return null;
+  }, [text, where]);
+  assert.ok(pt, 'clickText: no text node holds ' + JSON.stringify(text));
+  assert.ok(pt.same, 'clickText: the point over ' + JSON.stringify(text) + ' hits ' + pt.hit + ', not its block');
+  await page.mouse.click(pt.x, pt.y);
+}
+check('code-edit: a click edits in place with no fence on screen', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  const s = await page.evaluate(() => {
+    const h = document.querySelector('pre[data-ed-code-edit]');
+    return {
+      raw: document.querySelectorAll('textarea.ed-raw').length,
+      ce: h ? h.getAttribute('contenteditable') : null,
+      text: h ? h.textContent : null,
+      active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')),
+      fence: document.querySelector('.content').textContent.indexOf('```') !== -1,
+    };
+  });
+  assert.ok(['plaintext-only', 'true'].includes(s.ce), 'editable: ' + s.ce);
+  assert.deepStrictEqual({ raw: s.raw, text: s.text, active: s.active, fence: s.fence },
+    { raw: 0, text: 'module m;\nendmodule', active: true, fence: false });
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 19, focused: true }, 'the caret is where the click was');
+}, { md: CODE_MD });
+check('code-edit: typing re-colours within 300 ms and Esc writes the file', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule');
+  // A re-colour rewrites the host's own children, never the host: no focus
+  // event at all (the detach census row for it rests on this).
+  await page.evaluate(() => { window.__codeFocusouts = 0; document.addEventListener('focusout', () => { window.__codeFocusouts++; }, true); });
+  await page.keyboard.press('End'); await page.keyboard.press('Enter'); await page.keyboard.type('wire w;');
+  await wait(450);
+  const s = await page.evaluate(() => {
+    const h = document.querySelector('pre[data-ed-code-edit]');
+    return { wire: !!h && [...h.querySelectorAll('.hljs-keyword')].some((k) => k.textContent === 'wire'),
+      active: !!h && document.activeElement === h, focusouts: window.__codeFocusouts, text: h ? h.textContent : null };
+  });
+  assert.deepStrictEqual(s, { wire: true, active: true, focusouts: 0, text: 'module m;\nendmodule\nwire w;' });
+  assert.strictEqual((await codeEdit(page)).caret, 27, 'the caret stays at the end across the re-colour');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await codeEdit(page), null, 'Esc closed the edit');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\nwire w;\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-edit: Enter keeps the indent, Tab and Shift+Tab indent the selected lines', DESKTOP, async (page, boot) => {
+  await clickText(page, 'module', 'start');
+  assert.strictEqual((await codeEdit(page) || {}).caret, 0, 'guard: the caret is at the start');
+  await page.keyboard.press('Tab');
+  assert.deepStrictEqual(await codeEdit(page), { text: '  module m;\nendmodule', caret: 2, focused: true });
+  await page.keyboard.press('End'); await page.keyboard.press('Enter'); await page.keyboard.type('x');
+  assert.deepStrictEqual(await codeEdit(page), { text: '  module m;\n  x\nendmodule', caret: 15, focused: true });
+  await page.keyboard.press('Control+a'); await page.keyboard.press('Tab');
+  assert.strictEqual((await codeEdit(page)).text, '    module m;\n    x\n  endmodule');
+  await page.keyboard.press('Shift+Tab');
+  assert.strictEqual((await codeEdit(page)).text, '  module m;\n  x\nendmodule');
+  await page.keyboard.press('Shift+Tab');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nx\nendmodule');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```verilog\nmodule m;\nx\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-edit: Ctrl+Z inside the edit steps its own typing and never touches the file', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the edit is open');
+  await page.keyboard.press('Control+End');
+  await page.keyboard.type('x'); await wait(400); await page.keyboard.type('y'); await wait(400);
+  const text = async () => (await codeEdit(page)).text;
+  assert.strictEqual(await text(), 'module m;\nendmodulexy');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await text(), 'module m;\nendmodulex');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await text(), 'module m;\nendmodule');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await text(), 'module m;\nendmodule', 'nothing left inside: the text stays');
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === 'Alpha.X')),
+    true, 'the paragraph keeps its edit: the document stack was not touched');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```verilog\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-edit: one Ctrl+Z after leaving restores the block', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule');
+  await page.keyboard.type('zz'); await wait(400); await page.keyboard.press('Enter'); await page.keyboard.type('q');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmodulezz\nq'), 'guard: the edit landed');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
+}, { md: CODE_MD });
+check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKTOP, async (page, boot) => {
+  const before = renderTotal(page);
+  await clickText(page, 'endmodule'); await page.keyboard.press('Escape'); await renderIdle(page);
+  const s = await page.evaluate(() => ({
+    editable: !!document.querySelector('pre[data-ed-code-edit], pre[contenteditable]'),
+    status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    title: document.title.charAt(0) === '●',
+  }));
+  assert.deepStrictEqual(Object.assign(s, { renders: renderTotal(page) - before }), { editable: false, status: 'clean', title: false, renders: 0 });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
+  // The next Ctrl+Z undoes the edit made before the visit, so the visit
+  // pushed nothing on top of it.
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the edit is open');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
+}, { md: CODE_MD });
+check('code-edit: Ctrl+S commits the edit and saves', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+  assert.strictEqual(await codeEdit(page), null, 'the commit closed the edit');
+}, { md: CODE_MD });
+check('code-edit: keys typed right after the click land at the click point', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule', 'start'); await page.keyboard.type('zz');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nzzendmodule', caret: 12, focused: true });
+}, { md: CODE_MD });
+check('code-edit: a body holding ``` saves with a longer fence and renders as one block', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Enter'); await page.keyboard.type('```');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n````verilog\nmodule m;\nendmodule\n```\n````\n\nOmega.\n');
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) => b.getAttribute('data-block-type'))),
+    ['heading', 'paragraph', 'code', 'paragraph']);
+}, { md: CODE_MD });
+check('code-edit: a ~~~ fence keeps its fence', DESKTOP, async (page, boot) => {
+  await clickText(page, 'print'); await page.keyboard.type('(1)');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n~~~python\nprint(1)\n~~~\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n~~~python\nprint\n~~~\n\nOmega.\n' });
+check('code-edit: "/" 程式碼 and the ``` shortcut open the edit in place', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, '"/" 程式碼 opens the edit on the empty body');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0, 'no raw box');
+  await page.keyboard.type('x'); await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('```'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'the ``` shortcut opens the edit on the empty body');
+  await page.keyboard.type('y'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nx\n```\n\nOmega.\n\n```\ny\n```\n');
+}, { md: BASE_MD });
+check('code-edit: an IME composition survives the re-colour tick', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  const cdp = await page.context().newCDPSession(page);
+  await page.keyboard.type('a');
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await wait(450); // the tick the "a" started falls inside the composition
+  const mid = (await codeEdit(page)).text;
+  await cdp.send('Input.insertText', { text: '你' });
+  await wait(450);
+  assert.deepStrictEqual({ mid, end: await codeEdit(page) },
+    { mid: 'module m;\nendmoduleaㄋ', end: { text: 'module m;\nendmodulea你', caret: 21, focused: true } });
+}, { md: CODE_MD, engines: ['chromium'] });
+check('code-edit: ⠿ MD 原始碼 still opens the whole block with its fence', DESKTOP, async (page) => {
+  await gutterMenu(page, '.ed-block[data-block-type="code"]', 'MD 原始碼');
+  assert.deepStrictEqual({ raw: await rawBox(page), edit: await codeEdit(page) },
+    { raw: { value: '```verilog\nmodule m;\nendmodule\n```', caret: 11, focused: true }, edit: null });
+}, { md: CODE_MD });
+// R24: a click inside the open edit is a caret move — no commit, no render.
+check('code-edit: a click inside the open edit keeps it and writes nothing (R24)', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('a');
+  const before = renderTotal(page);
+  await clickText(page, 'module', 'start'); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), renders: renderTotal(page) - before },
+    { edit: { text: 'module m;\nendmodulea', caret: 0, focused: true }, renders: 0 });
+}, { md: CODE_MD });
+// R26: the pre is the host, so a click in its blank area and a click on an
+// empty body both open the edit.
+check('code-edit: a click in the blank area right of a line, and on an empty body, opens the edit (R26)', DESKTOP, async (page, boot) => {
+  const pt = await page.evaluate(() => {
+    const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+    const kw = pre.querySelector('.hljs-keyword');
+    const p = pre.getBoundingClientRect(); const k = kw.getBoundingClientRect();
+    const x = p.right - 30; const y = k.top + k.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inPre: !!hit && pre.contains(hit) };
+  });
+  assert.strictEqual(pt.inPre, true, 'guard: the point is inside the pre');
+  await page.mouse.click(pt.x, pt.y);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 9, focused: true }, 'blank area: the end of that line');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
+}, { md: CODE_MD });
+check('code-edit: an empty body opens on a click and takes typing (R26)', DESKTOP, async (page, boot) => {
+  const box = await page.evaluate(() => {
+    const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+    const r = pre.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, inPre: !!hit && pre.contains(hit), h: r.height };
+  });
+  assert.strictEqual(box.inPre, true, 'guard: the centre of the empty pre is the pre: ' + JSON.stringify(box));
+  await page.mouse.click(box.x, box.y);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true });
+  await page.keyboard.type('k'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nk\n```\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n```\n```\n\nOmega.\n' });
+// R27 (3): a commit whose render fails is rolled back and the edit stays
+// open on what was typed; the next commit lands it.
+check('code-edit: a commit whose render fails keeps the edit open with its text (R27)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await failFirstRender(page);
+  await page.keyboard.press('Escape'); await wait(1200); await renderIdle(page);
+  assert.deepStrictEqual({ card: await errorCardUp(page), edit: await codeEdit(page) },
+    { card: true, edit: { text: 'module m;\nendmoduleq', caret: 20, focused: true } });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+// R28: keys held while the ``` shortcut renders land in the body, and a held
+// Escape commits the edit.
+check('code-edit: "```js" and an Escape held during a slow render land in the body and commit (R28)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('```js'); await page.keyboard.press('Escape');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) }, { edit: null, notice: null });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\njs\n```\n\nOmega.\n');
+}, { md: BASE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

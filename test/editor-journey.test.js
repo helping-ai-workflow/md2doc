@@ -495,6 +495,26 @@ async function answerLinkField(page, text) {
 // here is a general "press at exactly this point, without moving first"
 // facility with its own two assertions; grep says nothing in this file
 // passes `pressAtPointer` any more.
+// v3.17.0 T2 (R29): a click on a fenced code block opens the in-place code
+// edit, not the raw box. The journeys that pin the RAW box's fence semantics
+// on a code block open it through the kept raw route instead: ⠿ → MD 原始碼,
+// pressed for real.
+async function openCodeRawViaGutter(page, sel) {
+  await page.hover(sel);
+  await new Promise((r) => setTimeout(r, 150));
+  await pressClick(page, sel + ' .ed-handle', 80);
+  await page.waitForSelector(sel + ' .ed-handle-menu-btn', { timeout: 5000 });
+  await page.evaluate(() => {
+    document.querySelectorAll('[data-journey-target]').forEach((e) => e.removeAttribute('data-journey-target'));
+    const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+      .find((e) => e.textContent.trim() === 'MD 原始碼');
+    if (!it) throw new Error('⠿ 選單裡沒有 MD 原始碼');
+    it.setAttribute('data-journey-target', '1');
+  });
+  await pressClick(page, '[data-journey-target="1"]', 0);
+  await page.waitForSelector(sel + ' textarea.ed-raw', { timeout: 5000 });
+}
+
 async function pressClick(page, selector, holdMs, opts) {
   const box = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
@@ -1855,6 +1875,10 @@ async function main() {
   const readLeverage = (page) => page.evaluate(() => ({
     active: document.activeElement ? document.activeElement.tagName : null,
     activeClass: document.activeElement ? String(document.activeElement.className) : '',
+    // v3.17.0 T2 (R28): 轉換成 程式碼 lands in the in-place code edit, whose
+    // host (the block's own <pre>) carries an attribute, not a class.
+    activeCode: !!(document.activeElement && document.activeElement.matches &&
+      document.activeElement.matches('pre[data-ed-code-edit]')),
     // Review I2: `save` excluded from this count — see the identical
     // comment on the "conversion restores focus" scenario earlier in this
     // file for why (NO_BLOCK_ALLOWED member whose OWN disabled flag tracks
@@ -1933,9 +1957,9 @@ async function main() {
     if (answer === 'caret') {
       if (st.active === 'BODY') return shown + '（必需答案 caret：游標不得掉到 BODY）';
       // 「不是 BODY」還不夠 —— 焦點停在某顆按鈕或某個 wrapper 上一樣打不了字。
-      if (!/\bed-wys-armed\b|\bed-wys-cell\b|\bed-raw\b/.test(st.activeClass)) {
+      if (!/\bed-wys-armed\b|\bed-wys-cell\b|\bed-raw\b/.test(st.activeClass) && !st.activeCode) {
         return shown + '（必需答案 caret：游標必須落在真的編輯面上' +
-          '（ed-wys-armed / ed-wys-cell / ed-raw），不是只要不是 BODY 就好）';
+          '（ed-wys-armed / ed-wys-cell / ed-raw / pre[data-ed-code-edit]），不是只要不是 BODY 就好）';
       }
       if (st.enabled <= 4) return shown + '（必需答案 caret：工具列塌成 ' + st.enabled + ' 顆）';
       return null;
@@ -2062,6 +2086,8 @@ async function main() {
       { id: 'quote',        state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,blockquote,paragraph' ? null
           : '選取所在的段落必須變成 blockquote，got ' + a.types },
+      // v3.17.0 T2 (R28): the code row lands in the in-place code edit (its
+      // <pre> host, readLeverage()'s activeCode), no longer in the raw box.
       { id: 'code',         state: 'sel',  answer: 'caret',
         effect: (b, a) => a.types === 'heading,code,paragraph' ? null
           : '選取所在的段落必須變成 code block，got ' + a.types },
@@ -2290,6 +2316,7 @@ async function main() {
       // calls the SAME convertBlockViaMenu() the toolbar's quote/code
       // buttons do, so backlog #6's `allowRawEditRescue` fix applies here
       // too — MEASURED, activeClass 'ed-raw', enabled 15, mode 'edit'.
+      // v3.17.0 T2 (R28): 程式碼 now lands in the in-place code edit.
       { label: '程式碼',       answer: 'caret', convert: true },
       { label: '引用',        answer: 'caret', convert: true },
     ];
@@ -4818,9 +4845,7 @@ async function main() {
         window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
       ['heading[1,1]', 'paragraph[3,3]', 'code[5,7]', 'paragraph[9,9]'],
       'F9 前提失敗：fixture 沒有給出一個佔 5..7 行的 code block');
-    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-      { timeout: 5000 });
+    await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
     const sel = await ctx.page.evaluate(() => {
       const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
       return { start: ta.selectionStart, end: ta.selectionEnd, len: ta.value.length, v: ta.value };
@@ -4864,9 +4889,7 @@ async function main() {
       assert.strictEqual(
         await ctx.page.evaluate(() => document.querySelectorAll('.ed-block').length), 5,
         'F10 控制組前提失敗：fixture 應該渲染出五個區塊');
-      await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-      await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-        { timeout: 5000 });
+      await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
       await ctx.page.evaluate(() => {
         const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
         ta.value = ta.value.replace('const a = 1;', 'const a = 2;');
@@ -4893,9 +4916,7 @@ async function main() {
     // 吞噬組：把收尾 fence 改成 ``` MID，圍欄不再閉合。
     {
       const ctx = await newPage(MD);
-      await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-      await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-        { timeout: 5000 });
+      await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
       const seeded = await ctx.page.evaluate(() => {
         const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
         ta.value = ta.value.replace(/```$/m, '``` MID');
@@ -4945,9 +4966,7 @@ async function main() {
         window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
       ['heading[1,1]', 'paragraph[3,3]', 'code[5,6]', 'paragraph[8,8]'],
       'F9b 前提失敗：fixture 沒有給出一個佔 5..6 行的【空】code block');
-    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-      { timeout: 5000 });
+    await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
     const sel = await ctx.page.evaluate(() => {
       const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
       return { v: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
@@ -4982,9 +5001,7 @@ async function main() {
     const title0 = await ctx.page.evaluate(() => document.title);
     assert.strictEqual(title0.indexOf('●'), -1,
       'F9c 前提失敗：剛開檔就已經是髒的，title=' + JSON.stringify(title0));
-    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-      { timeout: 5000 });
+    await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
     await close(ctx);
     await new Promise((r) => setTimeout(r, 700));
     const title1 = await ctx.page.evaluate(() => document.title);
@@ -5200,12 +5217,23 @@ async function main() {
     // banner 的生命週期而不是按壓機制，所以開編輯器走合成 click（委派的 click
     // 處理器對 clientX/clientY 為 0 的合成事件的處理見 client.js 那段註解）、
     // 提交走鍵盤 Ctrl+Enter，兩者都不經過那個被蓋住的點。
+    // v3.17.0 T2 (R29): a click on the block opens the in-place code edit
+    // now, so the raw box this pins opens through ⠿ → MD 原始碼 — still with
+    // synthesized clicks (on the ⠿ and on the menu item), for the reason
+    // above.
     const openCode = async (ctx) => {
       await ctx.page.evaluate((s) => {
         const el = document.querySelector(s);
         if (!el) throw new Error('找不到 code block');
-        el.click();
+        el.querySelector(':scope > .ed-handle').click();
       }, CODE);
+      await ctx.page.waitForSelector(CODE + ' .ed-handle-menu-btn', { timeout: 5000 });
+      await ctx.page.evaluate(() => {
+        const it = Array.from(document.querySelectorAll('.ed-handle-menu-btn'))
+          .find((e) => e.textContent.trim() === 'MD 原始碼');
+        if (!it) throw new Error('⠿ 選單裡沒有 MD 原始碼');
+        it.click();
+      });
       await ctx.page.waitForSelector(CODE + ' textarea.ed-raw', { timeout: 5000 });
     };
     const commitCode = async (ctx, value) => {
@@ -5282,9 +5310,7 @@ async function main() {
         window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
       ['heading[1,1]', 'paragraph[3,3]', 'code[5,9]', 'paragraph[11,11]'],
       'K1 前提失敗：fixture 沒有給出一個佔 5..9 行的巢狀圍欄');
-    await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-    await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-      { timeout: 5000 });
+    await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
     const sel = await ctx.page.evaluate(() => {
       const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
       return { v: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
@@ -5545,9 +5571,7 @@ async function main() {
           window.__ED__.blocks.map((b) => b.type + '[' + b.startLine + ',' + b.endLine + ']')),
         ['heading[1,1]', 'paragraph[3,3]', 'code[5,9]', 'paragraph[11,11]'],
         'PIN-len 前提失敗：fixture 沒有給出一個 ```` 開頭、內含 ``` 的 code block');
-      await pressClick(ctx.page, '.ed-block[data-block-type="code"]', 80);
-      await ctx.page.waitForSelector('.ed-block[data-block-type="code"] textarea.ed-raw',
-        { timeout: 5000 });
+      await openCodeRawViaGutter(ctx.page, '.ed-block[data-block-type="code"]');
       const sel = await ctx.page.evaluate(() => {
         const ta = document.querySelector('.ed-block[data-block-type="code"] textarea.ed-raw');
         return { v: ta.value, start: ta.selectionStart };
@@ -5777,8 +5801,7 @@ async function main() {
     const SW = SWALLOW_MSG;
     const CODE = '.ed-block[data-block-type="code"]';
     const rawEditCode = async (ctx, mutate) => {
-      await pressClick(ctx.page, CODE, 80);
-      await ctx.page.waitForSelector(CODE + ' textarea.ed-raw', { timeout: 5000 });
+      await openCodeRawViaGutter(ctx.page, CODE);
       await ctx.page.evaluate((s, body) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
         // eslint-disable-next-line no-new-func
@@ -6036,8 +6059,7 @@ async function main() {
     // FN-agg2：同一次編輯走逐區塊的 raw 編輯器。
     {
       const ctx = await newPage(DUPBRACE);
-      await pressClick(ctx.page, CODE, 80);
-      await ctx.page.waitForSelector(CODE + ' textarea.ed-raw', { timeout: 5000 });
+      await openCodeRawViaGutter(ctx.page, CODE);
       await ctx.page.evaluate((s) => {
         const ta = document.querySelector(s + ' textarea.ed-raw');
         ta.value = '```js\nif (a) {\n}\nif (b) {';
@@ -9310,6 +9332,11 @@ async function main() {
       const tag = await ctx.page.evaluate(() => document.activeElement.tagName);
       assert.notStrictEqual(tag, 'TEXTAREA',
         'I4 (建立副本/code)：不得自動開啟 raw editor，got ' + JSON.stringify({ tag }));
+      // v3.17.0 T2: the rescue now opens a code block IN PLACE, so "no editor
+      // opened" also means no in-place code edit.
+      const codeEdits = await ctx.page.evaluate(() => document.querySelectorAll('pre[data-ed-code-edit]').length);
+      assert.strictEqual(codeEdits, 0,
+        'I4 (建立副本/code)：不得自動開啟 in-place code edit，got ' + JSON.stringify({ codeEdits }));
       assert.strictEqual(ctx.errs.length, 0, 'I4 (建立副本/code)：不得有 pageerror: ' + ctx.errs.join(' | '));
       await ctx.page.close(); ctx.srv.close();
     }

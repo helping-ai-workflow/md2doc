@@ -1768,8 +1768,15 @@ function countInCode(source, needle) {
   // commit-then-render site: removeEmptiedParagraph() — a real paragraph left
   // with no text and no image is removed by one commitRangeRemoval() and owns
   // its rollback (+1). 1 declaration + 30 call lines = 31.
-  assert.strictEqual(helperCalls, 31,
-    'the helper must be DECLARED once and used on all thirty ' +
+  // MIGRATED by v3.17.0 T2 (31 -> 32, R30). ONE genuinely new
+  // commit-then-render site: commitCodeEditBody() — the in-place code edit
+  // commits the whole fenced block through one commitRangeEdit() and renders,
+  // and a failed render rolls that op back with the helper while the edit
+  // stays open on its text (R27 (3)) (+1). Its language pick
+  // (commitCodeEditWithLang()) goes through the same body, not a site of its
+  // own. 1 declaration + 31 call lines = 32.
+  assert.strictEqual(helperCalls, 32,
+    'the helper must be DECLARED once and used on all thirty-one ' +
     'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');
 }
 
