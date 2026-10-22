@@ -441,12 +441,16 @@ check('focus: TOC header button shows inset ring (no clipping)', async () => {
   const { htmlPath } = render(SIDE_MD);
   const page = await openPage(htmlPath);
   await page.focus('#toc-collapse-all');
-  await page.keyboard.press('Tab');
-  const s = await page.evaluate(() => { const a = document.activeElement; const c = getComputedStyle(a); return { id: a.id, outline: c.outlineStyle + ' ' + c.outlineWidth + ' ' + c.outlineColor, outlineOffset: c.outlineOffset }; });
+  // v3.16.0: the screenshot-mode button sits between Collapse all and the
+  // sidebar toggle, so Tab reaches it first; both carry the inset ring.
+  for (const id of ['capture-mode-toggle', 'toc-collapse-toggle']) {
+    await page.keyboard.press('Tab');
+    const s = await page.evaluate(() => { const a = document.activeElement; const c = getComputedStyle(a); return { id: a.id, outline: c.outlineStyle + ' ' + c.outlineWidth + ' ' + c.outlineColor, outlineOffset: c.outlineOffset }; });
+    assert.strictEqual(s.id, id);
+    assert.strictEqual(s.outline, 'solid 2px rgb(9, 105, 218)', id + ' ring');
+    assert.strictEqual(s.outlineOffset, '-2px', id + ' ring is inset');
+  }
   await page.close();
-  assert.strictEqual(s.id, 'toc-collapse-toggle');
-  assert.strictEqual(s.outline, 'solid 2px rgb(9, 105, 218)');
-  assert.strictEqual(s.outlineOffset, '-2px');
 });
 
 // ── Final fix wave A: print must not clip table columns ────────────────────

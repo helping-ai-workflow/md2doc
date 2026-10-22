@@ -189,6 +189,32 @@ async function focusRing(page) {
   });
 }
 
+// What a scroll-and-stitch full-page capture (FireShot and the like) repeats on
+// every slice: visible elements whose place on screen does not move when the
+// page scrolls by dy. Measured, not read from CSS, so a sticky table column
+// (it moves vertically) is not reported and a new floating control is.
+async function stuckWhileScrolling(page, dy) {
+  return page.evaluate(async (dy) => {
+    const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const pinned = [...document.querySelectorAll('body *')].filter((e) => {
+      const p = getComputedStyle(e).position;
+      return p === 'fixed' || p === 'sticky';
+    });
+    const shown = (r) => r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+    const y0 = scrollY;
+    const before = pinned.map((e) => e.getBoundingClientRect());
+    window.scrollBy(0, dy);
+    await frame();
+    const moved = scrollY - y0;
+    if (moved < dy - 1) throw new Error('the page did not scroll by ' + dy + ' (moved ' + moved + ')');
+    return pinned.filter((e, i) => {
+      const a = before[i];
+      const b = e.getBoundingClientRect();
+      return shown(a) && shown(b) && getComputedStyle(e).visibility !== 'hidden' && Math.abs(b.top - a.top) < moved / 2;
+    }).map((e) => e.id || String(e.className));
+  }, dy);
+}
+
 const checks = [];
 // opts.engines: run only on these engines. opts.launch: launch options for a
 // browser of the check's own (launched and closed around it), e.g. to turn the
@@ -321,6 +347,58 @@ check('desktop: a diagram opens in the lightbox; ✕ and Esc close it', DESKTOP,
   await wait(200);
   assert.ok(!(await isOpen()), 'Esc closes');
 });
+// Screenshot mode (v3.16.0): the reader minus everything a scroll-and-stitch
+// capture would repeat, the document kept at the width it was read at.
+async function readerShape(page) {
+  return page.evaluate(() => {
+    const vis = (sel) => { const e = document.querySelector(sel); return !!e && e.getClientRects().length > 0; };
+    const r = document.querySelector('main.content').getBoundingClientRect();
+    const toast = document.querySelector('.capture-toast');
+    return {
+      w: Math.round(r.width), left: Math.round(r.left), right: Math.round(document.documentElement.clientWidth - r.right),
+      y: Math.round(scrollY), sidebar: vis('.reader-sidebar'), splitter: vis('#sidebar-splitter'), bar: vis('#mobile-bar'),
+      theme: vis('#md2doc-theme-toggle'), toast: toast && toast.getClientRects().length ? toast.textContent : null,
+    };
+  });
+}
+check('desktop: screenshot mode leaves only the document at its reading width; Esc brings the reader back', DESKTOP, async (page) => {
+  assert.ok((await stuckWhileScrolling(page, 600)).includes('reader-sidebar'), 'the probe sees the sticky sidebar outside the mode');
+  await page.evaluate(() => window.scrollTo(0, 1500)); await wait(300);
+  const before = await readerShape(page);
+  await page.click('#capture-mode-toggle'); await wait(300);
+  const s = await readerShape(page);
+  assert.strictEqual(s.sidebar, false, 'sidebar hidden, ' + JSON.stringify(s));
+  assert.strictEqual(s.splitter, false, 'splitter hidden, ' + JSON.stringify(s));
+  assert.strictEqual(s.theme, false, 'theme bubble hidden, ' + JSON.stringify(s));
+  assert.ok(Math.abs(s.w - before.w) <= 1, 'reading width kept: ' + before.w + ' -> ' + s.w);
+  assert.ok(Math.abs(s.left - s.right) <= 1, 'centred, ' + JSON.stringify(s));
+  assert.ok(Math.abs(s.y - before.y) <= 1, 'reading position kept: ' + before.y + ' -> ' + s.y);
+  assert.match(String(s.toast), /Esc/, 'the toast says how to leave');
+  await wait(2600);
+  assert.deepStrictEqual(await stuckWhileScrolling(page, 600), [], 'nothing stays put while the page scrolls (toast gone too)');
+  const y = (await readerShape(page)).y;
+  await page.keyboard.press('Escape'); await wait(300);
+  const back = await readerShape(page);
+  assert.strictEqual(back.sidebar, true, 'sidebar back, ' + JSON.stringify(back));
+  assert.strictEqual(back.theme, true, 'theme bubble back, ' + JSON.stringify(back));
+  assert.ok(Math.abs(back.w - before.w) <= 1, 'width back: ' + before.w + ' -> ' + back.w);
+  assert.ok(Math.abs(back.y - y) <= 1, 'Esc keeps the reading position: ' + y + ' -> ' + back.y);
+});
+check('desktop: the screenshot button sits between Collapse all and the sidebar toggle; the rail hides it', DESKTOP, async (page) => {
+  const shown = () => page.$$eval('.toc-header-actions button', (bs) => bs.filter((b) => b.getClientRects().length > 0).map((b) => b.id));
+  assert.deepStrictEqual(await shown(), ['toc-expand-all', 'toc-collapse-all', 'capture-mode-toggle', 'toc-collapse-toggle']);
+  await page.click('#toc-collapse-toggle'); await wait(250);
+  assert.deepStrictEqual(await shown(), ['toc-collapse-toggle'], 'the 36px rail keeps only its restore toggle');
+});
+check('desktop: in screenshot mode Esc closes an open diagram first and stays in the mode', DESKTOP, async (page) => {
+  await page.click('#capture-mode-toggle'); await wait(300);
+  await page.click('main.content .graphviz svg'); await wait(250);
+  await page.keyboard.press('Escape'); await wait(250);
+  const s = await page.evaluate(() => ({ lightbox: !document.querySelector('.lightbox').hidden, sidebar: document.querySelector('.reader-sidebar').getClientRects().length > 0 }));
+  assert.deepStrictEqual(s, { lightbox: false, sidebar: false }, 'first Esc closes the diagram only');
+  await page.keyboard.press('Escape'); await wait(250);
+  assert.ok(await page.evaluate(() => document.querySelector('.reader-sidebar').getClientRects().length > 0), 'second Esc leaves the mode');
+});
 
 // ── Phone ───────────────────────────────────────────────────────────────────
 check('phone: top bar holds the menu and the title; no sideways scroll; no edge shadow', PHONE, async (page) => {
@@ -352,6 +430,24 @@ check('phone: ☰ opens the drawer below the bar; ☰, the scrim and Esc close i
   await page.keyboard.press('Escape');
   await wait(300);
   assert.ok(!(await opened()), 'Esc closes it');
+});
+check('phone: screenshot mode from the drawer closes it and hides the bar; Esc brings the bar back', PHONE, async (page) => {
+  await page.evaluate(() => window.scrollTo(0, 1200)); await wait(300);
+  const before = await readerShape(page);
+  await page.click('#sidebar-toggle'); await wait(300);
+  await page.click('#capture-mode-toggle'); await wait(300);
+  const s = await readerShape(page);
+  const lock = await page.evaluate(() => document.body.hasAttribute('data-sidebar-open') || document.documentElement.hasAttribute('data-sidebar-open'));
+  assert.strictEqual(lock, false, 'the drawer and its scroll lock are released');
+  assert.strictEqual(s.bar, false, 'top bar hidden, ' + JSON.stringify(s));
+  assert.strictEqual(s.sidebar, false, 'drawer hidden, ' + JSON.stringify(s));
+  assert.ok(Math.abs(s.w - before.w) <= 1, 'reading width kept: ' + before.w + ' -> ' + s.w);
+  assert.ok(Math.abs(s.y - before.y) <= 1, 'reading position kept: ' + before.y + ' -> ' + s.y);
+  assert.ok((await overflowX(page)) <= 0, 'no horizontal page scroll');
+  await wait(2600);
+  assert.deepStrictEqual(await stuckWhileScrolling(page, 400), [], 'nothing stays put while the page scrolls');
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.strictEqual((await readerShape(page)).bar, true, 'Esc brings the bar back');
 });
 check('phone: a TOC jump closes the drawer, lands below the bar and renames the bar', PHONE, async (page) => {
   await page.click('#sidebar-toggle');
