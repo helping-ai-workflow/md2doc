@@ -58,6 +58,24 @@ const run = spawnSync(process.execPath, [LIB, mdPath, htmlPath], { cwd: REPO, en
 assert.strictEqual(run.status, 0, 'fixture renders: ' + run.stderr);
 const URL = 'file://' + htmlPath;
 
+// ── Wide fixture (v3.16.1): a coverage report shaped like the one a FireShot
+// capture lost columns of — a per-file table a little wider than the reading
+// column, one far wider than any screen, and a code line longer than both ────
+const wideMd = ['# Coverage Report: tx_test_top', '', '## Per-File Summary', '',
+  '| File | Line Total | Line Covered | Line Uncovered | Line % | Toggle Total | Toggle Covered | Toggle Uncovered | Toggle % | Status |',
+  '|------|-----------:|-------------:|---------------:|-------:|-------------:|---------------:|-----------------:|---------:|--------|'];
+for (let i = 0; i < 40; i++) wideMd.push('| RT_axis_chk_generator_' + i + '.sv | 13 | 5 | 8 | 38.5% | 457 | 216 | 241 | 47.3% | WARN |');
+wideMd.push('', filler('w', 2), '', '## Uncovered Lines', '',
+  '| ' + Array.from({ length: 14 }, (_, i) => 'Column ' + i).join(' | ') + ' |', '|' + '---|'.repeat(14));
+for (let i = 0; i < 6; i++) wideMd.push('| ' + Array.from({ length: 14 }, (_, j) => '`rg_' + i + '_status_word_' + j + '`').join(' | ') + ' |');
+wideMd.push('', '\x60\x60\x60', 'assign r = ' + Array.from({ length: 30 }, (_, i) => 'input_data[IDXW-' + i + ']').join(' ^ ') + ';', '\x60\x60\x60', '', filler('w2', 6), '');
+const wideMdPath = path.join(tmpDir, 'wide.md');
+const wideHtmlPath = path.join(tmpDir, 'wide.html');
+fs.writeFileSync(wideMdPath, wideMd.join('\n'), 'utf8');
+const wideRun = spawnSync(process.execPath, [LIB, wideMdPath, wideHtmlPath], { cwd: REPO, encoding: 'utf8' });
+assert.strictEqual(wideRun.status, 0, 'wide fixture renders: ' + wideRun.stderr);
+const WIDE_URL = 'file://' + wideHtmlPath;
+
 // ── Theme fixture (v3.9.0): every diagram kind plus an image ───────────────
 const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 fs.writeFileSync(path.join(tmpDir, 'dot.png'), Buffer.from(PNG_1PX, 'base64'));
@@ -191,8 +209,11 @@ async function focusRing(page) {
 
 // What a scroll-and-stitch full-page capture (FireShot and the like) repeats on
 // every slice: visible elements whose place on screen does not move when the
-// page scrolls by dy. Measured, not read from CSS, so a sticky table column
-// (it moves vertically) is not reported and a new floating control is.
+// page scrolls by dy. Measured, not read from CSS, so a new floating control is
+// reported. It is NOT the whole screenshot-mode contract: a sticky table column
+// moves vertically and passes here, yet a capture tool hides every sticky and
+// fixed element after its first slice, which blanked that column from the
+// second screen down (v3.16.0). captureCensus below checks that.
 async function stuckWhileScrolling(page, dy) {
   return page.evaluate(async (dy) => {
     const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -361,6 +382,59 @@ async function readerShape(page) {
     };
   });
 }
+// What a capture tool would lose (v3.16.1), read from computed style, not from
+// movement: pinned = every visible sticky/fixed element (the tool hides them
+// after its first slice, so their content is on one screen only); clipped =
+// every visible box in the document that scrolls sideways (the tool only sees
+// the part in view); outside = wide boxes not fully inside the viewport.
+async function captureCensus(page) {
+  return page.evaluate(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+    const name = (e) => e.tagName.toLowerCase() + (e.id ? '#' + e.id : (typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : ''));
+    const pinned = new Set();
+    for (const e of document.querySelectorAll('body *')) {
+      const p = getComputedStyle(e).position;
+      if ((p === 'sticky' || p === 'fixed') && vis(e)) pinned.add(name(e));
+    }
+    const col = document.querySelector('main.content');
+    const vw = document.documentElement.clientWidth;
+    const clipped = [...col.querySelectorAll('*')].filter((e) => getComputedStyle(e).overflowX !== 'visible' && e.scrollWidth > e.clientWidth + 1 && vis(e)).map(name);
+    const outside = [...col.querySelectorAll('table, pre, .diagram-scroll')].filter((e) => {
+      const r = e.getBoundingClientRect(); return vis(e) && (r.left < -0.5 || r.right > vw + 0.5);
+    }).map(name);
+    const styled = [...col.querySelectorAll('table, pre, .diagram-scroll')].filter((e) => e.getAttribute('style') || /capture/.test(String(e.className))).map(name);
+    return { pinned: [...pinned].sort(), clipped, outside, styled, pageX: document.documentElement.scrollWidth - vw };
+  });
+}
+async function wideTablesInFull(page) {
+  await page.goto(WIDE_URL, { waitUntil: 'load' }); await wait(400);
+  const pre = await captureCensus(page);
+  const has = (list, tag) => list.filter((n) => n === tag || n.startsWith(tag + '.') || n.startsWith(tag + '#')).length;
+  assert.ok(has(pre.clipped, 'table') >= 2 && has(pre.clipped, 'pre') >= 1,
+    'the fixture has two sideways-scrolling tables and a code block outside the mode: ' + JSON.stringify(pre.clipped));
+  assert.ok(has(pre.pinned, 'td') && has(pre.pinned, 'th'), 'the census sees the sticky first column outside the mode: ' + JSON.stringify(pre.pinned));
+  const prose = () => page.$eval('main.content p', (p) => Math.round(p.getBoundingClientRect().width));
+  const proseBefore = await prose();
+  if (await page.isVisible('#sidebar-toggle')) { await page.click('#sidebar-toggle'); await wait(300); } // phone: the button is in the drawer
+  await page.click('#capture-mode-toggle'); await wait(2600);
+  const s = await captureCensus(page);
+  assert.deepStrictEqual(s.pinned, [], 'no sticky or fixed element left for a capture tool to hide');
+  assert.deepStrictEqual(s.clipped, [], 'nothing in the document scrolls sideways');
+  assert.deepStrictEqual(s.outside, [], 'every wide box fits the screen');
+  assert.ok(s.pageX <= 0, 'the page itself does not scroll sideways, by ' + s.pageX);
+  assert.ok(Math.abs((await prose()) - proseBefore) <= 1, 'prose keeps its reading width: ' + proseBefore + ' -> ' + (await prose()));
+  const firstCells = await page.$$eval('main.content table', (ts) => ts.map((t) => t.querySelector('tbody td').textContent.trim()));
+  assert.deepStrictEqual(firstCells, ['RT_axis_chk_generator_0.sv', 'rg_0_status_word_0'], 'first columns still hold their text');
+  const t = await page.$eval('main.content table', (e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: document.documentElement.clientWidth - r.right }; });
+  assert.ok(Math.abs(t.left - t.right) <= 1, 'the widened table is centred: ' + JSON.stringify(t));
+  await page.keyboard.press('Escape'); await wait(300);
+  const back = await captureCensus(page);
+  assert.deepStrictEqual(back.clipped, pre.clipped, 'Esc gives the tables their sideways scroll back');
+  assert.deepStrictEqual(back.styled, [], 'Esc leaves no inline width or class behind');
+  assert.ok(has(back.pinned, 'td'), 'Esc makes the first column sticky again');
+}
+check('desktop: screenshot mode shows every table and code block in full, first column included', DESKTOP, wideTablesInFull);
+check('phone: screenshot mode shows every table and code block in full, first column included', PHONE, wideTablesInFull);
 check('desktop: screenshot mode leaves only the document at its reading width; Esc brings the reader back', DESKTOP, async (page) => {
   assert.ok((await stuckWhileScrolling(page, 600)).includes('reader-sidebar'), 'the probe sees the sticky sidebar outside the mode');
   await page.evaluate(() => window.scrollTo(0, 1500)); await wait(300);
