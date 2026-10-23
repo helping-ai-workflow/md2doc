@@ -8507,6 +8507,38 @@ check('diagram-btn: clicking the button opens the diagram panel in place', DESKT
     'one panel inside the block, the diagram replaced by it, no raw box');
 }, { md: DIAG_MD });
 
+// T6 (D14): Enter on ONE selected diagram block opens the panel, not MD 原始碼.
+const shiftClickBlock = async (page, sel) => {
+  const r = await page.evaluate((q) => { const e = document.querySelector(q); e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.left + 20, y: b.top + b.height / 2 }; }, sel);
+  await page.keyboard.down('Shift'); await page.mouse.click(r.x, r.y); await page.keyboard.up('Shift');
+  await wait(250);
+  return page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
+};
+const enterState = (page) => page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length }));
+check('diagram-btn: Enter on a selected Graphviz block opens the panel', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block:has(.graphviz)'), 1, 'guard: the Graphviz block is the one selected block');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 0, panel: 1 }, 'panel open, no raw box');
+}, { md: DIAG_MD });
+check('diagram-btn: Enter on a selected Mermaid block opens the panel', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block:has(.mermaid)'), 1, 'guard: the Mermaid block is the one selected block');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 0, panel: 1 }, 'panel open, no raw box');
+}, { md: DIAG_MD });
+check('diagram-btn: Enter on a selected plain code block still opens MD 原始碼', DESKTOP, async (page) => {
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block[data-block-type="code"]'), 1, 'guard: the code block is selected');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 1, panel: 0 }, 'raw box, no panel');
+}, { md: DIAG_MIX_MD });
+check('diagram-btn: Enter on a selected Graphviz block with a syntax error opens MD 原始碼 (an ordinary code block)', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block pre code.language-dot', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block[data-block-type="code"]'), 1, 'guard: the broken dot block is selected');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 1, panel: 0 }, 'raw box, no panel');
+}, { md: '# D\n\n```dot\ndigraph { a -> \n```\n\nOmega.\n' });
+
 // ── diagram-panel (v3.17.0 T5, D15): the source and a live preview in place ──
 // The open panel, read in the page: the textarea's value / selection / focus,
 // the preview's svg text, whether it is stale, the message line (and its
