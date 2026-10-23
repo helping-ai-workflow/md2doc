@@ -1775,6 +1775,10 @@ function countInCode(source, needle) {
   // stays open on its text (R27 (3)) (+1). Its language pick
   // (commitCodeEditWithLang()) goes through the same body, not a site of its
   // own. 1 declaration + 31 call lines = 32.
+  // v3.17.0 T5 (R27): no new site, the count stays 32. That rollback line
+  // moved out of commitCodeEditBody() into commitFencedRangeAndRender(), the
+  // commit-and-render helper the in-place code edit and the diagram panel
+  // (commitDiagramPanelBody()) now share. The panel adds no line of its own.
   assert.strictEqual(helperCalls, 32,
     'the helper must be DECLARED once and used on all thirty-one ' +
     'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');

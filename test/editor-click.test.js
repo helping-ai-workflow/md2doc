@@ -8795,6 +8795,90 @@ check('diagram-panel: a commit whose render fails keeps the panel open with its 
   assert.strictEqual(await diagPanel(page), null);
   assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
 }, { md: DIAG_MD });
+// Fix round 1 (I1): Ctrl+S on a Graphviz source that does not parse. The
+// saved block renders as plain code, not a diagram; the panel still opens
+// again on it, with what was typed while the save was out, and the preview
+// keeps saying what is wrong.
+check('diagram-panel: Ctrl+S on a source with a syntax error keeps the panel open with the typing', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.press('Backspace');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('cd');
+  await renderIdle(page);
+  const BROKEN = DIAG_MD.replace(DOT_SRC, 'digraph { a -> b ');
+  assert.strictEqual(await diskUntil(boot, BROKEN), BROKEN, 'the save wrote the source as it was at Ctrl+S');
+  await wait(1500);
+  const s = await diagPanel(page);
+  assert.ok(s, 'the panel is open again');
+  assert.deepStrictEqual({ value: s.value, caret: s.caret, focused: s.focused, notice: await noticeText(page) },
+    { value: 'digraph { a -> b cd', caret: 19, focused: true, notice: null });
+  assert.ok(/syntax error/.test(s.error || ''), 'the error line: ' + JSON.stringify(s.error));
+  assert.strictEqual(s.head.indexOf('Graphviz') !== -1, true, 'still the Graphviz panel');
+  // Fixed and left, it renders as a diagram again.
+  await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.type('}');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content .graphviz svg').length), 1);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD);
+}, { md: DIAG_MD });
+// R58 (fix round 1, M2): switching the theme is not leaving what is being
+// edited — a code edit and a paragraph keep their focus and their typing.
+check('theme: the toggle keeps an open code edit and a paragraph edit open with their typing (R58)', DESKTOP, async (page, boot) => {
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await toggle(); await wait(300);
+  assert.strictEqual(await page.evaluate(() => document.documentElement.getAttribute('data-md2doc-theme')), 'dark', 'guard: dark');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'the code edit is open, typing kept');
+  await page.keyboard.type('r');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleqr', 'typing goes on in the code');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  const before = renderTotal(page);
+  await toggle(); await wait(300);
+  const p = await page.evaluate(() => {
+    const a = document.activeElement;
+    return { focused: !!a && a.classList.contains('ed-wys-armed'), text: a ? a.textContent : null };
+  });
+  assert.deepStrictEqual(Object.assign(p, { renders: renderTotal(page) - before }), { focused: true, text: 'Alpha.X', renders: 0 },
+    'the paragraph keeps focus and its typing, nothing committed by the toggle');
+  await page.keyboard.type('Y');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.XY\n\n```verilog\nmodule m;\nendmoduleqr\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+// Fix round 1 (M4): Esc puts the diagram back drawn for the theme on screen.
+// A Mermaid host is drawn again once (the runtime adopts the restored node),
+// and the next toggle redraws it; a Graphviz svg opened in dark and closed in
+// light loses the dark recolour.
+check('diagram-panel: Esc puts the diagram back drawn for the theme now on screen', DESKTOP, async (page) => {
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await openDiagPanel(page, '.mermaid svg');
+  await toggle(); await wait(1500);
+  await page.evaluate(() => {
+    window.__mmRenders = 0;
+    const orig = window.mermaid.render.bind(window.mermaid);
+    window.mermaid.render = (...a) => { window.__mmRenders++; return orig(...a); };
+  });
+  await page.keyboard.press('Escape'); await wait(1500);
+  const read = () => page.evaluate(() => {
+    const svg = document.querySelector('.content .mermaid svg');
+    const r = svg ? svg.getBoundingClientRect() : null;
+    return { panel: document.querySelectorAll('.ed-diagram-panel').length, visible: !!r && r.width > 0 && r.height > 0,
+      live: !!svg && svg.hasAttribute('data-md2doc-live'), renders: window.__mmRenders };
+  });
+  assert.deepStrictEqual(await read(), { panel: 0, visible: true, live: true, renders: 1 }, 'drawn once, dark');
+  await toggle(); await wait(1500);
+  const light = await read();
+  assert.deepStrictEqual({ visible: light.visible, live: light.live }, { visible: true, live: false }, 'the next toggle redraws it light');
+  // Graphviz: opened in dark, closed in light.
+  await toggle(); await wait(400);
+  await openDiagPanel(page, '.graphviz svg');
+  await toggle(); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.documentElement.getAttribute('data-md2doc-theme')), null, 'guard: light');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const svg = document.querySelector('.content .graphviz svg');
+    return { svg: !!svg, recoloured: !!svg && svg.hasAttribute('data-md2doc-recoloured') };
+  }), { svg: true, recoloured: false });
+}, { md: DIAG_MD });
 // R44: a page with no Mermaid at load: the engine arrives with the first
 // inserted block, and the panel previews through it.
 check('diagram-panel: a Mermaid block added to a page without Mermaid previews in the panel', DESKTOP, async (page) => {

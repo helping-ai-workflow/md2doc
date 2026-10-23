@@ -187,6 +187,19 @@ check('renderMermaid rejects when mermaid is not on the page', async () => {
   assert.ok(err, 'rejected');
 });
 
+// Fix round 1 (M3): a listener that unsubscribes itself while notify() runs
+// must not make the next listener miss the switch.
+check('a theme listener removing itself mid-notify does not skip the next one', () => {
+  const p = boot();
+  const seen = [];
+  let off = null;
+  off = p.theme.onTheme(() => { seen.push('first'); off(); });
+  p.theme.onTheme((dark) => { seen.push('second:' + dark); });
+  p.toggle();
+  assert.deepStrictEqual(seen, ['first', 'second:true']);
+  p.toggle();
+  assert.deepStrictEqual(seen, ['first', 'second:true', 'second:false'], 'the first is gone for good');
+});
 check('the runtime never contains a closing script tag', () => {
   assert.strictEqual(SRC.indexOf('</' + 'script'), -1);
 });
