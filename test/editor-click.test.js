@@ -9473,6 +9473,43 @@ check('image-toolbar: 替換 with a file that is not a picture writes nothing', 
   assert.strictEqual(uploads, 0, 'nothing uploaded');
   assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
 }, IMG_OPTS);
+// v3.17.0 final review I1: 替換 used to read the block id from the node it
+// held across the file dialog. A render meanwhile replaced that node, and a
+// commit above it moved every id by one, so the stale id named the picture
+// above: the wrong picture was replaced, with no notice. Both renders are
+// forced while the chooser is pending (the window blur a real dialog raises
+// can commit a dirty paragraph elsewhere in the same way).
+const IMG2_ASSETS = { 'assets/a.png': PNG_160, 'assets/b.png': PNG_160 };
+const IMG2_MD = '# D\n\nAlpha.\n\n![one](assets/a.png)\n\n![two](assets/b.png)\n\nOmega.\n';
+const imgConflictText = (page) => page.evaluate(() => { const b = document.querySelector('.ed-conflict'); return b ? b.textContent : ''; });
+check('image-toolbar: 替換 across a render that moved the block ids replaces the picture that was pointed at (final I1)', DESKTOP, async (page, boot) => {
+  await page.locator(IMG_SEL).nth(1).hover(); await wait(250);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true, 'guard: the forced render ran');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await page.keyboard.type('New.');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\n![one](assets/a.png)\n\n![two](assets/b.png)\n\nOmega.\n',
+    'guard: a paragraph landed above both pictures while the dialog was open');
+  await pickImage(page, chooser, PNG_160);
+  assert.strictEqual(await imgConflictText(page), '', 'no notice, no error');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\n![one](assets/a.png)\n\n![two](assets/dot.png)\n\nOmega.\n');
+}, { md: IMG2_MD, assets: IMG2_ASSETS });
+// The same window, with a picture that has an identical twin: after the
+// render it cannot be told apart, so the pick is refused with the retry
+// notice, BEFORE anything is uploaded (no orphan file in assets/).
+const IMG_TWIN_MD = '# D\n\nAlpha.\n\n![x](assets/a.png)\n\n![x](assets/a.png)\n\nOmega.\n';
+check('image-toolbar: 替換 refuses, uploading nothing, when the picture cannot be found again after a render (final I1)', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await page.locator(IMG_SEL).nth(1).hover(); await wait(250);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true, 'guard: the forced render ran');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_160, 'base64') });
+  await wait(600); await renderIdle(page);
+  const notice = await imgConflictText(page);
+  assert.ok(notice.indexOf('文件已更新，請重試這個操作') !== -1, 'the retry notice: ' + JSON.stringify(notice));
+  assert.strictEqual(uploads, 0, 'nothing uploaded');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_TWIN_MD, 'nothing written');
+}, { md: IMG_TWIN_MD, assets: { 'assets/a.png': PNG_160 } });
 check('image-toolbar: 刪除 removes the paragraph, one undo step', DESKTOP, async (page, boot) => {
   await hoverImg(page);
   await imgTbBtn(page, '刪除').click(); await renderIdle(page);
