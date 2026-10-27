@@ -3253,6 +3253,16 @@ check('loose lists: a checkbox toggles', DESKTOP, async (page, boot) => {
   assert.strictEqual(await noticeText(page), null, 'no refusal');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- [ ] alpha\n\n- [x] bravo\n\n- [ ] charlie\n');
 }, { md: '# D\n\n- [ ] alpha\n\n- [ ] bravo\n\n- [ ] charlie\n' });
+// v3.17.0 T10 (N2): the press leaves focus where it was, and the toggle's
+// resolution used to drop it on BODY. Measured at 4b2e86e: BODY.
+check('lists: a checkbox click keeps the caret where it was (N2)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 3);
+  await page.locator('.ed-block[data-task="1"]', { hasText: 'two' }).locator('.ed-li-check').click();
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 3, transient: false }, 'the caret is where it was');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpzha.\n\n- [ ] one\n- [x] two\n');
+}, { md: '# D\n\nAlpha.\n\n- [ ] one\n- [ ] two\n' });
 check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, async (page, boot) => {
   await gutterMenu(page, await blockByText(page, 'bravo'), '刪除');
   assert.strictEqual(await noticeText(page), null, 'no refusal');
@@ -4080,6 +4090,33 @@ check('transient-model: typing then leaving commits one paragraph, one undo step
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+// v3.17.0 T10 (L95b): the toolbar button steps the open burst like Ctrl+Z
+// does. Before, it committed the paragraph and then undid the whole commit
+// (a transient typed into vanished entirely), closing the burst either way.
+check('transient-model: toolbar 復原 inside an open paragraph undoes the last typing only (L95b)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await wait(600); await page.keyboard.type('Y');
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ caret: await caretNow(page), renders: renderTotal(page) - before, disk: fs.readFileSync(boot.mdPath, 'utf8') },
+    { caret: { text: 'Alpha.', offset: 6, transient: false }, renders: 0, disk: BASE_MD });
+  // The burst is still open (Ctrl+Z's own step, typing grouped as the burst
+  // history groups it): the next key lands in the paragraph, and nothing
+  // before the burst was undone.
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Q\n\nOmega.\n', 'only the typing went');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'the committed typing is the one document step');
+}, { md: BASE_MD });
+check('transient-model: toolbar 復原 inside a transient with typing keeps the transient (L95b)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.keyboard.type('New.'); await wait(100);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ caret: await caretNow(page), list: await blockList(page) },
+    { caret: { text: '', offset: 0, transient: true }, list: ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.'] });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD);
 }, { md: BASE_MD });
 check('transient-model: 在上方插入 on the first block puts it at the top', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'D', 1);
@@ -5549,6 +5586,22 @@ check('slash: no match shows the empty line; a space closes and keeps the text',
   assert.strictEqual((await slashMenu(page)).open, false);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n/zz x\n\nOmega.\n');
 }, { md: BASE_MD });
+// v3.17.0 T10 (M-a, R42): the empty line stays for two characters past the
+// last query that matched ('u' matched 項目符號列表; 's' and 'r' keep it), and
+// the third ('/') closes it. The text is plain paragraph text throughout.
+check('slash: no match closes after three more characters and keeps the text (M-a)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const seen = {};
+  for (const [label, chars] of [['/u', '/u'], ['/us', 's'], ['/usr', 'r'], ['/usr/', '/']]) {
+    await page.keyboard.type(chars);
+    const m = await slashMenu(page);
+    seen[label] = [m.open, m.labels.length];
+  }
+  assert.deepStrictEqual(seen, { '/u': [true, 1], '/us': [true, 0], '/usr': [true, 0], '/usr/': [false, 0] });
+  await page.keyboard.type('bin');
+  assert.strictEqual((await slashMenu(page)).open, false, 'it stays closed');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n/usr/bin\n\nOmega.\n');
+}, { md: BASE_MD });
 check('slash: Enter with no match closes the menu and splits', DESKTOP, async (page) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('/zz');
@@ -6648,16 +6701,56 @@ check('link-field: a click elsewhere closes it and the typed edit survives', DES
   assert.strictEqual((await linkField(page)).open, false);
   assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain words here.!'));
 }, { md: LINKS_MD });
-check('link-field: a scroll closes it', DESKTOP, async (page) => {
+// v3.17.0 T10 (M-c): a scroll moves the field with its selection and keeps
+// its text; only the selection leaving the view closes it. Migrated from
+// 'link-field: a scroll closes it' (old: closed on any scroll event; new:
+// open, text kept, same offset to the selection).
+async function tallPage(page) {
+  await page.evaluate(() => {
+    const d = document.createElement('div');
+    d.id = 'spacer-t10'; d.style.cssText = 'height:4000px;width:1px;';
+    document.body.appendChild(d);
+  });
+}
+const wordsBottom = (page) => page.evaluate(() => {
+  const p = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Plain words here.');
+  const t = p.firstChild;
+  const r = document.createRange(); r.setStart(t, 6); r.setEnd(t, 11);
+  return r.getBoundingClientRect().bottom;
+});
+check('link-field: a scroll keeps it with its text and follows the selection (M-c)', DESKTOP, async (page) => {
+  await tallPage(page);
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('abc');
+  const gap = async () => {
+    const f = await page.evaluate(() => { const b = document.querySelector('.ed-linkbar'); return b && b.isConnected ? b.getBoundingClientRect().top : null; });
+    return f === null ? null : Math.round((f - await wordsBottom(page)) * 10) / 10;
+  };
+  const before = await gap();
+  assert.notStrictEqual(before, null, 'guard: the field is open');
+  const y0 = await wordsBottom(page);
+  await page.evaluate(() => window.scrollTo(0, 40)); await wait(150);
+  const y1 = await wordsBottom(page);
+  assert.ok(Math.abs((y0 - y1) - 40) <= 1, 'guard: the page really scrolled by 40: ' + (y0 - y1));
+  const f = await linkField(page);
+  const after = await gap();
+  assert.deepStrictEqual({ open: f.open, value: f.value, moved: after !== null && Math.abs(after - before) <= 2 },
+    { open: true, value: 'abc', moved: true });
+}, { md: LINKS_MD });
+check('link-field: scrolling the selection out of view closes it', DESKTOP, async (page) => {
+  await tallPage(page);
   await selectInSurface(page, 'Plain words here.', 6, 11);
   await page.keyboard.press('Control+k');
   assert.strictEqual((await linkField(page)).open, true);
-  await page.evaluate(() => { document.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('scroll')); });
-  await wait(100);
+  await page.evaluate(() => window.scrollTo(0, 3000)); await wait(150);
   assert.strictEqual((await linkField(page)).open, false);
   // Closed by a scroll means back to the toolbar with the selection kept.
-  const r = await page.evaluate(() => ({ sel: String(getSelection()), bar: !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected }));
-  assert.deepStrictEqual([r.sel, r.bar], ['words', true]);
+  const sel = await page.evaluate(() => String(getSelection()));
+  assert.strictEqual(sel, 'words');
+  await page.evaluate(() => window.scrollTo(0, 0)); await wait(200);
+  const bar = await page.evaluate(() => !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected);
+  assert.strictEqual(bar, true, 'the toolbar comes back when the selection does');
 }, { md: LINKS_MD });
 check('link-paste: a URL over a selection makes a link', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Plain words here.', 6, 11);
@@ -7983,6 +8076,22 @@ check('emptied-para: Ctrl+S in an emptied paragraph writes no <br> and keeps the
   await page.keyboard.type('Q');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nZulu.\n');
 }, { md: FF_EMPTY_MD });
+// v3.17.0 T10 (N4): the transient Ctrl+S leaves in an emptied paragraph's
+// place belongs to the removal, so the first Ctrl+Z brings the paragraph back
+// (it used to drop the transient and change nothing; the second Ctrl+Z then
+// restored it).
+check('emptied-para: the first Ctrl+Z after an emptied paragraph is removed brings it back (N4)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nZulu.\n', 'guard: the removal is saved');
+  await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 1, 'guard: the transient is up');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.deepStrictEqual({ paras: await paragraphs(page), transients: await transientCount(page) },
+    { paras: ['Alpha.', 'Omega.', 'Zulu.'], transients: 0 });
+  assert.strictEqual(await saveAndRead(page, boot), FF_EMPTY_MD);
+}, { md: FF_EMPTY_MD });
 
 // R96 (I4): the "/" menu is not re-filtered while an IME composes; the
 // committed text filters it. Measured at ffbdd7c: ＋'s menu closed at the
@@ -8198,6 +8307,21 @@ check('code-edit: one Ctrl+Z after leaving restores the block', DESKTOP, async (
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmodulezz\nq'), 'guard: the edit landed');
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
+}, { md: CODE_MD });
+// v3.17.0 T10 (L95b): the toolbar button inside an open code edit is the
+// edit's own Ctrl+Z, never a commit followed by an undo of the whole edit.
+check('code-edit: toolbar 復原 steps the edit\'s own typing and never commits (L95b)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Control+End');
+  await page.keyboard.type('x'); await wait(400); await page.keyboard.type('y'); await wait(400);
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), renders: renderTotal(page) - before, disk: fs.readFileSync(boot.mdPath, 'utf8') },
+    { edit: { text: 'module m;\nendmodulex', caret: 20, focused: true }, renders: 0, disk: CODE_MD });
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmodule', 'a second press steps once more');
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ text: (await codeEdit(page) || {}).text, renders: renderTotal(page) - before }, { text: 'module m;\nendmodule', renders: 0 },
+    'nothing left inside: the edit stays open and the file is not reached');
 }, { md: CODE_MD });
 check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKTOP, async (page, boot) => {
   const before = renderTotal(page);
@@ -8554,6 +8678,17 @@ check('code-chips: the language filter takes 「py」 and Enter picks', DESKTOP,
   assert.deepStrictEqual((await langMenu(page)).items, ['Python']);
   await page.keyboard.press('Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+// v3.17.0 T10 (R54c): the filter input pointed at an option the empty list no
+// longer holds.
+check('code-chips: an empty filtered list clears aria-activedescendant (R54c)', DESKTOP, async (page) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  const ad = () => page.evaluate(() => document.querySelector('.ed-code-langmenu input').getAttribute('aria-activedescendant'));
+  await page.keyboard.type('py'); await wait(100);
+  assert.strictEqual(await ad(), 'ed-code-lang-python', 'guard: a match is current');
+  await page.keyboard.type('zz'); await wait(100);
+  assert.deepStrictEqual({ items: (await langMenu(page)).items, ad: await ad() }, { items: [], ad: null });
 }, { md: CODE_MD });
 check('code-chips: the arrow keys move the cursor, Esc closes the menu and keeps the edit', DESKTOP, async (page, boot) => {
   await clickText(page, 'endmodule'); await page.keyboard.type('q');
@@ -9461,6 +9596,54 @@ check('degraded-press: a lost click on the first of two identical code blocks op
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```\ntwin\n```\n\n```\ntwin\n```\n', 'only the paragraph\'s commit is written');
 }, { md: '# D\n\nAlpha.\n\n```\ntwin\n```\n\n```\ntwin\n```\n' });
 
+// v3.17.0 T10 (M1): the release path takes the click router's gutter-band
+// rule. The press is in the band left of the code block (the block's own
+// box), held until the paragraph's commit render replaced the block, released
+// over the new block's band: nothing opens, as a click there never did.
+async function pressBandAcrossRender(page, text) {
+  const pt = await page.evaluate((t) => {
+    const pre = [...document.querySelectorAll('.ed-block[data-block-type="code"]')].find((b) => b.textContent.indexOf(t) !== -1);
+    const r = pre.getBoundingClientRect();
+    const bs = getComputedStyle(pre, '::before');
+    // Low in the band: the ＋ / ⠿ pair sits at its top.
+    const x = r.left + parseFloat(bs.left) + parseFloat(bs.width) / 2, y = r.bottom - 4;
+    window.__t10Pressed = pre;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, same: hit === pre, hit: hit ? hit.tagName + '.' + hit.className : null, band: [bs.left, bs.width] };
+  }, text);
+  assert.ok(pt.same, 'pressBandAcrossRender: the lower middle of the ::before band hits the block itself: ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.down();
+  let gone = false;
+  for (let i = 0; i < 100 && !gone; i++) {
+    gone = await page.evaluate(() => !window.__t10Pressed.isConnected);
+    if (!gone) await wait(50);
+  }
+  await page.mouse.up();
+  return gone;
+}
+check('degraded-press: a release in the gutter band of a code block opens nothing (R50, M1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressBandAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), notice: await noticeText(page) },
+    { edit: null, raw: 0, notice: null });
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.X'));
+}, { md: CODE_MD });
+// v3.17.0 T10 (M2): the release that opened the block answers its own click
+// only. A click with no press of its own (a keyboard activation, a script)
+// came next and was swallowed once.
+check('degraded-press: a click with no press after a release that opened the edit is not swallowed (R50, M2)', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the release opened the code edit');
+  await page.evaluate(() => document.querySelector('blockquote').click());
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ box: await rawBox(page) && (await rawBox(page)).value, edit: await codeEdit(page) },
+    { box: '> Quote line.', edit: null }, 'the programmatic click opened the quote');
+}, { md: '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\n```\n\n> Quote line.\n\nOmega.\n' });
+
 // The /api/save answers, in the order they arrived (node side), for the
 // checks below; `slowSaves` holds every save 300 ms before it reaches the
 // server, so two that overlap overlap by construction.
@@ -9591,7 +9774,7 @@ check('code-chips: the language chip pressed from an empty new paragraph opens t
 }, { md: CODE_MD });
 
 (async () => {
-  const engines =(process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
+  const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
   let failed = 0; let ran = 0;
   for (const engine of engines) {

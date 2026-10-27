@@ -2768,4 +2768,27 @@ function countInCode(source, needle) {
   assert.strictEqual(jr.newStartLine, 3);
 }
 
+// -- v3.17.0 T10: carry-over source pins --------------------------------------
+{
+  // N6: the emptied-paragraph removal is decided by the burst's own surface.
+  // transientSurfaceEmpty() answers true when it finds no surface at all.
+  const call = src.indexOf('return await removeEmptiedParagraph(burst);');
+  assert.ok(call > 0, 'the removeEmptiedParagraph call site exists');
+  const guard = src.slice(src.lastIndexOf("if (burst.blockType === 'paragraph'", call), call);
+  assert.ok(guard.indexOf("burst.editEl &&") !== -1 &&
+    guard.indexOf("burst.editEl.textContent === ''") !== -1 &&
+    guard.indexOf("!burst.editEl.querySelector('img')") !== -1,
+    'N6: the call site tests burst.editEl');
+  assert.strictEqual(guard.indexOf('transientSurfaceEmpty'), -1, 'N6: and not transientSurfaceEmpty(burst.blockEl)');
+  // T5 minor: the dirty-state read has no side effect; the dispose is the
+  // render tails' reapDiagramPanel().
+  const pure = src.slice(src.indexOf('function diagramPanelHasUncommittedText()'), src.indexOf('function reapDiagramPanel()'));
+  assert.ok(pure.length > 0 && pure.indexOf('liveDiagramPanel') === -1, 'diagramPanelHasUncommittedText() is a pure read');
+  assert.strictEqual(src.split('reapDiagramPanel();').length - 1, 2, 'both render tails reap before setDirty()');
+  // M1: one gutter-band predicate, declared once, read by the router and the release path.
+  assert.strictEqual(src.split('pressInGutterBand(').length - 1, 3, 'M1: declaration + router + mouseup');
+  // M2: the release path's flag is cleared after its task.
+  assert.ok(src.indexOf('setTimeout(() => { degradedReleaseOpened = false; }, 0);') !== -1, 'M2: cleared with setTimeout(0)');
+}
+
 console.log('editor-client.test.js OK');
