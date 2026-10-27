@@ -9083,6 +9083,35 @@ check('image-toolbar: a paragraph with text around an image shows no toolbar', D
   }
 }, { md: '# D\n\nSee ![a](assets/a.png) here.\n\n[![b](assets/a.png)](http://example.com)\n\n![c](assets/a.png) ![d](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
 
+// ── v3.17.0 T8: a dropped picture on a picture replaces it ──
+const dropPngOn = (page, selector, b64) => page.evaluate(({ sel, b64 }) => {
+  const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
+  const target = document.querySelector(sel);
+  target.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+}, { sel: selector, b64 });
+check('image-drop: a PNG dropped on an image replaces its path', DESKTOP, async (page, boot) => {
+  const before = await blockList(page);
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    dropPngOn(page, IMG_SEL, PNG_160),
+  ]);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
+  assert.strictEqual((await blockList(page)).length, before.length, 'block count unchanged');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
+}, IMG_OPTS);
+check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP, async (page, boot) => {
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160),
+  ]);
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\n!\[chip top\]\(assets\/a\.png "T"\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, IMG_OPTS);
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
