@@ -15081,12 +15081,19 @@ async function gutterGeometry(page, sel) {
     }
 
     // ── Task 7: a gesture that CANNOT be re-resolved must say so ───────────
-    // When the intervening commit moves the target's own start line there is
-    // nothing left to re-resolve against, and the conservative answer is to
-    // drop the gesture — which is right, and which used to happen in total
-    // silence: the menu closed, nothing changed, no banner.
-    {
-      const rows = ['# Doc', '', 'Alpha', '', 'Bravo', '', 'Charlie', ''];
+    // When the intervening commit moves the target and the target cannot be
+    // proven (an identical twin), the conservative answer is to drop the
+    // gesture — which is right, and which used to happen in total silence:
+    // the menu closed, nothing changed, no banner.
+    // MIGRATED by v3.17.0 T10 (R104 / T9a M-R5): the original fixture (a
+    // UNIQUE Charlie below a raw edit that added a line) is now found again
+    // by content and the delete lands on Charlie, so that fixture pins the
+    // new behaviour (below) and the dropped-with-banner assertions run on an
+    // identical twin, the one case a re-find still refuses. Same assertions
+    // (banner asks for a retry; nothing deleted), different premise.
+    for (const twin of [true, false]) {
+      const rows = twin ? ['# Doc', '', 'Alpha', '', 'Bravo', '', 'Charlie', '', 'Charlie', '']
+        : ['# Doc', '', 'Alpha', '', 'Bravo', '', 'Charlie', ''];
       const { srv: nsrv, url: nurl, mdPath: nmdPath } = await setupBlockOpsDoc(rows);
       try {
         const page = await newPage(browser);
@@ -15106,14 +15113,21 @@ async function gutterGeometry(page, sel) {
           const el = document.querySelector('.ed-conflict');
           return el ? el.textContent : null;
         });
-        assert.ok(bannerText && bannerText.indexOf('請重試') !== -1,
-          'a dropped ⠿ gesture must surface a banner asking for a retry, got: ' +
-          JSON.stringify(bannerText));
         const after = await saveAndRead(page, nmdPath);
-        assert.ok(/(^|\n)Bravo(\n|$)/.test(after) && /(^|\n)Charlie(\n|$)/.test(after),
-          'a dropped delete must delete NOTHING — neither the target nor its neighbour, got:\n' + after);
+        if (twin) {
+          assert.ok(bannerText && bannerText.indexOf('請重試') !== -1,
+            'a dropped ⠿ gesture must surface a banner asking for a retry, got: ' +
+            JSON.stringify(bannerText));
+          assert.ok(/(^|\n)Bravo(\n|$)/.test(after) && (after.match(/(^|\n)Charlie(\n|$)/g) || []).length === 2,
+            'a dropped delete must delete NOTHING — neither the target nor its neighbour, got:\n' + after);
+        } else {
+          assert.strictEqual(bannerText, null, 'a unique target is found again: no banner, got: ' + JSON.stringify(bannerText));
+          assert.strictEqual(after, '# Doc\n\nAlpha1\n\nAlpha2\n\nBravo\n',
+            'the delete lands on Charlie, the block pressed, got:\n' + JSON.stringify(after));
+        }
         await page.close();
-        console.log('T7: an unresolvable ⠿ gesture is dropped WITH a banner, not silently — OK');
+        console.log(twin ? 'T7: an unresolvable ⠿ gesture is dropped WITH a banner, not silently — OK'
+          : 'T7: a ⠿ gesture on a unique block is found again after the intervening commit — OK');
       } finally { nsrv.close(); }
     }
     // ── T8 item 6: insertBlockBelow()'s zero-line refusal, at RUNTIME ─────
