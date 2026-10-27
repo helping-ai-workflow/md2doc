@@ -1071,10 +1071,11 @@ const shortcutOrderChecks = [
 for (const [re, msg] of shortcutOrderChecks) {
   assert.ok(re.test(src), msg);
 }
-// v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, and only a
-// leave that resolved (true) hands the caret on.
-assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\);\s*\}/.test(src),
-  'the raw box leave keys must run commit() / cancelAndMaybeDiscard() and hand the caret on only when it resolved');
+// v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
+// that resolved (true) hands the caret on, and a throw is reported
+// (fix round 1, M1).
+assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
+  'the raw box leave keys must run commit() / cancelAndMaybeDiscard(), hand the caret on only when it resolved, and report a throw');
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
 // tag by lib/editor/server.js (see LINEOPS_SRC / INLINE_MD_SRC / TABLE_MD_SRC

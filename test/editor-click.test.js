@@ -7808,6 +7808,90 @@ for (const [key, want] of [['Escape', '>'], ['Control+Enter', '> Q']]) {
     assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + want + '\n\nzOmega.\n');
   }, { md: BASE_MD });
 }
+// T9a fix round 1 (C1): the gesture's own commit rewrites the block it names
+// (typed into, then ⠿ / ＋ / 🖼 / a drop onto it), so its identity's source
+// can only belong to ANOTHER block afterwards. A content match then found the
+// identical twin and acted on it (the review's chain). In that self session
+// the block is the one at its start line (reresolveBlockElAfterSelfCommit()),
+// never a content match. Each row asserts the exact file: the twin `Twin.`
+// is untouched.
+const GU_SELF_MD = '# D\n\nTwin.\n\nTwin.\n\nEnd.\n';
+for (const [op, path, want] of [
+  ['刪除', '刪除', '# D\n\nTwin.\n\nEnd.\n'],
+  ['轉換 標題 1', ['轉換成', '標題 1'], '# D\n\n# Twin.X\n\nTwin.\n\nEnd.\n'],
+  ['建立副本', '建立副本', '# D\n\nTwin.X\n\nTwin.X\n\nTwin.\n\nEnd.\n'],
+]) {
+  check('gutter-unique: after typing into the first of two identical paragraphs, ⠿ ' + op + ' acts on that paragraph, not its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+    await gutterMenu(page, await guMark(page, 'Twin.X'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) }, { notice: null, disk: want });
+  }, { md: GU_SELF_MD });
+}
+check('gutter-unique: after typing into the first of two identical paragraphs, ＋ on it opens the new paragraph below it, not below its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  await plusClick(page, 'Twin.X'); await settleR86(page);
+  await page.keyboard.type('new');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nTwin.X\n\nnew\n\nTwin.\n\nEnd.\n');
+}, { md: GU_SELF_MD });
+check('gutter-unique: after typing into the first of two identical paragraphs, the toolbar 🖼 inserts below it, not below its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await pickImage(page, chooser); await settleR86(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nTwin\.X\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nTwin\.\n\nEnd\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, { md: GU_SELF_MD });
+check('gutter-unique: after typing into the first of two identical paragraphs, a block dropped onto it lands above it, not above its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  await dragBlock(page, 'End.', 'Twin.X'); await settleR86(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nEnd.\n\nTwin.X\n\nTwin.\n');
+}, { md: GU_SELF_MD });
+// T9a fix round 1 (I1, R35): an image insert whose anchor a render replaced
+// while the picker was open, with an identical twin, is refused with the
+// retry notice (it used to say there was nowhere to insert), and nothing is
+// uploaded or written but what the render itself committed.
+check('gutter-unique: the toolbar 🖼 whose anchor was redrawn while the picker was open, with an identical twin, is refused with the retry notice (M-R5, I1)', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await focusSurface(page, 'Twin.', 5);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), GU_SELF_MD, 'guard: the emptied paragraph is gone');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await wait(600); await settleR86(page);
+  assert.deepStrictEqual({ notice: await noticeText(page), uploads, disk: await saveAndRead(page, boot) },
+    { notice: '文件已更新，請重試這個操作', uploads: 0, disk: GU_SELF_MD });
+}, { md: '# D\n\nAlpha.\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+// T9a fix round 1 (M2): handCaretOnBelow()'s other two branches. (a) The
+// block below takes no caret (a code block): the caret goes into a new
+// paragraph between the two, which writes nothing until typed into. (b) A
+// leave that discards an untouched insert: the span it ends is gone, and the
+// caret goes to what follows it (`Omega.`); the file is unchanged.
+check('raw-box: Ctrl+Enter out of a quote box above a code block leaves the caret in a new paragraph between them (M-f, M2)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await page.keyboard.type('> '); await renderIdle(page);
+  await page.keyboard.type('Q'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' });
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'blockquote:Q', '~paragraph:', 'code:code'], 'the new paragraph sits between the quote and the code');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n> Q\n\nz\n\n```\ncode\n```\n');
+}, { md: '# D\n\nAlpha.\n\n```\ncode\n```\n' });
+check('code-edit: Esc out of an untouched "/" 程式碼 insert discards it and hands the caret to the paragraph below (M-f, M2)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content .ed-block[data-block-type="code"]').length), 0, 'the insert is gone');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'the file is unchanged');
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nzOmega.\n');
+}, { md: BASE_MD });
 // R104 (I-R3): the R80 stash reopen after a forced redraw, with two identical
 // quotes in the R86 failure order. The click on the SECOND quote opens (its
 // lines read the same on screen and in `lines`, by coincidence); its commit
