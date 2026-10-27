@@ -8156,10 +8156,26 @@ check('code-edit: Enter keeps the indent, Tab and Shift+Tab indent the selected 
   await page.keyboard.press('Escape'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```verilog\nmodule m;\nx\nendmodule\n```\n\nOmega.\n');
 }, { md: CODE_MD });
+// Polls the open code edit until it is open and focused (or 5 s pass) and
+// returns what it last read; the caller asserts it (diskUntil's shape).
+// T9b, measured: after typing in a paragraph, the click on the code block
+// opens the edit only once the paragraph's commit has settled — about 60 ms
+// after that render's response at 6x CPU throttling, later than
+// renderIdle()'s one macrotask and two frames. A single read after
+// renderIdle() then saw no edit: this check's red under suite load (T7, T9a),
+// 29 of 30 repeats at 6x throttling and 0 of 10 once the read waited.
+async function codeEditUntil(page) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const s = await codeEdit(page);
+    if ((s && s.focused) || Date.now() > deadline) return s;
+    await wait(50);
+  }
+}
 check('code-edit: Ctrl+Z inside the edit steps its own typing and never touches the file', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
   await clickText(page, 'endmodule'); await renderIdle(page);
-  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the edit is open');
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the edit is open');
   await page.keyboard.press('Control+End');
   await page.keyboard.type('x'); await wait(400); await page.keyboard.type('y'); await wait(400);
   const text = async () => (await codeEdit(page)).text;
@@ -8196,9 +8212,11 @@ check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKT
   // The next Ctrl+Z undoes the edit made before the visit, so the visit
   // pushed nothing on top of it. The paragraph is committed by Ctrl+S first
   // rather than by the press on the code block: a press whose blur-commit
-  // render lands before the button comes up loses its click (the race
+  // render lands before the button comes up used to lose its click (the race
   // wireBlockSelection()'s comment measures) — measured once here under a
-  // full-suite load, never in six isolated runs.
+  // full-suite load, never in six isolated runs. T9b (R50) fixed that race
+  // (pinned by the degraded-press: checks); the Ctrl+S step stays as the T2
+  // pin, per R50.
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
   await page.keyboard.press('Control+s'); await renderIdle(page);
   assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'guard: the paragraph edit is committed and saved');
@@ -9377,8 +9395,203 @@ check('image-drop: a .drawio dropped on an image still inserts below it', DESKTO
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\n![](assets/flow.drawio)\n\nOmega.\n');
 }, IMG_OPTS);
 
+// ── v3.17.0 T9b: timing races around commit renders ──
+// R50: a press on a degraded block right after typing in a paragraph blurs
+// the paragraph, and that paragraph's commit render can land before the
+// button comes up. When it replaced the pressed block, no click followed
+// (wireBlockSelection()'s trace) and nothing opened. The button is held down
+// here until the pressed block has left the document, so the render lands
+// inside the press by construction, not by load; the helper returns whether
+// it did (the checks' guard).
+async function pressTextAcrossRender(page, text) {
+  const pt = await page.evaluate((t) => {
+    const root = document.querySelector('.content');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = n.data.indexOf(t);
+      if (i === -1) continue;
+      const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + t.length);
+      const b = r.getBoundingClientRect();
+      const x = b.left + b.width / 2, y = b.top + b.height / 2;
+      const block = n.parentElement.closest('.ed-block');
+      const hit = document.elementFromPoint(x, y);
+      window.__t9bPressed = block;
+      return { x, y, same: !!(block && hit && block.contains(hit)) };
+    }
+    return null;
+  }, text);
+  assert.ok(pt && pt.same, 'pressTextAcrossRender: the point over ' + JSON.stringify(text) + ' hits its block');
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.down();
+  let gone = false;
+  for (let i = 0; i < 100 && !gone; i++) {
+    gone = await page.evaluate(() => !window.__t9bPressed.isConnected);
+    if (!gone) await wait(50);
+  }
+  await page.mouse.up();
+  return gone;
+}
+check('degraded-press: a click on a code block straight after typing in a paragraph opens the code edit (R50)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) },
+    { edit: { text: 'module m;\nendmodule', caret: 0, focused: true }, notice: null }, 'the press opened the code edit');
+  await page.keyboard.type('q'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.X').replace('module m;', 'qmodule m;'));
+}, { md: CODE_MD });
+check('degraded-press: a click on a quote straight after typing in a paragraph opens its box (R50)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'Quote line.'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  const box = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? { value: t.value, focused: document.activeElement === t } : null; });
+  assert.deepStrictEqual({ box, notice: await noticeText(page) }, { box: { value: '> Quote line.', focused: true }, notice: null }, 'the press opened the box');
+  await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n> NEW\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n> Quote line.\n\nOmega.\n' });
+// The re-find is R104's: with an identical twin the press cannot tell which
+// one it was on, so it opens neither and says so (it used to say nothing).
+check('degraded-press: a lost click on the first of two identical code blocks opens neither and shows the retry notice (R50, R104)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'twin'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), notice: await noticeText(page) },
+    { edit: null, raw: 0, notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```\ntwin\n```\n\n```\ntwin\n```\n', 'only the paragraph\'s commit is written');
+}, { md: '# D\n\nAlpha.\n\n```\ntwin\n```\n\n```\ntwin\n```\n' });
+
+// The /api/save answers, in the order they arrived (node side), for the
+// checks below; `slowSaves` holds every save 300 ms before it reaches the
+// server, so two that overlap overlap by construction.
+function recordSaves(page) {
+  const statuses = [];
+  page.on('response', (r) => { try { if (new URL(r.url()).pathname === '/api/save') statuses.push(r.status()); } catch (e) { /* ignore */ } });
+  return statuses;
+}
+async function slowSaves(page) {
+  await page.route('**/api/save', async (route) => { await wait(300); await route.continue(); });
+}
+async function savesUntil(statuses, n) {
+  const deadline = Date.now() + 10000;
+  while (statuses.length < n && Date.now() < deadline) await wait(50);
+  await wait(400); // and any later one
+  return statuses.slice();
+}
+// The focused surface's text and whether a code edit / diagram panel is open.
+const t9bFocus = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { tag: a ? a.tagName : null, text: a && a.matches && a.matches('.ed-wys-armed') ? a.textContent : null,
+    code: !!document.querySelector('pre[data-ed-code-edit]'), panel: !!document.querySelector('.ed-diagram-panel') };
+});
+
+// T9b item 2 (Task 2 re-review; T5 M6): keys are held while the Ctrl+S
+// re-enter render is out and replayed into the reopened edit. A click that
+// put the caret in another paragraph meanwhile stops that: what is typed
+// after it goes there (the v3.13.1 rule: an entry a click positioned
+// elsewhere is not the edit's), and the edit is not opened again over it.
+check('code-edit: a click on another paragraph during the Ctrl+S render takes the typing there and keeps focus there (T9b)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s'); await wait(100);
+  await clickText(page, 'Omega.'); await page.keyboard.type('z');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleq')), CODE_MD.replace('endmodule', 'endmoduleq'), 'the save wrote the code edit');
+  assert.deepStrictEqual({ focus: await t9bFocus(page), notice: await noticeText(page) },
+    { focus: { tag: 'P', text: 'Omega.z', code: false, panel: false }, notice: null });
+  assert.strictEqual(await commitAndRead(page, boot), CODE_MD.replace('endmodule', 'endmoduleq').replace('Omega.', 'Omega.z'));
+}, { md: CODE_MD });
+check('diagram-panel: a click on a paragraph during the Ctrl+S render takes the typing there and keeps focus there (T9b, T5 M6)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s'); await wait(100);
+  await clickText(page, 'Omega.'); await page.keyboard.type('z');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, DIAG_MD.replace('a -> b', 'a -> zeta')), DIAG_MD.replace('a -> b', 'a -> zeta'), 'the save wrote the panel');
+  assert.deepStrictEqual({ focus: await t9bFocus(page), notice: await noticeText(page) },
+    { focus: { tag: 'P', text: 'Omega.z', code: false, panel: false }, notice: null });
+  assert.strictEqual(await commitAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta').replace('Omega.', 'Omega.z'));
+}, { md: DIAG_MD });
+
+// T9b item 3: a second Ctrl+S inside the hold used to send its save while
+// the first was still out; the server 409s the stale baseline and the page
+// showed the conflict card over a correctly saved file. It waits now.
+check('code-edit: a second Ctrl+S during the Ctrl+S render saves after the first, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), edit: await codeEdit(page) },
+    { saves: [200, 200], status: 'clean', notice: null, edit: { text: 'module m;\nendmoduleq', caret: 20, focused: true } });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+check('code-edit: Esc and a second Ctrl+S during the Ctrl+S render leave the edit and save, never reopening it (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800); await slowSaves(page);
+  // Every time a host becomes the code edit (the attribute added, not removed):
+  // the end state alone cannot tell, because a reopen after the Esc is closed
+  // again by the leave's own caret hand-on.
+  await page.evaluate(() => {
+    window.__t9bOpens = 0;
+    new MutationObserver((ms) => ms.forEach((m) => { if (m.oldValue === null) window.__t9bOpens++; }))
+      .observe(document.querySelector('.content'), { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['data-ed-code-edit'] });
+  });
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Escape'); await page.keyboard.press('Control+s');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), edit: await codeEdit(page),
+    opens: await page.evaluate(() => window.__t9bOpens) },
+  { saves: [200, 200], status: 'clean', notice: null, edit: null, opens: 1 }, 'opened once (the Ctrl+S re-entry), never again after the Esc');
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' }, 'the leave handed the caret on');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+check('diagram-panel: a second Ctrl+S during the Ctrl+S render saves after the first, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const p = await diagPanel(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), panel: p && { value: p.value, focused: p.focused } },
+    { saves: [200, 200], status: 'clean', notice: null, panel: { value: 'digraph { a -> zeta }', focused: true } });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// The document-level variant: two Ctrl+S while a paragraph's commit renders
+// share one resolution (`switching`) and used to run two save()s back to back.
+check('save: two Ctrl+S during a paragraph\'s commit render save one after the other, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page) },
+    { saves: [200, 200], status: 'clean', notice: null });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.X\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// T9b item 4 (R57, T5 M5): the language chip pressed while the caret sits in
+// an empty new paragraph (a transient). The chip keeps focus there, so the
+// transient opened its burst again after the gesture's resolution, and its
+// focusout when the code host took focus resolved the brand-new edit, closing
+// it in the gesture that opened it (the shape T5 fixed in openDiagramPanel()).
+check('code-chips: the language chip pressed from an empty new paragraph opens the edit and its menu, and keeps them (R57, T5 M5)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' }, 'guard: the caret is in a new empty paragraph');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await renderIdle(page); await wait(300); await renderIdle(page);
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ menu: m && m.focused, edit: await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }), notice: await noticeText(page) },
+    { menu: true, edit: 'module m;\nendmodule', notice: null });
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 0, focused: true }, 'the edit is open again after the pick');
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('```verilog', '```python'));
+}, { md: CODE_MD });
+
 (async () => {
-  const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
+  const engines =(process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
   let failed = 0; let ran = 0;
   for (const engine of engines) {
