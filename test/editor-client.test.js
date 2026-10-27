@@ -1054,13 +1054,16 @@ const shortcutOrderChecks = [
   [/key === 'z'\)\s*\{\s*e\.preventDefault\(\);\s*undo\(\);/, 'Ctrl+Z must preventDefault() before undo()'],
   [/\(e\.key === 'y' \|\| \(e\.shiftKey && e\.key === 'Z'\)\)\)\s*\{\s*e\.preventDefault\(\);\s*redo\(\);/,
     'Ctrl+Y / Ctrl+Shift+Z must preventDefault() before redo()'],
-  [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*commit\(\);/,
+  // v3.17.0 T9a (M-f): the raw box's two leave keys go through
+  // leaveByKey(), which runs the same commit() / cancelAndMaybeDiscard() and
+  // then hands the caret on (pinned after this list).
+  [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*leaveByKey\(commit\);/,
     'Ctrl+Enter (raw-editor commit) must preventDefault() before commit()'],
   // §10-gap fix (review): Esc inside the raw editor now goes through
   // cancelAndMaybeDiscard() (restore() + the pristine-insert auto-remove
   // check) instead of calling restore() directly — deliberate, not a
   // regression (see cancelAndMaybeDiscard()'s own comment).
-  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*cancelAndMaybeDiscard\(\);/,
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*leaveByKey\(cancelAndMaybeDiscard\);/,
     'Esc inside the raw editor must preventDefault() before cancelAndMaybeDiscard()'],
   [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*closeGutterMenu\(\);/,
     'Esc (global, ⠿ menu dismiss) must preventDefault() before closeGutterMenu()'],
@@ -1068,6 +1071,10 @@ const shortcutOrderChecks = [
 for (const [re, msg] of shortcutOrderChecks) {
   assert.ok(re.test(src), msg);
 }
+// v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, and only a
+// leave that resolved (true) hands the caret on.
+assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\);\s*\}/.test(src),
+  'the raw box leave keys must run commit() / cancelAndMaybeDiscard() and hand the caret on only when it resolved');
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
 // tag by lib/editor/server.js (see LINEOPS_SRC / INLINE_MD_SRC / TABLE_MD_SRC

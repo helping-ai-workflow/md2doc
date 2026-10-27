@@ -7751,6 +7751,63 @@ for (const via of ['click', '⠿ MD 原始碼']) {
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> NEW\n\nEnd.\n');
   }, { md: '# D\n\nAlpha.\n\n> Q\n\nEnd.\n' });
 }
+// v3.17.0 T9a (M-R5, R35): the ⠿ actions take R104's rule too. Their
+// re-find matched start line + type + source, so after R95's unlogged
+// removal of the emptied paragraph above, the SECOND `Twin.` sat on the
+// first one's start line and was the one deleted, converted or copied; and
+// a paragraph that is the only one with its text was refused, its start line
+// having moved. Now a block whose node was redrawn is found again only when
+// it is the one block of its type with that source: two identical paragraphs
+// → refused with the notice, nothing written but the emptied paragraph's own
+// removal; one → acted on the first try. (R35 states the cost: a gesture on
+// a block with an identical twin needs a second try.)
+const guMark = (page, text) => page.evaluate((t) => {
+  const p = [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"]')].find((b) => b.textContent.trim() === t);
+  p.setAttribute('data-gu', '1'); return '[data-gu="1"]';
+}, text);
+for (const [op, path, oneWant] of [
+  ['刪除', '刪除', '# D\n\nEnd.\n'],
+  ['轉換 標題 1', ['轉換成', '標題 1'], '# D\n\n# Only.\n\nEnd.\n'],
+  ['建立副本', '建立副本', '# D\n\nOnly.\n\nOnly.\n\nEnd.\n'],
+]) {
+  check('gutter-unique: after emptying the paragraph above, ⠿ ' + op + ' on the first of two identical paragraphs is refused and writes nothing (M-R5)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    await gutterMenu(page, await guMark(page, 'Twin.'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: '文件已更新，請重試這個操作', disk: '# D\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+  }, { md: '# D\n\nAlpha.\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+  check('gutter-unique: after emptying the paragraph above, ⠿ ' + op + ' on a unique paragraph acts on the first try (M-R5)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    await gutterMenu(page, await guMark(page, 'Only.'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: null, disk: oneWant });
+  }, { md: '# D\n\nAlpha.\n\nOnly.\n\nEnd.\n' });
+}
+// v3.17.0 T9a (M-f, L146): a raw box left with its own key put its node back
+// and focus went to BODY with it, so the next key landed nowhere. The caret
+// now goes on to the block right below (here `Omega.`, at its start). Read in
+// the page: what holds focus, and its text when it sits in a block.
+const focusAfterLeave = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  const b = a && a.closest ? a.closest('.ed-block') : null;
+  return { tag: a ? a.tagName : null, armed: !!a && !!a.classList && a.classList.contains('ed-wys-armed'),
+    transient: !!b && b.hasAttribute('data-ed-transient'), text: b ? a.textContent : null };
+});
+for (const [key, want] of [['Escape', '>'], ['Control+Enter', '> Q']]) {
+  check('raw-box: ' + (key === 'Escape' ? 'Esc' : 'Ctrl+Enter') + ' out of a quote box leaves the caret in the next paragraph (M-f)', DESKTOP, async (page, boot) => {
+    await newParaBelowAlpha(page);
+    await page.keyboard.type('> '); await renderIdle(page);
+    assert.deepStrictEqual(await rawBox(page), { value: '> ', caret: 2, focused: true }, 'guard: the quote box is open');
+    await page.keyboard.type('Q'); await page.keyboard.press(key); await renderIdle(page);
+    assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+    await page.keyboard.type('z');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + want + '\n\nzOmega.\n');
+  }, { md: BASE_MD });
+}
 // R104 (I-R3): the R80 stash reopen after a forced redraw, with two identical
 // quotes in the R86 failure order. The click on the SECOND quote opens (its
 // lines read the same on screen and in `lines`, by coincidence); its commit
@@ -8031,6 +8088,30 @@ check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKT
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
 }, { md: CODE_MD });
+// v3.17.0 T9a (M-f, Task 2 deferral): leaving the edit with its own key took
+// the editing attributes off the focused host, and focus went to BODY. The
+// caret goes on to the paragraph below (at its start), for every leave: Esc
+// and Ctrl+Enter after typing, and Esc with nothing changed (the cancel path).
+for (const [name, typed, key] of [['Esc', 'x', 'Escape'], ['Ctrl+Enter', 'x', 'Control+Enter'], ['an unchanged Esc', '', 'Escape']]) {
+  check('code-edit: ' + name + ' out of the edit hands the caret on to the paragraph below (M-f)', DESKTOP, async (page, boot) => {
+    await clickText(page, 'endmodule');
+    if (typed) await page.keyboard.type(typed);
+    await page.keyboard.press(key); await renderIdle(page);
+    assert.strictEqual(await codeEdit(page), null, 'guard: the edit is closed');
+    assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+    await page.keyboard.type('z');
+    assert.strictEqual(await commitAndRead(page, boot), CODE_MD.replace('endmodule', 'endmodule' + typed).replace('Omega.', 'zOmega.'));
+  }, { md: CODE_MD });
+}
+// The last block: nothing below takes a caret, so it goes into a new empty
+// paragraph there (a transient), which writes nothing until typed into.
+check('code-edit: Esc out of the last block hands the caret to a new paragraph below it (M-f)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\n```\nendmodule\n```\n', 'nothing written');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n```\nendmodule\n```\n\nz\n');
+}, { md: '# D\n\n```\nendmodule\n```\n' });
 // Fix round 1 (R49 M6): waits are on what the page and the disk say, never a
 // fixed sleep. `diskUntil` polls the file until it reads `want` (or 10 s
 // pass) and returns what it last read; `saveStateUntil` does the same for the
@@ -8403,6 +8484,39 @@ check('code-chips: the language chip right after typing in a paragraph opens the
   await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.x').replace('```verilog', '```python'));
 }, { md: CODE_MD });
+// v3.17.0 T9a (R54a): the language chip opens the edit through the click
+// router's own guards. (1) Its block redrawn by the removal of the emptied
+// paragraph above, with an identical twin: found again by content only when
+// it is the one such block (R104), so it is refused with the notice.
+check('code-chips: after emptying the paragraph above, the language chip on the first of two identical code blocks is refused and opens nothing (R54a, R104)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await settleR86(page);
+  assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
+    { edit: null, menu: null, notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nx\n```\n\n```\nx\n```\n\nEnd.\n', 'nothing written but the removal');
+}, { md: '# D\n\nAlpha.\n\n```\nx\n```\n\n```\nx\n```\n\nEnd.\n' });
+// (2) The R102 (I-R1) shape: a split above, its undo's render fails and so
+// does the redraw, so the flight ends with a reconciliation owed and the
+// code block's node still on screen over stale `blocks`. The chip used to
+// open the edit there, seeded from lines that are not the block's; now it is
+// refused like the click on the block itself, and nothing is written.
+check('code-chips: the language chip on a code block below a split whose undo and redraw failed is refused and writes nothing (R54a, R102)', DESKTOP, async (page, boot) => {
+  const SPLIT = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\n';
+  await scriptRenders(page, [300, 2000, 1000], [false, true, true]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
+    { edit: null, menu: null, notice: '文件已更新，請重試這個操作' }, 'refused: no edit on the stale screen');
+  assert.strictEqual(await saveAndRead(page, boot), SPLIT + '```\ncode\n```\n', 'nothing written');
+}, { md: '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n```\ncode\n```\n' });
 check('code-chips: a typed filter starts on its first match, not on the current language (M3)', DESKTOP, async (page, boot) => {
   await hoverCodeBlock(page);
   await page.click('.ed-code-lang'); await wait(200);
@@ -8534,6 +8648,21 @@ check('diagram-btn: Enter on a selected Mermaid block opens the panel', DESKTOP,
   await page.keyboard.press('Enter'); await wait(400);
   assert.deepStrictEqual(await enterState(page), { raw: 0, panel: 1 }, 'panel open, no raw box');
 }, { md: DIAG_MD });
+// v3.17.0 T9a (R60 (2)): the Enter that opens the panel is not typed into
+// it — the source is focused and holds the block's body as it is, with no
+// newline from that Enter, the caret at its start.
+for (const [kind, sel, body] of [['Graphviz', '.ed-block:has(.graphviz)', 'digraph { a -> b }'], ['Mermaid', '.ed-block:has(.mermaid)', 'graph TD\n  A --> B']]) {
+  check('diagram-btn: Enter on a selected ' + kind + ' block focuses the panel source holding the block source unchanged (R60)', DESKTOP, async (page) => {
+    await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+    assert.strictEqual(await shiftClickBlock(page, sel), 1, 'guard: the ' + kind + ' block is the one selected block');
+    await page.keyboard.press('Enter'); await wait(400);
+    const s = await page.evaluate(() => {
+      const t = document.querySelector('.ed-diagram-panel textarea.ed-diagram-src');
+      return t ? { focused: document.activeElement === t, value: t.value, sel: [t.selectionStart, t.selectionEnd] } : null;
+    });
+    assert.deepStrictEqual(s, { focused: true, value: body, sel: [0, 0] });
+  }, { md: DIAG_MD });
+}
 check('diagram-btn: Enter on a selected plain code block still opens MD 原始碼', DESKTOP, async (page) => {
   assert.strictEqual(await shiftClickBlock(page, '.ed-block[data-block-type="code"]'), 1, 'guard: the code block is selected');
   await page.keyboard.press('Enter'); await wait(400);
@@ -9110,6 +9239,22 @@ check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP
   await renderIdle(page);
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\n!\[chip top\]\(assets\/a\.png "T"\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, IMG_OPTS);
+// v3.17.0 T9a (R61, D18): only a raster picture replaces; a .drawio dropped
+// on a picture is inserted below it, and the picture keeps its path.
+check('image-drop: a .drawio dropped on an image still inserts below it', DESKTOP, async (page, boot) => {
+  const MX = '<mxfile host="app.diagrams.net"><diagram name="Page-1"><mxGraphModel dx="1" dy="1"><root>' +
+    '<mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>';
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    page.evaluate(({ sel, text }) => {
+      const dt = new DataTransfer(); dt.items.add(new File([text], 'flow.drawio', { type: '' }));
+      document.querySelector(sel).dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    }, { sel: IMG_SEL, text: MX }),
+  ]);
+  await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\n![](assets/flow.drawio)\n\nOmega.\n');
 }, IMG_OPTS);
 
 (async () => {
