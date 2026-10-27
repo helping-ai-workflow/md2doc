@@ -7849,6 +7849,42 @@ check('gutter-unique: after typing into the first of two identical paragraphs, a
   assert.strictEqual(await noticeText(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nEnd.\n\nTwin.X\n\nTwin.\n');
 }, { md: GU_SELF_MD });
+// T9a fix round 2 (R64): the gesture's own commit is R95's removal of the
+// emptied paragraph, so the block is gone; its start line now names `Beta.`,
+// which the self-commit re-find (start line + type) used to act on (measured
+// at 22a60e5 and 219754b: ⠿ 刪除 left `# D\n\nEnd.\n`). Now that re-find
+// answers "removed": 刪除 is already done (nothing more, no notice); every
+// other gesture writes nothing more and shows the retry notice.
+const GONE_MD = '# D\n\nAlpha.\n\nBeta.\n\nEnd.\n';
+const r64Empty = async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  return page.evaluate(() => { const b = document.activeElement.closest('.ed-block'); b.setAttribute('data-r64', '1'); return '[data-r64="1"]'; });
+};
+check('gutter-unique: ⠿ 刪除 on a paragraph just emptied removes only it, and says nothing (T9a R64)', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await r64Empty(page), '刪除'); await settleR86(page);
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: '# D\n\nBeta.\n\nEnd.\n' });
+}, { md: GONE_MD });
+for (const [op, path] of [['轉換 標題 1', ['轉換成', '標題 1']], ['建立副本', '建立副本']]) {
+  check('gutter-unique: ⠿ ' + op + ' on a paragraph just emptied is refused with the notice and touches the paragraph below nothing (T9a R64)', DESKTOP, async (page, boot) => {
+    await gutterMenu(page, await r64Empty(page), path); await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: '文件已更新，請重試這個操作', disk: '# D\n\nBeta.\n\nEnd.\n' });
+  }, { md: GONE_MD });
+}
+check('gutter-unique: ＋ on a paragraph just emptied is refused with the notice and opens nothing below the paragraph below (T9a R64)', DESKTOP, async (page, boot) => {
+  const sel = await r64Empty(page);
+  await page.hover(sel); await wait(150);
+  const box = await page.locator(sel + ' > .ed-insert').boundingBox();
+  assert.ok(box, 'guard: the emptied paragraph has its ＋');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await settleR86(page);
+  // The one transient is where `Alpha.` was: its emptied paragraph, which R95
+  // keeps as a transient while focus stays in it (the ＋ press keeps focus).
+  // None opened below `Beta.`.
+  assert.deepStrictEqual({ notice: await noticeText(page), blocks: await blockList(page), disk: await saveAndRead(page, boot) },
+    { notice: '文件已更新，請重試這個操作', blocks: ['heading:D', '~paragraph:', 'paragraph:Beta.', 'paragraph:End.'], disk: '# D\n\nBeta.\n\nEnd.\n' });
+}, { md: GONE_MD });
 // T9a fix round 1 (I1, R35): an image insert whose anchor a render replaced
 // while the picker was open, with an identical twin, is refused with the
 // retry notice (it used to say there was nowhere to insert), and nothing is
