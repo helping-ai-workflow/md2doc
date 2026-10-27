@@ -9596,6 +9596,20 @@ check('degraded-press: a lost click on the first of two identical code blocks op
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```\ntwin\n```\n\n```\ntwin\n```\n', 'only the paragraph\'s commit is written');
 }, { md: '# D\n\nAlpha.\n\n```\ntwin\n```\n\n```\ntwin\n```\n' });
 
+// v3.17.0 T10 (ER 'Esc out of a raw editor is recoverable', surfaced by T9a's
+// hand-on): the caret an Esc hands to a transient above a code block must not
+// swallow the Ctrl+Z that restores the discarded text.
+check('raw-box: Ctrl+Z after Esc out of a quote box above a code block restores the discarded text (M-f, T10)', DESKTOP, async (page, boot) => {
+  await page.locator('blockquote').click(); await renderIdle(page);
+  assert.strictEqual((await rawBox(page) || {}).focused, true, 'guard: the box is open');
+  await page.keyboard.type(' DROPPED'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ box: await rawBox(page), transients: await transientCount(page) }, { box: null, transients: 1 }, 'guard: Esc left a transient with the caret');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
+  const box = await rawBox(page);
+  assert.ok(box && box.value.indexOf('DROPPED') !== -1, 'the box is back with the text: ' + JSON.stringify(box));
+  assert.strictEqual(await transientCount(page), 0, 'the transient went');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.\n\n> Quote line.\n\n```\nc\n```\n\nOmega.\n', 'nothing written');
+}, { md: '# D\n\nAlpha.\n\n> Quote line.\n\n```\nc\n```\n\nOmega.\n' });
 // v3.17.0 T10 (M1): the release path takes the click router's gutter-band
 // rule. The press is in the band left of the code block (the block's own
 // box), held until the paragraph's commit render replaced the block, released
