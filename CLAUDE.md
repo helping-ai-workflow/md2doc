@@ -40,7 +40,7 @@ heartbeat reads them). `POST /api/preview` (v3.17.0) serves the diagram panel's 
 preview of a source that is not saved yet, so it is stateless: it calls `renderDotSvg` only,
 never `renderMarkdown` and never `trackDrawioRefs`, and it answers 200 `{svg}`, 422 `{error}`
 (the engine's first line) or 400 / 403 / 415. Do not route a preview through `/api/render`:
-that would record an unsaved source's references and re-read the file on every keystroke.
+that would record an unsaved source's references and re-render the whole document on every keystroke.
 Mermaid previews never reach the server (`md2docTheme.renderMermaid` in the page).
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
@@ -71,7 +71,7 @@ first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`; the two IME checks run in Chromium only, `opts.engines`, because they drive composition through CDP); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour), `code-edit.test.js` (the in-place code edit's pure core, `lib/editor/code-edit.js`), `theme-runtime.test.js` (`lib/theme/runtime.js` in a vm: the order of Mermaid renders on its serial chain); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`; the two IME checks run in Chromium only, `opts.engines`, because they drive composition through CDP); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
@@ -455,7 +455,9 @@ before the backtick counting as an escape.
 CSS, which added no backtick): **360** every backtick byte, **4** `` \` `` escapes (one line,
 5555 in that lib, a 7118-line file), **356** structural. The +2 over v3.15.0 came in with
 v3.16.0's screenshot mode (`bedc1b1` 358, `effb475` 360); nothing in this release's editor work
-(all in `lib/editor/*.js`, `lib/theme/runtime.js` and CSS without backticks) moved it. Counted with
+(all in `lib/editor/*.js`, `lib/theme/runtime.js` and CSS without backticks) moved it. The one
+change to the lib's JavaScript, `loadGraphviz` / `renderDotSvg` (the Graphviz bake split out so
+`/api/preview` can share it, `247579e`), is string concatenation and moved it neither. Counted with
 node over the file's characters, a backslash directly before the backtick counting as an escape.
 
 Both totals are even, which is the property the check is really after; an odd one either
