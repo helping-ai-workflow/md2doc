@@ -3613,6 +3613,18 @@ const failFirstRender = async (page) => {
     await wait(800);
     await route.fulfill({ status: 500, body: '{}' });
   });
+  // R51 flake (v3.17.0 probe, 7 reds in ~600 runs): `await page.route()` returns
+  // before the browser starts intercepting. A fetch the page makes in that gap
+  // goes straight to the server (HTTP 200, no request event on the node side),
+  // so the render the check meant to fail succeeds and no card ever comes. The
+  // product was right every time. A probe request proves interception is live.
+  let live = false;
+  await page.route('**/__route-live', (route) => { live = true; return route.fulfill({ status: 204, body: '' }); });
+  for (let i = 0; i < 100 && !live; i++) {
+    await page.evaluate(() => fetch('/__route-live').catch(() => {}));
+    if (!live) await wait(20);
+  }
+  assert.ok(live, 'failFirstRender: route interception never went live');
 };
 check('enter-type: keys typed before a second click stay where they were typed', DESKTOP, async (page, boot) => {
   await delayRender(page, 800);
