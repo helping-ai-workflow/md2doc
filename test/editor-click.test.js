@@ -35,10 +35,17 @@ const FIXTURE = [
 ].join('\n');
 
 const servers = [];
-async function bootEditor(mdText, opts) {
+async function bootEditor(mdText, opts, assets) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-edclick-'));
   const mdPath = path.join(dir, 'doc.md');
   fs.writeFileSync(mdPath, mdText === undefined ? FIXTURE : mdText, 'utf8');
+  // v3.17.0 T7 (R34): files the document refers to, written next to doc.md
+  // before the server starts -- { 'assets/a.png': <base64> }.
+  Object.keys(assets || {}).forEach((rel) => {
+    const f = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, Buffer.from(assets[rel], 'base64'));
+  });
   const srv = await createEditorServer(Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, opts || {}));
   servers.push(srv);
   return { url: srv.urlFor(mdPath), mdPath, srv };
@@ -5704,10 +5711,10 @@ async function plusClick(page, text, opts) {
 }
 // Answers a file chooser with the 1px PNG and waits for its upload and the
 // render that follows (R41: renderIdle alone does not wait for /api/asset).
-async function pickImage(page, chooser) {
+async function pickImage(page, chooser, base64) {
   await Promise.all([
     page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') }),
+    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }),
   ]);
   await renderIdle(page);
 }
@@ -8924,6 +8931,158 @@ check('diagram-panel: a Mermaid block added to a page without Mermaid previews i
   assert.strictEqual(await diagPanel(page), null);
 }, { md: BASE_MD });
 
+// ── v3.17.0 T7: the image toolbar (D16–D18) ──
+// A real 160x100 PNG, so the hover geometry has a picture to be inside of.
+const PNG_160 = (() => {
+  const zlib = require('zlib');
+  const w = 160, h = 100;
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 3 + 1)] = 0;
+    for (let x = 0; x < w; x++) { const o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = 200; raw[o + 1] = 80 + (x % 60); raw[o + 2] = 90; }
+  }
+  const crcTable = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+  const crc = (b) => { let c = 0xffffffff; for (const v of b) c = crcTable[(c ^ v) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const cr = Buffer.alloc(4); cr.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cr]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]).toString('base64');
+})();
+const IMG_MD = '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\nOmega.\n';
+const IMG_OPTS = { md: IMG_MD, assets: { 'assets/a.png': PNG_160 } };
+const IMG_SEL = '.content .ed-block[data-block-type="paragraph"] img';
+const imgTbState = (page) => page.evaluate(() => {
+  const t = document.querySelector('.ed-imgtb');
+  if (!t || t.hidden) return null;
+  const img = document.querySelector('.content .ed-block img');
+  const r = t.getBoundingClientRect(), p = img.getBoundingClientRect();
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--md-ed-err)';
+  document.body.appendChild(probe);
+  const errColour = getComputedStyle(probe).color;
+  probe.remove();
+  const btns = [...t.querySelectorAll('.ed-imgtb-btn')];
+  const del = btns.find((b) => b.textContent === '刪除');
+  const hit = document.elementFromPoint(r.left + 4, r.top + 4);
+  return {
+    left: Math.round(r.left - p.left), top: Math.round(r.top - p.top), texts: btns.map((b) => b.textContent),
+    delErr: !!del && getComputedStyle(del).color === errColour, inContent: !!t.closest('.content'),
+    hit: !!hit && !!hit.closest('.ed-imgtb'), imgW: Math.round(p.width), imgH: Math.round(p.height),
+    inputShown: !!t.querySelector('.ed-imgtb-input') && !t.querySelector('.ed-imgtb-input').hidden,
+  };
+});
+const hoverImg = async (page) => { await page.hover(IMG_SEL); await wait(250); };
+const imgTbBtn = (page, label) => page.locator('.ed-imgtb-btn', { hasText: label });
+const openAlt = async (page) => {
+  await hoverImg(page);
+  await imgTbBtn(page, '替代文字').click(); await wait(300);
+  assert.strictEqual((await imgTbState(page)).inputShown, true, 'guard: the alt input is showing');
+};
+check('image-toolbar: hovering an image shows 替換 替代文字 刪除 at its top-left', DESKTOP, async (page) => {
+  assert.strictEqual(await imgTbState(page), null, 'guard: no toolbar while the pointer is elsewhere');
+  await hoverImg(page);
+  const s = await imgTbState(page);
+  assert.ok(s, 'toolbar shown');
+  assert.ok(s.left >= 6 && s.left <= 10 && s.top >= 6 && s.top <= 10, 'inset from the image corner: ' + JSON.stringify(s));
+  assert.deepStrictEqual({ texts: s.texts, delErr: s.delErr, inContent: s.inContent, hit: s.hit, size: [s.imgW, s.imgH] },
+    { texts: ['替換', '替代文字', '刪除'], delErr: true, inContent: false, hit: true, size: [160, 100] });
+  // The toolbar itself keeps the pointer; leaving both hides it after a moment.
+  const box = await page.locator('.ed-imgtb').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await wait(450);
+  assert.ok(await imgTbState(page), 'still shown with the pointer on it');
+  await page.mouse.move(5, 5); await wait(150);
+  assert.ok(await imgTbState(page), 'not yet hidden 150 ms after leaving');
+  await wait(450);
+  assert.strictEqual(await imgTbState(page), null, 'hidden after the pointer left both');
+}, IMG_OPTS);
+check('image-toolbar: 替代文字 rewrites only the brackets, one undo step', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'chip top');
+  assert.strictEqual(await page.evaluate(() => document.activeElement === document.querySelector('.ed-imgtb-input')), true, 'the input has focus');
+  await page.keyboard.type('new words'); await page.keyboard.press('Enter'); await renderIdle(page);
+  // (A pointer left over the re-rendered picture may bring the toolbar back: that is the hover rule.)
+  await page.mouse.move(5, 5); await wait(450);
+  assert.strictEqual(await imgTbState(page), null, 'toolbar gone after applying');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![new words](assets/a.png "T")\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the block');
+}, IMG_OPTS);
+check('image-toolbar: alt with brackets round-trips', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('p [q]'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![p \\[q\\]](assets/a.png "T")\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.content img').getAttribute('alt')), 'p [q]', 'renders back to the typed text');
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'p [q]', 'reopened: the input shows the typed text');
+}, IMG_OPTS);
+check('image-toolbar: Esc in the alt field changes nothing', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('zzz'); await page.keyboard.press('Escape'); await wait(300);
+  const s = await imgTbState(page);
+  assert.ok(!s || s.inputShown === false, 'the input is gone');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+  // Enter with the text unchanged writes nothing either: one Ctrl+Z has nothing to undo.
+  await openAlt(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-conflict')), false, 'no message');
+}, IMG_OPTS);
+check('image-toolbar: Ctrl+Z in the alt field leaves the document alone', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('first'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await openAlt(page);
+  await page.keyboard.type(' more');
+  await page.keyboard.press('Control+z'); await wait(300);
+  const s = await page.evaluate(() => ({ alt: document.querySelector('.content img').getAttribute('alt'),
+    input: !document.querySelector('.ed-imgtb-input').hidden }));
+  assert.deepStrictEqual(s, { alt: 'first', input: true }, 'the field undid its own text; the document did not move');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![first](assets/a.png "T")\n\nOmega.\n');
+}, IMG_OPTS);
+check('image-toolbar: 替換 rewrites only the path and keeps alt and title', DESKTOP, async (page, boot) => {
+  await hoverImg(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(chooser.isMultiple(), false, 'a single-file picker');
+  await pickImage(page, chooser, PNG_160);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
+}, IMG_OPTS);
+check('image-toolbar: 替換 with a file that is not a picture writes nothing', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await hoverImg(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  await chooser.setFiles({ name: 'x.drawio', mimeType: '', buffer: Buffer.from('<mxfile/>') });
+  await wait(600);
+  const notice = await page.evaluate(() => { const b = document.querySelector('.ed-conflict'); return b ? b.textContent : ''; });
+  assert.ok(notice.indexOf('只能用圖片檔替換') !== -1, 'notice: ' + JSON.stringify(notice));
+  assert.strictEqual(uploads, 0, 'nothing uploaded');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+}, IMG_OPTS);
+check('image-toolbar: 刪除 removes the paragraph, one undo step', DESKTOP, async (page, boot) => {
+  await hoverImg(page);
+  await imgTbBtn(page, '刪除').click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z puts the image back');
+}, IMG_OPTS);
+check('image-toolbar: a click on the image still opens the lightbox', DESKTOP, async (page) => {
+  await hoverImg(page);
+  const box = await page.locator(IMG_SEL).boundingBox();
+  await page.mouse.click(box.x + box.width - 20, box.y + box.height - 20); await wait(300);
+  const s = await page.evaluate(() => { const l = document.querySelector('.lightbox'); return { open: !!l && !l.hidden, raw: document.querySelectorAll('.ed-raw').length }; });
+  assert.deepStrictEqual(s, { open: true, raw: 0 }, 'lightbox open, no raw box');
+}, IMG_OPTS);
+check('image-toolbar: a paragraph with text around an image shows no toolbar', DESKTOP, async (page) => {
+  const n = await page.locator('.content .ed-block img').count();
+  assert.strictEqual(n, 4, 'guard: four pictures on the page');
+  for (let i = 0; i < n; i++) {
+    await page.locator('.content .ed-block img').nth(i).hover(); await wait(250);
+    assert.strictEqual(await imgTbState(page), null, 'no toolbar over picture ' + i);
+  }
+}, { md: '# D\n\nSee ![a](assets/a.png) here.\n\n[![b](assets/a.png)](http://example.com)\n\n![c](assets/a.png) ![d](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -8935,7 +9094,7 @@ check('diagram-panel: a Mermaid block added to a page without Mermaid previews i
         if (only && !c.name.includes(only)) continue;
         if (c.opts.engines && c.opts.engines.indexOf(engine) === -1) continue;
         ran++;
-        const boot = await bootEditor(c.opts.md, c.opts.srv);
+        const boot = await bootEditor(c.opts.md, c.opts.srv, c.opts.assets);
         const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.opts.ctx));
         const page = await context.newPage();
         const errs = [];
