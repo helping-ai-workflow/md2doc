@@ -9072,6 +9072,23 @@ check('diagram-panel: 完成 writes the file in one undo step; Esc discards', DE
   { panel: 0, b: true, omega: false, status: 'clean', listeners, renders: 0 });
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD);
 }, { md: DIAG_MD });
+// v3.17.0 final review I2: Esc still discards, but no longer for good. The
+// next Ctrl+Z brings the whole fenced block back in the raw box with what
+// was typed (the panel's snapshot is in the raw box's shape, R23), as it
+// does after the raw box's own Esc.
+check('diagram-panel: Ctrl+Z after Esc brings the discarded source back (final I2)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ panel: await diagPanel(page), box: await rawBox(page) }, { panel: null, box: null }, 'guard: Esc closed the panel');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'guard: nothing written by the Esc');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
+  const box = await rawBox(page);
+  assert.deepStrictEqual(box && { value: box.value, focused: box.focused },
+    { value: '```dot\ndigraph { a -> omega }\n```', focused: true }, 'the typed source is back');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'restoring writes nothing');
+  assert.strictEqual(await commitAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> omega'), 'and it commits as typed');
+}, { md: DIAG_MD });
 check('diagram-panel: a click elsewhere commits', DESKTOP, async (page, boot) => {
   await openDiagPanel(page, '.graphviz svg');
   await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
