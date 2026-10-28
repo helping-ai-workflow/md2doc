@@ -1054,13 +1054,16 @@ const shortcutOrderChecks = [
   [/key === 'z'\)\s*\{\s*e\.preventDefault\(\);\s*undo\(\);/, 'Ctrl+Z must preventDefault() before undo()'],
   [/\(e\.key === 'y' \|\| \(e\.shiftKey && e\.key === 'Z'\)\)\)\s*\{\s*e\.preventDefault\(\);\s*redo\(\);/,
     'Ctrl+Y / Ctrl+Shift+Z must preventDefault() before redo()'],
-  [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*commit\(\);/,
+  // v3.17.0 T9a (M-f): the raw box's two leave keys go through
+  // leaveByKey(), which runs the same commit() / cancelAndMaybeDiscard() and
+  // then hands the caret on (pinned after this list).
+  [/e\.key === 'Enter' && \(e\.ctrlKey \|\| e\.metaKey\)\)\s*\{\s*e\.preventDefault\(\);\s*leaveByKey\(commit\);/,
     'Ctrl+Enter (raw-editor commit) must preventDefault() before commit()'],
   // §10-gap fix (review): Esc inside the raw editor now goes through
   // cancelAndMaybeDiscard() (restore() + the pristine-insert auto-remove
   // check) instead of calling restore() directly — deliberate, not a
   // regression (see cancelAndMaybeDiscard()'s own comment).
-  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*cancelAndMaybeDiscard\(\);/,
+  [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*leaveByKey\(cancelAndMaybeDiscard\);/,
     'Esc inside the raw editor must preventDefault() before cancelAndMaybeDiscard()'],
   [/e\.key === 'Escape'\)\s*\{\s*e\.preventDefault\(\);\s*closeGutterMenu\(\);/,
     'Esc (global, ⠿ menu dismiss) must preventDefault() before closeGutterMenu()'],
@@ -1068,6 +1071,11 @@ const shortcutOrderChecks = [
 for (const [re, msg] of shortcutOrderChecks) {
   assert.ok(re.test(src), msg);
 }
+// v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
+// that resolved (true) hands the caret on, and a throw is reported
+// (fix round 1, M1).
+assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
+  'the raw box leave keys must run commit() / cancelAndMaybeDiscard(), hand the caret on only when it resolved, and report a throw');
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
 // tag by lib/editor/server.js (see LINEOPS_SRC / INLINE_MD_SRC / TABLE_MD_SRC
@@ -1768,8 +1776,19 @@ function countInCode(source, needle) {
   // commit-then-render site: removeEmptiedParagraph() — a real paragraph left
   // with no text and no image is removed by one commitRangeRemoval() and owns
   // its rollback (+1). 1 declaration + 30 call lines = 31.
-  assert.strictEqual(helperCalls, 31,
-    'the helper must be DECLARED once and used on all thirty ' +
+  // MIGRATED by v3.17.0 T2 (31 -> 32, R30). ONE genuinely new
+  // commit-then-render site: commitCodeEditBody() — the in-place code edit
+  // commits the whole fenced block through one commitRangeEdit() and renders,
+  // and a failed render rolls that op back with the helper while the edit
+  // stays open on its text (R27 (3)) (+1). Its language pick
+  // (commitCodeEditWithLang()) goes through the same body, not a site of its
+  // own. 1 declaration + 31 call lines = 32.
+  // v3.17.0 T5 (R27): no new site, the count stays 32. That rollback line
+  // moved out of commitCodeEditBody() into commitFencedRangeAndRender(), the
+  // commit-and-render helper the in-place code edit and the diagram panel
+  // (commitDiagramPanelBody()) now share. The panel adds no line of its own.
+  assert.strictEqual(helperCalls, 32,
+    'the helper must be DECLARED once and used on all thirty-one ' +
     'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -2747,6 +2766,29 @@ function countInCode(source, needle) {
   const jr = commitTightInsert({ lines: ['P', '', '- a'], blocks: [B(0, 'paragraph', 1, 1), B(1, 'li', 3, 3)], stack: new UndoStack() }, 3, ['- [ ] '], true);
   assert.deepStrictEqual(jr.lines, ['P', '', '- [ ] ', '- a']);
   assert.strictEqual(jr.newStartLine, 3);
+}
+
+// -- v3.17.0 T10: carry-over source pins --------------------------------------
+{
+  // N6: the emptied-paragraph removal is decided by the burst's own surface.
+  // transientSurfaceEmpty() answers true when it finds no surface at all.
+  const call = src.indexOf('return await removeEmptiedParagraph(burst);');
+  assert.ok(call > 0, 'the removeEmptiedParagraph call site exists');
+  const guard = src.slice(src.lastIndexOf("if (burst.blockType === 'paragraph'", call), call);
+  assert.ok(guard.indexOf("burst.editEl &&") !== -1 &&
+    guard.indexOf("burst.editEl.textContent === ''") !== -1 &&
+    guard.indexOf("!burst.editEl.querySelector('img')") !== -1,
+    'N6: the call site tests burst.editEl');
+  assert.strictEqual(guard.indexOf('transientSurfaceEmpty'), -1, 'N6: and not transientSurfaceEmpty(burst.blockEl)');
+  // T5 minor: the dirty-state read has no side effect; the dispose is the
+  // render tails' reapDiagramPanel().
+  const pure = src.slice(src.indexOf('function diagramPanelHasUncommittedText()'), src.indexOf('function reapDiagramPanel()'));
+  assert.ok(pure.length > 0 && pure.indexOf('liveDiagramPanel') === -1, 'diagramPanelHasUncommittedText() is a pure read');
+  assert.strictEqual(src.split('reapDiagramPanel();').length - 1, 2, 'both render tails reap before setDirty()');
+  // M1: one gutter-band predicate, declared once, read by the router and the release path.
+  assert.strictEqual(src.split('pressInGutterBand(').length - 1, 3, 'M1: declaration + router + mouseup');
+  // M2: the release path's flag is cleared after its task.
+  assert.ok(src.indexOf('setTimeout(() => { degradedReleaseOpened = false; }, 0);') !== -1, 'M2: cleared with setTimeout(0)');
 }
 
 console.log('editor-client.test.js OK');

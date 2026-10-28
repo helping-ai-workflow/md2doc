@@ -23,7 +23,7 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
-Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the last one since v3.15.0):
+Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the next one since v3.15.0, the last one since v3.17.0):
 
 | File | Purpose | Anchor |
 |---|---|---|
@@ -32,6 +32,16 @@ Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since
 | `lib/editor/wave-canvas.js` | The wave editor's canvas, drawn by the WaveDrom engine itself (`RenderWaveForm` at scale 1.5, dark recolour via `window.md2docTheme.recolourSvg`), plus the client-coordinate bridge the interaction layer uses (`cellAt`, `boundaryAt`, `cellRectClient`, `anchorClient`, `labelBoxes`, `overflow`). Injected by `lib/editor/server.js` as `window.__md2docWave['wave-canvas.js']`; tested by `test/wave-canvas.test.js` (Playwright, in `test:browser`) | `function createCanvas(opts)` |
 | `lib/wave-overflow.js` | Data-label width estimate (Helvetica AFM table) and the labels wider than their segment: the CLI's stderr overflow warning (`renderMarkdown`'s `warnWaveOverflow` option) and the editor's 「改每拍 K×」 suggestion. In the browser it lands at `window.__md2docWave['wave-overflow.js']` (the server's CommonJS shim) | `function overflowOf(doc)` |
 | `lib/editor/block-catalog.js` | The block catalogue behind the editor's "/" menu (＋ and the toolbar's 在上方／在下方插入 open the same menu): the 16 items in four groups (基本 / 清單 / 區塊 / 圖表), the menu filter (case-insensitive prefix match on each word of an item's label and keywords), the empty skeleton each item writes (`TABLE_SKELETON` is the one 3 × 2 table for every entry point), and the Markdown-shortcut matcher (`matchShortcut`, `shortcutLines`). Pure UMD, no DOM: `window.md2docBlockCatalog`, injected by `lib/editor/server.js` the same way as `convert-md.js`, interpolated raw into a `<script>` (so never a closing script tag in it); tested by `test/block-catalog.test.js` | `function filterSlashItems(` |
+| `lib/editor/code-edit.js` | The pure core of the editor's in-place code editing, no DOM and no editor state: the language table (`CODE_LANGS`, equal to `lib/highlight.js`'s registered list; a unit row keeps them in step) with `langLabel` / `filterLangs` / `setFenceLang` for the language chip and menu; `parseFence` / `buildFence` for the fence around the body (the fence is lengthened past any backtick run in the body, char and info string kept); `newlineWithIndent` (Enter keeps the indent) and `indentLines` (Tab / Shift+Tab); and `TextHistory`, the edit's own Ctrl+Z stack. UMD: `window.md2docCodeEdit`, injected by `lib/editor/server.js` the same way as `block-catalog.js`, so never a closing script tag in it; tested by `test/code-edit.test.js` | `function buildFence(` |
+
+**`/api/preview` is not `/api/render`.** `POST /api/render` re-renders the document with
+`renderMarkdown` and records its draw.io references with `trackDrawioRefs` (the staleness
+heartbeat reads them). `POST /api/preview` (v3.17.0) serves the diagram panel's live Graphviz
+preview of a source that is not saved yet, so it is stateless: it calls `renderDotSvg` only,
+never `renderMarkdown` and never `trackDrawioRefs`, and it answers 200 `{svg}`, 422 `{error}`
+(the engine's first line) or 400 / 403 / 415. Do not route a preview through `/api/render`:
+that would record an unsaved source's references and re-render the whole document on every keystroke.
+Mermaid previews never reach the server (`md2docTheme.renderMermaid` in the page).
 
 ⚠ **Both closing-tag anchors above have the same trap: the one you want is the
 LAST occurrence inside its region, never the first hit `grep` prints.** "to its
@@ -61,7 +71,7 @@ first occurrence in the file.
 
 CLI entry point: `bin/md2doc.js`. Shells out to `lib/md2doc.js` once per `(input, format)` pair.
 
-Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`; the two IME checks run in Chromium only, `opts.engines`, because they drive composition through CDP); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
+Tests live in `test/` — `md2doc.test.js` (renderer), `images.test.js` (image assets), `scroll-anchor.test.js` (zoom/resize reading position), `lightbox.test.js` (diagram popup), `cli.test.js`, `code-operator.test.js`, `highlight.test.js` (syntax colour), `code-edit.test.js` (the in-place code edit's pure core, `lib/editor/code-edit.js`), `theme-runtime.test.js` (`lib/theme/runtime.js` in a vm: the order of Mermaid renders on its serial chain); mostly regex assertions against rendered HTML. `editor-click.test.js` is the edit page's click-through check (Playwright, Chromium + WebKit, part of `test:browser`; the two IME checks run in Chromium only, `opts.engines`, because they drive composition through CDP); `wave-canvas.test.js` checks the wave editor's engine canvas the same way (also `test:browser` only — CI's `test` job installs no browsers). Run with `npm test`; a new file must be added to the `test` script in `package.json`.
 
 **Reader click-through checks** — `npm run test:browser` (`test/reader-click.test.js`)
 clicks every reader control for real in Chromium and WebKit at 1440×900 and 390×844 and
@@ -440,6 +450,15 @@ no backtick, and v3.14.1 measured the same): **358** every backtick
 byte, **4** `` \` `` escapes (one line, 5283 in that lib, a 6822-line file), **354** structural —
 unchanged from v3.13.0. Counted with node over the file's characters, a backslash directly
 before the backtick counting as an escape.
+
+**Measured at v3.17.0** (`lib/md2doc.js` as last changed in `b469ef5`, the image toolbar's
+CSS, which added no backtick): **360** every backtick byte, **4** `` \` `` escapes (one line,
+5555 in that lib, a 7118-line file), **356** structural. The +2 over v3.15.0 came in with
+v3.16.0's screenshot mode (`bedc1b1` 358, `effb475` 360); nothing in this release's editor work
+(all in `lib/editor/*.js`, `lib/theme/runtime.js` and CSS without backticks) moved it. The one
+change to the lib's JavaScript, `loadGraphviz` / `renderDotSvg` (the Graphviz bake split out so
+`/api/preview` can share it, `247579e`), is string concatenation and moved it neither. Counted with
+node over the file's characters, a backslash directly before the backtick counting as an escape.
 
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader

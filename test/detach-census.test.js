@@ -164,6 +164,18 @@ const CENSUS = [
     why: 'Delete 合併：移除的是【下一個】區塊（文字已併進聚焦面），從來不是聚焦元素；寫在 withFocusoutSuppressed() 內只是與 Backspace 那支對稱' },
   { fn: 'joinTransientIntoBlock()', needle: "editEl.closest('.ed-block').parentNode.removeChild(editEl.closest('.ed-block'));", disposition: 'b',
     why: '(b) lexical —— R31 Backspace：按鍵所在的區塊併進上方有字的 transient；焦點在同一個 withFocusoutSuppressed() 區間內先移到 transient 的接縫，這一行 detach 的已不是聚焦元素；移焦那一發 focusout 由 suppressLiFocusout 擋下，burst 由呼叫端 endBurstWithoutResolve() 結束' },
+  // ── v3.17.0 T2（Q3：這一版新增、會寫 DOM 的敘述）──────────────────────
+  { fn: 'writeCodeEditHost()（in-place code edit 的上色／換字）', needle: 's.host.innerHTML = codeEditHostHtml(text, s.lang);', disposition: 'd',
+    why: '(d) —— 寫的是聚焦的 <pre> host 自己的子樹，host 本身留在文件裡，沒有聚焦節點被 detach。實測（EC「code-edit: typing re-colours within 300 ms and Esc writes the file」，Chromium + WebKit）：End、Enter（立即重寫）、打字後 300 ms 的上色 tick（再重寫一次）之間，document 上 capture 期的 focusout 計數為 0，activeElement 一直是 host。選取由呼叫端以字元 offset 放回（restoreSelection()）' },
+  { fn: 'endCodeEditVisual()', needle: 'host.innerHTML = s.originalHtml;', disposition: 'a',
+    why: '(a) —— 結束 in-place code edit：`activeEditor = null`（以及 codeEditState）在拿掉 contenteditable 與這次寫入【之前】，所以拿掉屬性或寫入讓 host 失焦時，focusout 的 code 分支看到 `activeEditor !== s.editor` 而不做事 —— 與 restore()/commit() 同一種「先歸零再寫」樣式（R27 (5)）' },
+  // ── v3.17.0 T5（Q3：這一版新增、會寫 DOM 的敘述；R43）──────────────────────
+  { fn: 'openDiagramPanel()', needle: 'blockEl.replaceChildren(panel);', disposition: 'none',
+    why: '打開圖表面板：寫入前同一個函式已先把焦點從區塊外的元素拿掉（`ae.blur()`）並等它的 resolution（switchAwayFrom()）結束，而圖表區塊裡沒有可聚焦的東西（編輯圖表鈕的 mousedown preventDefault，焦點不會落進圖裡），所以這次換掉子樹時沒有聚焦節點被 detach。Ctrl+S 重開那一路，舊面板已被 render 拿走、焦點在 BODY' },
+  { fn: 'endDiagramPanelVisual()', needle: 's.blockEl.innerHTML = s.originalHtml;', disposition: 'a',
+    why: '(a) —— 收起圖表面板（Esc、取消路徑、被保留節點）：`activeEditor = null`（以及 diagramPanelState）與 listeners.abort() 都在這次寫入【之前】，所以寫入 detach 聚焦的 textarea 時，面板自己的 focusout 已拆掉、document 的 focusout 沒有分支認得 .ed-diagram-src，不會重入 commit —— 與 restore()/commit() 同一種「先歸零再寫」樣式（R36、R27 (5)）' },
+  { fn: 'showDiagramPreview()', needle: 'pv.innerHTML = out.svg;', disposition: 'd',
+    why: '(d) —— 寫的是 .ed-diagram-preview 自己的子樹；預覽框（tabindex -1，R36）本身可以是聚焦元素，但它留在文件裡，沒有聚焦節點被 detach。實測（EC「diagram-panel: the preview follows dark mode」，Chromium + WebKit）：焦點放在預覽框上切換主題，Mermaid 重畫寫入新 svg，document 上 capture 期的 focusout 計數為 0，activeElement 一直是預覽框' },
 ];
 
 let checks = 0;
@@ -185,17 +197,23 @@ assert.strictEqual(CENSUS.filter((r) => r.disposition === 'a').length >= 6, true
 // (d) 家族（純 d 與 b+d）。2026-09-06 補表補進來的四列就是這四個，數字釘住的是
 // 「table 變體有、平版沒有」那個漏法不會再默默發生一次。
 // v3.14.0 T2: 7 → 8，加入 splitSurfaceAtCaret() 的 tail.extractContents()。
-assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 8,
-  'census: (d) 家族應為 8 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
+// v3.17.0 T2: 8 → 9，加入 writeCodeEditHost() 的 host 子樹寫入。
+// v3.17.0 T5: 9 → 10，加入 showDiagramPreview() 的預覽子樹寫入。
+assert.strictEqual(CENSUS.filter((r) => r.disposition.indexOf('d') !== -1).length, 10,
+  'census: (d) 家族應為 10 個站點（burstUndo / burstRedo / revertBurstAndEnd 的 ' +
   'innerHTML 寫入 / handleLiKeydown 空項目 Enter 的 textEl 清空 / extractRangeInto / ' +
-  'dropEmptied / restoreDiscardedBurst 的非表格分支 / splitSurfaceAtCaret）');
+  'dropEmptied / restoreDiscardedBurst 的非表格分支 / splitSurfaceAtCaret / writeCodeEditHost / ' +
+  'showDiagramPreview）');
 
 // v3.10.0：29 → 27，刪掉的兩個站點是 leaveSourceMode() 的 ta.remove() 與
 // enterSourceMode() 的 contentEl.hidden = true（整份原始碼模式移除）。
 // v3.14.0 T2/T3：27 → 30，splitSurfaceAtCaret()、joinIntoPrevious()、deleteAtEnd()。
 // v3.14.0 T2/T3 fix round 1：30 → 31，joinTransientIntoBlock()（R31）。
-assert.strictEqual(CENSUS.length, 31,
-  'census: 站點總數應為 31。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
+// v3.17.0 T2：31 → 33，writeCodeEditHost()（d）與 endCodeEditVisual()（a）（R43）。
+// v3.17.0 T5：33 → 36，openDiagramPanel()（none）、endDiagramPanelVisual()（a）、
+// showDiagramPreview()（d）（R43）。
+assert.strictEqual(CENSUS.length, 36,
+  'census: 站點總數應為 36。新增或刪除站點時【一定要】連同這個數字一起改，並在 ' +
   'commit message 說明是哪一個站點 —— 這條斷言存在的唯一理由是讓「表悄悄變短或 ' +
   '變長」變成紅燈。');
 

@@ -738,3 +738,15 @@ console.log('md2doc dot WASM test passed');
   assert.ok(!edit.html.includes('<button id="capture-mode-toggle"'), 'edit mode has no screenshot-mode button');
   console.log('md2doc screenshot mode button render test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.17.0 T4 (D12): renderDotSvg is the one dot path for the bake and the
+// editor preview: a bare svg laid out in Helvetica, and the engine's error
+// otherwise.
+(async () => {
+  const { renderDotSvg } = require('../lib/md2doc.js');
+  const svg = await renderDotSvg('digraph { a -> b }');
+  assert.match(svg, /^<svg[\s\S]*Helvetica/, 'bare svg in Helvetica, got ' + svg.slice(0, 60));
+  assert.ok(!/<\?xml|<!DOCTYPE|<!--/.test(svg), 'no xml declaration, doctype or comment');
+  await assert.rejects(() => renderDotSvg('digraph {'), /syntax error/, 'the engine error is thrown');
+  console.log('md2doc renderDotSvg test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

@@ -35,10 +35,17 @@ const FIXTURE = [
 ].join('\n');
 
 const servers = [];
-async function bootEditor(mdText, opts) {
+async function bootEditor(mdText, opts, assets) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-edclick-'));
   const mdPath = path.join(dir, 'doc.md');
   fs.writeFileSync(mdPath, mdText === undefined ? FIXTURE : mdText, 'utf8');
+  // v3.17.0 T7 (R34): files the document refers to, written next to doc.md
+  // before the server starts -- { 'assets/a.png': <base64> }.
+  Object.keys(assets || {}).forEach((rel) => {
+    const f = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, Buffer.from(assets[rel], 'base64'));
+  });
   const srv = await createEditorServer(Object.assign({ files: [mdPath], clientJs: CLIENT_SRC }, opts || {}));
   servers.push(srv);
   return { url: srv.urlFor(mdPath), mdPath, srv };
@@ -3246,6 +3253,16 @@ check('loose lists: a checkbox toggles', DESKTOP, async (page, boot) => {
   assert.strictEqual(await noticeText(page), null, 'no refusal');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- [ ] alpha\n\n- [x] bravo\n\n- [ ] charlie\n');
 }, { md: '# D\n\n- [ ] alpha\n\n- [ ] bravo\n\n- [ ] charlie\n' });
+// v3.17.0 T10 (N2): the press leaves focus where it was, and the toggle's
+// resolution used to drop it on BODY. Measured at 4b2e86e: BODY.
+check('lists: a checkbox click keeps the caret where it was (N2)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 3);
+  await page.locator('.ed-block[data-task="1"]', { hasText: 'two' }).locator('.ed-li-check').click();
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 3, transient: false }, 'the caret is where it was');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpzha.\n\n- [ ] one\n- [x] two\n');
+}, { md: '# D\n\nAlpha.\n\n- [ ] one\n- [ ] two\n' });
 check('loose lists: ⠿ 刪除 removes an item and its blank line', DESKTOP, async (page, boot) => {
   await gutterMenu(page, await blockByText(page, 'bravo'), '刪除');
   assert.strictEqual(await noticeText(page), null, 'no refusal');
@@ -3596,6 +3613,18 @@ const failFirstRender = async (page) => {
     await wait(800);
     await route.fulfill({ status: 500, body: '{}' });
   });
+  // R51 flake (v3.17.0 probe, 7 reds in ~600 runs): `await page.route()` returns
+  // before the browser starts intercepting. A fetch the page makes in that gap
+  // goes straight to the server (HTTP 200, no request event on the node side),
+  // so the render the check meant to fail succeeds and no card ever comes. The
+  // product was right every time. A probe request proves interception is live.
+  let live = false;
+  await page.route('**/__route-live', (route) => { live = true; return route.fulfill({ status: 204, body: '' }); });
+  for (let i = 0; i < 100 && !live; i++) {
+    await page.evaluate(() => fetch('/__route-live').catch(() => {}));
+    if (!live) await wait(20);
+  }
+  assert.ok(live, 'failFirstRender: route interception never went live');
 };
 check('enter-type: keys typed before a second click stay where they were typed', DESKTOP, async (page, boot) => {
   await delayRender(page, 800);
@@ -4073,6 +4102,33 @@ check('transient-model: typing then leaving commits one paragraph, one undo step
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\nOmega.\n');
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+// v3.17.0 T10 (L95b): the toolbar button steps the open burst like Ctrl+Z
+// does. Before, it committed the paragraph and then undid the whole commit
+// (a transient typed into vanished entirely), closing the burst either way.
+check('transient-model: toolbar 復原 inside an open paragraph undoes the last typing only (L95b)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X'); await wait(600); await page.keyboard.type('Y');
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ caret: await caretNow(page), renders: renderTotal(page) - before, disk: fs.readFileSync(boot.mdPath, 'utf8') },
+    { caret: { text: 'Alpha.', offset: 6, transient: false }, renders: 0, disk: BASE_MD });
+  // The burst is still open (Ctrl+Z's own step, typing grouped as the burst
+  // history groups it): the next key lands in the paragraph, and nothing
+  // before the burst was undone.
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Q\n\nOmega.\n', 'only the typing went');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'the committed typing is the one document step');
+}, { md: BASE_MD });
+check('transient-model: toolbar 復原 inside a transient with typing keeps the transient (L95b)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await tb(page, 'insert-after');
+  await page.keyboard.type('New.'); await wait(100);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ caret: await caretNow(page), list: await blockList(page) },
+    { caret: { text: '', offset: 0, transient: true }, list: ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:Omega.'] });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD);
 }, { md: BASE_MD });
 check('transient-model: 在上方插入 on the first block puts it at the top', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'D', 1);
@@ -4883,7 +4939,9 @@ check('toolbar-transient: 圖片 on an empty one replaces it with the picked ima
 }, { md: BASE_MD });
 check('empty-doc: the code button inserts a fenced block at the top', DESKTOP, async (page, boot) => {
   await tb(page, 'code');
-  assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'raw box open');
+  // v3.17.0 T2: the in-place code edit, on the skeleton's empty body.
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: '', caret: 0, focused: true }, raw: null }, 'the code edit is open on the empty body');
   await page.keyboard.type('x');
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '```\nx\n```\n');
@@ -5455,6 +5513,20 @@ const rawBox = (page) => page.evaluate(() => {
   const t = document.querySelector('textarea.ed-raw');
   return t ? { value: t.value, caret: t.selectionStart, focused: document.activeElement === t } : null;
 });
+// The open in-place code edit: its text, the caret's character offset in it
+// (null when the selection is elsewhere) and whether it has focus; null when
+// no code block is being edited.
+const codeEdit = (page) => page.evaluate(() => {
+  const h = document.querySelector('pre[data-ed-code-edit]');
+  if (!h) return null;
+  const sel = getSelection();
+  let caret = null;
+  if (sel.rangeCount && h.contains(sel.focusNode)) {
+    const r = document.createRange(); r.setStart(h, 0); r.setEnd(sel.focusNode, sel.focusOffset);
+    caret = r.toString().length;
+  }
+  return { text: h.textContent, caret, focused: document.activeElement === h };
+});
 const inBase = (block) => '# D\n\nAlpha.\n\n' + block + '\n\nOmega.\n';
 const TABLE_3X2_X = '| A | B | C |\n|---|---|---|\n| x |  |  |\n|  |  |  |';
 const TABLE_3X2 = '| A | B | C |\n|---|---|---|\n|  |  |  |\n|  |  |  |';
@@ -5526,6 +5598,22 @@ check('slash: no match shows the empty line; a space closes and keeps the text',
   assert.strictEqual((await slashMenu(page)).open, false);
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n/zz x\n\nOmega.\n');
 }, { md: BASE_MD });
+// v3.17.0 T10 (M-a, R42): the empty line stays for two characters past the
+// last query that matched ('u' matched 項目符號列表; 's' and 'r' keep it), and
+// the third ('/') closes it. The text is plain paragraph text throughout.
+check('slash: no match closes after three more characters and keeps the text (M-a)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  const seen = {};
+  for (const [label, chars] of [['/u', '/u'], ['/us', 's'], ['/usr', 'r'], ['/usr/', '/']]) {
+    await page.keyboard.type(chars);
+    const m = await slashMenu(page);
+    seen[label] = [m.open, m.labels.length];
+  }
+  assert.deepStrictEqual(seen, { '/u': [true, 1], '/us': [true, 0], '/usr': [true, 0], '/usr/': [false, 0] });
+  await page.keyboard.type('bin');
+  assert.strictEqual((await slashMenu(page)).open, false, 'it stays closed');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n/usr/bin\n\nOmega.\n');
+}, { md: BASE_MD });
 check('slash: Enter with no match closes the menu and splits', DESKTOP, async (page) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('/zz');
@@ -5553,7 +5641,7 @@ const SLASH_EVERY = [
   ['text', 'text', null],
   ['h1', 'h1', 'heading'], ['h2', 'h2', 'heading'], ['h3', 'h3', 'heading'],
   ['ul', 'bullet', 'li'], ['ol', 'ordered', 'li'], ['task', 'todo', 'li'],
-  ['quote', 'quote', 'raw'], ['code', 'code', 'raw'],
+  ['quote', 'quote', 'raw'], ['code', 'code', 'code-edit'],
   ['divider', 'divider', null], ['table', 'table', 'table'],
   ['mermaid', 'mermaid', null], ['graphviz', 'graphviz', null], ['wavedrom', 'wavedrom', null], ['math', 'math', null],
 ];
@@ -5583,7 +5671,9 @@ for (const [id, kw] of SLASH_EVERY) {
       await page.keyboard.type('T'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
       assert.strictEqual(await saveAndRead(page, boot), inBase('> T'));
     } else if (id === 'code') {
-      assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 4, focused: true });
+      // v3.17.0 T2: the in-place code edit on the empty body, not the raw box.
+      assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+        { edit: { text: '', caret: 0, focused: true }, raw: null });
       await page.keyboard.type('x'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
       assert.strictEqual(await saveAndRead(page, boot), inBase('```\nx\n```'));
     } else if (id === 'divider') {
@@ -5686,10 +5776,10 @@ async function plusClick(page, text, opts) {
 }
 // Answers a file chooser with the 1px PNG and waits for its upload and the
 // render that follows (R41: renderIdle alone does not wait for /api/asset).
-async function pickImage(page, chooser) {
+async function pickImage(page, chooser, base64) {
   await Promise.all([
     page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') }),
+    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }),
   ]);
   await renderIdle(page);
 }
@@ -6088,14 +6178,18 @@ check('shortcut: at the start of an existing paragraph the text after the caret 
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n\\## Omega.\n');
 }, { md: BASE_MD });
-// The raw box commits with Ctrl+Enter (openRawEditor()'s own keydown).
-check('shortcut: "```" opens a code box with the caret on the fence line', DESKTOP, async (page, boot) => {
+// v3.17.0 T2 (R21): ``` opens the in-place code edit on the empty body (the
+// language is the chip's, no longer typed on the fence line); Enter is a
+// newline in the body, and Ctrl+Enter commits (D3).
+check('shortcut: "```" opens the code edit in place with the caret on the empty body', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('```'); await renderIdle(page);
-  assert.deepStrictEqual(await rawBox(page), { value: '```\n\n```', caret: 3, focused: true });
-  await page.keyboard.type('js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: '', caret: 0, focused: true }, raw: null });
+  await page.keyboard.type('x = 1'); await page.keyboard.press('Enter'); await page.keyboard.type('y');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'x = 1\ny', caret: 7, focused: true });
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nx = 1\ny\n```\n\nOmega.\n');
 }, { md: BASE_MD });
 check('shortcut: "---" writes a divider and opens a paragraph below it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
@@ -6321,15 +6415,18 @@ check('shortcut: Enter at the end of a nested last to-do then typing keeps it a 
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n  - [ ] bravo\n  - [ ] x\n\nOmega.\n');
 }, { md: '# D\n\n- alpha\n  - [ ] bravo\n\nOmega.\n' });
 // R59: keys typed while the render that opens the raw box is out land in it.
-check('shortcut: "```js", Enter, "x = 1" typed straight on during a slow render land in the code box (R59)', DESKTOP, async (page, boot) => {
+// v3.17.0 T2 (R28): for ``` that is the in-place code edit, and everything
+// typed after the marker is body text — "js" included.
+check('shortcut: "```js", Enter, "x = 1" typed straight on during a slow render land in the code body (R59, R28)', DESKTOP, async (page, boot) => {
   await newParaBelowAlpha(page);
   await delayRender(page, 800);
   await page.keyboard.type('```js'); await page.keyboard.press('Enter'); await page.keyboard.type('x = 1');
   await renderIdle(page);
-  assert.deepStrictEqual(await rawBox(page), { value: '```js\nx = 1\n```', caret: 11, focused: true });
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await rawBox(page) },
+    { edit: { text: 'js\nx = 1', caret: 8, focused: true }, raw: null });
   assert.strictEqual(await noticeText(page), null, 'nothing dropped');
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```js\nx = 1\n```\n\nOmega.\n');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\njs\nx = 1\n```\n\nOmega.\n');
 }, { md: BASE_MD });
 check('shortcut: "> quote" typed straight on during a slow render lands in the quote box (R59)', DESKTOP, async (page, boot) => {
   await newParaBelowAlpha(page);
@@ -6342,8 +6439,8 @@ check('shortcut: "> quote" typed straight on during a slow render lands in the q
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n> quote\n\nOmega.\n');
 }, { md: BASE_MD });
 // R60 / D1: per kind, one Ctrl+Z gives the escaped literal with the caret
-// after it, a second the paragraph as it was. (A raw box is left with
-// Escape first.)
+// after it, a second the paragraph as it was. (A raw box, or since v3.17.0
+// the in-place code edit, is left with Escape first.)
 for (const [typed, literal, caret] of [
   ['## ', '\\##', { text: '##', offset: 2, transient: false }],
   ['- ', '\\-', { text: '-', offset: 1, transient: false }],
@@ -6356,7 +6453,7 @@ for (const [typed, literal, caret] of [
   check('shortcut: "' + typed + '" one Ctrl+Z gives the literal, a second the paragraph as it was (R60)', DESKTOP, async (page, boot) => {
     await newParaBelowAlpha(page);
     await page.keyboard.type(typed); await renderIdle(page);
-    if (await rawBox(page)) { await page.keyboard.press('Escape'); await renderIdle(page); }
+    if (await rawBox(page) || await codeEdit(page)) { await page.keyboard.press('Escape'); await renderIdle(page); }
     await page.keyboard.press('Control+z'); await renderIdle(page);
     assert.deepStrictEqual(await caretNow(page), caret);
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n' + literal + '\n\nOmega.\n');
@@ -6616,16 +6713,56 @@ check('link-field: a click elsewhere closes it and the typed edit survives', DES
   assert.strictEqual((await linkField(page)).open, false);
   assert.strictEqual(await commitAndRead(page, boot), LINKS_MD.replace('Plain words here.', 'Plain words here.!'));
 }, { md: LINKS_MD });
-check('link-field: a scroll closes it', DESKTOP, async (page) => {
+// v3.17.0 T10 (M-c): a scroll moves the field with its selection and keeps
+// its text; only the selection leaving the view closes it. Migrated from
+// 'link-field: a scroll closes it' (old: closed on any scroll event; new:
+// open, text kept, same offset to the selection).
+async function tallPage(page) {
+  await page.evaluate(() => {
+    const d = document.createElement('div');
+    d.id = 'spacer-t10'; d.style.cssText = 'height:4000px;width:1px;';
+    document.body.appendChild(d);
+  });
+}
+const wordsBottom = (page) => page.evaluate(() => {
+  const p = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Plain words here.');
+  const t = p.firstChild;
+  const r = document.createRange(); r.setStart(t, 6); r.setEnd(t, 11);
+  return r.getBoundingClientRect().bottom;
+});
+check('link-field: a scroll keeps it with its text and follows the selection (M-c)', DESKTOP, async (page) => {
+  await tallPage(page);
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('abc');
+  const gap = async () => {
+    const f = await page.evaluate(() => { const b = document.querySelector('.ed-linkbar'); return b && b.isConnected ? b.getBoundingClientRect().top : null; });
+    return f === null ? null : Math.round((f - await wordsBottom(page)) * 10) / 10;
+  };
+  const before = await gap();
+  assert.notStrictEqual(before, null, 'guard: the field is open');
+  const y0 = await wordsBottom(page);
+  await page.evaluate(() => window.scrollTo(0, 40)); await wait(150);
+  const y1 = await wordsBottom(page);
+  assert.ok(Math.abs((y0 - y1) - 40) <= 1, 'guard: the page really scrolled by 40: ' + (y0 - y1));
+  const f = await linkField(page);
+  const after = await gap();
+  assert.deepStrictEqual({ open: f.open, value: f.value, moved: after !== null && Math.abs(after - before) <= 2 },
+    { open: true, value: 'abc', moved: true });
+}, { md: LINKS_MD });
+check('link-field: scrolling the selection out of view closes it', DESKTOP, async (page) => {
+  await tallPage(page);
   await selectInSurface(page, 'Plain words here.', 6, 11);
   await page.keyboard.press('Control+k');
   assert.strictEqual((await linkField(page)).open, true);
-  await page.evaluate(() => { document.dispatchEvent(new Event('scroll')); window.dispatchEvent(new Event('scroll')); });
-  await wait(100);
+  await page.evaluate(() => window.scrollTo(0, 3000)); await wait(150);
   assert.strictEqual((await linkField(page)).open, false);
   // Closed by a scroll means back to the toolbar with the selection kept.
-  const r = await page.evaluate(() => ({ sel: String(getSelection()), bar: !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected }));
-  assert.deepStrictEqual([r.sel, r.bar], ['words', true]);
+  const sel = await page.evaluate(() => String(getSelection()));
+  assert.strictEqual(sel, 'words');
+  await page.evaluate(() => window.scrollTo(0, 0)); await wait(200);
+  const bar = await page.evaluate(() => !!document.querySelector('.ed-seltb') && document.querySelector('.ed-seltb').isConnected);
+  assert.strictEqual(bar, true, 'the toolbar comes back when the selection does');
 }, { md: LINKS_MD });
 check('link-paste: a URL over a selection makes a link', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Plain words here.', 6, 11);
@@ -7538,16 +7675,26 @@ check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders is ref
 // both engines; identical at ffbdd7c). Now the click waits for the render;
 // the split's render replaces every block below it, so the click is refused
 // with the notice, and the next click opens the block's own lines.
+// v3.17.0 T2 (R21): a code block's click opens the in-place edit on its body
+// (`seed` is that body), a quote's the raw box; `opened` reads whichever is
+// open, so "no box" also means "no code edit".
+const openedEditorText = (page) => page.evaluate(() => {
+  const t = document.querySelector('textarea.ed-raw');
+  if (t) return t.value;
+  const h = document.querySelector('pre[data-ed-code-edit]');
+  return h ? h.textContent : null;
+});
+const openedEditorSel = (type) => (type === 'code' ? 'pre[data-ed-code-edit]' : 'textarea.ed-raw');
 for (const [label, md, type, seed, typed, want] of [
   ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
-  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', '\x60\x60\x60\ncode\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
+  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
   check('raw-box: ' + label + ' clicked below a split that is still rendering is refused, and the next click edits its own lines (R100)', DESKTOP, async (page, boot) => {
     const clickBlock = async () => {
       const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
       assert.ok(box, 'guard: the ' + type + ' block is on screen');
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     };
-    const rawValue = () => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+    const rawValue = () => openedEditorText(page);
     await delayRender(page, 2500);
     await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
     await clickBlock(); await wait(300);
@@ -7557,7 +7704,7 @@ for (const [label, md, type, seed, typed, want] of [
       { box: null, notice: '文件已更新，請重試這個操作' }, 'the click is refused once the render lands');
     await clickBlock(); await wait(300);
     assert.strictEqual(await rawValue(), seed, 'the next click opens the block\'s own lines');
-    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
+    await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
     await page.unroute('**/api/render');
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\npara one.\n\nMiddle.\n\n' + want + '\n');
@@ -7603,19 +7750,21 @@ check('raw-box: a quote below a split clicked while the undo renders, whose redr
 // block before the click is resolved. With nothing in flight at the press,
 // the block's identity is taken then and the block is found again by it, so
 // the first click opens it. Measured at 6208f4c: no box, the retry notice.
-for (const [label, md, type, seed, typed] of [
-  ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW'],
-  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', '\x60\x60\x60\ncode\n\x60\x60\x60', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
+// v3.17.0 T2: the code block's click opens the in-place edit on its body
+// (`seed`), and `want` is what its commit writes.
+for (const [label, md, type, seed, typed, want] of [
+  ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
+  ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
   check('raw-box: ' + label + ' clicked right after typing in a paragraph opens on the first click (R102, M-R2)', DESKTOP, async (page, boot) => {
     await focusSurface(page, 'Alpha para one.', 2); await page.keyboard.type('X');
     const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     await renderIdle(page); await wait(300);
-    const raw = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
+    const raw = await openedEditorText(page);
     assert.deepStrictEqual({ box: raw, notice: await noticeText(page) }, { box: seed, notice: null }, 'the box opened on the first click');
-    await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
+    await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
-    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n' + typed + '\n');
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlXpha para one.\n\nMiddle.\n\n' + want + '\n');
   }, { md });
 }
 // R102 (M-R2), the ⠿ entry: the same everyday shape — typing in a paragraph,
@@ -7707,6 +7856,183 @@ for (const via of ['click', '⠿ MD 原始碼']) {
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> NEW\n\nEnd.\n');
   }, { md: '# D\n\nAlpha.\n\n> Q\n\nEnd.\n' });
 }
+// v3.17.0 T9a (M-R5, R35): the ⠿ actions take R104's rule too. Their
+// re-find matched start line + type + source, so after R95's unlogged
+// removal of the emptied paragraph above, the SECOND `Twin.` sat on the
+// first one's start line and was the one deleted, converted or copied; and
+// a paragraph that is the only one with its text was refused, its start line
+// having moved. Now a block whose node was redrawn is found again only when
+// it is the one block of its type with that source: two identical paragraphs
+// → refused with the notice, nothing written but the emptied paragraph's own
+// removal; one → acted on the first try. (R35 states the cost: a gesture on
+// a block with an identical twin needs a second try.)
+const guMark = (page, text) => page.evaluate((t) => {
+  const p = [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"]')].find((b) => b.textContent.trim() === t);
+  p.setAttribute('data-gu', '1'); return '[data-gu="1"]';
+}, text);
+for (const [op, path, oneWant] of [
+  ['刪除', '刪除', '# D\n\nEnd.\n'],
+  ['轉換 標題 1', ['轉換成', '標題 1'], '# D\n\n# Only.\n\nEnd.\n'],
+  ['建立副本', '建立副本', '# D\n\nOnly.\n\nOnly.\n\nEnd.\n'],
+]) {
+  check('gutter-unique: after emptying the paragraph above, ⠿ ' + op + ' on the first of two identical paragraphs is refused and writes nothing (M-R5)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    await gutterMenu(page, await guMark(page, 'Twin.'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: '文件已更新，請重試這個操作', disk: '# D\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+  }, { md: '# D\n\nAlpha.\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+  check('gutter-unique: after emptying the paragraph above, ⠿ ' + op + ' on a unique paragraph acts on the first try (M-R5)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    await gutterMenu(page, await guMark(page, 'Only.'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: null, disk: oneWant });
+  }, { md: '# D\n\nAlpha.\n\nOnly.\n\nEnd.\n' });
+}
+// v3.17.0 T9a (M-f, L146): a raw box left with its own key put its node back
+// and focus went to BODY with it, so the next key landed nowhere. The caret
+// now goes on to the block right below (here `Omega.`, at its start). Read in
+// the page: what holds focus, and its text when it sits in a block.
+const focusAfterLeave = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  const b = a && a.closest ? a.closest('.ed-block') : null;
+  return { tag: a ? a.tagName : null, armed: !!a && !!a.classList && a.classList.contains('ed-wys-armed'),
+    transient: !!b && b.hasAttribute('data-ed-transient'), text: b ? a.textContent : null };
+});
+for (const [key, want] of [['Escape', '>'], ['Control+Enter', '> Q']]) {
+  check('raw-box: ' + (key === 'Escape' ? 'Esc' : 'Ctrl+Enter') + ' out of a quote box leaves the caret in the next paragraph (M-f)', DESKTOP, async (page, boot) => {
+    await newParaBelowAlpha(page);
+    await page.keyboard.type('> '); await renderIdle(page);
+    assert.deepStrictEqual(await rawBox(page), { value: '> ', caret: 2, focused: true }, 'guard: the quote box is open');
+    await page.keyboard.type('Q'); await page.keyboard.press(key); await renderIdle(page);
+    assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+    await page.keyboard.type('z');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + want + '\n\nzOmega.\n');
+  }, { md: BASE_MD });
+}
+// T9a fix round 1 (C1): the gesture's own commit rewrites the block it names
+// (typed into, then ⠿ / ＋ / 🖼 / a drop onto it), so its identity's source
+// can only belong to ANOTHER block afterwards. A content match then found the
+// identical twin and acted on it (the review's chain). In that self session
+// the block is the one at its start line (reresolveBlockElAfterSelfCommit()),
+// never a content match. Each row asserts the exact file: the twin `Twin.`
+// is untouched.
+const GU_SELF_MD = '# D\n\nTwin.\n\nTwin.\n\nEnd.\n';
+for (const [op, path, want] of [
+  ['刪除', '刪除', '# D\n\nTwin.\n\nEnd.\n'],
+  ['轉換 標題 1', ['轉換成', '標題 1'], '# D\n\n# Twin.X\n\nTwin.\n\nEnd.\n'],
+  ['建立副本', '建立副本', '# D\n\nTwin.X\n\nTwin.X\n\nTwin.\n\nEnd.\n'],
+]) {
+  check('gutter-unique: after typing into the first of two identical paragraphs, ⠿ ' + op + ' acts on that paragraph, not its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+    await gutterMenu(page, await guMark(page, 'Twin.X'), path);
+    await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) }, { notice: null, disk: want });
+  }, { md: GU_SELF_MD });
+}
+check('gutter-unique: after typing into the first of two identical paragraphs, ＋ on it opens the new paragraph below it, not below its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  await plusClick(page, 'Twin.X'); await settleR86(page);
+  await page.keyboard.type('new');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nTwin.X\n\nnew\n\nTwin.\n\nEnd.\n');
+}, { md: GU_SELF_MD });
+check('gutter-unique: after typing into the first of two identical paragraphs, the toolbar 🖼 inserts below it, not below its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await pickImage(page, chooser); await settleR86(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nTwin\.X\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nTwin\.\n\nEnd\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, { md: GU_SELF_MD });
+check('gutter-unique: after typing into the first of two identical paragraphs, a block dropped onto it lands above it, not above its twin (M-R5, C1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Twin.', 5); await page.keyboard.type('X');
+  await dragBlock(page, 'End.', 'Twin.X'); await settleR86(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nEnd.\n\nTwin.X\n\nTwin.\n');
+}, { md: GU_SELF_MD });
+// T9a fix round 2 (R64): the gesture's own commit is R95's removal of the
+// emptied paragraph, so the block is gone; its start line now names `Beta.`,
+// which the self-commit re-find (start line + type) used to act on (measured
+// at 22a60e5 and 219754b: ⠿ 刪除 left `# D\n\nEnd.\n`). Now that re-find
+// answers "removed": 刪除 is already done (nothing more, no notice); every
+// other gesture writes nothing more and shows the retry notice.
+const GONE_MD = '# D\n\nAlpha.\n\nBeta.\n\nEnd.\n';
+const r64Empty = async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  return page.evaluate(() => { const b = document.activeElement.closest('.ed-block'); b.setAttribute('data-r64', '1'); return '[data-r64="1"]'; });
+};
+check('gutter-unique: ⠿ 刪除 on a paragraph just emptied removes only it, and says nothing (T9a R64)', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await r64Empty(page), '刪除'); await settleR86(page);
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: null, disk: '# D\n\nBeta.\n\nEnd.\n' });
+}, { md: GONE_MD });
+for (const [op, path] of [['轉換 標題 1', ['轉換成', '標題 1']], ['建立副本', '建立副本']]) {
+  check('gutter-unique: ⠿ ' + op + ' on a paragraph just emptied is refused with the notice and touches the paragraph below nothing (T9a R64)', DESKTOP, async (page, boot) => {
+    await gutterMenu(page, await r64Empty(page), path); await settleR86(page);
+    assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+      { notice: '文件已更新，請重試這個操作', disk: '# D\n\nBeta.\n\nEnd.\n' });
+  }, { md: GONE_MD });
+}
+check('gutter-unique: ＋ on a paragraph just emptied is refused with the notice and opens nothing below the paragraph below (T9a R64)', DESKTOP, async (page, boot) => {
+  const sel = await r64Empty(page);
+  await page.hover(sel); await wait(150);
+  const box = await page.locator(sel + ' > .ed-insert').boundingBox();
+  assert.ok(box, 'guard: the emptied paragraph has its ＋');
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2); await settleR86(page);
+  // The one transient is where `Alpha.` was: its emptied paragraph, which R95
+  // keeps as a transient while focus stays in it (the ＋ press keeps focus).
+  // None opened below `Beta.`.
+  assert.deepStrictEqual({ notice: await noticeText(page), blocks: await blockList(page), disk: await saveAndRead(page, boot) },
+    { notice: '文件已更新，請重試這個操作', blocks: ['heading:D', '~paragraph:', 'paragraph:Beta.', 'paragraph:End.'], disk: '# D\n\nBeta.\n\nEnd.\n' });
+}, { md: GONE_MD });
+// T9a fix round 1 (I1, R35): an image insert whose anchor a render replaced
+// while the picker was open, with an identical twin, is refused with the
+// retry notice (it used to say there was nowhere to insert), and nothing is
+// uploaded or written but what the render itself committed.
+check('gutter-unique: the toolbar 🖼 whose anchor was redrawn while the picker was open, with an identical twin, is refused with the retry notice (M-R5, I1)', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await focusSurface(page, 'Twin.', 5);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.click('[data-ed-tb="image"]')]);
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), GU_SELF_MD, 'guard: the emptied paragraph is gone');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_1PX, 'base64') });
+  await wait(600); await settleR86(page);
+  assert.deepStrictEqual({ notice: await noticeText(page), uploads, disk: await saveAndRead(page, boot) },
+    { notice: '文件已更新，請重試這個操作', uploads: 0, disk: GU_SELF_MD });
+}, { md: '# D\n\nAlpha.\n\nTwin.\n\nTwin.\n\nEnd.\n' });
+// T9a fix round 1 (M2): handCaretOnBelow()'s other two branches. (a) The
+// block below takes no caret (a code block): the caret goes into a new
+// paragraph between the two, which writes nothing until typed into. (b) A
+// leave that discards an untouched insert: the span it ends is gone, and the
+// caret goes to what follows it (`Omega.`); the file is unchanged.
+check('raw-box: Ctrl+Enter out of a quote box above a code block leaves the caret in a new paragraph between them (M-f, M2)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await page.keyboard.type('> '); await renderIdle(page);
+  await page.keyboard.type('Q'); await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' });
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'blockquote:Q', '~paragraph:', 'code:code'], 'the new paragraph sits between the quote and the code');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n> Q\n\nz\n\n```\ncode\n```\n');
+}, { md: '# D\n\nAlpha.\n\n```\ncode\n```\n' });
+check('code-edit: Esc out of an untouched "/" 程式碼 insert discards it and hands the caret to the paragraph below (M-f, M2)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content .ed-block[data-block-type="code"]').length), 0, 'the insert is gone');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'the file is unchanged');
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nzOmega.\n');
+}, { md: BASE_MD });
 // R104 (I-R3): the R80 stash reopen after a forced redraw, with two identical
 // quotes in the R86 failure order. The click on the SECOND quote opens (its
 // lines read the same on screen and in `lines`, by coincidence); its commit
@@ -7761,6 +8087,22 @@ check('emptied-para: Ctrl+S in an emptied paragraph writes no <br> and keeps the
   await renderIdle(page);
   await page.keyboard.type('Q');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nZulu.\n');
+}, { md: FF_EMPTY_MD });
+// v3.17.0 T10 (N4): the transient Ctrl+S leaves in an emptied paragraph's
+// place belongs to the removal, so the first Ctrl+Z brings the paragraph back
+// (it used to drop the transient and change nothing; the second Ctrl+Z then
+// restored it).
+check('emptied-para: the first Ctrl+Z after an emptied paragraph is removed brings it back (N4)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nZulu.\n', 'guard: the removal is saved');
+  await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 1, 'guard: the transient is up');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.deepStrictEqual({ paras: await paragraphs(page), transients: await transientCount(page) },
+    { paras: ['Alpha.', 'Omega.', 'Zulu.'], transients: 0 });
+  assert.strictEqual(await saveAndRead(page, boot), FF_EMPTY_MD);
 }, { md: FF_EMPTY_MD });
 
 // R96 (I4): the "/" menu is not re-filtered while an IME composes; the
@@ -7854,6 +8196,1663 @@ for (const [label, surface, wantOpen] of [
   }, { md: FF_OPEN_MD });
 }
 
+// ── code-edit (v3.17.0 T2): a fenced code block edits in place ──
+const CODE_MD = '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\n```\n\nOmega.\n';
+// Clicks the start or the end of `text`, which must sit inside one text node
+// under `.content`: the point is read from a Range over its first or last
+// character, and the element the browser hit-tests there must belong to the
+// same block (never a rectangle guess about what was pressed).
+async function clickText(page, text, where = 'end') {
+  const pt = await page.evaluate(([t, w]) => {
+    const root = document.querySelector('.content');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = n.data.indexOf(t);
+      if (i === -1) continue;
+      n.parentElement.scrollIntoView({ block: 'center' });
+      const r = document.createRange();
+      const at = w === 'start' ? i : i + t.length - 1;
+      r.setStart(n, at); r.setEnd(n, at + 1);
+      const b = r.getBoundingClientRect();
+      const x = w === 'start' ? b.left + 1 : b.right - 1;
+      const y = b.top + b.height / 2;
+      const block = n.parentElement.closest('.ed-block');
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, same: !!(block && hit && block.contains(hit)), hit: hit ? hit.nodeName + '.' + hit.className : null };
+    }
+    return null;
+  }, [text, where]);
+  assert.ok(pt, 'clickText: no text node holds ' + JSON.stringify(text));
+  assert.ok(pt.same, 'clickText: the point over ' + JSON.stringify(text) + ' hits ' + pt.hit + ', not its block');
+  await page.mouse.click(pt.x, pt.y);
+}
+check('code-edit: a click edits in place with no fence on screen', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  const s = await page.evaluate(() => {
+    const h = document.querySelector('pre[data-ed-code-edit]');
+    return {
+      raw: document.querySelectorAll('textarea.ed-raw').length,
+      ce: h ? h.getAttribute('contenteditable') : null,
+      text: h ? h.textContent : null,
+      active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')),
+      fence: document.querySelector('.content').textContent.indexOf('```') !== -1,
+    };
+  });
+  assert.ok(['plaintext-only', 'true'].includes(s.ce), 'editable: ' + s.ce);
+  assert.deepStrictEqual({ raw: s.raw, text: s.text, active: s.active, fence: s.fence },
+    { raw: 0, text: 'module m;\nendmodule', active: true, fence: false });
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 19, focused: true }, 'the caret is where the click was');
+}, { md: CODE_MD });
+check('code-edit: typing re-colours within 300 ms and Esc writes the file', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule');
+  // A re-colour rewrites the host's own children, never the host: no focus
+  // event at all (the detach census row for it rests on this).
+  await page.evaluate(() => { window.__codeFocusouts = 0; document.addEventListener('focusout', () => { window.__codeFocusouts++; }, true); });
+  await page.keyboard.press('End'); await page.keyboard.press('Enter'); await page.keyboard.type('wire w;');
+  await wait(450);
+  const s = await page.evaluate(() => {
+    const h = document.querySelector('pre[data-ed-code-edit]');
+    return { wire: !!h && [...h.querySelectorAll('.hljs-keyword')].some((k) => k.textContent === 'wire'),
+      active: !!h && document.activeElement === h, focusouts: window.__codeFocusouts, text: h ? h.textContent : null };
+  });
+  assert.deepStrictEqual(s, { wire: true, active: true, focusouts: 0, text: 'module m;\nendmodule\nwire w;' });
+  assert.strictEqual((await codeEdit(page)).caret, 27, 'the caret stays at the end across the re-colour');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await codeEdit(page), null, 'Esc closed the edit');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\nwire w;\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-edit: Enter keeps the indent, Tab and Shift+Tab indent the selected lines', DESKTOP, async (page, boot) => {
+  await clickText(page, 'module', 'start');
+  assert.strictEqual((await codeEdit(page) || {}).caret, 0, 'guard: the caret is at the start');
+  await page.keyboard.press('Tab');
+  assert.deepStrictEqual(await codeEdit(page), { text: '  module m;\nendmodule', caret: 2, focused: true });
+  await page.keyboard.press('End'); await page.keyboard.press('Enter'); await page.keyboard.type('x');
+  assert.deepStrictEqual(await codeEdit(page), { text: '  module m;\n  x\nendmodule', caret: 15, focused: true });
+  await page.keyboard.press('Control+a'); await page.keyboard.press('Tab');
+  assert.strictEqual((await codeEdit(page)).text, '    module m;\n    x\n  endmodule');
+  await page.keyboard.press('Shift+Tab');
+  assert.strictEqual((await codeEdit(page)).text, '  module m;\n  x\nendmodule');
+  await page.keyboard.press('Shift+Tab');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nx\nendmodule');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```verilog\nmodule m;\nx\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+// Polls the open code edit until it is open and focused (or 5 s pass) and
+// returns what it last read; the caller asserts it (diskUntil's shape).
+// T9b, measured: after typing in a paragraph, the click on the code block
+// opens the edit only once the paragraph's commit has settled — about 60 ms
+// after that render's response at 6x CPU throttling, later than
+// renderIdle()'s one macrotask and two frames. A single read after
+// renderIdle() then saw no edit: this check's red under suite load (T7, T9a),
+// 29 of 30 repeats at 6x throttling and 0 of 10 once the read waited.
+async function codeEditUntil(page) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const s = await codeEdit(page);
+    if ((s && s.focused) || Date.now() > deadline) return s;
+    await wait(50);
+  }
+}
+check('code-edit: Ctrl+Z inside the edit steps its own typing and never touches the file', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the edit is open');
+  await page.keyboard.press('Control+End');
+  await page.keyboard.type('x'); await wait(400); await page.keyboard.type('y'); await wait(400);
+  const text = async () => (await codeEdit(page)).text;
+  assert.strictEqual(await text(), 'module m;\nendmodulexy');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await text(), 'module m;\nendmodulex');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual(await text(), 'module m;\nendmodule');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await text(), 'module m;\nendmodule', 'nothing left inside: the text stays');
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === 'Alpha.X')),
+    true, 'the paragraph keeps its edit: the document stack was not touched');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```verilog\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-edit: one Ctrl+Z after leaving restores the block', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule');
+  await page.keyboard.type('zz'); await wait(400); await page.keyboard.press('Enter'); await page.keyboard.type('q');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmodulezz\nq'), 'guard: the edit landed');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
+}, { md: CODE_MD });
+// v3.17.0 T10 (L95b): the toolbar button inside an open code edit is the
+// edit's own Ctrl+Z, never a commit followed by an undo of the whole edit.
+check('code-edit: toolbar 復原 steps the edit\'s own typing and never commits (L95b)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Control+End');
+  await page.keyboard.type('x'); await wait(400); await page.keyboard.type('y'); await wait(400);
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), renders: renderTotal(page) - before, disk: fs.readFileSync(boot.mdPath, 'utf8') },
+    { edit: { text: 'module m;\nendmodulex', caret: 20, focused: true }, renders: 0, disk: CODE_MD });
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmodule', 'a second press steps once more');
+  await page.click('[data-ed-tb="undo"]'); await wait(300);
+  assert.deepStrictEqual({ text: (await codeEdit(page) || {}).text, renders: renderTotal(page) - before }, { text: 'module m;\nendmodule', renders: 0 },
+    'nothing left inside: the edit stays open and the file is not reached');
+}, { md: CODE_MD });
+check('code-edit: leaving unchanged writes nothing and adds no undo step', DESKTOP, async (page, boot) => {
+  const before = renderTotal(page);
+  await clickText(page, 'endmodule'); await page.keyboard.press('Escape'); await renderIdle(page);
+  const s = await page.evaluate(() => ({
+    editable: !!document.querySelector('pre[data-ed-code-edit], pre[contenteditable]'),
+    status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    title: document.title.charAt(0) === '●',
+  }));
+  assert.deepStrictEqual(Object.assign(s, { renders: renderTotal(page) - before }), { editable: false, status: 'clean', title: false, renders: 0 });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
+  // The next Ctrl+Z undoes the edit made before the visit, so the visit
+  // pushed nothing on top of it. The paragraph is committed by Ctrl+S first
+  // rather than by the press on the code block: a press whose blur-commit
+  // render lands before the button comes up used to lose its click (the race
+  // wireBlockSelection()'s comment measures) — measured once here under a
+  // full-suite load, never in six isolated runs. T9b (R50) fixed that race
+  // (pinned by the degraded-press: checks); the Ctrl+S step stays as the T2
+  // pin, per R50.
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'guard: the paragraph edit is committed and saved');
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the edit is open');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD);
+}, { md: CODE_MD });
+// v3.17.0 T9a (M-f, Task 2 deferral): leaving the edit with its own key took
+// the editing attributes off the focused host, and focus went to BODY. The
+// caret goes on to the paragraph below (at its start), for every leave: Esc
+// and Ctrl+Enter after typing, and Esc with nothing changed (the cancel path).
+for (const [name, typed, key] of [['Esc', 'x', 'Escape'], ['Ctrl+Enter', 'x', 'Control+Enter'], ['an unchanged Esc', '', 'Escape']]) {
+  check('code-edit: ' + name + ' out of the edit hands the caret on to the paragraph below (M-f)', DESKTOP, async (page, boot) => {
+    await clickText(page, 'endmodule');
+    if (typed) await page.keyboard.type(typed);
+    await page.keyboard.press(key); await renderIdle(page);
+    assert.strictEqual(await codeEdit(page), null, 'guard: the edit is closed');
+    assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' });
+    await page.keyboard.type('z');
+    assert.strictEqual(await commitAndRead(page, boot), CODE_MD.replace('endmodule', 'endmodule' + typed).replace('Omega.', 'zOmega.'));
+  }, { md: CODE_MD });
+}
+// The last block: nothing below takes a caret, so it goes into a new empty
+// paragraph there (a transient), which writes nothing until typed into.
+check('code-edit: Esc out of the last block hands the caret to a new paragraph below it (M-f)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\n```\nendmodule\n```\n', 'nothing written');
+  await page.keyboard.type('z');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n```\nendmodule\n```\n\nz\n');
+}, { md: '# D\n\n```\nendmodule\n```\n' });
+// Fix round 1 (R49 M6): waits are on what the page and the disk say, never a
+// fixed sleep. `diskUntil` polls the file until it reads `want` (or 10 s
+// pass) and returns what it last read; `saveStateUntil` does the same for the
+// toolbar's save status. The caller asserts the returned value.
+async function diskUntil(boot, want) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const d = fs.readFileSync(boot.mdPath, 'utf8');
+    if (d === want || Date.now() > deadline) return d;
+    await wait(50);
+  }
+}
+async function saveStateUntil(page, want) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const st = await page.evaluate(() => document.querySelector('.ed-toolbar-status').getAttribute('data-state'));
+    if (st === want || Date.now() > deadline) return st;
+    await wait(50);
+  }
+}
+// R48: Ctrl+S commits and saves, and the edit stays open where the caret was.
+check('code-edit: Ctrl+S commits the edit and saves', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'the save landed');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true },
+    'the edit is open again at the same caret');
+}, { md: CODE_MD });
+// R48: keys typed while the Ctrl+S render is out land in the code, in order.
+check('code-edit: typing straight on after Ctrl+S lands in the code', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('rs'); await page.keyboard.press('Enter'); await page.keyboard.type('t');
+  await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleq')), CODE_MD.replace('endmodule', 'endmoduleq'),
+    'the first save wrote what was there at Ctrl+S');
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) },
+    { edit: { text: 'module m;\nendmoduleqrs\nt', caret: 24, focused: true }, notice: null });
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleqrs\nt')), CODE_MD.replace('endmodule', 'endmoduleqrs\nt'));
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean');
+}, { md: CODE_MD });
+// R47: typed code that has not left the edit is unsaved work — the dot, the
+// status and the beforeunload guard all say so; back to the opened text, all
+// clean again.
+check('code-edit: typing in the open edit marks the document unsaved (R47)', DESKTOP, async (page) => {
+  const state = () => page.evaluate(() => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return { title: document.title.charAt(0) === '●', status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+      guard: ev.defaultPrevented };
+  });
+  await clickText(page, 'endmodule');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'guard: clean on open');
+  await page.keyboard.type('q');
+  assert.deepStrictEqual(await state(), { title: true, status: 'dirty', guard: true }, 'typed, not left');
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: still editing');
+  await page.keyboard.press('Backspace');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'back to the opened text');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'left unchanged');
+}, { md: CODE_MD });
+// R49 (M5a): an unterminated fence on the in-place path — an untouched visit
+// writes nothing, an edit writes the closing fence (R37's repair).
+check('code-edit: an unterminated fence: an untouched visit writes nothing, an edit closes it (R37)', DESKTOP, async (page, boot) => {
+  const MD = '# D\n\nAlpha.\n\n```\ncode\n';
+  const before = renderTotal(page);
+  await clickText(page, 'code');
+  assert.strictEqual((await codeEdit(page) || {}).focused, true, 'guard: the in-place edit opened');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ renders: renderTotal(page) - before, disk: await saveAndRead(page, boot) }, { renders: 0, disk: MD });
+  await clickText(page, 'code'); await page.keyboard.type('x');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\ncodex\n```\n');
+}, { md: '# D\n\nAlpha.\n\n```\ncode\n' });
+// R49 (M5b) / R27 (8): an untouched "/" 程式碼 insert left by a click
+// elsewhere is taken away again — file unchanged, no undo step left.
+check('code-edit: an untouched "/" 程式碼 insert abandoned by a click elsewhere is discarded (R27)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
+  await clickText(page, 'Omega.'); await renderIdle(page);
+  const s = await page.evaluate(() => ({ status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    codeBlocks: document.querySelectorAll('.content .ed-block[data-block-type="code"]').length }));
+  assert.deepStrictEqual(s, { status: 'clean', codeBlocks: 0 });
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'no undo step was left behind');
+}, { md: BASE_MD });
+// R49 (M4) / R23: a reconciliation that lands while the code edit is open
+// reopens the block as a raw box holding the fences and the typed text. The
+// R83 / R86 order: the split renders, its undo's render fails and so does
+// the redraw (a reconciliation is owed); the code block above the split
+// reads the same on screen and in `lines`, so it opens; its commit runs the
+// owed redraw, which captures the edit's snapshot and reopens it.
+check('code-edit: a reconciliation that lands while the edit is open reopens it as a raw box with the fences and the typed text (R23)', DESKTOP, async (page, boot) => {
+  await scriptRenders(page, [300, 2000, 1000, 1500], [false, true, true, false]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  // Clicked while the undo renders, as R83's quote is: the click settles
+  // first, and the block opens once the redraw has failed too.
+  await clickText(page, 'code');
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  await page.keyboard.press('End'); await page.keyboard.type(' ab');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'code ab', caret: 7, focused: true }, 'guard: the edit is open on the stale screen');
+  await page.keyboard.press('Escape');
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the commit ran the owed redraw');
+  assert.deepStrictEqual({ raw: await rawBox(page), edit: await codeEdit(page) },
+    { raw: { value: '```\ncode ab\n```', caret: 11, focused: true }, edit: null });
+  await page.keyboard.press('Control+Enter'); await settleR86(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\ncode ab\n```\n\nBravo\n\nparagraph text.\n\nOmega.\n');
+}, { md: '# D\n\n```\ncode\n```\n\nBravo paragraph text.\n\nOmega.\n' });
+check('code-edit: keys typed right after the click land at the click point', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule', 'start'); await page.keyboard.type('zz');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nzzendmodule', caret: 12, focused: true });
+}, { md: CODE_MD });
+check('code-edit: a body holding ``` saves with a longer fence and renders as one block', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.press('Enter'); await page.keyboard.type('```');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n````verilog\nmodule m;\nendmodule\n```\n````\n\nOmega.\n');
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) => b.getAttribute('data-block-type'))),
+    ['heading', 'paragraph', 'code', 'paragraph']);
+}, { md: CODE_MD });
+check('code-edit: a ~~~ fence keeps its fence', DESKTOP, async (page, boot) => {
+  await clickText(page, 'print'); await page.keyboard.type('(1)');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n~~~python\nprint(1)\n~~~\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n~~~python\nprint\n~~~\n\nOmega.\n' });
+check('code-edit: "/" 程式碼 and the ``` shortcut open the edit in place', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, '"/" 程式碼 opens the edit on the empty body');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), 0, 'no raw box');
+  await page.keyboard.type('x'); await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('```'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'the ``` shortcut opens the edit on the empty body');
+  await page.keyboard.type('y'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nx\n```\n\nOmega.\n\n```\ny\n```\n');
+}, { md: BASE_MD });
+check('code-edit: an IME composition survives the re-colour tick', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  const cdp = await page.context().newCDPSession(page);
+  await page.keyboard.type('a');
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await wait(450); // the tick the "a" started falls inside the composition
+  const mid = (await codeEdit(page)).text;
+  await cdp.send('Input.insertText', { text: '你' });
+  await wait(450);
+  assert.deepStrictEqual({ mid, end: await codeEdit(page) },
+    { mid: 'module m;\nendmoduleaㄋ', end: { text: 'module m;\nendmodulea你', caret: 21, focused: true } });
+}, { md: CODE_MD, engines: ['chromium'] });
+check('code-edit: ⠿ MD 原始碼 still opens the whole block with its fence', DESKTOP, async (page) => {
+  await gutterMenu(page, '.ed-block[data-block-type="code"]', 'MD 原始碼');
+  assert.deepStrictEqual({ raw: await rawBox(page), edit: await codeEdit(page) },
+    { raw: { value: '```verilog\nmodule m;\nendmodule\n```', caret: 11, focused: true }, edit: null });
+}, { md: CODE_MD });
+// R24: a click inside the open edit is a caret move — no commit, no render.
+check('code-edit: a click inside the open edit keeps it and writes nothing (R24)', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('a');
+  const before = renderTotal(page);
+  await clickText(page, 'module', 'start'); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), renders: renderTotal(page) - before },
+    { edit: { text: 'module m;\nendmodulea', caret: 0, focused: true }, renders: 0 });
+}, { md: CODE_MD });
+// R26: the pre is the host, so a click in its blank area and a click on an
+// empty body both open the edit.
+check('code-edit: a click in the blank area right of a line, and on an empty body, opens the edit (R26)', DESKTOP, async (page, boot) => {
+  const pt = await page.evaluate(() => {
+    const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+    // The last line: the first line's right end is under the chips (v3.17.0 T3).
+    const kw = [...pre.querySelectorAll('.hljs-keyword')].pop();
+    const p = pre.getBoundingClientRect(); const k = kw.getBoundingClientRect();
+    const x = p.right - 30; const y = k.top + k.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inPre: !!hit && pre.contains(hit) };
+  });
+  assert.strictEqual(pt.inPre, true, 'guard: the point is inside the pre');
+  await page.mouse.click(pt.x, pt.y);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 19, focused: true }, 'blank area: the end of that line');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD);
+}, { md: CODE_MD });
+check('code-edit: an empty body opens on a click and takes typing (R26)', DESKTOP, async (page, boot) => {
+  const box = await page.evaluate(() => {
+    const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+    const r = pre.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, inPre: !!hit && pre.contains(hit), h: r.height };
+  });
+  assert.strictEqual(box.inPre, true, 'guard: the centre of the empty pre is the pre: ' + JSON.stringify(box));
+  await page.mouse.click(box.x, box.y);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true });
+  await page.keyboard.type('k'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nk\n```\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n```\n```\n\nOmega.\n' });
+// R27 (3): a commit whose render fails is rolled back and the edit stays
+// open on what was typed; the next commit lands it.
+check('code-edit: a commit whose render fails keeps the edit open with its text (R27)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await failFirstRender(page);
+  await page.keyboard.press('Escape'); await wait(1200); await renderIdle(page);
+  assert.deepStrictEqual({ card: await errorCardUp(page), edit: await codeEdit(page) },
+    { card: true, edit: { text: 'module m;\nendmoduleq', caret: 20, focused: true } });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+// R28: keys held while the ``` shortcut renders land in the body, and a held
+// Escape commits the edit.
+check('code-edit: "```js" and an Escape held during a slow render land in the body and commit (R28)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await delayRender(page, 800);
+  await page.keyboard.type('```js'); await page.keyboard.press('Escape');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) }, { edit: null, notice: null });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\njs\n```\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// ── code-chips (v3.17.0 T3): the language chip and the copy chip ──
+const CODE_PRE = '.ed-block[data-block-type="code"] > pre';
+// Same recorder / refuser as reader-click's stubClipboard (R34): both engines,
+// and the assertion reads what was handed over.
+async function stubClipboard(page, refuse) {
+  await page.evaluate((no) => {
+    window.__copied = null;
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: (t) => { if (no) return Promise.reject(new Error('denied')); window.__copied = t; return Promise.resolve(); },
+    } });
+    if (no) document.execCommand = () => false;
+  }, !!refuse);
+}
+const chipsState = (page) => page.evaluate(() => {
+  const c = document.querySelector('.ed-code-chips');
+  const pre = document.querySelector('.ed-block[data-block-type="code"] > pre');
+  if (!c || c.hidden) return null;
+  const r = c.getBoundingClientRect(), p = pre.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  const lang = c.querySelector('.ed-code-lang'), copy = c.querySelector('.ed-code-copy');
+  return {
+    right: Math.round(p.right - r.right), top: Math.round(r.top - p.top), h: Math.round(r.height),
+    label: lang.textContent.trim(), copyLabel: copy.getAttribute('aria-label'), copyText: copy.textContent.trim(),
+    hit: !!hit && !!hit.closest('.ed-code-chips'), copied: window.__copied,
+  };
+});
+const langMenu = (page) => page.evaluate(() => {
+  const m = document.querySelector('.ed-code-langmenu');
+  if (!m) return null;
+  const f = m.querySelector('input');
+  return { items: [...m.querySelectorAll('.ed-code-langitem')].map((b) => b.textContent.trim()),
+    focused: document.activeElement === f, w: Math.round(m.getBoundingClientRect().width),
+    cursor: (m.querySelector('[data-ed-lang-cursor]') || {}).textContent || null };
+});
+const hoverCodeBlock = async (page) => { await page.hover(CODE_PRE); await wait(200); };
+check('code-chips: hovering a code block shows Verilog and copy at its top-right', DESKTOP, async (page) => {
+  assert.strictEqual(await chipsState(page), null, 'guard: no chips while the pointer is elsewhere');
+  await hoverCodeBlock(page);
+  const s = await chipsState(page);
+  assert.ok(s, 'chips shown');
+  assert.ok(s.right >= 4 && s.right <= 10, 'right inset: ' + s.right);
+  assert.ok(s.top >= 4 && s.top <= 10, 'top inset: ' + s.top);
+  assert.deepStrictEqual({ label: s.label, h: s.h, hit: s.hit, copyLabel: s.copyLabel }, { label: 'Verilog', h: 24, hit: true, copyLabel: 'Copy code' });
+  await page.mouse.move(5, 5); await wait(200);
+  assert.strictEqual(await chipsState(page), null, 'hidden again when the pointer leaves');
+}, { md: CODE_MD });
+check('code-chips: picking Python rewrites only the fence word, one undo step', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  // R40: the chip opened the edit (caret at 0) and then the menu, whose filter holds focus.
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ n: m.items.length, first: m.items[0], last: m.items[11], focused: m.focused, w: m.w, cursor: m.cursor },
+    { n: 12, first: 'Verilog', last: '純文字', focused: true, w: 220, cursor: 'Verilog' });
+  assert.strictEqual(await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }), 'module m;\nendmodule', 'the chip opened the edit');
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.strictEqual(await langMenu(page), null, 'the menu closed');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 0, focused: true }, 'the edit is open again');
+  assert.strictEqual((await chipsState(page)).label, 'Python');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;\nendmodule\n```\n\nOmega.\n');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await page.keyboard.press('Control+z'); await wait(900); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'one undo restores the old language');
+}, { md: CODE_MD });
+check('code-chips: picking while editing keeps the typing and the caret', DESKTOP, async (page, boot) => {
+  await clickText(page, 'module', 'start');
+  await page.keyboard.press('End'); await page.keyboard.type('x');
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;x\nendmodule', caret: 10, focused: true });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;x\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-chips: the language filter takes 「py」 and Enter picks', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.type('py'); await wait(100);
+  assert.deepStrictEqual((await langMenu(page)).items, ['Python']);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+// v3.17.0 T10 (R54c): the filter input pointed at an option the empty list no
+// longer holds.
+check('code-chips: an empty filtered list clears aria-activedescendant (R54c)', DESKTOP, async (page) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  const ad = () => page.evaluate(() => document.querySelector('.ed-code-langmenu input').getAttribute('aria-activedescendant'));
+  await page.keyboard.type('py'); await wait(100);
+  assert.strictEqual(await ad(), 'ed-code-lang-python', 'guard: a match is current');
+  await page.keyboard.type('zz'); await wait(100);
+  assert.deepStrictEqual({ items: (await langMenu(page)).items, ad: await ad() }, { items: [], ad: null });
+}, { md: CODE_MD });
+check('code-chips: the arrow keys move the cursor, Esc closes the menu and keeps the edit', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.press('ArrowDown'); await page.keyboard.press('ArrowDown');
+  assert.strictEqual((await langMenu(page)).cursor, 'Bash');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await langMenu(page), null, 'Esc closed the menu');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'focus is back in the edit, typing kept');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD, 'nothing was written');
+  await page.keyboard.type('r');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleqr', 'typing goes on in the code');
+}, { md: CODE_MD });
+check('code-chips: 純文字 removes the language word', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("純文字")'); await renderIdle(page);
+  assert.strictEqual((await chipsState(page)).label, '純文字');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+check('code-chips: 純文字 keeps the words after the first', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.click('.ed-code-langitem:has-text("純文字")'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```title="a"\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD.replace('```verilog', '```verilog title="a"') });
+check('code-chips: copy writes the edit text, uncommitted typing included, and shows Copied', DESKTOP, async (page) => {
+  await stubClipboard(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-copy'); await wait(150);
+  const s = await chipsState(page);
+  assert.deepStrictEqual({ copied: s.copied, label: s.copyLabel, text: s.copyText },
+    { copied: 'module m;\nendmoduleq', label: 'Copied', text: 'Copied' });
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'the edit keeps focus and text');
+  await wait(2200);
+  const back = await chipsState(page);
+  assert.deepStrictEqual([back.copyLabel, back.copyText], ['Copy code', ''], 'reverts after two seconds');
+}, { md: CODE_MD });
+check('code-chips: copy on a block that is not being edited copies its code', DESKTOP, async (page) => {
+  await stubClipboard(page);
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-copy'); await wait(150);
+  assert.strictEqual((await chipsState(page)).copied, 'module m;\nendmodule');
+  assert.strictEqual(await codeEdit(page), null, 'copying does not open the edit');
+}, { md: CODE_MD });
+check('code-chips: a refused clipboard selects the code and says Press Ctrl+C', DESKTOP, async (page) => {
+  await stubClipboard(page, true);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.click('.ed-code-copy'); await wait(200);
+  const r = await page.evaluate(() => ({ sel: String(window.getSelection()), label: document.querySelector('.ed-code-copy').getAttribute('aria-label'),
+    want: /Mac|iPhone|iPad/.test(navigator.platform || '') ? 'Press Cmd+C' : 'Press Ctrl+C' }));
+  assert.strictEqual(r.sel.replace(/\n$/, ''), 'module m;\nendmoduleq', 'the whole code is selected');
+  assert.strictEqual(r.label, r.want);
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleq', 'the edit is untouched');
+}, { md: CODE_MD });
+
+check('code-chips: the language chip right after typing in a paragraph opens the menu', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('x');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await renderIdle(page); await wait(300);
+  const m = await langMenu(page);
+  assert.ok(m, 'the menu opened (notice: ' + (await noticeText(page)) + ')');
+  assert.strictEqual(m.focused, true, 'the filter holds focus');
+  assert.strictEqual(await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }),
+    'module m;\nendmodule', 'the edit is open');
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.x').replace('```verilog', '```python'));
+}, { md: CODE_MD });
+// v3.17.0 T9a (R54a): the language chip opens the edit through the click
+// router's own guards. (1) Its block redrawn by the removal of the emptied
+// paragraph above, with an identical twin: found again by content only when
+// it is the one such block (R104), so it is refused with the notice.
+check('code-chips: after emptying the paragraph above, the language chip on the first of two identical code blocks is refused and opens nothing (R54a, R104)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await settleR86(page);
+  assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
+    { edit: null, menu: null, notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nx\n```\n\n```\nx\n```\n\nEnd.\n', 'nothing written but the removal');
+}, { md: '# D\n\nAlpha.\n\n```\nx\n```\n\n```\nx\n```\n\nEnd.\n' });
+// (2) The R102 (I-R1) shape: a split above, its undo's render fails and so
+// does the redraw, so the flight ends with a reconciliation owed and the
+// code block's node still on screen over stale `blocks`. The chip used to
+// open the edit there, seeded from lines that are not the block's; now it is
+// refused like the click on the block itself, and nothing is written.
+check('code-chips: the language chip on a code block below a split whose undo and redraw failed is refused and writes nothing (R54a, R102)', DESKTOP, async (page, boot) => {
+  const SPLIT = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\n';
+  await scriptRenders(page, [300, 2000, 1000], [false, true, true]);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
+  await wait(100); await page.keyboard.press('Control+z');
+  await wait(600);
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await settleR86(page); await wait(300); await settleR86(page);
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
+    { edit: null, menu: null, notice: '文件已更新，請重試這個操作' }, 'refused: no edit on the stale screen');
+  assert.strictEqual(await saveAndRead(page, boot), SPLIT + '```\ncode\n```\n', 'nothing written');
+}, { md: '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n```\ncode\n```\n' });
+check('code-chips: a typed filter starts on its first match, not on the current language (M3)', DESKTOP, async (page, boot) => {
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await wait(200);
+  await page.keyboard.type('j'); await wait(100);
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ items: m.items, cursor: m.cursor }, { items: ['JSON', 'JavaScript'], cursor: 'JSON' });
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('```verilog', '```json'));
+}, { md: CODE_MD.replace('```verilog', '```javascript') });
+check('code-chips: the chips come back when an edit ends with the pointer still over the block (M6)', DESKTOP, async (page) => {
+  await clickText(page, 'endmodule');
+  await page.keyboard.press('Escape'); await renderIdle(page); await wait(400);
+  assert.strictEqual(await codeEdit(page), null, 'guard: the edit ended');
+  assert.ok(await chipsState(page), 'chips shown again');
+}, { md: CODE_MD });
+check('code-chips: scrolling the block sideways keeps its chips (M1)', DESKTOP, async (page) => {
+  await hoverCodeBlock(page);
+  assert.ok(await chipsState(page), 'guard: shown');
+  const sc = await page.evaluate(() => { const p = document.querySelector('.ed-block[data-block-type="code"] > pre'); p.scrollLeft = 200; return p.scrollLeft; });
+  assert.ok(sc > 0, 'guard: the block scrolled sideways: ' + sc);
+  await wait(300);
+  assert.ok(await chipsState(page), 'still shown');
+}, { md: CODE_MD.replace('module m;', 'module m; // ' + 'x'.repeat(400)) });
+const CODE_SCROLL_MD = '# D\n\n' + Array.from({ length: 30 }, (_, i) => 'Filler ' + i + '.').join('\n\n') +
+  '\n\n```verilog\nmodule m;\nendmodule\n```\n\n' + Array.from({ length: 30 }, (_, i) => 'Tail ' + i + '.').join('\n\n') + '\n';
+check('code-chips: a scroll hides the chips of a block that is not edited and moves an edit\'s with it', DESKTOP, async (page) => {
+  await page.evaluate(() => document.querySelector('.ed-block[data-block-type="code"]').scrollIntoView({ block: 'center' }));
+  await wait(200);
+  await hoverCodeBlock(page);
+  assert.ok(await chipsState(page), 'guard: chips shown on hover');
+  await page.evaluate(() => window.scrollBy(0, 40)); await wait(300);
+  assert.strictEqual(await chipsState(page), null, 'hidden by the scroll');
+  await clickText(page, 'endmodule');
+  const before = await chipsState(page);
+  assert.ok(before, 'chips shown while editing');
+  await page.evaluate(() => window.scrollBy(0, 60)); await wait(300);
+  const after = await chipsState(page);
+  assert.ok(after, 'chips still shown while editing');
+  assert.ok(after.top >= 4 && after.top <= 10 && after.right >= 4 && after.right <= 10, 'still at the block corner: ' + JSON.stringify(after));
+  assert.strictEqual(after.hit, true, 'and hit-testable');
+}, { md: CODE_SCROLL_MD });
+
+// v3.17.0 T4: the 編輯圖表 button on Graphviz and Mermaid blocks (D6/E8).
+const DIAG_MD = '# D\n\n```dot\ndigraph { a -> b }\n```\n\n```mermaid\ngraph TD\n  A --> B\n```\n\nOmega.\n';
+const DIAG_MIX_MD = '# D\n\n```js\nvar a = 1;\n```\n\n```wavedrom\n{ signal: [{ name: "a", wave: "01" }] }\n```\n\nOmega.\n';
+const diagBtnState = (page, sel) => page.evaluate((s) => {
+  const b = document.querySelector('.ed-diagram-edit-btn');
+  const d = document.querySelector(s);
+  if (!b || b.hidden || !d) return null;
+  const r = b.getBoundingClientRect(), p = d.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return {
+    text: b.textContent.trim(), right: Math.round(p.right - r.right), top: Math.round(r.top - p.top),
+    hit: !!hit && !!hit.closest('.ed-diagram-edit-btn'), icon: !!b.querySelector('svg'),
+    inContent: !!b.closest('.content'),
+  };
+}, sel);
+check('diagram-btn: hovering a Graphviz block shows 編輯圖表 at its top-right; Mermaid too', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await diagBtnState(page, '.graphviz'), null, 'guard: no button while the pointer is elsewhere');
+  await page.hover('.graphviz svg'); await wait(250);
+  const g = await diagBtnState(page, '.graphviz');
+  assert.ok(g, 'button shown over the Graphviz block');
+  assert.ok(g.right >= 4 && g.right <= 10 && g.top >= 4 && g.top <= 10, 'inset from the diagram corner: ' + JSON.stringify(g));
+  assert.deepStrictEqual({ text: g.text, hit: g.hit, icon: g.icon, inContent: g.inContent }, { text: '編輯圖表', hit: true, icon: true, inContent: false });
+  assert.strictEqual(await page.evaluate(() => { const c = document.querySelector('.ed-code-chips'); return !c || c.hidden; }), true, 'no code chips on a diagram block');
+  await page.mouse.move(5, 5); await wait(250);
+  assert.strictEqual(await diagBtnState(page, '.graphviz'), null, 'hidden again when the pointer leaves');
+  await page.hover('.ed-block .mermaid svg'); await wait(250);
+  const m = await diagBtnState(page, '.mermaid');
+  assert.ok(m, 'button shown over the Mermaid block');
+  assert.ok(m.right >= 4 && m.right <= 10 && m.top >= 4 && m.top <= 10, 'inset from the diagram corner: ' + JSON.stringify(m));
+  assert.strictEqual(m.text, '編輯圖表');
+  assert.strictEqual(await page.evaluate(() => { const c = document.querySelector('.ed-code-chips'); return !c || c.hidden; }), true, 'no code chips on a Mermaid block');
+  // The button itself keeps the pointer: moving onto it does not hide it.
+  const box = await page.locator('.ed-diagram-edit-btn').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await wait(250);
+  assert.ok(await diagBtnState(page, '.mermaid'), 'still shown with the pointer on it');
+}, { md: DIAG_MD });
+check('diagram-btn: a click on the diagram itself still opens the lightbox', DESKTOP, async (page) => {
+  await page.hover('.graphviz svg'); await wait(250);
+  await page.click('.graphviz svg'); await wait(300);
+  const s = await page.evaluate(() => {
+    const l = document.querySelector('.lightbox');
+    return { open: !!l && !l.hidden, raw: document.querySelectorAll('.ed-raw').length };
+  });
+  assert.deepStrictEqual(s, { open: true, raw: 0 }, 'lightbox open, no raw box');
+}, { md: DIAG_MD });
+check('diagram-btn: a plain code block and a WaveDrom block show no 編輯圖表', DESKTOP, async (page) => {
+  await page.hover(CODE_PRE); await wait(250);
+  assert.strictEqual(await diagBtnState(page, CODE_PRE), null, 'no button on a plain code block');
+  await page.waitForSelector('.wavedrom-diagram, [id^="WaveDrom_Display_"]', { timeout: 20000 });
+  await page.hover('[id^="WaveDrom_Display_"] svg, .wavedrom-diagram svg'); await wait(250);
+  assert.strictEqual(await diagBtnState(page, '[id^="WaveDrom_Display_"], .wavedrom-diagram'), null, 'no button on a WaveDrom block');
+  assert.strictEqual(await page.evaluate(() => { const b = document.querySelector('.ed-wave-edit-btn'); return !!b && !b.hidden; }), true, 'guard: the wave button is the one shown');
+}, { md: DIAG_MIX_MD });
+// T5 (R56 (b)): the click opens the panel in place, with no raw box.
+check('diagram-btn: clicking the button opens the diagram panel in place', DESKTOP, async (page) => {
+  await page.hover('.graphviz svg'); await wait(250);
+  await page.locator('.ed-diagram-edit-btn').click(); await wait(300);
+  const s = await page.evaluate(() => {
+    const p = document.querySelector('.ed-diagram-panel');
+    const b = document.querySelector('.ed-diagram-edit-btn');
+    return { raw: document.querySelectorAll('.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length,
+      inBlock: !!p && !!p.closest('.content .ed-block[data-block-type="code"]'), btnHidden: !b || b.hidden,
+      graphvizLeft: document.querySelectorAll('.content .graphviz').length };
+  });
+  assert.deepStrictEqual(s, { raw: 0, panel: 1, inBlock: true, btnHidden: true, graphvizLeft: 0 },
+    'one panel inside the block, the diagram replaced by it, no raw box');
+}, { md: DIAG_MD });
+
+// T6 (D14): Enter on ONE selected diagram block opens the panel, not MD 原始碼.
+const shiftClickBlock = async (page, sel) => {
+  const r = await page.evaluate((q) => { const e = document.querySelector(q); e.scrollIntoView({ block: 'center' }); const b = e.getBoundingClientRect(); return { x: b.left + 20, y: b.top + b.height / 2 }; }, sel);
+  await page.keyboard.down('Shift'); await page.mouse.click(r.x, r.y); await page.keyboard.up('Shift');
+  await wait(250);
+  return page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length);
+};
+const enterState = (page) => page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length, panel: document.querySelectorAll('.ed-diagram-panel').length }));
+check('diagram-btn: Enter on a selected Graphviz block opens the panel', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block:has(.graphviz)'), 1, 'guard: the Graphviz block is the one selected block');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 0, panel: 1 }, 'panel open, no raw box');
+}, { md: DIAG_MD });
+check('diagram-btn: Enter on a selected Mermaid block opens the panel', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block:has(.mermaid)'), 1, 'guard: the Mermaid block is the one selected block');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 0, panel: 1 }, 'panel open, no raw box');
+}, { md: DIAG_MD });
+// v3.17.0 T9a (R60 (2)): the Enter that opens the panel is not typed into
+// it — the source is focused and holds the block's body as it is, with no
+// newline from that Enter, the caret at its start.
+for (const [kind, sel, body] of [['Graphviz', '.ed-block:has(.graphviz)', 'digraph { a -> b }'], ['Mermaid', '.ed-block:has(.mermaid)', 'graph TD\n  A --> B']]) {
+  check('diagram-btn: Enter on a selected ' + kind + ' block focuses the panel source holding the block source unchanged (R60)', DESKTOP, async (page) => {
+    await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+    assert.strictEqual(await shiftClickBlock(page, sel), 1, 'guard: the ' + kind + ' block is the one selected block');
+    await page.keyboard.press('Enter'); await wait(400);
+    const s = await page.evaluate(() => {
+      const t = document.querySelector('.ed-diagram-panel textarea.ed-diagram-src');
+      return t ? { focused: document.activeElement === t, value: t.value, sel: [t.selectionStart, t.selectionEnd] } : null;
+    });
+    assert.deepStrictEqual(s, { focused: true, value: body, sel: [0, 0] });
+  }, { md: DIAG_MD });
+}
+check('diagram-btn: Enter on a selected plain code block still opens MD 原始碼', DESKTOP, async (page) => {
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block[data-block-type="code"]'), 1, 'guard: the code block is selected');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 1, panel: 0 }, 'raw box, no panel');
+}, { md: DIAG_MIX_MD });
+check('diagram-btn: Enter on a selected Graphviz block with a syntax error opens MD 原始碼 (an ordinary code block)', DESKTOP, async (page) => {
+  await page.waitForSelector('.ed-block pre code.language-dot', { timeout: 20000 });
+  assert.strictEqual(await shiftClickBlock(page, '.ed-block[data-block-type="code"]'), 1, 'guard: the broken dot block is selected');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.deepStrictEqual(await enterState(page), { raw: 1, panel: 0 }, 'raw box, no panel');
+}, { md: '# D\n\n```dot\ndigraph { a -> \n```\n\nOmega.\n' });
+
+// ── diagram-panel (v3.17.0 T5, D15): the source and a live preview in place ──
+// The open panel, read in the page: the textarea's value / selection / focus,
+// the preview's svg text, whether it is stale, the message line (and its
+// kind), and the header text. null when no panel is open.
+const diagPanel = (page) => page.evaluate(() => {
+  const p = document.querySelector('.ed-diagram-panel');
+  if (!p) return null;
+  const ta = p.querySelector('textarea.ed-diagram-src');
+  const pv = p.querySelector('.ed-diagram-preview');
+  const er = p.querySelector('.ed-diagram-error');
+  const svg = pv ? pv.querySelector('svg') : null;
+  return {
+    value: ta ? ta.value : null, caret: ta ? ta.selectionStart : null, focused: !!ta && document.activeElement === ta,
+    // The drawn labels only (a Mermaid svg also holds its <style> text).
+    svg: svg ? [...svg.querySelectorAll('text, foreignObject')].map((t) => t.textContent.trim()).filter(Boolean).join(' ') : null, stale: !!pv && pv.classList.contains('is-stale'),
+    error: er && !er.hidden ? er.textContent : null, errorKind: er && !er.hidden ? er.getAttribute('data-kind') : null,
+    head: (p.querySelector('.ed-diagram-head') || {}).textContent || null,
+  };
+});
+// Polls the panel until `pred` holds (or 6 s pass) and returns what it last
+// read; the caller asserts the value (diskUntil's shape).
+async function diagPanelUntil(page, pred) {
+  const deadline = Date.now() + 6000;
+  for (;;) {
+    const s = await diagPanel(page);
+    if ((s && pred(s)) || Date.now() > deadline) return s;
+    await wait(50);
+  }
+}
+async function openDiagPanel(page, sel) {
+  if (sel === '.mermaid svg') await page.waitForSelector('.ed-block .mermaid svg', { timeout: 20000 });
+  await page.hover(sel); await wait(250);
+  await page.locator('.ed-diagram-edit-btn').click();
+  return diagPanelUntil(page, (s) => s.svg !== null);
+}
+// Selects [from, to) of the panel's source (to defaults to from).
+const diagSelect = (page, from, to) => page.evaluate(([a, b]) => {
+  const ta = document.querySelector('textarea.ed-diagram-src');
+  ta.focus(); ta.setSelectionRange(a, b === undefined ? a : b);
+}, [from, to]);
+const DOT_SRC = 'digraph { a -> b }';
+const DOT_B = DOT_SRC.lastIndexOf('b');
+check('diagram-panel: 編輯圖表 opens source and preview in place', DESKTOP, async (page) => {
+  const s = await openDiagPanel(page, '.graphviz svg');
+  assert.ok(s, 'a panel opened');
+  assert.deepStrictEqual({ value: s.value, focused: s.focused, svg: !!s.svg && /\ba\b/.test(s.svg) && /\bb\b/.test(s.svg), stale: s.stale, error: s.error },
+    { value: DOT_SRC, focused: true, svg: true, stale: false, error: null });
+  assert.ok(s.head.indexOf('Graphviz') !== -1 && s.head.indexOf('預覽在停止輸入 0.5 秒後更新') !== -1 && s.head.indexOf('完成') !== -1,
+    'header: ' + JSON.stringify(s.head));
+  const g = await page.evaluate(() => {
+    const p = document.querySelector('.ed-diagram-panel');
+    const pv = p.querySelector('.ed-diagram-preview');
+    return { inBlock: !!p.closest('.content .ed-block[data-block-type="code"]'), position: getComputedStyle(p).position,
+      border: getComputedStyle(p).borderTopWidth, previewTab: pv.getAttribute('tabindex'),
+      previewClass: pv.matches('.graphviz, .mermaid') || !!pv.closest('.graphviz, .mermaid'),
+      lightbox: (() => { const l = document.querySelector('.lightbox'); return !!l && !l.hidden; })() };
+  });
+  assert.deepStrictEqual(g, { inBlock: true, position: 'static', border: '2px', previewTab: '-1', previewClass: false, lightbox: false });
+  // A click on the preview does not open the lightbox, and the panel stays.
+  await page.click('.ed-diagram-preview svg'); await wait(300);
+  assert.deepStrictEqual({ lightbox: await page.evaluate(() => { const l = document.querySelector('.lightbox'); return !!l && !l.hidden; }),
+    open: !!(await diagPanel(page)) }, { lightbox: false, open: true });
+}, { md: DIAG_MD });
+check('diagram-panel: renaming a node updates the preview within 1.5 s', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await wait(1500);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, zeta: /\bzeta\b/.test(s.svg || ''), stale: s.stale, error: s.error },
+    { value: 'digraph { a -> zeta }', zeta: true, stale: false, error: null });
+}, { md: DIAG_MD });
+check('diagram-panel: a syntax error keeps the last preview and shows the first error line', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.press('Backspace');
+  await wait(1500);
+  const bad = await diagPanel(page);
+  assert.strictEqual(bad.value, 'digraph { a -> b ', 'guard: the brace is gone');
+  assert.ok(/syntax error/.test(bad.error || ''), 'error line: ' + JSON.stringify(bad.error));
+  assert.strictEqual(bad.error.indexOf('\n'), -1, 'one line only');
+  assert.deepStrictEqual({ stale: bad.stale, kept: !!bad.svg && /\bb\b/.test(bad.svg), kind: bad.errorKind }, { stale: true, kept: true, kind: 'error' });
+  await page.keyboard.type('}');
+  await wait(1500);
+  const fixed = await diagPanel(page);
+  assert.deepStrictEqual({ value: fixed.value, error: fixed.error, stale: fixed.stale, svg: !!fixed.svg },
+    { value: DOT_SRC, error: null, stale: false, svg: true });
+}, { md: DIAG_MD });
+check('diagram-panel: 完成 writes the file in one undo step; Esc discards', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  const after = await page.evaluate(() => ({ panel: document.querySelectorAll('.ed-diagram-panel').length,
+    svg: (document.querySelector('.content .graphviz svg') || {}).textContent || '' }));
+  assert.deepStrictEqual({ panel: after.panel, zeta: /zeta/.test(after.svg) }, { panel: 0, zeta: true });
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD, 'one Ctrl+Z takes the whole panel edit back');
+  // Esc: nothing written, no render, the diagram back as it was, no theme
+  // listener left behind.
+  const listeners = await page.evaluate(() => window.md2docTheme.__listenerCount());
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
+  const before = renderTotal(page);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  const esc = await page.evaluate(() => ({ panel: document.querySelectorAll('.ed-diagram-panel').length,
+    svg: (document.querySelector('.content .graphviz svg') || {}).textContent || '',
+    status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    listeners: window.md2docTheme.__listenerCount() }));
+  assert.deepStrictEqual({ panel: esc.panel, b: /\bb\b/.test(esc.svg), omega: /omega/.test(esc.svg), status: esc.status,
+    listeners: esc.listeners, renders: renderTotal(page) - before },
+  { panel: 0, b: true, omega: false, status: 'clean', listeners, renders: 0 });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD);
+}, { md: DIAG_MD });
+// v3.17.0 final review I2: Esc still discards, but no longer for good. The
+// next Ctrl+Z brings the whole fenced block back in the raw box with what
+// was typed (the panel's snapshot is in the raw box's shape, R23), as it
+// does after the raw box's own Esc.
+check('diagram-panel: Ctrl+Z after Esc brings the discarded source back (final I2)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ panel: await diagPanel(page), box: await rawBox(page) }, { panel: null, box: null }, 'guard: Esc closed the panel');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'guard: nothing written by the Esc');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
+  const box = await rawBox(page);
+  assert.deepStrictEqual(box && { value: box.value, focused: box.focused },
+    { value: '```dot\ndigraph { a -> omega }\n```', focused: true }, 'the typed source is back');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'restoring writes nothing');
+  assert.strictEqual(await commitAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> omega'), 'and it commits as typed');
+}, { md: DIAG_MD });
+check('diagram-panel: a click elsewhere commits', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await clickText(page, 'Omega.'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null, 'the panel closed');
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// Review Focus 4: the first preview request is held 1200 ms, every later one
+// answers at once; the slow older answer lands after the newer one and must
+// not replace it.
+check('diagram-panel: a slow older preview never replaces a newer one', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  let n = 0;
+  await page.route('**/api/preview', async (route) => {
+    if (n++ === 0) await wait(1200);
+    await route.continue();
+  });
+  await diagSelect(page, DOT_B + 1);
+  await page.keyboard.type('x'); await wait(600); await page.keyboard.type('y');
+  await wait(2000);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, requests: n, newest: /\bbxy\b/.test(s.svg || ''), stale: s.stale, error: s.error },
+    { value: 'digraph { a -> bxy }', requests: 2, newest: true, stale: false, error: null });
+}, { md: DIAG_MD });
+check('diagram-panel: Mermaid previews in the browser and commits', DESKTOP, async (page, boot) => {
+  const previews = [];
+  page.on('request', (r) => { if (/\/api\/preview$/.test(r.url())) previews.push(r.url()); });
+  const s = await openDiagPanel(page, '.mermaid svg');
+  assert.ok(s, 'a panel opened');
+  assert.deepStrictEqual({ value: s.value, svg: !!s.svg && /\bA\b/.test(s.svg) && /\bB\b/.test(s.svg), head: s.head.indexOf('Mermaid') !== -1 },
+    { value: 'graph TD\n  A --> B', svg: true, head: true });
+  await diagSelect(page, s.value.length - 1, s.value.length); await page.keyboard.type('Zed');
+  await wait(1500);
+  const t = await diagPanel(page);
+  assert.deepStrictEqual({ value: t.value, zed: /Zed/.test(t.svg || ''), stale: t.stale, error: t.error },
+    { value: 'graph TD\n  A --> Zed', zed: true, stale: false, error: null });
+  assert.deepStrictEqual(previews, [], 'Mermaid never asks the server');
+  // A Mermaid syntax error keeps the preview too.
+  await page.keyboard.type(' -->'); await wait(1500);
+  const bad = await diagPanel(page);
+  assert.deepStrictEqual({ stale: bad.stale, kept: /Zed/.test(bad.svg || ''), error: !!bad.error && bad.error.indexOf('\n') === -1 },
+    { stale: true, kept: true, error: true });
+  await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null, 'the panel closed');
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('A --> B', 'A --> Zed'));
+}, { md: DIAG_MD });
+check('diagram-panel: the preview follows dark mode', DESKTOP, async (page) => {
+  // A real press on the toggle: it keeps focus where it is and its click is
+  // not "outside any block", so the panel stays open across the switch.
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await openDiagPanel(page, '.graphviz svg');
+  await toggle(); await wait(400);
+  assert.deepStrictEqual(await diagPanel(page).then((s) => s && s.focused), true, 'guard: the panel is open and keeps focus');
+  const g = await page.evaluate(() => {
+    const svg = document.querySelector('.ed-diagram-preview svg');
+    return { dark: document.documentElement.getAttribute('data-md2doc-theme'), recoloured: !!svg && svg.hasAttribute('data-md2doc-recoloured') };
+  });
+  assert.deepStrictEqual(g, { dark: 'dark', recoloured: true });
+  await toggle(); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-diagram-preview svg').hasAttribute('data-md2doc-recoloured')), false,
+    'back to light: the recolour is taken off');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  // Mermaid: drawn again in the new theme (a new svg node), with focus left
+  // on the preview itself: the redraw writes its children, never the
+  // preview, so no focus event at all (detach census row).
+  await openDiagPanel(page, '.mermaid svg');
+  await page.evaluate(() => {
+    const pv = document.querySelector('.ed-diagram-preview');
+    pv.querySelector('svg').__old = true;
+    pv.focus();
+    window.__diagFocusouts = 0;
+    document.addEventListener('focusout', () => { window.__diagFocusouts++; }, true);
+  });
+  await toggle(); await wait(1500);
+  const m = await page.evaluate(() => {
+    const pv = document.querySelector('.ed-diagram-preview');
+    const svg = pv && pv.querySelector('svg');
+    return { svg: !!svg, replaced: !!svg && !svg.__old, focusouts: window.__diagFocusouts, active: document.activeElement === pv };
+  });
+  assert.deepStrictEqual(m, { svg: true, replaced: true, focusouts: 0, active: true });
+  assert.ok(await diagPanel(page), 'the panel is still open');
+}, { md: DIAG_MD });
+// R56 (a): an empty answer is "nothing to show": the last preview stays,
+// marked stale, and the line says so — never a blank success.
+check('diagram-panel: an empty source or an empty svg answer keeps the last preview', DESKTOP, async (page) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await page.route('**/api/preview', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"svg":""}' }));
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('c');
+  await wait(1500);
+  const a = await diagPanel(page);
+  assert.deepStrictEqual({ kept: !!a.svg && /\bb\b/.test(a.svg), stale: a.stale, error: a.error, kind: a.errorKind },
+    { kept: true, stale: true, error: '沒有可預覽的內容', kind: 'empty' });
+  await page.unroute('**/api/preview');
+  await page.keyboard.press('Control+a'); await page.keyboard.press('Backspace');
+  await wait(1500);
+  const b = await diagPanel(page);
+  assert.deepStrictEqual({ value: b.value, kept: !!b.svg, stale: b.stale, error: b.error, kind: b.errorKind },
+    { value: '', kept: true, stale: true, error: '沒有可預覽的內容', kind: 'empty' });
+  // Any other answer is the generic line (R31).
+  await page.route('**/api/preview', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }));
+  await page.keyboard.type(DOT_SRC); await wait(1500);
+  const c = await diagPanel(page);
+  assert.deepStrictEqual({ error: c.error, kind: c.errorKind, stale: c.stale }, { error: '預覽失敗（伺服器沒有回應）', kind: 'error', stale: true });
+}, { md: DIAG_MD });
+// R56 (c) / R48: Ctrl+S saves and the panel stays open where the caret was;
+// keys typed while that render is out land in the source in order.
+check('diagram-panel: Ctrl+S saves and keeps the panel open; typing on lands in the source', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'the save landed');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD.replace('a -> b', 'a -> zeta'));
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ value: s.value, caret: s.caret, focused: s.focused }, { value: 'digraph { a -> zeta }', caret: 19, focused: true },
+    'the panel is open again at the same caret');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('rs'); await page.keyboard.press('Enter'); await page.keyboard.type('t');
+  await renderIdle(page);
+  const t = await diagPanel(page);
+  assert.deepStrictEqual({ value: t.value, caret: t.caret, focused: t.focused, notice: await noticeText(page) },
+    { value: 'digraph { a -> zetars\nt }', caret: 23, focused: true, notice: null });
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, DIAG_MD.replace('a -> b', 'a -> zetars\nt')), DIAG_MD.replace('a -> b', 'a -> zetars\nt'));
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean');
+}, { md: DIAG_MD });
+// R56 (d) / R47: typed source not yet committed is unsaved work.
+check('diagram-panel: typing in the open panel marks the document unsaved (R47)', DESKTOP, async (page) => {
+  const state = () => page.evaluate(() => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return { title: document.title.charAt(0) === '●', status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+      guard: ev.defaultPrevented };
+  });
+  await openDiagPanel(page, '.graphviz svg');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'guard: clean on open');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.type('q');
+  assert.deepStrictEqual(await state(), { title: true, status: 'dirty', guard: true }, 'typed, not left');
+  await page.keyboard.press('Backspace');
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'back to the opened text');
+  await page.keyboard.type('q');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await state(), { title: false, status: 'clean', guard: false }, 'Esc discarded it');
+}, { md: DIAG_MD });
+// R36 / R25: Tab inserts two spaces; Ctrl+Z steps the textarea's own text and
+// never the document; a press on the header keeps the panel open.
+check('diagram-panel: Tab inserts two spaces and Ctrl+Z never reaches the document', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('X');
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length - 1);
+  await page.keyboard.press('Tab');
+  assert.deepStrictEqual(await diagPanel(page).then((s) => ({ value: s.value, caret: s.caret, focused: s.focused })),
+    { value: 'digraph { a -> b   }', caret: DOT_SRC.length + 1, focused: true });
+  await page.keyboard.press('Control+z'); await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual((await diagPanel(page)).value, DOT_SRC, 'the textarea stepped its own text');
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === 'Omega.X')),
+    true, 'the paragraph keeps its edit: the document stack was not touched');
+  await page.click('.ed-diagram-hint'); await wait(200);
+  assert.deepStrictEqual(await diagPanel(page).then((s) => ({ open: true, focused: s.focused })), { open: true, focused: true },
+    'a press on the header keeps the panel and its focus');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('Omega.', 'Omega.X'));
+}, { md: DIAG_MD });
+// R27 (3): a commit whose render fails keeps the panel open on its text.
+check('diagram-panel: a commit whose render fails keeps the panel open with its text (R27)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await failFirstRender(page);
+  await page.click('.ed-diagram-done'); await wait(1200); await renderIdle(page);
+  const s = await diagPanel(page);
+  assert.deepStrictEqual({ card: await errorCardUp(page), value: s && s.value }, { card: true, value: 'digraph { a -> zeta }' });
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// Fix round 1 (I1): Ctrl+S on a Graphviz source that does not parse. The
+// saved block renders as plain code, not a diagram; the panel still opens
+// again on it, with what was typed while the save was out, and the preview
+// keeps saying what is wrong.
+check('diagram-panel: Ctrl+S on a source with a syntax error keeps the panel open with the typing', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_SRC.length); await page.keyboard.press('Backspace');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await page.keyboard.type('cd');
+  await renderIdle(page);
+  const BROKEN = DIAG_MD.replace(DOT_SRC, 'digraph { a -> b ');
+  assert.strictEqual(await diskUntil(boot, BROKEN), BROKEN, 'the save wrote the source as it was at Ctrl+S');
+  await wait(1500);
+  const s = await diagPanel(page);
+  assert.ok(s, 'the panel is open again');
+  assert.deepStrictEqual({ value: s.value, caret: s.caret, focused: s.focused, notice: await noticeText(page) },
+    { value: 'digraph { a -> b cd', caret: 19, focused: true, notice: null });
+  assert.ok(/syntax error/.test(s.error || ''), 'the error line: ' + JSON.stringify(s.error));
+  assert.strictEqual(s.head.indexOf('Graphviz') !== -1, true, 'still the Graphviz panel');
+  // Fixed and left, it renders as a diagram again.
+  await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.type('}');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content .graphviz svg').length), 1);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD);
+}, { md: DIAG_MD });
+// R58 (fix round 1, M2): switching the theme is not leaving what is being
+// edited — a code edit and a paragraph keep their focus and their typing.
+check('theme: the toggle keeps an open code edit and a paragraph edit open with their typing (R58)', DESKTOP, async (page, boot) => {
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await toggle(); await wait(300);
+  assert.strictEqual(await page.evaluate(() => document.documentElement.getAttribute('data-md2doc-theme')), 'dark', 'guard: dark');
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'the code edit is open, typing kept');
+  await page.keyboard.type('r');
+  assert.strictEqual((await codeEdit(page)).text, 'module m;\nendmoduleqr', 'typing goes on in the code');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  const before = renderTotal(page);
+  await toggle(); await wait(300);
+  const p = await page.evaluate(() => {
+    const a = document.activeElement;
+    return { focused: !!a && a.classList.contains('ed-wys-armed'), text: a ? a.textContent : null };
+  });
+  assert.deepStrictEqual(Object.assign(p, { renders: renderTotal(page) - before }), { focused: true, text: 'Alpha.X', renders: 0 },
+    'the paragraph keeps focus and its typing, nothing committed by the toggle');
+  await page.keyboard.type('Y');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.XY\n\n```verilog\nmodule m;\nendmoduleqr\n```\n\nOmega.\n');
+}, { md: CODE_MD });
+// Fix round 1 (M4): Esc puts the diagram back drawn for the theme on screen.
+// A Mermaid host is drawn again once (the runtime adopts the restored node),
+// and the next toggle redraws it; a Graphviz svg opened in dark and closed in
+// light loses the dark recolour.
+check('diagram-panel: Esc puts the diagram back drawn for the theme now on screen', DESKTOP, async (page) => {
+  const toggle = () => page.locator('#md2doc-theme-toggle').click();
+  await openDiagPanel(page, '.mermaid svg');
+  await toggle(); await wait(1500);
+  await page.evaluate(() => {
+    window.__mmRenders = 0;
+    const orig = window.mermaid.render.bind(window.mermaid);
+    window.mermaid.render = (...a) => { window.__mmRenders++; return orig(...a); };
+  });
+  await page.keyboard.press('Escape'); await wait(1500);
+  const read = () => page.evaluate(() => {
+    const svg = document.querySelector('.content .mermaid svg');
+    const r = svg ? svg.getBoundingClientRect() : null;
+    return { panel: document.querySelectorAll('.ed-diagram-panel').length, visible: !!r && r.width > 0 && r.height > 0,
+      live: !!svg && svg.hasAttribute('data-md2doc-live'), renders: window.__mmRenders };
+  });
+  assert.deepStrictEqual(await read(), { panel: 0, visible: true, live: true, renders: 1 }, 'drawn once, dark');
+  await toggle(); await wait(1500);
+  const light = await read();
+  assert.deepStrictEqual({ visible: light.visible, live: light.live }, { visible: true, live: false }, 'the next toggle redraws it light');
+  // Graphviz: opened in dark, closed in light.
+  await toggle(); await wait(400);
+  await openDiagPanel(page, '.graphviz svg');
+  await toggle(); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.documentElement.getAttribute('data-md2doc-theme')), null, 'guard: light');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const svg = document.querySelector('.content .graphviz svg');
+    return { svg: !!svg, recoloured: !!svg && svg.hasAttribute('data-md2doc-recoloured') };
+  }), { svg: true, recoloured: false });
+}, { md: DIAG_MD });
+// R44: a page with no Mermaid at load: the engine arrives with the first
+// inserted block, and the panel previews through it.
+check('diagram-panel: a Mermaid block added to a page without Mermaid previews in the panel', DESKTOP, async (page) => {
+  assert.strictEqual(await page.evaluate(() => typeof window.mermaid), 'undefined', 'guard: not loaded at start');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/mer'); await page.keyboard.press('Enter'); await renderIdle(page);
+  const s = await openDiagPanel(page, '.mermaid svg');
+  assert.ok(s && s.svg && s.error === null && !s.stale, 'previewed: ' + JSON.stringify(s));
+  assert.ok(s.head.indexOf('Mermaid') !== -1);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await diagPanel(page), null);
+}, { md: BASE_MD });
+
+// ── v3.17.0 T7: the image toolbar (D16–D18) ──
+// A real 160x100 PNG, so the hover geometry has a picture to be inside of.
+const PNG_160 = (() => {
+  const zlib = require('zlib');
+  const w = 160, h = 100;
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 3 + 1)] = 0;
+    for (let x = 0; x < w; x++) { const o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = 200; raw[o + 1] = 80 + (x % 60); raw[o + 2] = 90; }
+  }
+  const crcTable = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+  const crc = (b) => { let c = 0xffffffff; for (const v of b) c = crcTable[(c ^ v) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const cr = Buffer.alloc(4); cr.writeUInt32BE(crc(td)); return Buffer.concat([len, td, cr]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]).toString('base64');
+})();
+const IMG_MD = '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\nOmega.\n';
+const IMG_OPTS = { md: IMG_MD, assets: { 'assets/a.png': PNG_160 } };
+const IMG_SEL = '.content .ed-block[data-block-type="paragraph"] img';
+const imgTbState = (page) => page.evaluate(() => {
+  const t = document.querySelector('.ed-imgtb');
+  if (!t || t.hidden) return null;
+  const img = document.querySelector('.content .ed-block img');
+  const r = t.getBoundingClientRect(), p = img.getBoundingClientRect();
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--md-ed-err)';
+  document.body.appendChild(probe);
+  const errColour = getComputedStyle(probe).color;
+  probe.remove();
+  const btns = [...t.querySelectorAll('.ed-imgtb-btn')];
+  const del = btns.find((b) => b.textContent === '刪除');
+  const hit = document.elementFromPoint(r.left + 4, r.top + 4);
+  return {
+    left: Math.round(r.left - p.left), top: Math.round(r.top - p.top), texts: btns.map((b) => b.textContent),
+    delErr: !!del && getComputedStyle(del).color === errColour, inContent: !!t.closest('.content'),
+    hit: !!hit && !!hit.closest('.ed-imgtb'), imgW: Math.round(p.width), imgH: Math.round(p.height),
+    inputShown: !!t.querySelector('.ed-imgtb-input') && !t.querySelector('.ed-imgtb-input').hidden,
+  };
+});
+const hoverImg = async (page) => { await page.hover(IMG_SEL); await wait(250); };
+const imgTbBtn = (page, label) => page.locator('.ed-imgtb-btn', { hasText: label });
+const openAlt = async (page) => {
+  await hoverImg(page);
+  await imgTbBtn(page, '替代文字').click(); await wait(300);
+  assert.strictEqual((await imgTbState(page)).inputShown, true, 'guard: the alt input is showing');
+};
+check('image-toolbar: hovering an image shows 替換 替代文字 刪除 at its top-left', DESKTOP, async (page) => {
+  assert.strictEqual(await imgTbState(page), null, 'guard: no toolbar while the pointer is elsewhere');
+  await hoverImg(page);
+  const s = await imgTbState(page);
+  assert.ok(s, 'toolbar shown');
+  assert.ok(s.left >= 6 && s.left <= 10 && s.top >= 6 && s.top <= 10, 'inset from the image corner: ' + JSON.stringify(s));
+  assert.deepStrictEqual({ texts: s.texts, delErr: s.delErr, inContent: s.inContent, hit: s.hit, size: [s.imgW, s.imgH] },
+    { texts: ['替換', '替代文字', '刪除'], delErr: true, inContent: false, hit: true, size: [160, 100] });
+  // The toolbar itself keeps the pointer; leaving both hides it after a moment.
+  const box = await page.locator('.ed-imgtb').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await wait(450);
+  assert.ok(await imgTbState(page), 'still shown with the pointer on it');
+  await page.mouse.move(5, 5); await wait(150);
+  assert.ok(await imgTbState(page), 'not yet hidden 150 ms after leaving');
+  await wait(450);
+  assert.strictEqual(await imgTbState(page), null, 'hidden after the pointer left both');
+}, IMG_OPTS);
+check('image-toolbar: 替代文字 rewrites only the brackets, one undo step', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'chip top');
+  assert.strictEqual(await page.evaluate(() => document.activeElement === document.querySelector('.ed-imgtb-input')), true, 'the input has focus');
+  await page.keyboard.type('new words'); await page.keyboard.press('Enter'); await renderIdle(page);
+  // (A pointer left over the re-rendered picture may bring the toolbar back: that is the hover rule.)
+  await page.mouse.move(5, 5); await wait(450);
+  assert.strictEqual(await imgTbState(page), null, 'toolbar gone after applying');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![new words](assets/a.png "T")\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the block');
+}, IMG_OPTS);
+check('image-toolbar: alt with brackets round-trips', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('p [q]'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![p \\[q\\]](assets/a.png "T")\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.content img').getAttribute('alt')), 'p [q]', 'renders back to the typed text');
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'p [q]', 'reopened: the input shows the typed text');
+}, IMG_OPTS);
+check('image-toolbar: Esc in the alt field changes nothing', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('zzz'); await page.keyboard.press('Escape'); await wait(300);
+  const s = await imgTbState(page);
+  assert.ok(!s || s.inputShown === false, 'the input is gone');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+  // Enter with the text unchanged writes nothing either: one Ctrl+Z has nothing to undo.
+  await openAlt(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-conflict')), false, 'no message');
+}, IMG_OPTS);
+check('image-toolbar: Ctrl+Z in the alt field leaves the document alone', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('first'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await openAlt(page);
+  await page.keyboard.type(' more');
+  await page.keyboard.press('Control+z'); await wait(300);
+  const s = await page.evaluate(() => ({ alt: document.querySelector('.content img').getAttribute('alt'),
+    input: !document.querySelector('.ed-imgtb-input').hidden }));
+  assert.deepStrictEqual(s, { alt: 'first', input: true }, 'the field undid its own text; the document did not move');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![first](assets/a.png "T")\n\nOmega.\n');
+}, IMG_OPTS);
+check('image-toolbar: 替換 rewrites only the path and keeps alt and title', DESKTOP, async (page, boot) => {
+  await hoverImg(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(chooser.isMultiple(), false, 'a single-file picker');
+  await pickImage(page, chooser, PNG_160);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
+}, IMG_OPTS);
+check('image-toolbar: 替換 with a file that is not a picture writes nothing', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await hoverImg(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  await chooser.setFiles({ name: 'x.drawio', mimeType: '', buffer: Buffer.from('<mxfile/>') });
+  await wait(600);
+  const notice = await page.evaluate(() => { const b = document.querySelector('.ed-conflict'); return b ? b.textContent : ''; });
+  assert.ok(notice.indexOf('只能用圖片檔替換') !== -1, 'notice: ' + JSON.stringify(notice));
+  assert.strictEqual(uploads, 0, 'nothing uploaded');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD);
+}, IMG_OPTS);
+// v3.17.0 final review I1: 替換 used to read the block id from the node it
+// held across the file dialog. A render meanwhile replaced that node, and a
+// commit above it moved every id by one, so the stale id named the picture
+// above: the wrong picture was replaced, with no notice. Both renders are
+// forced while the chooser is pending (the window blur a real dialog raises
+// can commit a dirty paragraph elsewhere in the same way).
+const IMG2_ASSETS = { 'assets/a.png': PNG_160, 'assets/b.png': PNG_160 };
+const IMG2_MD = '# D\n\nAlpha.\n\n![one](assets/a.png)\n\n![two](assets/b.png)\n\nOmega.\n';
+const imgConflictText = (page) => page.evaluate(() => { const b = document.querySelector('.ed-conflict'); return b ? b.textContent : ''; });
+check('image-toolbar: 替換 across a render that moved the block ids replaces the picture that was pointed at (final I1)', DESKTOP, async (page, boot) => {
+  await page.locator(IMG_SEL).nth(1).hover(); await wait(250);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true, 'guard: the forced render ran');
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await page.keyboard.type('New.');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\n![one](assets/a.png)\n\n![two](assets/b.png)\n\nOmega.\n',
+    'guard: a paragraph landed above both pictures while the dialog was open');
+  await pickImage(page, chooser, PNG_160);
+  assert.strictEqual(await imgConflictText(page), '', 'no notice, no error');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nNew.\n\n![one](assets/a.png)\n\n![two](assets/dot.png)\n\nOmega.\n');
+}, { md: IMG2_MD, assets: IMG2_ASSETS });
+// The same window, with a picture that has an identical twin: after the
+// render it cannot be told apart, so the pick is refused with the retry
+// notice, BEFORE anything is uploaded (no orphan file in assets/).
+const IMG_TWIN_MD = '# D\n\nAlpha.\n\n![x](assets/a.png)\n\n![x](assets/a.png)\n\nOmega.\n';
+check('image-toolbar: 替換 refuses, uploading nothing, when the picture cannot be found again after a render (final I1)', DESKTOP, async (page, boot) => {
+  let uploads = 0;
+  page.on('request', (r) => { try { if (new URL(r.url()).pathname === '/api/asset') uploads++; } catch (e) { /* ignore */ } });
+  await page.locator(IMG_SEL).nth(1).hover(); await wait(250);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  assert.strictEqual(await page.evaluate(() => window.__edTestForceRerender()), true, 'guard: the forced render ran');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_160, 'base64') });
+  await wait(600); await renderIdle(page);
+  const notice = await imgConflictText(page);
+  assert.ok(notice.indexOf('文件已更新，請重試這個操作') !== -1, 'the retry notice: ' + JSON.stringify(notice));
+  assert.strictEqual(uploads, 0, 'nothing uploaded');
+  assert.strictEqual(await saveAndRead(page, boot), IMG_TWIN_MD, 'nothing written');
+}, { md: IMG_TWIN_MD, assets: { 'assets/a.png': PNG_160 } });
+check('image-toolbar: 刪除 removes the paragraph, one undo step', DESKTOP, async (page, boot) => {
+  await hoverImg(page);
+  await imgTbBtn(page, '刪除').click(); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z puts the image back');
+}, IMG_OPTS);
+check('image-toolbar: a click on the image still opens the lightbox', DESKTOP, async (page) => {
+  await hoverImg(page);
+  const box = await page.locator(IMG_SEL).boundingBox();
+  await page.mouse.click(box.x + box.width - 20, box.y + box.height - 20); await wait(300);
+  const s = await page.evaluate(() => { const l = document.querySelector('.lightbox'); return { open: !!l && !l.hidden, raw: document.querySelectorAll('.ed-raw').length }; });
+  assert.deepStrictEqual(s, { open: true, raw: 0 }, 'lightbox open, no raw box');
+}, IMG_OPTS);
+check('image-toolbar: a paragraph with text around an image shows no toolbar', DESKTOP, async (page) => {
+  const n = await page.locator('.content .ed-block img').count();
+  assert.strictEqual(n, 4, 'guard: four pictures on the page');
+  for (let i = 0; i < n; i++) {
+    await page.locator('.content .ed-block img').nth(i).hover(); await wait(250);
+    assert.strictEqual(await imgTbState(page), null, 'no toolbar over picture ' + i);
+  }
+}, { md: '# D\n\nSee ![a](assets/a.png) here.\n\n[![b](assets/a.png)](http://example.com)\n\n![c](assets/a.png) ![d](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
+
+// ── v3.17.0 T8: a dropped picture on a picture replaces it ──
+const dropPngOn = (page, selector, b64) => page.evaluate(({ sel, b64 }) => {
+  const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
+  const target = document.querySelector(sel);
+  target.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+}, { sel: selector, b64 });
+check('image-drop: a PNG dropped on an image replaces its path', DESKTOP, async (page, boot) => {
+  const before = await blockList(page);
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    dropPngOn(page, IMG_SEL, PNG_160),
+  ]);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
+  assert.strictEqual((await blockList(page)).length, before.length, 'block count unchanged');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
+}, IMG_OPTS);
+check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP, async (page, boot) => {
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160),
+  ]);
+  await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\n!\[chip top\]\(assets\/a\.png "T"\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
+}, IMG_OPTS);
+// v3.17.0 T9a (R61, D18): only a raster picture replaces; a .drawio dropped
+// on a picture is inserted below it, and the picture keeps its path.
+check('image-drop: a .drawio dropped on an image still inserts below it', DESKTOP, async (page, boot) => {
+  const MX = '<mxfile host="app.diagrams.net"><diagram name="Page-1"><mxGraphModel dx="1" dy="1"><root>' +
+    '<mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>';
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    page.evaluate(({ sel, text }) => {
+      const dt = new DataTransfer(); dt.items.add(new File([text], 'flow.drawio', { type: '' }));
+      document.querySelector(sel).dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    }, { sel: IMG_SEL, text: MX }),
+  ]);
+  await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\n![](assets/flow.drawio)\n\nOmega.\n');
+}, IMG_OPTS);
+
+// ── v3.17.0 T9b: timing races around commit renders ──
+// R50: a press on a degraded block right after typing in a paragraph blurs
+// the paragraph, and that paragraph's commit render can land before the
+// button comes up. When it replaced the pressed block, no click followed
+// (wireBlockSelection()'s trace) and nothing opened. The button is held down
+// here until the pressed block has left the document, so the render lands
+// inside the press by construction, not by load; the helper returns whether
+// it did (the checks' guard).
+async function pressTextAcrossRender(page, text) {
+  const pt = await page.evaluate((t) => {
+    const root = document.querySelector('.content');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = n.data.indexOf(t);
+      if (i === -1) continue;
+      const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + t.length);
+      const b = r.getBoundingClientRect();
+      const x = b.left + b.width / 2, y = b.top + b.height / 2;
+      const block = n.parentElement.closest('.ed-block');
+      const hit = document.elementFromPoint(x, y);
+      window.__t9bPressed = block;
+      return { x, y, same: !!(block && hit && block.contains(hit)) };
+    }
+    return null;
+  }, text);
+  assert.ok(pt && pt.same, 'pressTextAcrossRender: the point over ' + JSON.stringify(text) + ' hits its block');
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.down();
+  let gone = false;
+  for (let i = 0; i < 100 && !gone; i++) {
+    gone = await page.evaluate(() => !window.__t9bPressed.isConnected);
+    if (!gone) await wait(50);
+  }
+  await page.mouse.up();
+  return gone;
+}
+check('degraded-press: a click on a code block straight after typing in a paragraph opens the code edit (R50)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), notice: await noticeText(page) },
+    { edit: { text: 'module m;\nendmodule', caret: 0, focused: true }, notice: null }, 'the press opened the code edit');
+  await page.keyboard.type('q'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.X').replace('module m;', 'qmodule m;'));
+}, { md: CODE_MD });
+check('degraded-press: a click on a quote straight after typing in a paragraph opens its box (R50)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'Quote line.'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  const box = await page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? { value: t.value, focused: document.activeElement === t } : null; });
+  assert.deepStrictEqual({ box, notice: await noticeText(page) }, { box: { value: '> Quote line.', focused: true }, notice: null }, 'the press opened the box');
+  await page.keyboard.press('Control+a'); await page.keyboard.type('> NEW');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n> NEW\n\nOmega.\n');
+}, { md: '# D\n\nAlpha.\n\n> Quote line.\n\nOmega.\n' });
+// The re-find is R104's: with an identical twin the press cannot tell which
+// one it was on, so it opens neither and says so (it used to say nothing).
+check('degraded-press: a lost click on the first of two identical code blocks opens neither and shows the retry notice (R50, R104)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'twin'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), notice: await noticeText(page) },
+    { edit: null, raw: 0, notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\n```\ntwin\n```\n\n```\ntwin\n```\n', 'only the paragraph\'s commit is written');
+}, { md: '# D\n\nAlpha.\n\n```\ntwin\n```\n\n```\ntwin\n```\n' });
+
+// v3.17.0 T10 (ER 'Esc out of a raw editor is recoverable', surfaced by T9a's
+// hand-on): the caret an Esc hands to a transient above a code block must not
+// swallow the Ctrl+Z that restores the discarded text.
+check('raw-box: Ctrl+Z after Esc out of a quote box above a code block restores the discarded text (M-f, T10)', DESKTOP, async (page, boot) => {
+  await page.locator('blockquote').click(); await renderIdle(page);
+  assert.strictEqual((await rawBox(page) || {}).focused, true, 'guard: the box is open');
+  await page.keyboard.type(' DROPPED'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ box: await rawBox(page), transients: await transientCount(page) }, { box: null, transients: 1 }, 'guard: Esc left a transient with the caret');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
+  const box = await rawBox(page);
+  assert.ok(box && box.value.indexOf('DROPPED') !== -1, 'the box is back with the text: ' + JSON.stringify(box));
+  assert.strictEqual(await transientCount(page), 0, 'the transient went');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.\n\n> Quote line.\n\n```\nc\n```\n\nOmega.\n', 'nothing written');
+}, { md: '# D\n\nAlpha.\n\n> Quote line.\n\n```\nc\n```\n\nOmega.\n' });
+// v3.17.0 T10 (M1): the release path takes the click router's gutter-band
+// rule. The press is in the band left of the code block (the block's own
+// box), held until the paragraph's commit render replaced the block, released
+// over the new block's band: nothing opens, as a click there never did.
+async function pressBandAcrossRender(page, text) {
+  const pt = await page.evaluate((t) => {
+    const pre = [...document.querySelectorAll('.ed-block[data-block-type="code"]')].find((b) => b.textContent.indexOf(t) !== -1);
+    const r = pre.getBoundingClientRect();
+    const bs = getComputedStyle(pre, '::before');
+    // Low in the band: the ＋ / ⠿ pair sits at its top.
+    const x = r.left + parseFloat(bs.left) + parseFloat(bs.width) / 2, y = r.bottom - 4;
+    window.__t10Pressed = pre;
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, same: hit === pre, hit: hit ? hit.tagName + '.' + hit.className : null, band: [bs.left, bs.width] };
+  }, text);
+  assert.ok(pt.same, 'pressBandAcrossRender: the lower middle of the ::before band hits the block itself: ' + JSON.stringify(pt));
+  await page.mouse.move(pt.x, pt.y);
+  await page.mouse.down();
+  let gone = false;
+  for (let i = 0; i < 100 && !gone; i++) {
+    gone = await page.evaluate(() => !window.__t10Pressed.isConnected);
+    if (!gone) await wait(50);
+  }
+  await page.mouse.up();
+  return gone;
+}
+check('degraded-press: a release in the gutter band of a code block opens nothing (R50, M1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressBandAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ edit: await codeEdit(page), raw: await page.evaluate(() => document.querySelectorAll('textarea.ed-raw').length), notice: await noticeText(page) },
+    { edit: null, raw: 0, notice: null });
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.', 'Alpha.X'));
+}, { md: CODE_MD });
+// v3.17.0 T10 (M2): the release that opened the block answers its own click
+// only. A click with no press of its own (a keyboard activation, a script)
+// came next and was swallowed once.
+check('degraded-press: a click with no press after a release that opened the edit is not swallowed (R50, M2)', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  assert.strictEqual(await pressTextAcrossRender(page, 'endmodule'), true, 'guard: the paragraph\'s commit render replaced the pressed block before the release');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the release opened the code edit');
+  await page.evaluate(() => document.querySelector('blockquote').click());
+  await renderIdle(page); await wait(300);
+  assert.deepStrictEqual({ box: await rawBox(page) && (await rawBox(page)).value, edit: await codeEdit(page) },
+    { box: '> Quote line.', edit: null }, 'the programmatic click opened the quote');
+}, { md: '# D\n\nAlpha.\n\n```verilog\nmodule m;\nendmodule\n```\n\n> Quote line.\n\nOmega.\n' });
+
+// The /api/save answers, in the order they arrived (node side), for the
+// checks below; `slowSaves` holds every save 300 ms before it reaches the
+// server, so two that overlap overlap by construction.
+function recordSaves(page) {
+  const statuses = [];
+  page.on('response', (r) => { try { if (new URL(r.url()).pathname === '/api/save') statuses.push(r.status()); } catch (e) { /* ignore */ } });
+  return statuses;
+}
+async function slowSaves(page) {
+  await page.route('**/api/save', async (route) => { await wait(300); await route.continue(); });
+}
+async function savesUntil(statuses, n) {
+  const deadline = Date.now() + 10000;
+  while (statuses.length < n && Date.now() < deadline) await wait(50);
+  await wait(400); // and any later one
+  return statuses.slice();
+}
+// The focused surface's text and whether a code edit / diagram panel is open.
+const t9bFocus = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { tag: a ? a.tagName : null, text: a && a.matches && a.matches('.ed-wys-armed') ? a.textContent : null,
+    code: !!document.querySelector('pre[data-ed-code-edit]'), panel: !!document.querySelector('.ed-diagram-panel') };
+});
+
+// T9b item 2 (Task 2 re-review; T5 M6): keys are held while the Ctrl+S
+// re-enter render is out and replayed into the reopened edit. A click that
+// put the caret in another paragraph meanwhile stops that: what is typed
+// after it goes there (the v3.13.1 rule: an entry a click positioned
+// elsewhere is not the edit's), and the edit is not opened again over it.
+check('code-edit: a click on another paragraph during the Ctrl+S render takes the typing there and keeps focus there (T9b)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s'); await wait(100);
+  await clickText(page, 'Omega.'); await page.keyboard.type('z');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD.replace('endmodule', 'endmoduleq')), CODE_MD.replace('endmodule', 'endmoduleq'), 'the save wrote the code edit');
+  assert.deepStrictEqual({ focus: await t9bFocus(page), notice: await noticeText(page) },
+    { focus: { tag: 'P', text: 'Omega.z', code: false, panel: false }, notice: null });
+  assert.strictEqual(await commitAndRead(page, boot), CODE_MD.replace('endmodule', 'endmoduleq').replace('Omega.', 'Omega.z'));
+}, { md: CODE_MD });
+check('diagram-panel: a click on a paragraph during the Ctrl+S render takes the typing there and keeps focus there (T9b, T5 M6)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s'); await wait(100);
+  await clickText(page, 'Omega.'); await page.keyboard.type('z');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, DIAG_MD.replace('a -> b', 'a -> zeta')), DIAG_MD.replace('a -> b', 'a -> zeta'), 'the save wrote the panel');
+  assert.deepStrictEqual({ focus: await t9bFocus(page), notice: await noticeText(page) },
+    { focus: { tag: 'P', text: 'Omega.z', code: false, panel: false }, notice: null });
+  assert.strictEqual(await commitAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> zeta').replace('Omega.', 'Omega.z'));
+}, { md: DIAG_MD });
+
+// T9b item 3: a second Ctrl+S inside the hold used to send its save while
+// the first was still out; the server 409s the stale baseline and the page
+// showed the conflict card over a correctly saved file. It waits now.
+check('code-edit: a second Ctrl+S during the Ctrl+S render saves after the first, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), edit: await codeEdit(page) },
+    { saves: [200, 200], status: 'clean', notice: null, edit: { text: 'module m;\nendmoduleq', caret: 20, focused: true } });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+check('code-edit: Esc and a second Ctrl+S during the Ctrl+S render leave the edit and save, never reopening it (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await delayRender(page, 800); await slowSaves(page);
+  // Every time a host becomes the code edit (the attribute added, not removed):
+  // the end state alone cannot tell, because a reopen after the Esc is closed
+  // again by the leave's own caret hand-on.
+  await page.evaluate(() => {
+    window.__t9bOpens = 0;
+    new MutationObserver((ms) => ms.forEach((m) => { if (m.oldValue === null) window.__t9bOpens++; }))
+      .observe(document.querySelector('.content'), { subtree: true, attributes: true, attributeOldValue: true, attributeFilter: ['data-ed-code-edit'] });
+  });
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Escape'); await page.keyboard.press('Control+s');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), edit: await codeEdit(page),
+    opens: await page.evaluate(() => window.__t9bOpens) },
+  { saves: [200, 200], status: 'clean', notice: null, edit: null, opens: 1 }, 'opened once (the Ctrl+S re-entry), never again after the Esc');
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: false, text: 'Omega.' }, 'the leave handed the caret on');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), CODE_MD.replace('endmodule', 'endmoduleq'));
+}, { md: CODE_MD });
+check('diagram-panel: a second Ctrl+S during the Ctrl+S render saves after the first, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page); await wait(300); await renderIdle(page);
+  const p = await diagPanel(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page), panel: p && { value: p.value, focused: p.focused } },
+    { saves: [200, 200], status: 'clean', notice: null, panel: { value: 'digraph { a -> zeta }', focused: true } });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD.replace('a -> b', 'a -> zeta'));
+}, { md: DIAG_MD });
+// The document-level variant: two Ctrl+S while a paragraph's commit renders
+// share one resolution (`switching`) and used to run two save()s back to back.
+check('save: two Ctrl+S during a paragraph\'s commit render save one after the other, no 409 and no conflict card (T9b)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await delayRender(page, 800); await slowSaves(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Control+s');
+  await renderIdle(page);
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page) },
+    { saves: [200, 200], status: 'clean', notice: null });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.X\n\nOmega.\n');
+}, { md: BASE_MD });
+
+// T9b item 4 (R57, T5 M5): the language chip pressed while the caret sits in
+// an empty new paragraph (a transient). The chip keeps focus there, so the
+// transient opened its burst again after the gesture's resolution, and its
+// focusout when the code host took focus resolved the brand-new edit, closing
+// it in the gesture that opened it (the shape T5 fixed in openDiagramPanel()).
+check('code-chips: the language chip pressed from an empty new paragraph opens the edit and its menu, and keeps them (R57, T5 M5)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  assert.deepStrictEqual(await focusAfterLeave(page), { tag: 'P', armed: true, transient: true, text: '' }, 'guard: the caret is in a new empty paragraph');
+  await hoverCodeBlock(page);
+  await page.click('.ed-code-lang'); await renderIdle(page); await wait(300); await renderIdle(page);
+  const m = await langMenu(page);
+  assert.deepStrictEqual({ menu: m && m.focused, edit: await page.evaluate(() => { const h = document.querySelector('pre[data-ed-code-edit]'); return h ? h.textContent : null; }), notice: await noticeText(page) },
+    { menu: true, edit: 'module m;\nendmodule', notice: null });
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 0, focused: true }, 'the edit is open again after the pick');
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('```verilog', '```python'));
+}, { md: CODE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -7865,7 +9864,7 @@ for (const [label, surface, wantOpen] of [
         if (only && !c.name.includes(only)) continue;
         if (c.opts.engines && c.opts.engines.indexOf(engine) === -1) continue;
         ran++;
-        const boot = await bootEditor(c.opts.md, c.opts.srv);
+        const boot = await bootEditor(c.opts.md, c.opts.srv, c.opts.assets);
         const context = await browser.newContext(Object.assign({ viewport: c.viewport }, c.opts.ctx));
         const page = await context.newPage();
         const errs = [];

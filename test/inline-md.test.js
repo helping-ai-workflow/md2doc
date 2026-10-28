@@ -444,4 +444,32 @@ assert.strictEqual(isPastedUrl('see https://x.y'), false);
 assert.strictEqual(isPastedUrl('ftp://x.y'), false);
 assert.strictEqual(isPastedUrl('https://x.y a'), false);
 
+// v3.17.0 T7 (D17): the image paragraph parser and the alt / path rewriter.
+{
+  const { parseImageParagraph: p, rewriteImage: rw } = require('../lib/editor/inline-md.js');
+  assert.deepStrictEqual(p('![chip top](assets/chip_top.png)'), { alt: 'chip top', dest: 'assets/chip_top.png', title: null, angle: false });
+  assert.deepStrictEqual(p('  ![a \\] b](<my pic.png> "T")  '), { alt: 'a ] b', dest: 'my pic.png', title: '"T"', angle: true });
+  assert.deepStrictEqual(p("![](x.png 'T U')"), { alt: '', dest: 'x.png', title: "'T U'", angle: false });
+  assert.deepStrictEqual(p('![a](x.png (T))'), { alt: 'a', dest: 'x.png', title: '(T)', angle: false });
+  assert.deepStrictEqual(p('![a](x_(1).png)'), { alt: 'a', dest: 'x_(1).png', title: null, angle: false });
+  assert.strictEqual(p('see ![a](x.png)'), null);
+  assert.strictEqual(p('![a](x.png) ![b](y.png)'), null);
+  assert.strictEqual(p('![a](x.png) tail'), null);
+  assert.strictEqual(p('[![a](x.png)](http://e)'), null);
+  assert.strictEqual(p('![a][ref]'), null);
+  assert.strictEqual(p('![a](x.png'), null);
+  assert.strictEqual(p('![a](x.png "T)'), null);
+  assert.strictEqual(p('plain text'), null);
+  assert.strictEqual(p(''), null);
+  assert.strictEqual(rw('![a](x.png "T")', { dest: 'assets/y.png' }), '![a](assets/y.png "T")');
+  assert.strictEqual(rw('![a](x.png "T")', { alt: 'p [q]' }), '![p \\[q\\]](x.png "T")');
+  assert.strictEqual(rw("  ![a](x.png 'T')", { alt: 'b' }), "  ![b](x.png 'T')");
+  assert.strictEqual(rw('![a](<my pic.png> "T")', { dest: 'assets/dot.png' }), '![a](assets/dot.png "T")');
+  assert.strictEqual(rw('![a](x.png)  ', { alt: 'b\\c' }), '![b\\\\c](x.png)  ');
+  assert.strictEqual(rw('![a](x.png)', {}), '![a](x.png)');
+  assert.strictEqual(rw('not an image', { alt: 'z' }), 'not an image');
+  // The alt a rewrite writes reads back as typed.
+  assert.strictEqual(p(rw('![a](x.png)', { alt: 'p [q] \\ r' })).alt, 'p [q] \\ r');
+}
+
 console.log('inline-md.test.js OK');
