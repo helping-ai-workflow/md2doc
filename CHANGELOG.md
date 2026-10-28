@@ -3,6 +3,14 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.17.1 — 2026-10-28
+
+### Fixed — 波形編輯器
+
+- **新增訊號後只有第一拍有訊號，後面的空白處怎麼點都換不了。** 新增的訊號只寫了一拍，而比整張圖短的
+  訊號，在它尾巴之後的格子上畫什麼都會被默默拒絕（滑鼠點、拖曳、鍵盤都一樣）。現在新增訊號直接補滿整張
+  圖的長度；任何比較短的訊號（手寫的長短不一的 lane 也是），畫在尾巴之後會先延續最後的電位到那一拍再畫。
+
 ## v3.17.0 — 2026-10-28
 
 ### Added — 編輯器（程式碼、圖表、圖片）

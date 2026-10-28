@@ -1025,7 +1025,8 @@ check('wave lanes: menu actions', DESKTOP, async (page) => {
   assert.deepStrictEqual(await signalNow(page), [a, b, b, c, d], '建立副本: a copy right below');
   await undo();
   await laneAction(page, 0, 'ed-wave-lane-add-below');
-  assert.deepStrictEqual(await signalNow(page), [a, { name: '', wave: 'x' }, b, c, d], '在下方新增訊號');
+  // v3.17.1: a new signal spans the diagram (4 cycles here), not one cycle.
+  assert.deepStrictEqual(await signalNow(page), [a, { name: '', wave: 'x...' }, b, c, d], '在下方新增訊號');
   await undo();
   await laneAction(page, 0, 'ed-wave-lane-blank-below');
   assert.deepStrictEqual(await signalNow(page), [a, {}, b, c, d], '在下方新增空白列');
@@ -1277,9 +1278,35 @@ check('wave lanes: add lane button', DESKTOP, async (page) => {
   assert.ok(b.onTop, 'and takes a press');
   const base = await signalNow(page);
   await page.mouse.click(b.x, b.y); await wait(300);
-  assert.deepStrictEqual(await signalNow(page), base.concat([{ name: '', wave: 'x' }]), 'a new signal at the end');
+  assert.deepStrictEqual(await signalNow(page), base.concat([{ name: '', wave: 'x...' }]), 'a new signal at the end, as long as the diagram');
   assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-wave-overlay').getAttribute('data-wave-lanes')), '5');
 }, { md: WAVE_LANES_MD });
+// User report (2026-10-28): after 新增訊號 the new lane had a signal on its
+// first cycle only, and no click on the blank cycles after it changed them.
+// Two halves: the new signal now spans the diagram, and painting past the end
+// of any shorter lane grows it (the codec used to refuse those cells).
+check('wave lanes: a new signal spans the diagram and takes a paint anywhere', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('.ed-wave-overlay button.ed-wave-add-lane').click(); await wait(300);
+  assert.deepStrictEqual((await signalNow(page))[4], { name: '', wave: 'x...' }, 'the new signal is lane 4, four cycles of x');
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const p = await cellPress(page, 4, 2);
+  await page.mouse.click(p.x, p.y); await wait(300);
+  assert.strictEqual((await signalNow(page))[4].wave, 'x.1x', 'cycle 2 of the new signal painted 1');
+}, { md: WAVE_LANES_MD });
+check('wave draw: painting past a short lane\'s end grows the lane', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const p = await cellPress(page, 1, 3);
+  await page.mouse.click(p.x, p.y); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'b')).wave, '0..1', 'a click on cycle 3 of the one-cycle lane b');
+  // The keyboard paints through the same codec call: lane c, cycle 4.
+  await page.locator('.ed-wave-overlay .ed-wave-layer').focus(); await wait(100);
+  await page.keyboard.press('ArrowDown');
+  for (let i = 0; i < 1; i++) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('0'); await wait(300);
+  assert.strictEqual((await laneNamed(page, 'c')).wave, '10..0', 'the key 0 on cycle 4 of the two-cycle lane c');
+}, { md: waveMd([{ name: 'a', wave: '01...' }, { name: 'b', wave: '0' }, { name: 'c', wave: '10' }]) });
 
 // ── wave edges (Task 9): edges and point notes on the engine canvas (spec 4.5) ──
 const waveDoc = (doc) => '# W\n\n\x60\x60\x60wavedrom\n' + JSON.stringify(doc) + '\n\x60\x60\x60\n\nTail.\n';
