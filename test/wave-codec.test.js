@@ -1307,10 +1307,31 @@ assert.strictEqual(
   assert.notStrictEqual(next, doc);
 }
 
+// 畫在 lane 尾巴之後：先用延續把 lane 補到那一拍，再畫。lane 比整張圖短
+// 是常態（新增訊號只有一拍、手寫的 lane 長短不一），編輯器的格子照整張圖
+// 的寬度給，所以「超出這條 lane」不是不合法的位置。2026-10-28 使用者回報：
+// 新增訊號後只有第一拍有訊號，後面怎麼點都換不了 —— 以前這裡原樣回去。
+{
+  assert.strictEqual(C.setCell({ signal: [{ name: '', wave: 'x' }] }, 0, 2, '1').signal[0].wave, 'x.1',
+    '一拍的新訊號，畫第 2 拍：中間那拍延續 x');
+  assert.strictEqual(C.setCell({ signal: [{ name: 'a', wave: '01' }] }, 0, 4, '0').signal[0].wave, '01..0',
+    '延續最後的 level 到畫的那一拍');
+  assert.strictEqual(C.setCell({ signal: [{ name: 'a', wave: '01' }] }, 0, 2, '1').signal[0].wave, '011',
+    '緊接在尾巴後面那一拍');
+  assert.strictEqual(C.setCellRange({ signal: [{ name: '', wave: 'x' }] }, 0, 3, 1, '0').signal[0].wave, 'x0..',
+    '一段跨過尾巴：一個 run');
+  assert.strictEqual(C.setCell({ signal: [{ name: '', wave: '' }] }, 0, 1, '1').signal[0].wave, 'x1',
+    '空的 lane：前面補 x');
+  const other = { name: 'b', wave: '0...' };
+  const doc = { signal: [{ name: '', wave: 'x' }, other] };
+  assert.strictEqual(C.setCell(doc, 0, 3, '1').signal[1], other, '別的 lane 不動');
+}
+
 // 不合法的位置、字元或 mode 一律原樣回去，不丟例外也不猜
 {
   const doc = { signal: [{ name: 'a', wave: '01' }] };
-  assert.strictEqual(C.setCell(doc, 0, 9, '1'), doc, '超出範圍就原樣回去');
+  assert.strictEqual(C.setCell(doc, 0, -1, '1'), doc, '負的拍數原樣回去');
+  assert.strictEqual(C.setCell(doc, 0, 1.5, '1'), doc, '不是整數也原樣回去');
   assert.strictEqual(C.setCell(doc, 5, 0, '1'), doc);
   assert.strictEqual(C.setCell(doc, 0, 0, '01'), doc, '一次只能寫一個字元');
   assert.strictEqual(C.removeLane(doc, 9), doc);
