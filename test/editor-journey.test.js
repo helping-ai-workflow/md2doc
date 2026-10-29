@@ -6504,17 +6504,18 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
     console.log('journey: N5-inflight a Ctrl+Z inside a save round-trip is not marked as saved — OK');
   }
-  // ── N5-two-saves: 兩個存檔同時在路上時，第一個 200 的效果必須留下來 ─────
+  // ── N5-two-saves: 第一個存檔還在路上時再按一次 Ctrl+S ─────────────────────
   //
   // v3.4.0 batch3 Task 7 fix 5（R1）。這條路徑上曾經有一道「有更新的請求就把
   // 舊的回覆丟掉」的守衛，前提是錯的：server 對任何過期的 `baseMtimeMs` 一律
-  // 回 409 而且不寫檔，而 client 的 `mtimeMs` 只有 200 那一支在寫 —— 所以第
-  // 二個請求必然帶著過期的 baseline、必然 409、必然什麼都沒寫。被丟掉的那一
-  // 個，正好是唯一描述磁碟現況的那一個。
+  // 回 409 而且不寫檔，而 client 的 `mtimeMs` 只有 200 那一支在寫。被丟掉的那
+  // 一個，正好是唯一描述磁碟現況的那一個 —— 這一列守的性質是「第一個 200 的
+  // 效果必須留下來」。
   //
-  // 它之所以能一路綠著出貨，是因為守著它的是一條「原始碼長什麼樣」的斷言 ——
-  // 換個名字（實測 `reqSeq`）整套 fast suite 依然 EXIT 0。這一列改成守【性質】：
-  // 真的讓兩個請求同時在路上，然後看第一個 200 的效果有沒有留下來。
+  // v3.17.2 B2（R66）：第二個 Ctrl+S 不再跟第一個同時在路上，而是等第一個回
+  // 覆到了才送（save() 自己排隊）。以前它帶著過期的 baseline 送出去、409、衝
+  // 突卡跳出來，檔案其實已經存好了。這一列從「第二個必然 409」遷移成「第二個
+  // 等第一個、然後 200，沒有衝突卡」；第一個 200 算數的性質原樣保留。
   {
     const ctx = await newPage('# Doc\n\nAlpha paragraph.\n');
     await ctx.page.evaluate(() => {
@@ -6559,12 +6560,12 @@ async function main() {
       'N5-two-saves 前提失敗：第一個請求已經把檔案寫出去了（回覆只是還沒到），' +
       'got ' + JSON.stringify(diskAfterFirst));
 
-    await ctrlS();                       // 第二個：baseline 過期，必然 409
+    await ctrlS();                       // 第二個：等第一個回覆到了才送
     await new Promise((r) => setTimeout(r, 1200));
-    const statusMid = await ctx.page.evaluate(() => window.__saveStatus.slice());
-    assert.ok(statusMid.indexOf('2:409') !== -1,
-      'N5-two-saves 前提失敗：第二個請求必須是 409（baseline 過期、什麼都沒寫）。' +
-      'Got ' + JSON.stringify(statusMid));
+    const sentMid = await ctx.page.evaluate(() => window.__saveSent);
+    assert.strictEqual(sentMid, 1,
+      'N5-two-saves：第一個回覆還押著的時候，第二個請求不得送出 —— 同時送出就會' +
+      '帶著過期的 baseline、409、跳衝突卡（R66）。Got ' + sentMid);
 
     // …讓被押住的第一個 200 到達。它是【最後】到的那一個，而它必須算數。
     await new Promise((r) => setTimeout(r, 2500));
@@ -6572,9 +6573,15 @@ async function main() {
       title: document.title,
       status: window.__saveStatus.slice(),
       text: document.querySelector('.content').textContent || '',
+      conflict: /別處被修改/.test((document.querySelector('.ed-conflict') || {}).textContent || ''),
     }));
     assert.ok(after.status.indexOf('1:200') !== -1,
       'N5-two-saves 前提失敗：第一個請求要真的是 200。Got ' + JSON.stringify(after.status));
+    assert.ok(after.status.indexOf('2:200') !== -1,
+      'N5-two-saves：第二個請求在第一個之後送出，帶著新的 baseline，必須是 200。Got ' +
+      JSON.stringify(after.status));
+    assert.strictEqual(after.conflict, false,
+      'N5-two-saves：不得跳出衝突卡 —— 檔案是這一頁自己存的（R66）');
     assert.strictEqual(fs.readFileSync(ctx.mdPath, 'utf8'), diskAfterFirst,
       'N5-two-saves 前提失敗：磁碟上還是第一個請求寫的那一份');
     assert.ok(after.text.indexOf('FIRST') !== -1, 'N5-two-saves 前提失敗：字還在畫面上');
@@ -6597,7 +6604,7 @@ async function main() {
     assert.strictEqual(ctx.errs.length, 0,
       'N5-two-saves：不得有 pageerror: ' + ctx.errs.join(' | '));
     await ctx.page.close(); ctx.srv.close();
-    console.log('journey: N5-two-saves a reply that lands after a newer request still counts — OK');
+    console.log('journey: N5-two-saves a second Ctrl+S waits for the first reply, and that 200 counts — OK');
   }
   // 邊緣選單的「置中」寫一個屬性，其他什麼都不動：runSetAlign() 只 snap()
   // burst 的歷史，setColumnAlign() 把 `style="text-align:…"` 寫進整欄的

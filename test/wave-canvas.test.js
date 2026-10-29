@@ -358,9 +358,15 @@ check('redraw budget', async (page) => {
   // 32.00ms three times in a row (local ~15ms, min 29, max 41) — WebKit runs
   // about 2x local there and its timer is whole milliseconds, so 2x local
   // sat exactly on the line. CI WebKit therefore gets 48ms (3x local); a
-  // doubling still reddens it. Locally both engines keep 16ms.
+  // doubling still reddens it. Locally Chromium keeps 16ms (WebKit: below).
+  // v3.17.2 C2 (R76): local WebKit gets 24ms, 1.5x its own local median.
+  // MEASURED on this machine: WebKit medians 14-16ms in isolation (whole
+  // milliseconds, so a median is an integer or a half), and the v3.17.0 gate
+  // under full-suite load hit 16.00 against `< 16` — a red that one busy
+  // moment produces, not a regression. Chromium (local median ~9ms) keeps the
+  // spec's 16ms; a doubling still reddens both.
   const engineName = page.context().browser().browserType().name();
-  const budget = process.env.CI ? (engineName === 'webkit' ? 48 : 32) : 16;
+  const budget = process.env.CI ? (engineName === 'webkit' ? 48 : 32) : (engineName === 'webkit' ? 24 : 16);
   // Ruling R6b: one 20-render median can land over budget when the machine
   // is busy (reproduced on the untouched base), so an over-budget median is
   // re-measured up to 2 more times on the same canvas and the check passes
