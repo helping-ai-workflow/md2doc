@@ -8748,12 +8748,22 @@ check('code-chips: 純文字 removes the language word', DESKTOP, async (page, b
   assert.strictEqual((await chipsState(page)).label, '純文字');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```\nmodule m;\nendmodule\n```\n\nOmega.\n');
 }, { md: CODE_MD });
-check('code-chips: 純文字 keeps the words after the first', DESKTOP, async (page, boot) => {
+// v3.17.2 A2 (R53): the words after the first are kept as written, and a
+// first word holding `=` is an attribute, not a language: the chip reads
+// 純文字 and a language picked next goes in front of it. Before: the chip read
+// `title="a"` and Python replaced it, losing the attribute.
+check('code-chips: 純文字 keeps the words after the first, and a language picked next goes in front of them (v3.17.2 A2, R53)', DESKTOP, async (page, boot) => {
   await hoverCodeBlock(page);
   await page.click('.ed-code-lang'); await wait(200);
   await page.click('.ed-code-langitem:has-text("純文字")'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```title="a"\nmodule m;\nendmodule\n```\n\nOmega.\n');
-}, { md: CODE_MD.replace('```verilog', '```verilog title="a"') });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```title="a  b"\nmodule m;\nendmodule\n```\n\nOmega.\n');
+  await page.mouse.move(5, 5); await hoverCodeBlock(page);
+  assert.strictEqual((await chipsState(page) || {}).label, '純文字', 'an attribute is not a language');
+  await page.click('.ed-code-lang'); await wait(200);
+  assert.strictEqual((await langMenu(page) || {}).cursor, '純文字', 'the menu marks 純文字 as the current one');
+  await page.click('.ed-code-langitem:has-text("Python")'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n```python title="a  b"\nmodule m;\nendmodule\n```\n\nOmega.\n');
+}, { md: CODE_MD.replace('```verilog', '```verilog title="a  b"') });
 check('code-chips: copy writes the edit text, uncommitted typing included, and shows Copied', DESKTOP, async (page) => {
   await stubClipboard(page);
   await clickText(page, 'endmodule'); await page.keyboard.type('q');
@@ -9099,23 +9109,9 @@ check('diagram-panel: 完成 writes the file in one undo step; Esc discards', DE
   { panel: 0, b: true, omega: false, status: 'clean', listeners, renders: 0 });
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD);
 }, { md: DIAG_MD });
-// v3.17.0 final review I2: Esc still discards, but no longer for good. The
-// next Ctrl+Z brings the whole fenced block back in the raw box with what
-// was typed (the panel's snapshot is in the raw box's shape, R23), as it
-// does after the raw box's own Esc.
-check('diagram-panel: Ctrl+Z after Esc brings the discarded source back (final I2)', DESKTOP, async (page, boot) => {
-  await openDiagPanel(page, '.graphviz svg');
-  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
-  await page.keyboard.press('Escape'); await renderIdle(page);
-  assert.deepStrictEqual({ panel: await diagPanel(page), box: await rawBox(page) }, { panel: null, box: null }, 'guard: Esc closed the panel');
-  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'guard: nothing written by the Esc');
-  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
-  const box = await rawBox(page);
-  assert.deepStrictEqual(box && { value: box.value, focused: box.focused },
-    { value: '```dot\ndigraph { a -> omega }\n```', focused: true }, 'the typed source is back');
-  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'restoring writes nothing');
-  assert.strictEqual(await commitAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> omega'), 'and it commits as typed');
-}, { md: DIAG_MD });
+// v3.17.0 final review I2 (Esc then Ctrl+Z brings the typed source back) is
+// the v3.17.2 B3 check near the end of this file: the panel opens again now,
+// not the raw box.
 check('diagram-panel: a click elsewhere commits', DESKTOP, async (page, boot) => {
   await openDiagPanel(page, '.graphviz svg');
   await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('zeta');
@@ -9879,6 +9875,148 @@ check('code-chips: the language chip pressed from an empty new paragraph opens t
   assert.deepStrictEqual(await codeEdit(page), { text: 'module m;\nendmodule', caret: 0, focused: true }, 'the edit is open again after the pick');
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('```verilog', '```python'));
 }, { md: CODE_MD });
+
+// ── v3.17.2: the dirty mark, saves, and re-entries ──
+// The toolbar's save state, the title's dot, and whether the unload guard
+// would fire (a dispatched beforeunload, read off defaultPrevented).
+const dirtyMarks = (page) => page.evaluate(() => {
+  const e = new Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(e);
+  return { status: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+    dot: document.title.indexOf('●') === 0, guard: e.defaultPrevented };
+});
+const QUOTE_MD = '# D\n\nAlpha.\n\n> Quote line.\n\nOmega.\n';
+// B1 (v3.17.0 final review T2 L74): text typed into an open raw box is
+// unsaved work. Before: clean status, no dot and no unload guard, so closing
+// the tab threw it away without a word.
+check('dirty (v3.17.2 B1): typing in a raw box marks the document unsaved; Esc makes it clean again', DESKTOP, async (page, boot) => {
+  await page.click('blockquote'); await renderIdle(page);
+  assert.deepStrictEqual(await rawBox(page), { value: '> Quote line.', caret: 13, focused: true }, 'guard: the quote opened in the raw box');
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'guard: an opened box is not an edit');
+  await page.keyboard.type('Z'); await wait(100);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'dirty', dot: true, guard: true }, 'typed text is unsaved');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'Esc put the file back');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), QUOTE_MD);
+}, { md: QUOTE_MD });
+// A6: markup a page script or extension adds to the editable surfaces is not
+// an edit. MEASURED before: Playwright's screenshot (caret 'hide') writes
+// `style="caret-color: transparent !important;"` on every editable element
+// and empties it after; with the caret in a table cell the table burst read
+// that as typing, the status went dirty, and leaving the cell committed the
+// table through its serializer, rewriting `|a|b|` as `| a | b |`.
+const A6_TABLE_MD = '# D\n\nAlpha.\n\n|a|b|\n|-|-|\n|x|y|\n\nOmega.\n';
+// A click, not focusSurface(): its selector probe is an attribute on the cell,
+// written before the click and removed after it, and only an inline style is
+// what this release stops counting (other attributes still do).
+const clickCell = async (page, text) => { await page.locator('.content td.ed-wys-cell').filter({ hasText: new RegExp('^' + text + '$') }).click(); await wait(150); };
+check('dirty (v3.17.2 A6): a screenshot\'s caret style on a table being edited is not an edit, and leaving writes nothing', DESKTOP, async (page, boot) => {
+  await clickCell(page, 'y');
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'guard: clean with the caret in a cell');
+  await page.screenshot({ caret: 'hide' }); await wait(200);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'the screenshot is not an edit');
+  const before = renderTotal(page);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.deepStrictEqual({ renders: renderTotal(page) - before, marks: await dirtyMarks(page) },
+    { renders: 0, marks: { status: 'clean', dot: false, guard: false } }, 'leaving the cell commits nothing');
+  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD, 'the table keeps its bytes');
+}, { md: A6_TABLE_MD });
+// The same for any inline style another script puts on a cell, while a real
+// alignment change (the one style the editor writes) still counts.
+check('dirty (v3.17.2 A6): a foreign inline style on a cell is not an edit; a column alignment still is', DESKTOP, async (page, boot) => {
+  await clickCell(page, 'y');
+  await page.evaluate(() => document.querySelectorAll('.content td, .content th').forEach((c) => c.setAttribute('style', 'outline: 1px solid red')));
+  await wait(200);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'a foreign style is not an edit');
+  await page.evaluate(() => { const c = [...document.querySelectorAll('.content td')].find((td) => td.textContent === 'y'); c.setAttribute('style', 'outline: 1px solid red; text-align: center'); });
+  await wait(200);
+  assert.strictEqual((await dirtyMarks(page)).status, 'dirty', 'an alignment is an edit');
+}, { md: A6_TABLE_MD });
+// B2 (R66): a second Ctrl+S while the first save's reply is still on its way
+// waits for it. Before: it went out at once with the baseline the first
+// reply was about to replace, the server answered 409 and the conflict card
+// went up over a file this page had just saved.
+check('save (v3.17.2 B2): two Ctrl+S while a slow save is out save one after the other, no 409 and no conflict card (R66)', DESKTOP, async (page, boot) => {
+  const statuses = recordSaves(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  await slowSaves(page);
+  await page.keyboard.press('Control+s'); await wait(50); await page.keyboard.press('Control+s');
+  assert.deepStrictEqual({ saves: await savesUntil(statuses, 2), status: await saveStateUntil(page, 'clean'), notice: await noticeText(page) },
+    { saves: [200, 200], status: 'clean', notice: null });
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.X\n\nOmega.\n');
+}, { md: BASE_MD });
+// B3 (R75): Ctrl+Z after an Esc in the diagram panel opens the panel again
+// with what was typed and its preview, not the raw box (final review I2's
+// first fix brought the text back through the raw box only).
+check('diagram-panel (v3.17.2 B3): Ctrl+Z after Esc reopens the panel with the discarded source and its preview (R75)', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('omega');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ panel: await diagPanel(page), box: await rawBox(page) }, { panel: null, box: null }, 'guard: Esc closed the panel');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'guard: nothing written by the Esc');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  const p = await diagPanelUntil(page, (s) => !!s.svg && /omega/.test(s.svg));
+  assert.deepStrictEqual({ box: await rawBox(page), panel: p && { value: p.value, focused: p.focused, omega: !!p.svg && /omega/.test(p.svg) } },
+    { box: null, panel: { value: 'digraph { a -> omega }', focused: true, omega: true } }, 'the panel is back with the typed source');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), DIAG_MD, 'restoring writes nothing');
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> omega'), 'and 完成 writes it');
+}, { md: DIAG_MD });
+// B4 (final review M1): Ctrl+S reopens the code edit on the saved block, and
+// its own Ctrl+Z still steps back over what was typed before the save.
+check('code-edit (v3.17.2 B4): Ctrl+Z inside the edit after Ctrl+S steps back over the typing from before the save (M1)', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await page.keyboard.type('q');
+  await page.keyboard.press('Control+s');
+  const saved = CODE_MD.replace('endmodule', 'endmoduleq');
+  assert.strictEqual(await diskUntil(boot, saved), saved, 'guard: the save wrote the typing');
+  await renderIdle(page);
+  assert.deepStrictEqual(await codeEditUntil(page), { text: 'module m;\nendmoduleq', caret: 20, focused: true }, 'guard: the edit is open again');
+  await page.keyboard.press('Control+z'); await wait(100);
+  assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmodule', 'Ctrl+Z took the q back inside the edit');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), saved, 'and wrote nothing');
+  await page.keyboard.press('Control+Shift+z'); await wait(100);
+  assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmoduleq', 'redo brings it back');
+}, { md: CODE_MD });
+// B5 (final review M2): Ctrl+S on an untouched "/" 程式碼 insert discards it
+// (R19) and saves. Before: the edit then reopened on whatever block took the
+// insert's start line, here the code block below, and the next keys went
+// into it.
+check('code-edit (v3.17.2 B5): Ctrl+S on an untouched "/" 程式碼 insert does not open the code block below (M2)', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page);
+  await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
+  await page.keyboard.press('Control+s'); await renderIdle(page); await wait(400); await renderIdle(page);
+  assert.strictEqual(await diskUntil(boot, CODE_MD), CODE_MD, 'the file is unchanged');
+  assert.deepStrictEqual({ edit: await codeEdit(page), code: await page.evaluate(() => document.querySelectorAll('.content .ed-block[data-block-type="code"]').length) },
+    { edit: null, code: 1 }, 'the insert is gone and nothing else opened');
+  await page.keyboard.type('z'); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'the keys went into no code block');
+}, { md: CODE_MD });
+// A3 (R65 / v3.15.0 N5): emptying the paragraph between two lists of the
+// same kind joins them TIGHT, as Notion does. Before: the blank line between
+// them stayed and the joined list was loose.
+const A3_MD = '# D\n\n- a\n\nMid.\n\n- b\n';
+async function emptyAndLeave(page, text) {
+  await focusSurface(page, text, text.length);
+  for (let i = 0; i < text.length; i++) await page.keyboard.press('Backspace');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+}
+check('lists (v3.17.2 A3): emptying the paragraph between two lists of the same kind joins them into one tight list (R65)', DESKTOP, async (page, boot) => {
+  await emptyAndLeave(page, 'Mid.');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n');
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block[data-block-type="li"]')].map((b) => b.getAttribute('data-list-loose'))),
+    [null, null], 'the joined list is tight');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), A3_MD, 'one Ctrl+Z brings the paragraph back');
+}, { md: A3_MD });
+check('lists (v3.17.2 A3): ordered lists join tight too; different markers and a loose list keep the blank line (R65)', DESKTOP, async (page, boot) => {
+  await emptyAndLeave(page, 'One.');
+  await emptyAndLeave(page, 'Two.');
+  await emptyAndLeave(page, 'Three.');
+  assert.strictEqual(await saveAndRead(page, boot),
+    '# D\n\n1. a\n2. b\n\n- c\n\n* d\n\n- e\n\n- f\n\n- g\n');
+}, { md: '# D\n\n1. a\n\nOne.\n\n2. b\n\n- c\n\nTwo.\n\n* d\n\n- e\n\n- f\n\nThree.\n\n- g\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

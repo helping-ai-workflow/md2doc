@@ -42,7 +42,17 @@ assert.strictEqual(ce.setFenceLang('verilog title="a b"', 'python'), 'python tit
 assert.strictEqual(ce.setFenceLang('verilog', ''), '');
 assert.strictEqual(ce.setFenceLang('verilog  title=x', ''), 'title=x');
 assert.strictEqual(ce.setFenceLang('', 'c'), 'c');
-assert.strictEqual(ce.setFenceLang('a   b  c', 'x'), 'x b c');
+// v3.17.2 A2 (R53): the words after the language are kept as written (a
+// quoted value's inner spaces included), and a first word holding `=` is an
+// attribute, not a language: a pick goes in front of it, "" leaves it alone.
+assert.strictEqual(ce.setFenceLang('a   b  c', 'x'), 'x b  c');
+assert.strictEqual(ce.setFenceLang('verilog title="a  b"', ''), 'title="a  b"');
+assert.strictEqual(ce.setFenceLang('verilog title="a  b"', 'c'), 'c title="a  b"');
+assert.strictEqual(ce.setFenceLang('title="a"', 'python'), 'python title="a"');
+assert.strictEqual(ce.setFenceLang('title="a"', ''), 'title="a"');
+assert.strictEqual(ce.langLabel('title="a"'), '\u7d14\u6587\u5b57');
+assert.strictEqual(ce.langWord('title="a" x'), '');
+assert.strictEqual(ce.langWord('  SV title=x'), 'SV');
 assert.strictEqual(ce.langLabel('sv'), 'Verilog');
 assert.strictEqual(ce.langLabel('SystemVerilog'), 'Verilog');
 assert.strictEqual(ce.langLabel('c++ title=x'), 'C++');

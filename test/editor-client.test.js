@@ -2768,6 +2768,32 @@ function countInCode(source, needle) {
   assert.strictEqual(jr.newStartLine, 3);
 }
 
+// -- v3.17.2 A3 (R65): an emptied paragraph between two lists of one kind --
+{
+  const { sameListKind, commitTightRemoval } = require('../lib/editor/client.js');
+  const B = (id, t, s, e) => ({ id, type: t, startLine: s, endLine: e });
+  assert.strictEqual(sameListKind('- a', '- [ ] b'), true, 'a task item is the same bullet list');
+  assert.strictEqual(sameListKind('- a', '* b'), false, 'another bullet character is another list');
+  assert.strictEqual(sameListKind('1. a', '7. b'), true, 'ordered, same delimiter');
+  assert.strictEqual(sameListKind('1. a', '1) b'), false, 'ordered, other delimiter');
+  assert.strictEqual(sameListKind('1. a', '- b'), false);
+  assert.strictEqual(sameListKind('-', '- b'), true, 'an empty item still opens one');
+  assert.strictEqual(sameListKind('Mid.', '- b'), false);
+  assert.strictEqual(sameListKind('    - a', '- b'), false, 'four spaces is code, not a list');
+  // The paragraph and every blank on both sides go, one op; the block after
+  // it shifts by the whole delta.
+  const st = new UndoStack();
+  const state = { lines: ['# D', '', '- a', '', '', 'Mid.', '', '- b', ''],
+    blocks: [B(0, 'heading', 1, 1), B(1, 'li', 3, 3), B(2, 'paragraph', 6, 6), B(3, 'li', 8, 8)], stack: st };
+  const r = commitTightRemoval(state, 6, 6);
+  assert.deepStrictEqual(r.lines, ['# D', '', '- a', '- b', '']);
+  assert.deepStrictEqual(r.op, { startLine: 4, endLine: 7, before: ['', '', 'Mid.', ''], after: [] });
+  assert.strictEqual(r.blocks.find((b) => b.id === 3).startLine, 4, 'the list below moved up four lines');
+  assert.strictEqual(st._done.length, 1, 'one undo op');
+  assert.strictEqual(commitTightRemoval({ lines: ['- a'], blocks: [B(0, 'li', 1, 1)], stack: new UndoStack() }, 2, 1).refused,
+    'inverted-range', 'an inverted range is refused like commitRangeRemoval()');
+}
+
 // -- v3.17.0 T10: carry-over source pins --------------------------------------
 {
   // N6: the emptied-paragraph removal is decided by the burst's own surface.
