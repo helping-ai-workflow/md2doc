@@ -10653,6 +10653,182 @@ check('v3173 N1: Backspace at a paragraph\'s start after a tight list joins as b
   assert.strictEqual(await saveAndRead(page, boot), '- a\n- b\n\nP.\n', 'one Ctrl+Z restores the file');
 }, { md: '- a\n- b\n\nP.\n' });
 
+// ── v3.17.3 Task 6 (B2, R12): selected text dragged to another block moves
+// in ONE op. Before, the source's deleteByDrag committed and re-rendered over
+// the target's insertFromDrop, so the text was gone from both blocks. A real
+// native drag: the selection is pressed in its middle, moved in steps to the
+// left edge (+1px) of character `destOffset` of the element matching
+// `destSel` whose trimmed text is `destText`, and released. Returns the
+// browser's own caret offset at the release point (caretPositionFromPoint /
+// caretRangeFromPoint, measured before the press), so each check pins where
+// the browser puts the drop. ──
+async function dragSelectionTo(page, destSel, destText, destOffset) {
+  const pts = await page.evaluate(([sel, t, o]) => {
+    const s = getSelection();
+    if (!s.rangeCount || s.isCollapsed) return null;
+    const r = s.getRangeAt(0).getBoundingClientRect();
+    const host = [...document.querySelectorAll(sel)].find((e) => e.textContent.trim() === t);
+    if (!host) return null;
+    const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+    let left = o; let b = null;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (left < n.data.length) {
+        const cr = document.createRange(); cr.setStart(n, left); cr.setEnd(n, left + 1);
+        b = cr.getBoundingClientRect(); break;
+      }
+      left -= n.data.length;
+    }
+    if (!b) return null;
+    const x = b.left + 1; const y = b.top + b.height / 2;
+    let node = null; let off = 0;
+    if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); if (p) { node = p.offsetNode; off = p.offset; } }
+    else if (document.caretRangeFromPoint) { const p = document.caretRangeFromPoint(x, y); if (p) { node = p.startContainer; off = p.startOffset; } }
+    let caret = null;
+    if (node && host.contains(node)) { const m = document.createRange(); m.setStart(host, 0); m.setEnd(node, off); caret = m.toString().length; }
+    return { from: [r.left + r.width / 2, r.top + r.height / 2], to: [x, y], caret };
+  }, [destSel, destText, destOffset]);
+  assert.ok(pts, 'dragSelectionTo: no selection, or no ' + destSel + ' with text ' + JSON.stringify(destText));
+  await page.mouse.move(pts.from[0], pts.from[1]);
+  await page.mouse.down();
+  await page.mouse.move(pts.to[0], pts.to[1], { steps: 12 });
+  await page.mouse.up();
+  await wait(300); await renderIdle(page); await wait(200); await renderIdle(page);
+  return pts.caret;
+}
+const SURFACE_SEL = '.ed-wys-armed, .ed-wys-cell';
+const surfaceTexts = (page) => page.evaluate(() => [...document.querySelectorAll('.content .ed-wys-armed')].map((e) => e.textContent));
+const shownNotice = (page) => page.evaluate(() => {
+  const n = document.querySelector('.ed-conflict[data-level="notice"]');
+  return n ? n.querySelector('.ed-msg-text').textContent : null;
+});
+const B2_MD = 'Alpha bravo charlie.\n\nOmega delta.\n';
+check('v3173 B2: dragging a word to another paragraph moves it', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7), 7, 'the browser drops before the 8th character');
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha  charlie.', 'Omega dbravoelta.']);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\nOmega dbravoelta.\n');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD, 'one Ctrl+Z restores the file');
+}, { md: B2_MD });
+check('v3173 B2: a dragged CJK word moves intact', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, '甲乙丙丁戊。', 1, 3);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, '子丑寅卯。', 2), 2);
+  assert.strictEqual(await saveAndRead(page, boot), '甲丁戊。\n\n子丑乙丙寅卯。\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '甲乙丙丁戊。\n\n子丑寅卯。\n', 'one Ctrl+Z restores the file');
+}, { md: '甲乙丙丁戊。\n\n子丑寅卯。\n' });
+// Marks: the selection's own Markdown moves, so a bold word stays bold and
+// part of a link keeps its link.
+check('v3173 B2: a dragged bold word stays bold', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7), 7);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\nOmega d**bravo**elta.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha **bravo** charlie.\n\nOmega delta.\n', 'one Ctrl+Z restores the file');
+}, { md: 'Alpha **bravo** charlie.\n\nOmega delta.\n' });
+check('v3173 B2: a dragged link keeps its link', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'See the docs here.', 4, 12);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 6), 6);
+  assert.strictEqual(await saveAndRead(page, boot), 'See  here.\n\nOmega [the docs](https://example.com/)delta.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'See [the docs](https://example.com/) here.\n\nOmega delta.\n', 'one Ctrl+Z restores the file');
+}, { md: 'See [the docs](https://example.com/) here.\n\nOmega delta.\n' });
+check('v3173 B2: a word dragged from a paragraph into a list item moves', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'two', 1), 1);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\n- one\n- tbravowo\n- three\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha bravo charlie.\n\n- one\n- two\n- three\n', 'one Ctrl+Z restores the file');
+}, { md: 'Alpha bravo charlie.\n\n- one\n- two\n- three\n' });
+check('v3173 B2: text dragged between two items of one list moves', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'alpha', 1, 4);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'charlie', 1), 1);
+  assert.strictEqual(await saveAndRead(page, boot), '# H\n\n- aa\n- bravo\n- clphharlie\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# H\n\n- alpha\n- bravo\n- charlie\n', 'one Ctrl+Z restores the file');
+}, { md: '# H\n\n- alpha\n- bravo\n- charlie\n' });
+check('v3173 B2: a word dragged up into a heading moves', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 12);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Title', 0), 0);
+  assert.strictEqual(await saveAndRead(page, boot), '# bravo Title\n\nAlpha charlie.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Title\n\nAlpha bravo charlie.\n', 'one Ctrl+Z restores the file');
+}, { md: '# Title\n\nAlpha bravo charlie.\n' });
+// A paragraph whose whole text is dragged away is removed, as an emptied
+// paragraph is (R95), in the same op.
+check('v3173 B2: dragging a paragraph\'s whole text away removes the paragraph', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Mid.', 0, 4);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 6), 6);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha.\n\nOmega Mid.delta.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha.\n\nMid.\n\nOmega delta.\n', 'one Ctrl+Z restores the file');
+}, { md: 'Alpha.\n\nMid.\n\nOmega delta.\n' });
+// D4: typing in the source before the drag is its own, earlier undo step.
+check('v3173 B2: a drag after typing in the source is two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha bravo charlie.', 20); await page.keyboard.type('X');
+  await selectInSurface(page, 'Alpha bravo charlie.X', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7), 7);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.X\n\nOmega dbravoelta.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha bravo charlie.X\n\nOmega delta.\n', 'the first Ctrl+Z takes the move back');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD, 'the second takes the typing back');
+}, { md: B2_MD });
+// D7: a move whose render fails stays on screen and the next commit writes it.
+check('v3173 B2: a move whose render fails is written by the next commit', DESKTOP, async (page, boot) => {
+  await failFirstRender(page);
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7);
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha  charlie.', 'Omega dbravoelta.'], 'the screen keeps the move');
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\nOmega dbravoelta.\n');
+}, { md: B2_MD });
+const B2_REFUSE_MD = 'Alpha bravo charlie.\n\n| A | B |\n|---|---|\n| a1 | b1 |\n\n```js\nlet x = 1;\n```\n';
+for (const [label, sel, text, off] of [
+  ['a table cell', '.ed-wys-cell', 'a1', 1],
+  ['a code block', CODE_PRE, 'let x = 1;', 4],
+]) {
+  check('v3173 B2: a drop into ' + label + ' is refused with a notice and nothing changes', DESKTOP, async (page, boot) => {
+    await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+    await dragSelectionTo(page, sel, text, off);
+    assert.ok(await shownNotice(page), 'a notice says why');
+    assert.strictEqual((await surfaceTexts(page))[0], 'Alpha bravo charlie.', 'the source keeps its text on screen');
+    assert.strictEqual(await saveAndRead(page, boot), B2_REFUSE_MD);
+  }, { md: B2_REFUSE_MD });
+}
+check('v3173 B2: text dragged out of a table cell into a paragraph is refused with a notice', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'a1', 0, 2);
+  await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 6);
+  assert.ok(await shownNotice(page), 'a notice says why');
+  assert.strictEqual(await saveAndRead(page, boot), B2_REFUSE_MD);
+}, { md: B2_REFUSE_MD });
+// Scope pin (green before the fix): a drop inside the same block is the
+// browser's own move and commits through the burst; nothing is lost. The
+// spacing and the landing point are each engine's own (measured before the
+// fix: Chromium keeps both spaces, the first as a no-break space (U+00A0),
+// and drops before the `.`; WebKit's smart delete takes one space and its
+// drop point, past the deleted word, lands after the `.`).
+check('v3173 B2: a drag inside one paragraph is the browser\'s own move', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
+  const want = engineOf(page) === 'webkit' ? 'Alpha charlie.bravo\n\nOmega delta.\n' : 'Alpha\u00a0 charliebravo.\n\nOmega delta.\n';
+  assert.strictEqual(await saveAndRead(page, boot), want);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+// A drop that did not start in the editor (another app, the reader) is not
+// this handler's: it is left to the browser, never cancelled.
+check('v3173 B2: a text drop from outside the editor is left to the browser', DESKTOP, async (page) => {
+  const prevented = await page.evaluate(() => {
+    const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Omega delta.');
+    const dt = new DataTransfer(); dt.setData('text/plain', 'zulu');
+    const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
+    s.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  });
+  assert.strictEqual(prevented, false);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
