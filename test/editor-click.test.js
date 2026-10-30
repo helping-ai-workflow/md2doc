@@ -10274,6 +10274,133 @@ check('v3173 C9: a column alignment set through the menu still marks the table e
     'the alignment reached the file');
 }, { md: A6_TABLE_MD });
 
+// ── v3173 Task 4: transient and Enter paths (B3, B10, B11, A8) ──
+// B3: an Enter at a paragraph's edge whose commit of the typing before it
+// failed is kept (pendingStructure) and opens its paragraph once a retry
+// lands. Ctrl+S is the retry here: a second Enter would open the paragraph
+// on its own and prove nothing.
+check('v3173 B3: Enter after a failed first write still opens the new paragraph once the write succeeds', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await failFirstRender(page);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.ok(await page.evaluate(() => !!document.querySelector('.ed-conflict')), 'the failed write shows its card');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'nothing written yet');
+  await page.keyboard.press('Control+s'); await renderIdle(page); await wait(900);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.X', '~paragraph:', 'paragraph:Omega.'], caret: { text: '', offset: 0, transient: true } },
+    'the retry landed and the Enter opened its paragraph');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.X\n\nOmega.\n', 'the retry wrote the typing');
+  await page.keyboard.type('x');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\nx\n\nOmega.\n');
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.content .ed-block').length), 4, 'exactly one extra block');
+}, { md: BASE_MD });
+check('v3173 B3: Enter at a paragraph\'s start after a failed first write opens the paragraph above once the write succeeds', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await failFirstRender(page);
+  await page.keyboard.type('X');
+  await page.keyboard.press('ArrowLeft');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.ok(await page.evaluate(() => !!document.querySelector('.ed-conflict')), 'the failed write shows its card');
+  await page.keyboard.press('Control+s'); await renderIdle(page); await wait(900);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:XOmega.'], caret: { text: 'XOmega.', offset: 0, transient: false } });
+  await page.keyboard.press('ArrowUp'); await renderIdle(page);
+  await page.keyboard.type('y');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\ny\n\nXOmega.\n');
+}, { md: BASE_MD });
+check('v3173 B3: a second Enter after the failed one opens one paragraph, not two', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await failFirstRender(page);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.X', '~paragraph:', 'paragraph:Omega.'], caret: { text: '', offset: 0, transient: true } });
+  await page.keyboard.type('x');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.X\n\nx\n\nOmega.\n');
+}, { md: BASE_MD });
+// B10: the commit of the block below an empty transient does not take the
+// transient away (applyFullRender() keeps it, transientKeptThroughRender()).
+check('v3173 B10: the empty paragraph opened by Enter at a paragraph\'s start survives typing below and ArrowUp', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X');
+  await page.keyboard.press('ArrowUp'); await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:XOmega.'], caret: { text: '', offset: 0, transient: true } });
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nXOmega.\n');
+}, { md: BASE_MD });
+check('v3173 B10: the empty paragraph opened by Enter at a paragraph\'s start survives typing below and a click on it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X');
+  await page.locator('[data-ed-transient] .ed-wys-armed').click(); await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', '~paragraph:', 'paragraph:XOmega.'], caret: { text: '', offset: 0, transient: true } });
+  await page.keyboard.type('Q');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nXOmega.\n');
+}, { md: BASE_MD });
+check('v3173 B10: keys typed after ArrowUp while the commit below renders land in the empty paragraph', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X');
+  await delayRender(page, 800);
+  await page.keyboard.press('ArrowUp'); await page.keyboard.type('Q');
+  await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', '~paragraph:Q', 'paragraph:XOmega.'], caret: { text: 'Q', offset: 1, transient: true } });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nXOmega.\n');
+}, { md: BASE_MD });
+// B11 (R10): Esc in a new paragraph with text commits it, as leaving does;
+// that commit is one undo step.
+check('v3173 B11: Esc in a new paragraph with typed text keeps the text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('hello');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', 'paragraph:hello', 'paragraph:Omega.'], caret: { text: 'hello', offset: 5, transient: false } });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nhello\n\nOmega.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'one Ctrl+Z takes the Esc commit back');
+}, { md: BASE_MD });
+check('v3173 B11: Esc in a table cell with typed text behaves as before', DESKTOP, async (page, boot) => {
+  await clickCell(page, 'y');
+  await page.keyboard.press('End'); await page.keyboard.type('Z');
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await commitAndRead(page, boot), A6_TABLE_MD, 'Esc reverts the cell; nothing written');
+}, { md: A6_TABLE_MD });
+// A8 (R9): an empty 「/待辦」 item survives Ctrl+S as `- [ ] `, caret in it.
+check('v3173 A8: an empty 「/待辦」 item survives Ctrl+S with the caret in it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('/待辦'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'li:', 'paragraph:Omega.']);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n- [ ] \n\nOmega.\n');
+  await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const a = document.activeElement;
+    const li = a && a.closest ? a.closest('.ed-block[data-block-type="li"]') : null;
+    return { inItem: !!li, text: li ? li.textContent.trim() : null, list: [...document.querySelectorAll('.content .ed-block')].length };
+  }), { inItem: true, text: '', list: 4 });
+  await page.keyboard.type('buy');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- [ ] buy\n\nOmega.\n');
+}, { md: BASE_MD });
+// Review Focus 5: under a slow server one Enter still gives one paragraph —
+// the B3 replay must not open a second one beside the Enter's own.
+check('v3173 B4/B3 slow server: one Enter gives one paragraph with render delayed 1500 ms', DESKTOP, async (page, boot) => {
+  await delayRender(page, 1500);
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Enter'); await page.keyboard.type('y');
+  await renderIdle(page);
+  assert.deepStrictEqual({ list: await blockList(page), caret: await caretNow(page) },
+    { list: ['heading:D', 'paragraph:Alpha.X', '~paragraph:y', 'paragraph:Omega.'], caret: { text: 'y', offset: 1, transient: true } });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.X\n\ny\n\nOmega.\n');
+}, { md: BASE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
