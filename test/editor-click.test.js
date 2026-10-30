@@ -10142,6 +10142,79 @@ check('v3173 C8: typed-but-unapplied alt text marks the document unsaved', DESKT
   assert.deepStrictEqual(await statusNow(page), { state: 'clean', dot: false }, 'Esc discards it');
 }, IMG_OPTS);
 
+// ── v3.17.3 Task 2 (C1, C7): toolbar 復原/重做 step the open code edit's and
+// diagram panel's own histories, and the panel's history survives Ctrl+S ──
+// Whether a paragraph reads `text`, in the page: did the document stack move.
+const paraIs = (page, text) => page.evaluate((t) => [...document.querySelectorAll('.ed-wys-armed')].some((e) => e.textContent === t), text);
+check('v3173 C1: toolbar 重做 in the code edit redoes the edit\'s own typing', DESKTOP, async (page, boot) => {
+  // A document redo waiting on the stack, so a press that reaches the
+  // document stack is seen (triage: the edit closed and "Alpha.X" came back).
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await clickText(page, 'Omega.'); await renderIdle(page);
+  await page.click('[data-ed-tb="undo"]'); await renderIdle(page);
+  assert.strictEqual(await paraIs(page, 'Alpha.'), true, 'guard: the document undo took "X" back');
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the edit is open');
+  await page.keyboard.press('Control+End');
+  await page.keyboard.type('ab');
+  await page.keyboard.press('Control+z');
+  assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmodule', 'guard: Ctrl+Z stepped the edit back');
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="redo"]'); await wait(300); await renderIdle(page);
+  assert.deepStrictEqual({ edit: await codeEdit(page), renders: renderTotal(page) - before, alpha: await paraIs(page, 'Alpha.'),
+    disk: fs.readFileSync(boot.mdPath, 'utf8') },
+  { edit: { text: 'module m;\nendmoduleab', caret: 21, focused: true }, renders: 0, alpha: true, disk: CODE_MD });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('endmodule', 'endmoduleab'));
+}, { md: CODE_MD });
+check('v3173 C1: toolbar 復原/重做 in the diagram panel step the panel\'s text and keep it open', DESKTOP, async (page, boot) => {
+  // A document step on the stack (Omega.Y), so a press that reaches the
+  // document stack is seen.
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Y');
+  await openDiagPanel(page, '.graphviz svg'); await renderIdle(page);
+  assert.strictEqual(await paraIs(page, 'Omega.Y'), true, 'guard: the paragraph committed');
+  await diagSelect(page, DOT_B + 1); await page.keyboard.type('X');
+  const typed = await diagPanelUntil(page, (s) => /\bbX\b/.test(s.svg || ''));
+  assert.deepStrictEqual({ value: typed.value, svg: /\bbX\b/.test(typed.svg || '') }, { value: 'digraph { a -> bX }', svg: true },
+    'guard: typed, and the preview drew it');
+  const before = renderTotal(page);
+  await page.click('[data-ed-tb="undo"]'); await wait(300); await renderIdle(page);
+  const u = await diagPanel(page);
+  assert.deepStrictEqual({ open: !!u, value: u && u.value, focused: u && u.focused, renders: renderTotal(page) - before,
+    omega: await paraIs(page, 'Omega.Y'), disk: fs.readFileSync(boot.mdPath, 'utf8') },
+  { open: true, value: DOT_SRC, focused: true, renders: 0, omega: true, disk: DIAG_MD });
+  // The preview follows through the panel's own debounce.
+  const up = await diagPanelUntil(page, (s) => !/\bbX\b/.test(s.svg || ''));
+  assert.deepStrictEqual({ bX: /\bbX\b/.test(up.svg || ''), b: /\bb\b/.test(up.svg || '') }, { bX: false, b: true }, 'the preview drew the step');
+  await page.click('[data-ed-tb="redo"]'); await wait(300); await renderIdle(page);
+  const r = await diagPanel(page);
+  assert.deepStrictEqual({ open: !!r, value: r && r.value, focused: r && r.focused, renders: renderTotal(page) - before,
+    omega: await paraIs(page, 'Omega.Y'), disk: fs.readFileSync(boot.mdPath, 'utf8') },
+  { open: true, value: 'digraph { a -> bX }', focused: true, renders: 0, omega: true, disk: DIAG_MD });
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD.replace('a -> b', 'a -> bX').replace('Omega.', 'Omega.Y'));
+}, { md: DIAG_MD });
+check('v3173 C7: Ctrl+Z in the diagram source still undoes typing from before Ctrl+S', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B + 1); await page.keyboard.type('X');
+  await page.keyboard.press('Control+s'); await renderIdle(page);
+  assert.strictEqual(await saveStateUntil(page, 'clean'), 'clean', 'guard: the save landed');
+  const saved = DIAG_MD.replace('a -> b', 'a -> bX');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), saved, 'guard: X is on disk');
+  assert.strictEqual((await diagPanel(page) || {}).value, 'digraph { a -> bX }', 'guard: the panel opened again on X');
+  const before = renderTotal(page);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  const u = await diagPanel(page);
+  assert.deepStrictEqual({ open: !!u, value: u && u.value, focused: u && u.focused, renders: renderTotal(page) - before,
+    disk: fs.readFileSync(boot.mdPath, 'utf8') },
+  { open: true, value: DOT_SRC, focused: true, renders: 0, disk: saved });
+  await page.keyboard.press('Control+y'); await renderIdle(page);
+  assert.strictEqual((await diagPanel(page) || {}).value, 'digraph { a -> bX }', 'Ctrl+Y brings it back');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  await page.click('.ed-diagram-done'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), DIAG_MD, 'the undone text commits as one step');
+}, { md: DIAG_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
