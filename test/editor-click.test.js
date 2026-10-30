@@ -10432,6 +10432,141 @@ check('v3173 B4/B3 slow server: one Enter gives one paragraph with render delaye
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.X\n\ny\n\nOmega.\n');
 }, { md: BASE_MD });
 
+// ── v3173 Task 5: Delete at a block's end (B9, R11) ──
+// Notion's Delete, the mirror of Backspace: at the end of a paragraph or
+// heading it pulls the next list item's text up (an item with children is
+// still selected first); at the end of a list item it pulls the next item,
+// or the paragraph after the list, up. One op, one Ctrl+Z.
+const selectedBlocks = (page) => page.evaluate(() => [...document.querySelectorAll('.ed-block.ed-selected')].map((b) => {
+  const s = b.querySelector('.ed-li-text') || b.querySelector('.ed-wys-armed');
+  return b.getAttribute('data-block-type') + ':' + (s ? s.textContent : '');
+}));
+check('v3173 B9: Delete at a paragraph\'s end pulls the next list item\'s text up', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P.', 2);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), caret: await caretNow(page) },
+    { selected: [], caret: { text: 'P.a', offset: 2, transient: false } });
+  assert.strictEqual(await saveAndRead(page, boot), 'P.a\n\n- b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'P.\n\n- a\n- b\n', 'one Ctrl+Z restores the file');
+}, { md: 'P.\n\n- a\n- b\n' });
+check('v3173 B9: Delete at a heading\'s end pulls the next list item\'s text up', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'H', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'Ha', offset: 1, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '# Ha\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# H\n\n- a\n', 'one Ctrl+Z restores the file');
+}, { md: '# H\n\n- a\n' });
+for (const [label, md, text, merged, caret] of [
+  ['the next item', '- a\n- b\n', 'a', '- ab\n', 'ab'],
+  ['the paragraph after the list', '- a\n\nP.\n', 'a', '- aP.\n', 'aP.'],
+  ['its own first child', '- a\n  - b\n- c\n', 'a', '- ab\n- c\n', 'ab'],
+  ['the parent\'s next sibling', '- a\n  - b\n- c\n', 'b', '- a\n  - bc\n', 'bc'],
+]) {
+  check('v3173 B9: Delete at a list item\'s end pulls ' + label + ' up', DESKTOP, async (page, boot) => {
+    await focusSurface(page, text, text.length);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.deepStrictEqual(await caretNow(page), { text: caret, offset: text.length, transient: false });
+    assert.strictEqual(await saveAndRead(page, boot), merged);
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z restores the file');
+  }, { md });
+}
+// A loose item's text sits in a <p> inside its surface. Found by probing
+// (not in the triage): the first cut appended a second <p> and wrote `-`.
+for (const [label, md, text, merged, caret] of [
+  ['a loose list\'s next item', '- a\n\n- b\n\n- c\n', 'a', '- ab\n\n- c\n', 'ab'],
+  ['the paragraph after a loose list', '- a\n\n- b\n\nP.\n', 'b', '- a\n\n- bP.\n', 'bP.'],
+  ['a loose list\'s first item into a paragraph', 'P.\n\n- a\n\n- b\n', 'P.', 'P.a\n\n- b\n', 'P.a'],
+]) {
+  check('v3173 B9: Delete pulls ' + label + ' up', DESKTOP, async (page, boot) => {
+    await focusSurface(page, text, text.length);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.deepStrictEqual(await caretNow(page), { text: caret, offset: text.length, transient: false });
+    assert.strictEqual(await saveAndRead(page, boot), merged);
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z restores the file');
+  }, { md });
+}
+// D7: a join whose render fails stays on screen and the next commit writes it.
+for (const [label, md, text, merged] of [
+  ['a list item', '# D\n\n- a\n- b\n\nP.\n', 'a', '# D\n\n- ab\n\nP.\n'],
+  ['a paragraph', '# D\n\nP.\n\n- a\n- b\n', 'P.', '# D\n\nP.a\n\n- b\n'],
+]) {
+  check('v3173 B9: a Delete join at ' + label + '\'s end whose render fails is written by the next commit', DESKTOP, async (page, boot) => {
+    await failFirstRender(page);
+    await focusSurface(page, text, text.length);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    const screen = await blockList(page);
+    assert.strictEqual(screen.length, 3, 'the screen keeps the join: ' + JSON.stringify(screen));
+    assert.strictEqual(await commitAndRead(page, boot), merged);
+  }, { md });
+}
+// D4, as for the paragraph merge: the typing before the key is its own step.
+check('v3173 B9: Delete at a list item\'s end after typing is two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a', 1);
+  await page.keyboard.type('X');
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'aXb', offset: 2, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '- aXb\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '- aX\n- b\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n- b\n');
+}, { md: '- a\n- b\n' });
+// Guard (R11): may be green before. An item that owns children is selected
+// first, as today; Delete at the end of the last item changes nothing.
+check('v3173 B9: Delete before an item with children keeps today\'s select-first', DESKTOP, async (page, boot) => {
+  const MD = 'P.\n\n- a\n  - c\n- b\n';
+  await focusSurface(page, 'P.', 2);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await selectedBlocks(page), ['li:a']);
+  assert.strictEqual(await saveAndRead(page, boot), MD);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'b', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), caret: await caretNow(page) },
+    { selected: [], caret: { text: 'b', offset: 1, transient: false } });
+  assert.strictEqual(await saveAndRead(page, boot), MD, 'nothing after the last item');
+}, { md: 'P.\n\n- a\n  - c\n- b\n' });
+// Guard: may be green before. A list item's Delete before an item that owns
+// children changes nothing, as today (its children would have no parent).
+check('v3173 B9: Delete at a list item\'s end before an item with children changes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'x', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), caret: await caretNow(page) },
+    { selected: [], caret: { text: 'x', offset: 1, transient: false } });
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- x\n- a\n  - c\n');
+}, { md: '# D\n\n- x\n- a\n  - c\n' });
+// Review Focus 2. Guard: may be green before.
+check('v3173 B9: Delete at a table cell\'s end changes nothing outside it', DESKTOP, async (page, boot) => {
+  const before = await blockList(page);
+  for (const cell of ['x', 'y']) {
+    await clickCell(page, cell);
+    await page.keyboard.press('End');
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.deepStrictEqual(await blockList(page), before, cell);
+    assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), cell, 'the caret stays in ' + cell);
+  }
+  assert.strictEqual(await commitAndRead(page, boot), A6_TABLE_MD);
+}, { md: A6_TABLE_MD });
+// Scope pin (R11): a block with no text to pull up keeps today's behaviour —
+// a code block below a paragraph is selected, below a list item nothing.
+check('v3173 B9: Delete before a code block keeps today\'s behaviour', DESKTOP, async (page, boot) => {
+  const MD = 'P.\n\n```\ncode\n```\n\n- a\n\n```\nmore\n```\n';
+  await focusSurface(page, 'P.', 2);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual((await selectedBlocks(page)).map((s) => s.split(':')[0]), ['code']);
+  assert.strictEqual(await saveAndRead(page, boot), MD);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  await focusSurface(page, 'a', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), caret: await caretNow(page) },
+    { selected: [], caret: { text: 'a', offset: 1, transient: false } });
+  assert.strictEqual(await saveAndRead(page, boot), MD);
+}, { md: 'P.\n\n```\ncode\n```\n\n- a\n\n```\nmore\n```\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
