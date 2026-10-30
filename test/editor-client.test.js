@@ -2733,6 +2733,24 @@ function countInCode(source, needle) {
   const sr = commitShortcut(same, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
   assert.deepStrictEqual(sr.ops.map((o) => o !== null), [false, true]);
   assert.deepStrictEqual(same.stack.undo(sr.lines).lines, ['# D', '', '\\## Alpha.']);
+  // v3.17.3 N4 (R41): `tail` — the ordered list below, renumbered — is written
+  // by op 2 over its own lines, so one undo takes the conversion and the new
+  // numbers back together (to the literal over the old numbers).
+  const L = (id, s) => ({ id, type: 'li', startLine: s, endLine: s });
+  const o = { lines: ['Intro', '', '1. a', '2. b'], blocks: [B(0, 1, 1), L(1, 3), L(2, 4)], stack: new UndoStack() };
+  const or = commitShortcut(o, { blockId: 0 }, ['1\\. Intro'], ['1. Intro'], 'below',
+    { range: { startLine: 3, endLine: 4 }, md: '2. a\n3. b' });
+  assert.deepStrictEqual(or.lines, ['1. Intro', '2. a', '3. b']);
+  assert.strictEqual(or.tailEnd, 4);
+  const o1 = o.stack.undo(or.lines).lines;
+  assert.deepStrictEqual(o1, ['1\\. Intro', '', '1. a', '2. b'], 'one undo → the literal, old numbers');
+  assert.deepStrictEqual(o.stack.undo(o1).lines, o.lines, 'two undos → the original');
+  // A tail whose lines no longer follow op 2's range is not written.
+  const q = { lines: ['Intro', '', '1. a', '2. b'], blocks: [B(0, 1, 1), L(1, 3), L(2, 4)], stack: new UndoStack() };
+  const qr = commitShortcut(q, { blockId: 0 }, ['1\\. Intro'], ['1. Intro'], null,
+    { range: { startLine: 3, endLine: 4 }, md: '2. a\n3. b' });
+  assert.deepStrictEqual(qr.lines, ['1. Intro', '', '1. a', '2. b']);
+  assert.strictEqual(qr.tailEnd, null);
 }
 
 // -- v3.15.0 B2 fix round 1 (R58): a list item joining an adjacent list ----

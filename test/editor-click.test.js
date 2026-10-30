@@ -10978,6 +10978,34 @@ check('v3173 A7: converting a paragraph below a * list joins it with *', DESKTOP
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n* a\n* b\n* Tail\n');
 }, { md: '# D\n\n* a\n* b\n\nTail\n' });
 
+// N4 (R41): the typed `1. ` shortcut at the start of a paragraph with text
+// joins the ordered list below and renumbers it in the same op (op 2). The
+// shortcut keeps its two undo steps (D1): the first Ctrl+Z shows the typed
+// literal with the list's old numbers, the second the original paragraph.
+const typeAtStart = async (page, text, typed) => {
+  await focusSurface(page, text, 0); await page.keyboard.type(typed); await renderIdle(page);
+};
+check('v3173 N4: typing 1. at the start of a paragraph above an ordered list renumbers it', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Intro', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '1. Intro\n2. a\n3. b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '1\\. Intro\n\n1. a\n2. b\n', 'one Ctrl+Z takes the conversion and the renumbering back');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Intro\n\n1. a\n2. b\n', 'the second restores the file');
+}, { md: 'Intro\n\n1. a\n2. b\n' });
+check('v3173 N4: typing 1. at the start of a one-letter paragraph above an ordered list renumbers it', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'x', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. x\n2. a\n3. b\n');
+}, { md: '# D\n\nx\n\n1. a\n2. b\n' });
+check('v3173 N4: typing 1. between two ordered lists numbers the item and the list below', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Mid', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. a\n2. b\n3. Mid\n4. c\n5. d\n');
+}, { md: '# D\n\n1. a\n2. b\n\nMid\n\n1. c\n2. d\n' });
+check('v3173 N4: typing 1. above a 1) list joins it with 1) and renumbers it', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Intro', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1) Intro\n2) a\n3) b\n');
+}, { md: '# D\n\nIntro\n\n1) a\n2) b\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
