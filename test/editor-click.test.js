@@ -3205,9 +3205,14 @@ check('mixed Tab: items of two adjacent lists indent together', DESKTOP, async (
   assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two items selected');
   await page.keyboard.press('Tab'); await wait(600);
   assert.strictEqual(await noticeText(page), null, 'no refusal');
-  // c's `*` comes out as `-`: its indent changed, so it is re-serialized
-  // rather than replayed, and both items are now one nested bullet list.
-  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n  - c\n');
+  // v3.17.3 A9 (R5): c keeps its `*`. It was a list of its own beside b's
+  // and stays one, now nested under a beside b's (before, it was rewritten
+  // `- c` and the two merged into one list).
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n  - b\n  * c\n');
+  await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-block[data-block-type="li"]')]
+    .map((x) => x.getAttribute('data-indent') + ':' + x.querySelector('.ed-li-text').textContent)), ['0:a', '1:b', '1:c'],
+  'both items are nested under a');
 }, { md: '# D\n\n- a\n- b\n* c\n' });
 
 // Press a block's ⠿ and drop it before the block holding `destText`, or
@@ -10914,6 +10919,64 @@ check('v3173 B2: moving a heading\'s whole text away leaves the heading empty', 
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# Title\n\nAlpha.\n', 'one Ctrl+Z restores the file');
 }, { md: '# Title\n\nAlpha.\n' });
+
+// ── v3173 Task 7: lists (A9, A7) ──
+// A9 (R5): a list keeps its own markers when it is written back — the item
+// typed into, the untouched items around it, and an item Enter makes.
+check('v3173 A9: editing one item of a * list keeps * on every item', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n* alpha\n* bravoX\n* charlie\n');
+}, { md: '# D\n\n* alpha\n* bravo\n* charlie\n' });
+check('v3173 A9: Enter in a * list makes a * item', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n* alpha\n* bravo\n* new\n* charlie\n');
+}, { md: '# D\n\n* alpha\n* bravo\n* charlie\n' });
+check('v3173 A9: editing one item of a 1) list keeps 1) on every item', DESKTOP, async (page, boot) => {
+  await liText(page, 'bravo').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n1) alpha\n2) bravoX\n3) charlie\n');
+}, { md: '# D\n\n1) alpha\n2) bravo\n3) charlie\n' });
+check('v3173 A9: editing a nested * item under a - parent keeps both markers', DESKTOP, async (page, boot) => {
+  await liText(page, 'kid').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- parent\n  * kidX\n- tail\n');
+}, { md: '# D\n\n- parent\n  * kid\n- tail\n' });
+check('v3173 A9: editing the only item of a + list keeps +', DESKTOP, async (page, boot) => {
+  await liText(page, 'alpha').click(); await page.keyboard.press('End'); await page.keyboard.type('X');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n+ alphaX\n');
+}, { md: '# D\n\n+ alpha\n' });
+// Review Focus 3: `- a` and `* c` side by side are two lists; each keeps its own.
+check('v3173 A9: two adjacent lists with different bullets keep their own', DESKTOP, async (page, boot) => {
+  await liText(page, 'charlie').click(); await page.keyboard.press('End');
+  await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('new');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n* charlie\n* new\n');
+}, { md: '# D\n\n- alpha\n* charlie\n' });
+// A7 (R6): converting a paragraph into the ordered list below renumbers that
+// list, as one undo step.
+check('v3173 A7: converting a paragraph into the ordered list below renumbers it', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '編號列表']);
+  await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '1. Intro\n2. a\n3. b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Intro\n\n1. a\n2. b\n', 'one Ctrl+Z restores the file');
+}, { md: 'Intro\n\n1. a\n2. b\n' });
+check('v3173 A7: converting a paragraph right above an all-ones list renumbers it', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '編號列表']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. Intro\n2. a\n3. b\n');
+}, { md: '# D\n\nIntro\n1. a\n1. b\n' });
+check('v3173 A7: converting a paragraph between two ordered lists numbers it and the list below', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Mid'), ['轉換成', '編號列表']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1) a\n2) b\n3) Mid\n4) c\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1) a\n2) b\n\nMid\n\n1) c\n', 'one Ctrl+Z restores the file');
+}, { md: '# D\n\n1) a\n2) b\n\nMid\n\n1) c\n' });
+check('v3173 A7: converting a paragraph below a * list joins it with *', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Tail'), ['轉換成', '項目符號列表']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n* a\n* b\n* Tail\n');
+}, { md: '# D\n\n* a\n* b\n\nTail\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
