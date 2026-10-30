@@ -10215,6 +10215,65 @@ check('v3173 C7: Ctrl+Z in the diagram source still undoes typing from before Ct
   assert.strictEqual(await saveAndRead(page, boot), DIAG_MD, 'the undone text commits as one step');
 }, { md: DIAG_MD });
 
+// ── v3.17.3 Task 3 (C2, C3, C4, C6, C9): small editor fixes ──
+// C3 is a unit row in test/code-edit.test.js; C4 is a code-read fix with no browser repro.
+const fenceMd = (indent) => '# D\n\nAlpha.\n\n' + indent + '```verilog\n' + indent + 'module m;\n' + indent + 'endmodule\n' + indent + '```\n\nOmega.\n';
+for (const indent of ['  ', '   ']) {
+  check('v3173 C2: a click at the end of endmodule in a ' + indent.length + '-space-indented fence puts the caret after it', DESKTOP, async (page) => {
+    await clickText(page, 'endmodule'); await renderIdle(page);
+    const e = await codeEditUntil(page);
+    const text = indent + 'module m;\n' + indent + 'endmodule';
+    assert.deepStrictEqual({ text: e && e.text, caret: e && e.caret }, { text, caret: text.length });
+  }, { md: fenceMd(indent) });
+}
+const C6_MD = '# D\n\n' + 'Filler line.\n\n'.repeat(60) + 'Plain words here.\n\n' + 'Filler line.\n\n'.repeat(60);
+check('v3173 C6: the link field stays inside the viewport when its selection nears the bottom', DESKTOP, async (page) => {
+  await selectInSurface(page, 'Plain words here.', 6, 11);
+  // Near the top of the viewport there is no room above the selection, so the
+  // field opens below it (triage C6).
+  await page.evaluate(() => {
+    const p = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Plain words here.');
+    const r = document.createRange(); r.setStart(p.firstChild, 6); r.setEnd(p.firstChild, 11);
+    window.scrollBy(0, r.getBoundingClientRect().top - 40);
+  });
+  await wait(250);
+  await page.keyboard.press('Control+k');
+  assert.strictEqual((await linkField(page)).open, true, 'guard: the field is open');
+  assert.ok(await page.evaluate(() => { const b = document.querySelector('.ed-linkbar'); return b.getBoundingClientRect().top > 40; }), 'guard: the field opened below the selection');
+  await page.evaluate(() => {
+    const p = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Plain words here.');
+    const r = document.createRange(); r.setStart(p.firstChild, 6); r.setEnd(p.firstChild, 11);
+    window.scrollBy(0, r.getBoundingClientRect().bottom - (innerHeight - 8));
+  });
+  await wait(250);
+  const f = await page.evaluate(() => { const b = document.querySelector('.ed-linkbar'); if (!b || !b.isConnected) return null; const r = b.getBoundingClientRect(); return { bottom: r.bottom, vh: innerHeight }; });
+  assert.ok(f, 'the field is still open (the selection is in view)');
+  assert.ok(f.bottom <= f.vh, 'field bottom ' + f.bottom + ' <= viewport ' + f.vh);
+}, { md: C6_MD });
+const GRAMMARLY = ['data-gramm', 'data-gramm_editor', 'data-enable-grammarly'];
+check('v3173 C9: Grammarly attributes on a table cell do not mark the document unsaved, and Ctrl+S leaves the table bytes alone', DESKTOP, async (page, boot) => {
+  await clickCell(page, 'y');
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'guard: clean with the caret in a cell');
+  for (const a of GRAMMARLY) {
+    await page.evaluate((n) => { const c = [...document.querySelectorAll('.content td')].find((td) => td.textContent === 'y'); c.setAttribute(n, 'false'); }, a);
+    await wait(200);
+    assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, a + ' is not an edit');
+  }
+  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD, 'the table keeps its bytes');
+}, { md: A6_TABLE_MD });
+check('v3173 C9: a column alignment set through the menu still marks the table edited with extension attributes present', DESKTOP, async (page, boot) => {
+  await clickCell(page, 'y');
+  await page.evaluate((names) => document.querySelectorAll('.content td, .content th').forEach((c) => names.forEach((n) => c.setAttribute(n, 'false'))), GRAMMARLY);
+  await wait(200);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'guard: the attributes alone are clean');
+  await openColMenu(page, 1);
+  await page.locator('.ed-te-menu button[aria-label="置中"]').click(); await wait(250);
+  assert.strictEqual((await dirtyMarks(page)).status, 'dirty', 'an alignment is an edit');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD.replace('|-|-|', '|-|:-:|').replace('|a|b|', '| a | b |').replace('|x|y|', '| x | y |'),
+    'the alignment reached the file');
+}, { md: A6_TABLE_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
