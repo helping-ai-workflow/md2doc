@@ -10566,6 +10566,92 @@ check('v3173 B9: Delete before a code block keeps today\'s behaviour', DESKTOP, 
     { selected: [], caret: { text: 'a', offset: 1, transient: false } });
   assert.strictEqual(await saveAndRead(page, boot), MD);
 }, { md: 'P.\n\n```\ncode\n```\n\n- a\n\n```\nmore\n```\n' });
+// Fix round 1, R34: an item over several source lines counts as one with
+// children. Below a paragraph it is selected, as before B9; at or below a
+// list item's end the browser's own Delete changes nothing. Never the
+// refusal notice. Measured before: the notice, and nothing selected.
+for (const [label, md, selected] of [
+  ['a hard-wrapped item', 'P.\n\n- a\n  wrapped\n- b\n', 'li:a\nwrapped'],
+  ['an item with a continuation paragraph', 'P.\n\n- a\n\n  more\n- b\n', 'li:a\nmore'],
+]) {
+  check('v3173 B9: Delete at a paragraph\'s end before ' + label + ' selects it', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'P.', 2);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.deepStrictEqual({ selected: await selectedBlocks(page), notice: await noticeText(page) },
+      { selected: [selected], notice: null });
+    assert.strictEqual(await saveAndRead(page, boot), md);
+  }, { md });
+}
+for (const [label, md, prefix] of [
+  ['at the end of a hard-wrapped item', '- a\n  wrapped\n- b\n', 'a'],
+  ['before a hard-wrapped item', '- x\n- a\n  wrapped\n', 'x'],
+]) {
+  check('v3173 B9: Delete ' + label + ' changes nothing and shows no notice', DESKTOP, async (page, boot) => {
+    const text = await page.evaluate((p) => [...document.querySelectorAll('.ed-li-text')].find((s) => s.textContent.indexOf(p) === 0).textContent, prefix);
+    await focusSurfaceStarting(page, prefix, text.length);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.deepStrictEqual({ selected: await selectedBlocks(page), notice: await noticeText(page), caret: await caretNow(page) },
+      { selected: [], notice: null, caret: { text, offset: text.length, transient: false } });
+    assert.strictEqual(await saveAndRead(page, boot), md);
+  }, { md });
+}
+// Fix round 1, M1: inline marks across the seam. Guards: green before the
+// round (the join already merges same marks and keeps a link whole).
+for (const [label, md, text, merged] of [
+  ['bold meets bold', '- **a**\n- **b**\n', 'a', '- **ab**\n'],
+  ['a link comes up whole', 'P.\n\n- [x](u) b\n', 'P.', 'P.[x](u) b\n'],
+]) {
+  check('v3173 B9: Delete join marks — ' + label, DESKTOP, async (page, boot) => {
+    await focusSurface(page, text, text.length);
+    await page.keyboard.press('Delete'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), merged);
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z restores the file');
+  }, { md });
+}
+// Fix round 1, M2: a Shift+Enter typed before the Delete is `<br>` on the
+// item's own line; the typing is still its own step. Guard: green before.
+check('v3173 B9: Delete after Shift+Enter in a list item is two undo steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a', 1);
+  await page.keyboard.press('Shift+Enter'); await page.keyboard.type('x');
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'axb', offset: 2, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '- a<br>xb\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '- a<br>x\n- b\n');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n- b\n');
+}, { md: '- a\n- b\n' });
+// Fix round 1, M3 (R35, accepted): a list that was loose only by the blank
+// line around its first item turns tight once that item is pulled up.
+check('v3173 B9: pulling the first item out of a list loose only around it leaves the list tight', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P.', 2);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'P.a\n\n- b\n- c\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'P.\n\n- a\n\n- b\n- c\n', 'one Ctrl+Z restores the file');
+}, { md: 'P.\n\n- a\n\n- b\n- c\n' });
+
+// ── v3173 N1 (R33): Backspace into a loose list's last item ──
+// Found during Task 5: joinIntoPrevious() appended beside the loose item's
+// <p> and the item's text was lost (`- a\n\n- P.\n`).
+check('v3173 N1: Backspace at a paragraph\'s start after a loose list joins the last item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'bP.', offset: 1, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n\n- bP.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n\n- b\n\nP.\n', 'one Ctrl+Z restores the file');
+}, { md: '- a\n\n- b\n\nP.\n' });
+// Guard: green before — the tight list joins as it always has.
+check('v3173 N1: Backspace at a paragraph\'s start after a tight list joins as before', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P.', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.deepStrictEqual(await caretNow(page), { text: 'bP.', offset: 1, transient: false });
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n- bP.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '- a\n- b\n\nP.\n', 'one Ctrl+Z restores the file');
+}, { md: '- a\n- b\n\nP.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
