@@ -5931,14 +5931,6 @@ check('slash: a real paragraph emptied to "/圖片" becomes the picked image', D
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), BASE_MD, 'one undo step back to the original paragraph');
 }, { md: BASE_MD });
-check('slash: a picker left unanswered from a real "/圖片" leaves the paragraph as typed', DESKTOP, async (page, boot) => {
-  const chooserP = page.waitForEvent('filechooser');
-  await emptyAlphaTo(page, '/圖片');
-  await page.keyboard.press('Enter');
-  await chooserP; await wait(300);
-  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:/圖片', 'paragraph:Omega.']);
-  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'nothing written');
-}, { md: BASE_MD });
 check('slash: a mouse pick of 文字 in a real paragraph does what Enter does', DESKTOP, async (page) => {
   await emptyAlphaTo(page, '/');
   await slashPick(page, '文字');
@@ -10017,6 +10009,138 @@ check('lists (v3.17.2 A3): ordered lists join tight too; different markers and a
   assert.strictEqual(await saveAndRead(page, boot),
     '# D\n\n1. a\n2. b\n\n- c\n\n* d\n\n- e\n\n- f\n\n- g\n');
 }, { md: '# D\n\n1. a\n\nOne.\n\n2. b\n\n- c\n\nTwo.\n\n* d\n\n- e\n\n- f\n\nThree.\n\n- g\n' });
+
+// ── v3.17.3 Task 1: the image toolbar (A1–A6, C8) ──
+const statusNow = (page) => page.evaluate(() => ({
+  state: document.querySelector('.ed-toolbar-status').getAttribute('data-state'),
+  dot: document.title.indexOf('●') === 0,
+}));
+const imgTbFocusLabel = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return a && a.closest && a.closest('.ed-imgtb') ? a.textContent : null;
+});
+check('v3173 A1: Enter on a selected image block shows the toolbar and Tab reaches 替換/替代文字/刪除', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('ArrowDown'); await wait(250);
+  const sel = await page.evaluate(() => [...document.querySelectorAll('.ed-block.ed-selected')].map((b) => (b.querySelector('img') ? 'img' : b.textContent.trim())));
+  assert.deepStrictEqual(sel, ['img'], 'guard: the image block is the one selected block');
+  await page.keyboard.press('Enter'); await wait(300);
+  const s = await imgTbState(page);
+  assert.ok(s, 'the toolbar is shown after Enter');
+  assert.strictEqual(await imgTbFocusLabel(page), '替換', 'focus is on the first button');
+  await page.keyboard.press('Tab');
+  assert.strictEqual(await imgTbFocusLabel(page), '替代文字', 'Tab: second button');
+  await page.keyboard.press('Tab');
+  assert.strictEqual(await imgTbFocusLabel(page), '刪除', 'Tab: third button');
+  // Esc goes back to the block selection.
+  await page.keyboard.press('Escape'); await wait(250);
+  assert.strictEqual(await imgTbState(page), null, 'Esc hides the toolbar');
+  const back = await page.evaluate(() => ({
+    sel: [...document.querySelectorAll('.ed-block.ed-selected')].map((b) => (b.querySelector('img') ? 'img' : b.textContent.trim())),
+    focusSelected: !!document.activeElement.classList && document.activeElement.classList.contains('ed-selected'),
+  }));
+  assert.deepStrictEqual(back, { sel: ['img'], focusSelected: true }, 'back on the block selection');
+}, IMG_OPTS);
+const IMG_LONG_MD = '# D\n\n' + Array.from({ length: 12 }, (_, i) => 'Filler ' + i + '.\n\n').join('') +
+  '![chip top](assets/a.png "T")\n\n' + Array.from({ length: 40 }, (_, i) => 'After ' + i + '.\n\n').join('');
+check('v3173 A2: typing half an alt text survives a 300px scroll', DESKTOP, async (page, boot) => {
+  await page.evaluate(() => { document.querySelector('.content img').scrollIntoView({ block: 'center' }); });
+  await wait(200);
+  await openAlt(page);
+  await page.keyboard.type('half');
+  await page.mouse.move(700, 300);
+  const y0 = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 300); await wait(500);
+  const y1 = await page.evaluate(() => window.scrollY);
+  assert.ok(y1 - y0 >= 250, 'guard: the page scrolled ' + (y1 - y0) + 'px');
+  const s = await page.evaluate(() => {
+    const i = document.querySelector('.ed-imgtb-input');
+    const t = document.querySelector('.ed-imgtb');
+    const r = i.getBoundingClientRect();
+    return { shown: !t.hidden && !i.hidden, value: i.value, onScreen: r.top >= 0 && r.bottom <= innerHeight };
+  });
+  assert.deepStrictEqual(s, { shown: true, value: 'half', onScreen: true }, 'the field is still there with the typed text');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  assert.ok(disk.indexOf('![half](assets/a.png "T")\n') !== -1, 'saved: ' + JSON.stringify(disk.slice(0, 40) + '...' + disk.slice(disk.indexOf('![') , disk.indexOf('![') + 40)));
+}, { md: IMG_LONG_MD, assets: { 'assets/a.png': PNG_160 } });
+check('v3173 A3: an alt with a single backtick still saves an image', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  await page.keyboard.type('a`b'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content img')].map((i) => i.getAttribute('alt'))), ['a`b'], 'one image whose alt is as typed');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![a&#96;b](assets/a.png "T")\n\nOmega.\n');
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'a`b', 'reopened: the field shows the typed text');
+}, IMG_OPTS);
+check('v3173 A4: a replace refused during the upload leaves no file in assets/', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  const before = fs.readdirSync(assetsDir).sort();
+  await page.route('**/api/asset', async (route) => {
+    if (route.request().method() !== 'POST') { await route.continue(); return; }
+    await wait(2000); await route.continue();
+  });
+  await hoverImg(page);
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), imgTbBtn(page, '替換').click()]);
+  const posted = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset' && r.request().method() === 'POST');
+  await chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(PNG_160, 'base64') });
+  // While the upload is held, the picture's own paragraph changes.
+  await wait(300);
+  await openAlt(page);
+  await page.keyboard.type('moved'); await page.keyboard.press('Enter'); await renderIdle(page);
+  await posted;
+  let now = null;
+  for (let i = 0; i < 20; i++) {
+    now = fs.readdirSync(assetsDir).sort();
+    if (JSON.stringify(now) === JSON.stringify(before)) break;
+    await wait(150);
+  }
+  assert.deepStrictEqual(now, before, 'assets/ holds what it held before the replace');
+  const notice = await imgConflictText(page);
+  assert.ok(notice.indexOf('文件已更新，請重試這個操作') !== -1, 'the retry notice: ' + JSON.stringify(notice));
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![moved](assets/a.png "T")\n\nOmega.\n', 'the alt edit stands, the path did not move');
+}, IMG_OPTS);
+check('v3173 A5: Esc during an IME composition in the alt field keeps the field open', DESKTOP, async (page) => {
+  await openAlt(page);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'ㄋ', selectionStart: 1, selectionEnd: 1 });
+  await page.keyboard.press('Escape'); await wait(300);
+  const s = await page.evaluate(() => {
+    const i = document.querySelector('.ed-imgtb-input');
+    return { shown: !!i && !i.hidden && !document.querySelector('.ed-imgtb').hidden, focused: document.activeElement === i };
+  });
+  assert.deepStrictEqual(s, { shown: true, focused: true }, 'the composition owns the Esc');
+}, { md: IMG_MD, assets: { 'assets/a.png': PNG_160 }, engines: ['chromium'] });
+check('v3173 A6: cancelling the 「/圖片」 picker removes the 「/圖片」 text', DESKTOP, async (page, boot) => {
+  const chooserP = page.waitForEvent('filechooser');
+  await emptyAlphaTo(page, '/圖片');
+  await page.keyboard.press('Enter');
+  await chooserP; await wait(300);
+  // Migrated from 'slash: a picker left unanswered from a real "/圖片" leaves the paragraph as typed':
+  // while the dialog is open nothing changes, on screen or on disk.
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:/圖片', 'paragraph:Omega.']);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), BASE_MD, 'nothing written');
+  // Playwright cannot press Cancel; the browser raises this event on the input.
+  await page.evaluate(() => { document.querySelector('body > input[type="file"]').dispatchEvent(new Event('cancel')); });
+  await renderIdle(page); await wait(200);
+  const bl = await blockList(page);
+  assert.ok(bl.indexOf('paragraph:/圖片') === -1, 'no 圖片 paragraph on screen: ' + JSON.stringify(bl));
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('body > input[type="file"]').length), 0, 'the picker input is gone');
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '# D\n\nOmega.\n', 'the consumed text is not in the file');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  const afterUndo = await saveAndRead(page, boot);
+  assert.strictEqual(afterUndo.indexOf('/圖片'), -1, 'one Ctrl+Z never brings the text back: ' + JSON.stringify(afterUndo));
+  assert.strictEqual(afterUndo, BASE_MD, 'one Ctrl+Z restores the pre-slash bytes');
+}, { md: BASE_MD });
+check('v3173 C8: typed-but-unapplied alt text marks the document unsaved', DESKTOP, async (page) => {
+  assert.deepStrictEqual(await statusNow(page), { state: 'clean', dot: false }, 'guard: clean first');
+  await openAlt(page);
+  assert.deepStrictEqual(await statusNow(page), { state: 'clean', dot: false }, 'guard: opening the field changes nothing');
+  await page.keyboard.type('new words'); await wait(150);
+  assert.deepStrictEqual(await statusNow(page), { state: 'dirty', dot: true }, 'typed text is unsaved work');
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.deepStrictEqual(await statusNow(page), { state: 'clean', dot: false }, 'Esc discards it');
+}, IMG_OPTS);
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

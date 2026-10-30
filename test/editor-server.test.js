@@ -1184,5 +1184,64 @@ function assertNoAutoCloseFor(server, ms) {
     console.log('server: POST /api/preview — 200/422/400/403/415 and no drawio tracking — OK');
   }
 
+  // v3.17.3 A4: DELETE /api/asset removes only a file this server instance
+  // wrote through POST /api/asset in this process (the orphan a refused
+  // replace leaves behind). Anything else is 404, including a file that exists.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-asset-del-'));
+    const mdPath = path.join(dir, 'doc.md');
+    fs.writeFileSync(mdPath, '# D\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'x'), 'keep', 'utf8');
+    fs.mkdirSync(path.join(dir, 'assets'));
+    fs.writeFileSync(path.join(dir, 'assets', 'old.png'), 'old', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const del = (p, headers) => new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port: srv.port, method: 'DELETE', path: p,
+        headers: Object.assign({ 'content-type': 'application/json' }, headers || {}) }, (res) => {
+        let buf = '';
+        res.on('data', (c) => (buf += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: buf }));
+      });
+      r.on('error', reject);
+      r.end();
+    });
+    try {
+      const up = await req(srv.port, 'POST', '/api/asset', { fileId: 0, mime: 'image/png', name: 'dot.png', data: png.toString('base64') });
+      assert.strictEqual(up.status, 200, up.body);
+      const rel = JSON.parse(up.body).path;
+      assert.strictEqual(rel, 'assets/dot.png');
+      // Host guard first.
+      const bad = await del('/api/asset?path=' + encodeURIComponent(rel), { host: 'evil.example:' + srv.port });
+      assert.strictEqual(bad.status, 403, 'a bad Host is 403, got ' + bad.status);
+      assert.strictEqual(fs.existsSync(path.join(dir, rel)), true, 'a refused delete leaves the file');
+      // Content-type guard.
+      const noct = await del('/api/asset?path=' + encodeURIComponent(rel), { 'content-type': 'text/plain' });
+      assert.strictEqual(noct.status, 415, 'a non-json content-type is 415, got ' + noct.status);
+      assert.strictEqual(fs.existsSync(path.join(dir, rel)), true);
+      // Not written by this process: 404 and untouched, even though it exists.
+      const doc = await del('/api/asset?path=doc.md');
+      assert.strictEqual(doc.status, 404, 'doc.md is not an uploaded asset, got ' + doc.status);
+      assert.strictEqual(fs.readFileSync(mdPath, 'utf8'), '# D\n', 'doc.md is unchanged');
+      const up2 = await del('/api/asset?path=' + encodeURIComponent('../x'));
+      assert.strictEqual(up2.status, 404, '../x is 404, got ' + up2.status);
+      assert.strictEqual(fs.readFileSync(path.join(dir, 'x'), 'utf8'), 'keep');
+      const old = await del('/api/asset?path=' + encodeURIComponent('assets/old.png'));
+      assert.strictEqual(old.status, 404, 'a pre-existing asset is 404, got ' + old.status);
+      assert.strictEqual(fs.readFileSync(path.join(dir, 'assets', 'old.png'), 'utf8'), 'old');
+      const none = await del('/api/asset');
+      assert.strictEqual(none.status, 404, 'no path is 404, got ' + none.status);
+      // The one it wrote: 204 and gone; a second delete is 404.
+      const ok = await del('/api/asset?path=' + encodeURIComponent(rel));
+      assert.strictEqual(ok.status, 204, 'the uploaded file is deleted, got ' + ok.status + ' ' + ok.body);
+      assert.strictEqual(fs.existsSync(path.join(dir, rel)), false, 'the file is gone');
+      assert.strictEqual((await del('/api/asset?path=' + encodeURIComponent(rel))).status, 404, 'a second delete is 404');
+    } finally {
+      srv.close();
+    }
+    console.log('server: DELETE /api/asset removes only what this process uploaded — OK');
+  }
+
   console.log('editor-server.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });
