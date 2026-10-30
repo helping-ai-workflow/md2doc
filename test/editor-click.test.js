@@ -10353,6 +10353,18 @@ check('v3173 B10: keys typed after ArrowUp while the commit below renders land i
     { list: ['heading:D', 'paragraph:Alpha.', '~paragraph:Q', 'paragraph:XOmega.'], caret: { text: 'Q', offset: 1, transient: true } });
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nQ\n\nXOmega.\n');
 }, { md: BASE_MD });
+// R29 (fix round 1): a transient the user has left is not kept through the
+// render of a commit below it.
+check('v3173 B10: the empty paragraph is not kept once the user has left it for a block further below', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await clickChar(page, 'Tail.', 1); await page.keyboard.type('Z');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n\nTZail.\n');
+  await renderIdle(page);
+  assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.', 'paragraph:TZail.'],
+    'the left transient is gone after the render');
+  assert.strictEqual(await transientCount(page), 0);
+}, { md: '# D\n\nAlpha.\n\nOmega.\n\nTail.\n' });
 // B11 (R10): Esc in a new paragraph with text commits it, as leaving does;
 // that commit is one undo step.
 check('v3173 B11: Esc in a new paragraph with typed text keeps the text', DESKTOP, async (page, boot) => {
@@ -10388,6 +10400,25 @@ check('v3173 A8: an empty 「/待辦」 item survives Ctrl+S with the caret in i
   await page.keyboard.type('buy');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n- [ ] buy\n\nOmega.\n');
 }, { md: BASE_MD });
+// M3 (fix round 1, R28): every untouched empty list item from the "/" menu.
+for (const [query, label, skel] of [['/項目符號', '項目符號', '-'], ['/編號', '編號', '1.']]) {
+  check('v3173 A8: an empty 「/' + label + '」 item survives Ctrl+S with the caret in it', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Alpha.', 6);
+    await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type(query); await page.keyboard.press('Enter'); await renderIdle(page);
+    assert.deepStrictEqual(await blockList(page), ['heading:D', 'paragraph:Alpha.', 'li:', 'paragraph:Omega.']);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n' + skel + '\n\nOmega.\n');
+    await renderIdle(page);
+    assert.deepStrictEqual(await page.evaluate(() => {
+      const a = document.activeElement;
+      const li = a && a.closest ? a.closest('.ed-block[data-block-type="li"]') : null;
+      const surface = li ? li.querySelector('.ed-li-text') : null;
+      return { inItem: !!li, text: surface ? surface.textContent : null, list: [...document.querySelectorAll('.content .ed-block')].length };
+    }), { inItem: true, text: '', list: 4 });
+    await page.keyboard.type('buy');
+    assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\n' + skel + ' buy\n\nOmega.\n');
+  }, { md: BASE_MD });
+}
 // Review Focus 5: under a slow server one Enter still gives one paragraph —
 // the B3 replay must not open a second one beside the Enter's own.
 check('v3173 B4/B3 slow server: one Enter gives one paragraph with render delayed 1500 ms', DESKTOP, async (page, boot) => {
