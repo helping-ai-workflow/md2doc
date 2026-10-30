@@ -10803,12 +10803,13 @@ check('v3173 B2: text dragged out of a table cell into a paragraph is refused wi
   assert.strictEqual(await saveAndRead(page, boot), B2_REFUSE_MD);
 }, { md: B2_REFUSE_MD });
 // Scope pin (green before the fix): a drop inside the same block is the
-// browser's own move and commits through the burst; nothing is lost. The
+// browser's own move and commits through the burst; no text is lost. It pins
+// known defect N3 (R39, deferred): Chromium's own move writes a U+00A0. The
 // spacing and the landing point are each engine's own (measured before the
 // fix: Chromium keeps both spaces, the first as a no-break space (U+00A0),
 // and drops before the `.`; WebKit's smart delete takes one space and its
 // drop point, past the deleted word, lands after the `.`).
-check('v3173 B2: a drag inside one paragraph is the browser\'s own move', DESKTOP, async (page, boot) => {
+check('v3173 B2: same-block drag is the browser\'s own move (pins known defect N3: Chromium writes U+00A0)', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
   assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
   const want = engineOf(page) === 'webkit' ? 'Alpha charlie.bravo\n\nOmega delta.\n' : 'Alpha\u00a0 charliebravo.\n\nOmega delta.\n';
@@ -10817,17 +10818,102 @@ check('v3173 B2: a drag inside one paragraph is the browser\'s own move', DESKTO
 }, { md: B2_MD });
 // A drop that did not start in the editor (another app, the reader) is not
 // this handler's: it is left to the browser, never cancelled.
+// Dispatches a text drop that no in-document drag started on the surface
+// whose text is exactly `onText`; returns whether anything cancelled it.
+const externalTextDrop = (page, onText) => page.evaluate((t) => {
+  const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === t);
+  const dt = new DataTransfer(); dt.setData('text/plain', 'zulu');
+  const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
+  s.dispatchEvent(ev);
+  return ev.defaultPrevented;
+}, onText);
 check('v3173 B2: a text drop from outside the editor is left to the browser', DESKTOP, async (page) => {
-  const prevented = await page.evaluate(() => {
-    const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Omega delta.');
-    const dt = new DataTransfer(); dt.setData('text/plain', 'zulu');
-    const ev = new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
-    s.dispatchEvent(ev);
-    return ev.defaultPrevented;
-  });
-  assert.strictEqual(prevented, false);
+  assert.strictEqual(await externalTextDrop(page, 'Omega delta.'), false);
   assert.strictEqual(await shownNotice(page), null, 'no notice');
 }, { md: B2_MD });
+// ── fix round 1 ──
+// I1: the drag's state ends with the drag even when the move detached the
+// node it started on (a whole marked word, a whole paragraph's text).
+// Before, the next external drop was cancelled with the refusal notice.
+check('v3173 B2: after a whole bold word moves, a PNG file dropped on a paragraph is still inserted', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7);
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160),
+  ]);
+  await renderIdle(page);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\n![](assets/dot.png)\n\nOmega d**bravo**elta.\n');
+}, { md: 'Alpha **bravo** charlie.\n\nOmega delta.\n' });
+check('v3173 B2: after a whole paragraph\'s text moves, a text drop from outside is left to the browser', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Mid.', 0, 4);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 6);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha.\n\nOmega Mid.delta.\n');
+  assert.strictEqual(await externalTextDrop(page, 'Omega Mid.delta.'), false);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: 'Alpha.\n\nMid.\n\nOmega delta.\n' });
+// I2 (R37): a mark the drop point already sits inside is unwrapped, and a
+// moved mark meeting one of its kind becomes one mark; a link into a link has
+// no Markdown and is refused.
+check('v3173 B2: a bold word dropped inside a bold word joins it', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 8), 8);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\nOmega **debravolta**.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha **bravo** charlie.\n\nOmega **delta**.\n', 'one Ctrl+Z restores the file');
+}, { md: 'Alpha **bravo** charlie.\n\nOmega **delta**.\n' });
+check('v3173 B2: a bold word dropped against a bold word becomes one bold run', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 6), 6);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\nOmega **bravodelta**.\n');
+}, { md: 'Alpha **bravo** charlie.\n\nOmega **delta**.\n' });
+const B2_LINK_MD = 'See [the docs](https://example.com/) here.\n\nOmega [delta](https://x.org/).\n';
+check('v3173 B2: a link dropped inside a link is refused with a notice and nothing changes', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'See the docs here.', 4, 12);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 8), 8);
+  assert.ok(await shownNotice(page), 'a notice says why');
+  assert.deepStrictEqual(await surfaceTexts(page), ['See the docs here.', 'Omega delta.'], 'the screen is unchanged');
+  assert.strictEqual(await saveAndRead(page, boot), B2_LINK_MD);
+}, { md: B2_LINK_MD });
+// M4 (R38): a drop outside every block (here the search box) is refused; it
+// used to take the text out of the document into the box. (The sidebar and
+// its search box are drawn only for a document with a table of contents.)
+const B2_SEARCH_MD = '# D\n\n## One\n\nAlpha bravo charlie.\n\n## Two\n\nOmega delta.\n';
+check('v3173 B2: text dropped on the search box is refused with a notice and stays in the document', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  const pts = await page.evaluate(() => {
+    const r = getSelection().getRangeAt(0).getBoundingClientRect();
+    const b = document.querySelector('#doc-search-input').getBoundingClientRect();
+    return { from: [r.left + r.width / 2, r.top + r.height / 2], to: [b.left + b.width / 2, b.top + b.height / 2] };
+  });
+  await page.mouse.move(pts.from[0], pts.from[1]); await page.mouse.down();
+  await page.mouse.move(pts.to[0], pts.to[1], { steps: 12 }); await page.mouse.up();
+  await wait(300); await renderIdle(page);
+  assert.ok(await shownNotice(page), 'a notice says why');
+  assert.strictEqual(await page.inputValue('#doc-search-input'), '', 'the box took nothing');
+  assert.strictEqual(await surfaceTexts(page).then((t) => t[2]), 'Alpha bravo charlie.', 'the source keeps its text on screen');
+  assert.strictEqual(await saveAndRead(page, boot), B2_SEARCH_MD);
+}, { md: B2_SEARCH_MD });
+// M5: a transient at either end is refused (R12); its text stays and is
+// written by the next commit, as always.
+check('v3173 B2: text dragged out of a new (transient) paragraph is refused with a notice', DESKTOP, async (page, boot) => {
+  await newParaBelowAlpha(page); await page.keyboard.type('new text');
+  await selectInSurface(page, 'new text', 0, 3);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega.', 2);
+  assert.ok(await shownNotice(page), 'a notice says why');
+  assert.deepStrictEqual(await surfaceTexts(page), ['D', 'Alpha.', 'new text', 'Omega.'], 'the screen is unchanged');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nnew text\n\nOmega.\n');
+}, { md: BASE_MD });
+// M5: a heading whose whole text is moved away stays, empty (Notion keeps an
+// emptied block); the empty heading is written as its bare `#`.
+check('v3173 B2: moving a heading\'s whole text away leaves the heading empty', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Title', 0, 5);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha.', 0), 0);
+  assert.strictEqual(await saveAndRead(page, boot), '#\n\nTitleAlpha.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Title\n\nAlpha.\n', 'one Ctrl+Z restores the file');
+}, { md: '# Title\n\nAlpha.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
