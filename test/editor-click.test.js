@@ -11425,6 +11425,31 @@ check('v3173 C14: Alt+↓ inside the period popover writes the value to the popo
     'period 3 is on b only and the lane order is unchanged');
 }, { md: WAVE_LANES_MD });
 
+// ── v3173 Task 12 (N2, R36): a block after a link reference definition owns its own line ──
+// marked's lexer drops a definition without a token, so the block map used to give the
+// next block the definition's line, and a write to that block replaced the definition.
+const N2_MD = '# D\n\nA.\n\n[r]: http://u\n\nP.\n';
+check('v3173 N2: typing in a paragraph after a link reference definition leaves the definition intact', DESKTOP, async (page, boot) => {
+  await page.click((await blockByText(page, 'P.')) + ' p'); await page.keyboard.press('End');
+  await page.keyboard.type('X'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.\n\n[r]: http://u\n\nP.X\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: N2_MD });
+check('v3173 N2: the definition line is not a block on the edit page', DESKTOP, async (page, boot) => {
+  const blocks = await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) =>
+    [b.getAttribute('data-block-type'), b.textContent.replace(/\s+/g, ' ').trim().replace(/^[\d.]+ (?=D$)/, '')]));
+  assert.deepStrictEqual(blocks, [['heading', 'D'], ['paragraph', 'A.'], ['paragraph', 'P.']]);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'no byte changes');
+}, { md: N2_MD });
+check('v3173 N2: deleting the paragraph after a definition through the ⠿ menu keeps the definition', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'P.'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.\n\n[r]: http://u\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: N2_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

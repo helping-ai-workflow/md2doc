@@ -754,3 +754,20 @@ console.log('md2doc dot WASM test passed');
   await assert.rejects(() => renderDotSvg('digraph {'), /syntax error/, 'the engine error is thrown');
   console.log('md2doc renderDotSvg test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3173 N2: the edit-mode block model gives the block after a link reference
+// definition its own line, not the definition's (marked drops the definition
+// without a token); the walk still renders one part per block.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'n2.md');
+  for (const [md, want] of [
+    ['A.\n\n[r]: http://u\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 5, 5]]],
+    ['- a\n\n[r]: http://u\n\nP.\n', [['li', 1, 1], ['paragraph', 5, 5]]],
+  ]) {
+    const r = await renderMarkdown(md, fake, { editMode: true });
+    assert.deepStrictEqual(r.blocks.map((b) => [b.type, b.startLine, b.endLine]), want, 'v3173 N2: ' + JSON.stringify(md));
+    assert.strictEqual(r.parts.length, want.length, 'v3173 N2: one part per block');
+  }
+  console.log('md2doc v3173 N2 block line test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
