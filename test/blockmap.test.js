@@ -570,4 +570,60 @@ assert.deepStrictEqual(
   assert.deepStrictEqual(x, [[true, true], [false, undefined]], 'checked box; an escaped box stays text');
 }
 
+// v3173 N2: a link reference definition leaves no token, and the block after it
+// used to be given the definition's own line (a write to it replaced the
+// definition). Each row pins the lines measured from the source; marked 14.1.4.
+{
+  const rows = [
+    ['A.\n\n[r]: http://u\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 5, 5]]],
+    ['- a\n\n[r]: http://u\n\nP.\n', [['li', 1, 1], ['paragraph', 5, 5]]],
+    ['# D\n\nA.\n\n[r]: http://u\n\nP.\n', [['heading', 1, 1], ['paragraph', 3, 3], ['paragraph', 7, 7]]],
+    // a title on the same line
+    ['A.\n\n[r]: http://u "t"\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 5, 5]]],
+    // a definition over two lines (its title on the next one)
+    ['A.\n\n[r]: http://u\n"t"\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 6, 6]]],
+    // two definitions in a row
+    ['A.\n\n[r]: http://u\n[s]: http://v\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 6, 6]]],
+    // the same label twice (marked keeps the first; both are dropped)
+    ['A.\n\n[r]: http://u\n\n[r]: http://v\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 7, 7]]],
+    // at the start of the document
+    ['[r]: http://u\n\nP.\n', [['paragraph', 3, 3]]],
+    // directly after a heading, with no blank line
+    ['# H\n[r]: http://u\n\nP.\n', [['heading', 1, 1], ['paragraph', 4, 4]]],
+    // no blank line before the next paragraph
+    ['[r]: http://u\nP.\n', [['paragraph', 2, 2]]],
+    // a whitespace-only line after it (the rule's trailing \n+ stops there)
+    ['[r]: http://u\n   \nP.\n', [['paragraph', 3, 3]]],
+    // the blocks after it are a list and a fence
+    ['A.\n\n[r]: http://u\n\n- x\n- y\n\n```\nc\n```\n', [['paragraph', 1, 1], ['li', 5, 5], ['li', 6, 6], ['code', 8, 10]]],
+    // CRLF source (the lexer reads \r\n as \n)
+    ['A.\r\n\r\n[r]: http://u\r\n\r\nP.\r\n', [['paragraph', 1, 1], ['paragraph', 5, 5]]],
+    // Guards, already right before the fix: a definition inside a list item or a
+    // blockquote is inside a raw that already holds its lines; a definition-shaped
+    // line a paragraph absorbed, or one inside a fence, is not a definition.
+    ['- a\n\n  [r]: http://u\n\n  b\n- c\n\nP.\n', [['li', 1, 5], ['li', 6, 6], ['paragraph', 8, 8]]],
+    ['> [r]: http://u\n\nP.\n', [['blockquote', 1, 1], ['paragraph', 3, 3]]],
+    ['A.\n[r]: http://u\n\nP.\n', [['paragraph', 1, 2], ['paragraph', 4, 4]]],
+    ['```\n[r]: http://u\n```\n\nP.\n', [['code', 1, 3], ['paragraph', 5, 5]]],
+  ];
+  for (const [src, want] of rows) {
+    const got = buildBlockMap(src).blocks.map((b) => [b.type, b.startLine, b.endLine]);
+    assert.deepStrictEqual(got, want, 'v3173 N2: ' + JSON.stringify(src));
+    const lines = src.replace(/\r\n/g, '\n').split('\n');
+    const last = got[got.length - 1];
+    if (last[0] === 'paragraph') assert.strictEqual(lines[last[1] - 1], 'P.', 'v3173 N2: the last block names P.\'s own line in ' + JSON.stringify(src));
+  }
+}
+
+// v3173 N2b: each block carries the text lines of the definitions dropped
+// just above it, as distances above its startLine (nearest last).
+{
+  const at = (src) => buildBlockMap(src).blocks.map((b) => b.defLinesAbove || null);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n\nP.\n'), [null, [2]]);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n"t"\n\nP.\n'), [null, [3, 2]]);
+  assert.deepStrictEqual(at('[r]: http://u\n   \n[s]: http://v\n\n- x\n- y\n'), [[4, 2], null]);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n'), [null], 'a definition after the last block is given to nobody');
+  assert.deepStrictEqual(at('- a\n\n  [r]: http://u\n\n  b\n'), [null], 'one inside an item is the item\'s own line');
+}
+
 console.log('blockmap.test.js OK');

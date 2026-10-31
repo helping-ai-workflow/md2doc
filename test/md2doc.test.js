@@ -651,6 +651,10 @@ console.log('md2doc dot WASM test passed');
   assert.match(await editBody('<svg width="20" height="10"><text>x</text></svg>\n'), /data-svg-plate="1"/, 'edit mode marks a one-line svg paragraph');
   assert.doesNotMatch(await editBody('Text <svg width="5"><circle r="2"/></svg> after\n'), /data-svg-plate/, 'svg in prose is not marked');
   assert.doesNotMatch(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /inline-svg/, 'still no inline-svg wrapper in edit mode');
+  // v3.17.3 C10: an svg in a list item's own text is marked too (tight, loose, svg-only).
+  assert.match(await editBody('- item <svg width="20" height="10"><text>x</text></svg>\n- two\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'tight list item with an svg is marked');
+  assert.match(await editBody('- a\n\n  <svg width="20" height="10"><text>x</text></svg>\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'loose list item with an svg is marked');
+  assert.doesNotMatch(await editBody('- item\n- two\n'), /data-svg-plate/, 'a list without an svg is not marked');
   assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
     /inline-svg/, 'edit mode emits no inline-svg wrapper');
   console.log('md2doc inline svg wrapper test passed');
@@ -749,4 +753,21 @@ console.log('md2doc dot WASM test passed');
   assert.ok(!/<\?xml|<!DOCTYPE|<!--/.test(svg), 'no xml declaration, doctype or comment');
   await assert.rejects(() => renderDotSvg('digraph {'), /syntax error/, 'the engine error is thrown');
   console.log('md2doc renderDotSvg test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3173 N2: the edit-mode block model gives the block after a link reference
+// definition its own line, not the definition's (marked drops the definition
+// without a token); the walk still renders one part per block.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'n2.md');
+  for (const [md, want] of [
+    ['A.\n\n[r]: http://u\n\nP.\n', [['paragraph', 1, 1], ['paragraph', 5, 5]]],
+    ['- a\n\n[r]: http://u\n\nP.\n', [['li', 1, 1], ['paragraph', 5, 5]]],
+  ]) {
+    const r = await renderMarkdown(md, fake, { editMode: true });
+    assert.deepStrictEqual(r.blocks.map((b) => [b.type, b.startLine, b.endLine]), want, 'v3173 N2: ' + JSON.stringify(md));
+    assert.strictEqual(r.parts.length, want.length, 'v3173 N2: one part per block');
+  }
+  console.log('md2doc v3173 N2 block line test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

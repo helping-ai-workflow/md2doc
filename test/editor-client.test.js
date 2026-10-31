@@ -2733,16 +2733,51 @@ function countInCode(source, needle) {
   const sr = commitShortcut(same, { blockId: 1 }, ['\\## Alpha.'], ['## Alpha.']);
   assert.deepStrictEqual(sr.ops.map((o) => o !== null), [false, true]);
   assert.deepStrictEqual(same.stack.undo(sr.lines).lines, ['# D', '', '\\## Alpha.']);
+  // v3.17.3 N4 (R41): `tail` — the ordered list below, renumbered — is written
+  // by op 2 over its own lines, so one undo takes the conversion and the new
+  // numbers back together (to the literal over the old numbers).
+  const L = (id, s) => ({ id, type: 'li', startLine: s, endLine: s });
+  const o = { lines: ['Intro', '', '1. a', '2. b'], blocks: [B(0, 1, 1), L(1, 3), L(2, 4)], stack: new UndoStack() };
+  const or = commitShortcut(o, { blockId: 0 }, ['1\\. Intro'], ['1. Intro'], 'below',
+    { range: { startLine: 3, endLine: 4 }, md: '2. a\n3. b' });
+  assert.deepStrictEqual(or.lines, ['1. Intro', '2. a', '3. b']);
+  assert.strictEqual(or.tailEnd, 4);
+  const o1 = o.stack.undo(or.lines).lines;
+  assert.deepStrictEqual(o1, ['1\\. Intro', '', '1. a', '2. b'], 'one undo → the literal, old numbers');
+  assert.deepStrictEqual(o.stack.undo(o1).lines, o.lines, 'two undos → the original');
+  // A tail whose lines no longer follow op 2's range is not written.
+  const q = { lines: ['Intro', '', '1. a', '2. b'], blocks: [B(0, 1, 1), L(1, 3), L(2, 4)], stack: new UndoStack() };
+  const qr = commitShortcut(q, { blockId: 0 }, ['1\\. Intro'], ['1. Intro'], null,
+    { range: { startLine: 3, endLine: 4 }, md: '2. a\n3. b' });
+  assert.deepStrictEqual(qr.lines, ['1. Intro', '', '1. a', '2. b']);
+  assert.strictEqual(qr.tailEnd, null);
 }
 
 // -- v3.15.0 B2 fix round 1 (R58): a list item joining an adjacent list ----
 {
   const B = (id, t, s, e) => ({ id, type: t, startLine: s, endLine: e });
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above'), [2, 4]);
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below'), [4, 5]);
-  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above'), [1, 1]);
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both'), [2, 5], 'R62: both separators');
-  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null), [3, 3]);
+  // Final review I1: the blocks are passed, and a blank run is taken only when
+  // it reaches a block (the four rows above the I1 rows were lines-only).
+  const gb = [B(0, 'li', 1, 1), B(1, 'paragraph', 4, 4), B(2, 'li', 6, 6)];
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above', gb), [2, 4]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below', gb), [4, 5]);
+  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above', [B(0, 'paragraph', 1, 1)]), [1, 1]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both', gb), [2, 5], 'R62: both separators');
+  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null, [B(0, 'li', 1, 1), B(1, 'paragraph', 3, 3)]), [3, 3]);
+  // Final review I1 (R54): a run that stops at a line no block owns (a
+  // definition) is not taken: the join would make that line the item's text.
+  const gd = ['- a', '', '[r]: http://u', '', 'P', '', '- b'];
+  const gdb = [B(0, 'li', 1, 1), B(1, 'paragraph', 5, 5), B(2, 'li', 7, 7)];
+  assert.deepStrictEqual(growOverBlanks(gd, 5, 5, 'above', gdb), [5, 5], 'v3173 I1: a definition above stops the join');
+  assert.deepStrictEqual(growOverBlanks(gd, 5, 5, 'both', gdb), [5, 6], 'v3173 I1: only the side that reaches its list');
+  assert.deepStrictEqual(growOverBlanks(['P', '', '[r]: http://u', '', '- a'], 1, 1, 'below', [B(0, 'paragraph', 1, 1), B(1, 'li', 5, 5)]), [1, 1],
+    'v3173 I1: a definition below stops the join');
+  {
+    const sd = { lines: ['# D', '', 'Intro', '', '[r]: http://u', '', '- a', '- b'],
+      blocks: [B(0, 'heading', 1, 1), B(1, 'paragraph', 3, 3), B(2, 'li', 7, 7), B(3, 'li', 8, 8)], stack: new UndoStack() };
+    const rd = commitShortcut(sd, { blockId: 1 }, ['\\- Intro'], ['- Intro'], 'below');
+    assert.deepStrictEqual(rd.lines, ['# D', '', '- Intro', '', '[r]: http://u', '', '- a', '- b'], 'v3173 I1: the shortcut keeps the blank line above a definition');
+  }
   // A real paragraph below a list: op 1 the literal, op 2 the item over the
   // separator too, so the list stays tight; one undo gives the literal back
   // where it was.
@@ -2815,6 +2850,100 @@ function countInCode(source, needle) {
   assert.strictEqual(src.split('pressInGutterBand(').length - 1, 3, 'M1: declaration + router + mouseup');
   // M2: the release path's flag is cleared after its task.
   assert.ok(src.indexOf('setTimeout(() => { degradedReleaseOpened = false; }, 0);') !== -1, 'M2: cleared with setTimeout(0)');
+}
+
+// v3173 N2b (R54): the range helpers keep the link reference definition lines
+// of the range (blockmap.js's defLinesAbove) — a merge writes them after the
+// merged block, a span removal leaves them where the span was, a caller that
+// already carries them is not given a second copy, and one op is pushed.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const md = '# D\n\nA.\n\n[r]: http://u\n\nP.\n';
+  const st = () => ({ lines: md.split('\n'), blocks: buildBlockMap(md).blocks, stack: [] });
+  const run = (f) => { const x = st(); const r = f(x); return { md: r.lines.join('\n'), ops: x.stack.length }; };
+  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.P.')), { md: '# D\n\nA.P.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: merge');
+  assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 3, 7)), { md: '# D\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: span removal');
+  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.\n\n[r]: http://u\n\nQ.', { carriesGap: true })), { md: '# D\n\nA.\n\n[r]: http://u\n\nQ.\n', ops: 1 }, 'v3173 N2b: a caller that carries the gap verbatim is not doubled');
+  assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 7, 7)), { md: '# D\n\nA.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: a range that does not span it is unchanged');
+  const two = 'A.\n\n[r]: http://u\n"t"\n\n[s]: http://v\n\nP.\n\nZ.\n';
+  const s2 = { lines: two.split('\n'), blocks: buildBlockMap(two).blocks, stack: [] };
+  assert.strictEqual(commitRangeEdit(s2, 1, 8, 'A.P.').lines.join('\n'), 'A.P.\n\n[r]: http://u\n"t"\n\n[s]: http://v\n\nZ.\n', 'v3173 N2b: a two-line definition and a second one, in order');
+  const only = '[r]: http://u\n';
+  assert.strictEqual(commitInsertionAt({ lines: only.split('\n'), blocks: [], stack: [] }, null, ['X']).lines.join('\n'), 'X\n\n[r]: http://u\n', 'v3173 N2b: a definition-only file');
+  assert.strictEqual(commitInsertionAt({ lines: ['', '', ''], blocks: [], stack: [] }, null, ['X']).lines.join('\n'), 'X\n', 'v3173 N2b: a blank file is unchanged');
+}
+
+// v3173 N2b fix round 1: text the user wrote replaces its range verbatim (I1);
+// a definition-shaped line inside a fence is not the definition (M2); a kept
+// indented definition is written at column 0 (M3); a rewrite that changes
+// nothing but the definitions' absence is no op (M4).
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
+  const md = '# D\n\nA.\n\n[r]: http://u\n\nP.\n';
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n\nP.', { verbatim: true })), '# D\n\nA.\n\nP.\n', 'v3173 N2b: I1 deleted in the raw box');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n\n[r]: http://v\n\nP.', { verbatim: true })), '# D\n\nA.\n\n[r]: http://v\n\nP.\n', 'v3173 N2b: I1 edited in the raw box, one copy');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '\x60\x60\x60\n[r]: http://u\n\x60\x60\x60')), '\x60\x60\x60\n[r]: http://u\n\x60\x60\x60\n\n[r]: http://u\n\nP.\n', 'v3173 N2b: M2 a fenced copy is code');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n[r]: http://u\nP.')), '# D\n\nA.\n[r]: http://u\nP.\n\n[r]: http://u\n', 'v3173 N2b: M2 a copy inside a paragraph is text');
+  const ind = '# D\n\nA.\n\n  [r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(ind), 3, 7, '- A.\n- P.')), '# D\n\n- A.\n- P.\n\n[r]: http://u\n', 'v3173 N2b: M3 column 0 after a list');
+  assert.strictEqual(out(commitRangeRemoval(mk(ind), 3, 7)), '# D\n\n[r]: http://u\n', 'v3173 N2b: M3 removal');
+  const x = mk(md);
+  assert.strictEqual(commitRangeEdit(x, 3, 7, 'A.\n\nP.').op, null, 'v3173 N2b: M4 nothing changed');
+  assert.strictEqual(x.stack.length, 0, 'v3173 N2b: M4 no op pushed');
+}
+
+// v3173 N2b fix rounds 2–3 (R56): no scan of the new text decides whether a
+// definition is already in it. A caller whose text replays every gap line
+// verbatim says so (carriesGap) and is not doubled; every other caller has the
+// definitions appended, whatever its text looks like ('<!--', '$$' and fences
+// included). One row per flagged caller's shape, and a census of the flagged
+// callers: a new one has to be added here, with its reason in client.js.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  const recOf = (st, text) => st.blocks.find((b) => st.lines[b.startLine - 1] === text);
+  // commitBlockMove(): P. dragged above A., past a definition under a heading / a break.
+  for (const [src, mid] of [['# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n', '# H'], ['# D\n\nA.\n\n---\n[r]: http://u\n\nP.\n', '---']]) {
+    const st = mk(src);
+    assert.strictEqual(out(commitBlockMove(st, recOf(st, 'P.'), recOf(st, 'A.'))), '# D\n\nP.\n\nA.\n\n' + mid + '\n[r]: http://u\n',
+      'v3173 N2b: a block move after ' + mid + ' leaves one copy');
+  }
+  // pullListItemUp() with survivors: head + the gap sliced from lines + the re-serialized list.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\nA.\n\n[r]: http://u\n\n- x\n- y\n'), 3, 8, 'A.x\n\n[r]: http://u\n\n- y', { carriesGap: true })),
+    '# D\n\nA.x\n\n[r]: http://u\n\n- y\n', 'v3173 N2b: the pull-up shape leaves one copy');
+  // tabSpanAcrossLists(): segments with the lines between them sliced verbatim.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\n## A\n\n[r]: http://u\n\n- x\n'), 3, 7, '### A\n\n[r]: http://u\n\n  - x', { carriesGap: true })),
+    '# D\n\n### A\n\n[r]: http://u\n\n  - x\n', 'v3173 N2b: the Tab-span shape leaves one copy');
+  // changeHeadingDepthsInSpan(): the range sliced, heading lines rewritten.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\n## A\n\n[r]: http://u\n\n## P\n'), 3, 7, '### A\n\n[r]: http://u\n\n### P', { carriesGap: true })),
+    '# D\n\n### A\n\n[r]: http://u\n\n### P\n', 'v3173 N2b: the heading-depth shape leaves one copy');
+  // Unflagged text keeps the definition, whatever looks like a copy of it.
+  const md = 'A.\n\n[r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '<!--\n\n[r]: http://u\n-->\n\nA.P.')), '<!--\n\n[r]: http://u\n-->\n\nA.P.\n\n[r]: http://u\n', 'v3173 N2b: a copy in an html comment is not the definition');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '$$\n\n[r]: http://u\n$$\n\nA.P.')), '$$\n\n[r]: http://u\n$$\n\nA.P.\n\n[r]: http://u\n', 'v3173 N2b: a copy in a $$ block is not the definition');
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n'), 3, 8, 'P.\n\nA.\nx\n[r]: http://u')),
+    '# D\n\nP.\n\nA.\nx\n[r]: http://u\n\n[r]: http://u\n', 'v3173 N2b: unflagged text has the definition appended');
+  // The census: every `carriesGap:` in client.js, by enclosing function.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  // Final review I3: every site counts — `carriesGap:` with any spacing and a
+  // shorthand `carriesGap,` / `carriesGap }` — and the count is pinned per
+  // function, so a second site in an allowed function needs its row too.
+  const sites = {};
+  for (const hit of src.matchAll(/carriesGap\s*:|\bcarriesGap\s*[,}]/g)) {
+    const head = src.slice(0, hit.index);
+    const m = [...head.matchAll(/\n {2}(?:async )?function ([A-Za-z0-9_]+)\(/g)].pop();
+    const fn = m ? m[1] : '?';
+    sites[fn] = (sites[fn] || 0) + 1;
+  }
+  assert.deepStrictEqual(sites, {
+    changeHeadingDepthsInSpan: 1, commitBlockMove: 1, commitRangeRemoval: 1, commitTypingThenStructure: 1,
+    // serialize()'s two-end text (the lines between the ends sliced verbatim) and its commit
+    moveDroppedText: 2,
+    pullListItemUp: 2, retryPendingStructure: 1, tabSpanAcrossLists: 1,
+  }, 'v3173 N2b: the callers allowed to say their text carries the gap (a new one needs its reason and a row here)');
 }
 
 console.log('editor-client.test.js OK');
