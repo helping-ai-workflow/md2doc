@@ -2249,12 +2249,45 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     });
     assert.strictEqual(st.hits, 1, 'one svg hit ' + JSON.stringify(st));
     assert.strictEqual(st.inView, true, 'the hit is in the viewport ' + JSON.stringify(st));
-    assert.notStrictEqual(st.stroke, 'none', 'the hit is painted with a halo ' + JSON.stringify(st));
+    assert.strictEqual(st.stroke, 'rgb(253, 230, 138)', 'the hit halo is the light yellow (light) ' + JSON.stringify(st));
     // On a phone the search box lives in the closed drawer, so clear it from the page.
     await page.evaluate(() => document.getElementById('doc-search-clear').click());
     await wait(300);
     const after = await page.evaluate(() => ({ hits: document.querySelectorAll('.svg-hit').length, text: document.getElementById('c11t').textContent, kids: document.getElementById('c11t').childNodes.length }));
     assert.deepStrictEqual(after, { hits: 0, text: 'Zeta label', kids: 1 }, 'cleared');
+  });
+}
+// Fix round 1 (I2): the halo is painted on the svg plate, white in both themes.
+check('v3173 C11: the halo keeps its yellow in dark (the plate is white)', DESKTOP, async (page) => {
+  await gotoTheme(page, c11());
+  await page.click('#md2doc-theme-toggle'); await wait(500);
+  await page.fill('#doc-search-input', 'Zeta label');
+  await page.press('#doc-search-input', 'Enter');
+  await wait(400);
+  const st = await page.evaluate(() => { const h = document.querySelector('svg .svg-hit'); return h ? getComputedStyle(h).stroke : null; });
+  assert.strictEqual(st, 'rgb(253, 230, 138)');
+});
+// Fix round 1 (I1): a hit across two text nodes under one parent is flagged once
+// and cleared once; clearing used to unwrap the whole text element.
+const C11B_MD = ['# C11 b', '', '## Head one', '',
+  '<svg width="300" height="40" xmlns="http://www.w3.org/2000/svg"><text id="t1" x="4" y="24">Zeta <tspan font-weight="bold">bold</tspan> label</text></svg>', '',
+  '<svg width="300" height="40" xmlns="http://www.w3.org/2000/svg"><text id="t2" x="4" y="24">Omega<!-- c --> label</text></svg>', '',
+  filler('c11b', 3), ''];
+let c11bUrl = null;
+const c11b = () => c11bUrl || (c11bUrl = fixtureUrl('c11b', C11B_MD));
+// t1 flags the text and its tspan (two elements); t2 flags the one text element.
+for (const [id, q, want, flags] of [['t1', 'Zeta bold label', 'Zeta bold label', 2], ['t2', 'Omega label', 'Omega label', 1]]) {
+  check('v3173 C11: a hit across two text nodes of one svg text survives clearing (' + id + ')', DESKTOP, async (page) => {
+    await gotoTheme(page, c11b());
+    await page.fill('#doc-search-input', q);
+    await page.press('#doc-search-input', 'Enter');
+    await wait(400);
+    const hit = await page.evaluate((i) => ({ flagged: document.getElementById(i).classList.contains('svg-hit'), n: document.querySelectorAll('.svg-hit').length }), id);
+    assert.deepStrictEqual(hit, { flagged: true, n: flags });
+    await page.click('#search-next'); await wait(300);
+    await page.evaluate(() => document.getElementById('doc-search-clear').click()); await wait(300);
+    const after = await page.evaluate((i) => { const e = document.getElementById(i); return { there: !!e, text: e ? e.textContent : null, hits: document.querySelectorAll('.svg-hit').length }; }, id);
+    assert.deepStrictEqual(after, { there: true, text: want, hits: 0 });
   });
 }
 

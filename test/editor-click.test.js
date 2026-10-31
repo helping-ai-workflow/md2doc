@@ -11384,6 +11384,32 @@ check('v3173 C13: a hand-written closing sequence that is not edited stays byte-
   assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use C #\n\nTail.X\n');
 }, { md: C13_HAND });
 
+// Fix round 1 (M3): in dark only the inline svg of a list item gets the plate, not a diagram.
+const C10B_MD = '# L\n\n- item ' + C10_SVG + '\n\n  ```dot\n  digraph { a -> b }\n  ```\n';
+check('v3173 C10: a graphviz diagram in a list item gets no white plate in dark', DESKTOP, async (page, boot) => {
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  const st = await page.evaluate(() => ({
+    plain: getComputedStyle(document.querySelector('.content .ed-li-text > svg, .content .ed-li-text > p > svg')).backgroundColor,
+    graph: (() => { const g = document.querySelector('.content .ed-li-text .graphviz svg'); return g ? getComputedStyle(g).backgroundColor : null; })() }));
+  assert.deepStrictEqual(st, { plain: 'rgb(255, 255, 255)', graph: 'rgba(0, 0, 0, 0)' });
+}, { md: C10B_MD });
+// Fix round 1 (M4): an ASCII " #" after CJK text is escaped.
+check('v3173 C13: an ASCII " #" typed after a CJK heading is escaped', DESKTOP, async (page, boot) => {
+  await c13Type(page, '.content h2', ' #');
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## 標題 \\#\n\nTail.\n');
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('.ed-toolbar'); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.content h2').textContent.replace(/\s+/g, ' ').trim().replace(/^[\d.]+ /, '')), '標題 #');
+}, { md: C13_CJK });
+check('v3173 C13: a paragraph "foo #" merged into a heading keeps the #', DESKTOP, async (page, boot) => {
+  await page.click('.content p'); await page.keyboard.press('Home'); await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use Cfoo \\#\n');
+}, { md: '# Top\n\n## Use C\n\nfoo #\n' });
+check('v3173 C13: converting a paragraph ending in " #" to a heading keeps the #', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Use C #'), ['轉換成', '標題 2']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use C \\#\n');
+}, { md: '# Top\n\nUse C #\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
