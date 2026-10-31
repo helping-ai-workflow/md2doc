@@ -1243,5 +1243,63 @@ function assertNoAutoCloseFor(server, ms) {
     console.log('server: DELETE /api/asset removes only what this process uploaded — OK');
   }
 
+  // v3.17.3 (graphviz worker, R21): the Graphviz preview lays out in a worker
+  // thread, so a slow layout does not stall the server's event loop. Before,
+  // POST /api/ping waited out the whole layout. The source stays within the
+  // route's 1 MB body limit; a few thousand edges already take seconds.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-gvworker-'));
+    const mdPath = path.join(dir, 'g.md');
+    fs.writeFileSync(mdPath, '# G\n', 'utf8');
+    const srv = await createEditorServer({ files: [mdPath], clientJs: '' });
+    try {
+      let heavy = 'digraph{';
+      for (let i = 0; i < 4000; i++) heavy += 'n' + i + ' -> n' + ((i * 7 + 1) % 4000) + ';';
+      heavy += '}';
+      // Warm the worker so the timing below is about blocking, not start-up.
+      assert.strictEqual((await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph{a->b}' })).status, 200);
+      // The server shares this process with the client, so a blocked server
+      // blocks the timers here too: send both together and compare when each
+      // one came back. A blocked loop answers the ping only after the layout.
+      const t0 = Date.now();
+      let slowAt = 0;
+      let pingAt = 0;
+      const slow = req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: heavy })
+        .then((r) => { slowAt = Date.now() - t0; return r; });
+      const ping = await req(srv.port, 'POST', '/api/ping', { fileId: 0 });
+      pingAt = Date.now() - t0;
+      assert.strictEqual(ping.status, 204);
+      const done = await slow;
+      assert.strictEqual(done.status, 200, 'the heavy preview still answers');
+      assert.ok(slowAt > 500, 'guard: the heavy layout takes a while, took ' + slowAt);
+      assert.ok(pingAt < 200 && pingAt < slowAt, 'graphviz worker: /api/ping answers in <200 ms while a heavy preview lays out; ping ' + pingAt + ' ms, preview ' + slowAt + ' ms');
+      // An engine error is still 422 with the first line, and the worker survives it.
+      const bad = await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph {' });
+      assert.strictEqual(bad.status, 422);
+      assert.strictEqual((await req(srv.port, 'POST', '/api/preview', { fileId: 0, lang: 'dot', source: 'digraph{x->y}' })).status, 200);
+    } finally {
+      srv.close();
+    }
+    // A worker that goes away mid-request fails that request as a crash, and the next one starts a fresh worker.
+    const { createDotPreview } = require('../lib/editor/dot-preview.js');
+    const dp = createDotPreview();
+    try {
+      assert.ok((await dp.render('digraph{a->b}')).startsWith('<svg'));
+      const inflight = dp.render(heavy2());
+      await new Promise((r) => setTimeout(r, 100));
+      dp.close();
+      await assert.rejects(inflight, (e) => e.crashed === true);
+      assert.ok((await dp.render('digraph{c->d}')).startsWith('<svg'), 'a new worker answers after the old one died');
+    } finally {
+      dp.close();
+    }
+    function heavy2() {
+      let h = 'digraph{';
+      for (let i = 0; i < 4000; i++) h += 'n' + i + ' -> n' + ((i * 7 + 1) % 4000) + ';';
+      return h + '}';
+    }
+    console.log('server: graphviz worker keeps /api/ping responsive and recovers from a dead worker — OK');
+  }
+
   console.log('editor-server.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });

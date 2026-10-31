@@ -11410,6 +11410,21 @@ check('v3173 C13: converting a paragraph ending in " #" to a heading keeps the #
   assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use C \\#\n');
 }, { md: '# Top\n\nUse C #\n' });
 
+// ── Task 10 (C14, R14): the period popover keeps Alt+arrows to itself ──
+check('v3173 C14: Alt+↓ inside the period popover writes the value to the popover\'s own signal', DESKTOP, async (page) => {
+  await openWave(page);
+  await page.locator('[data-focus-key="brush-1"]').click(); await wait(100);
+  const p = await cellPress(page, 0, 2);
+  await page.mouse.click(p.x, p.y); await wait(300);   // lane a is now the selected lane
+  const base = await signalNow(page);
+  const [a, b, c, d] = base;
+  await laneAction(page, 1, 'ed-wave-lane-period');
+  await page.keyboard.type('3'); await wait(100);
+  await page.keyboard.press('Alt+ArrowDown'); await wait(300);
+  assert.deepStrictEqual(await signalNow(page), [a, Object.assign({}, b, { period: 3 }), c, d],
+    'period 3 is on b only and the lane order is unchanged');
+}, { md: WAVE_LANES_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
