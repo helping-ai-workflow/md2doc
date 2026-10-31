@@ -615,4 +615,15 @@ assert.deepStrictEqual(
   }
 }
 
+// v3173 N2b: each block carries the text lines of the definitions dropped
+// just above it, as distances above its startLine (nearest last).
+{
+  const at = (src) => buildBlockMap(src).blocks.map((b) => b.defLinesAbove || null);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n\nP.\n'), [null, [2]]);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n"t"\n\nP.\n'), [null, [3, 2]]);
+  assert.deepStrictEqual(at('[r]: http://u\n   \n[s]: http://v\n\n- x\n- y\n'), [[4, 2], null]);
+  assert.deepStrictEqual(at('A.\n\n[r]: http://u\n'), [null], 'a definition after the last block is given to nobody');
+  assert.deepStrictEqual(at('- a\n\n  [r]: http://u\n\n  b\n'), [null], 'one inside an item is the item\'s own line');
+}
+
 console.log('blockmap.test.js OK');

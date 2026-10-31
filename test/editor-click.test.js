@@ -11450,6 +11450,64 @@ check('v3173 N2: deleting the paragraph after a definition through the ⠿ menu 
   assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'one Ctrl+Z restores the original bytes');
 }, { md: N2_MD });
 
+// ── v3173 N2b (R54): a gesture across a definition never deletes it ──
+// The definition is no block's line, so a merge or a span delete that rewrote
+// the range from the first block to the last used to drop it unseen. A merge
+// writes the merged block and keeps the definition after it.
+const n2bUndo = async (page, boot) => {
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'one Ctrl+Z restores the original bytes');
+};
+check('v3173 N2b: Backspace at the start of the paragraph after a definition merges it and keeps the definition', DESKTOP, async (page, boot) => {
+  await page.click((await blockByText(page, 'P.')) + ' p'); await page.keyboard.press('Home');
+  await page.keyboard.press('Backspace'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.P.\n\n[r]: http://u\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+check('v3173 N2b: Delete at the end of the paragraph before a definition merges and keeps the definition', DESKTOP, async (page, boot) => {
+  await page.click((await blockByText(page, 'A.')) + ' p'); await page.keyboard.press('End');
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.P.\n\n[r]: http://u\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+check('v3173 N2b: ⠿ 刪除 over the two blocks around a definition keeps the definition', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');
+  await gutterMenu(page, await blockByText(page, 'A.'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n[r]: http://u\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+check('v3173 N2b: converting the two blocks around a definition to a list keeps the definition', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');
+  await gutterMenu(page, await blockByText(page, 'A.'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- A.\n- P.\n\n[r]: http://u\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+check('v3173 N2b: dragging the paragraph after a definition above the one before it keeps the definition', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'P.', 'A.');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nP.\n\nA.\n\n[r]: http://u\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+const N2B_PULL_MD = '# D\n\nA.\n\n[r]: http://u\n\n- x\n- y\n';
+check('v3173 N2b: Delete pulling a list item up across a definition keeps the definition once', DESKTOP, async (page, boot) => {
+  await page.click((await blockByText(page, 'A.')) + ' p'); await page.keyboard.press('End');
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.x\n\n[r]: http://u\n\n- y\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2B_PULL_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: N2B_PULL_MD });
+check('v3173 N2b: Delete pulling the only list item up across a definition keeps the definition', DESKTOP, async (page, boot) => {
+  await page.click((await blockByText(page, 'A.')) + ' p'); await page.keyboard.press('End');
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.x\n\n[r]: http://u\n');
+}, { md: '# D\n\nA.\n\n[r]: http://u\n\n- x\n' });
+check('v3173 N2b: typing into a document that holds only a definition keeps the definition', DESKTOP, async (page, boot) => {
+  await page.keyboard.type('X'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), 'X\n\n[r]: http://u\n');
+}, { md: '[r]: http://u\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

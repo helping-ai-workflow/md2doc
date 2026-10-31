@@ -2835,4 +2835,25 @@ function countInCode(source, needle) {
   assert.ok(src.indexOf('setTimeout(() => { degradedReleaseOpened = false; }, 0);') !== -1, 'M2: cleared with setTimeout(0)');
 }
 
+// v3173 N2b (R54): the range helpers keep the link reference definition lines
+// of the range (blockmap.js's defLinesAbove) — a merge writes them after the
+// merged block, a span removal leaves them where the span was, a caller that
+// already carries them is not given a second copy, and one op is pushed.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const md = '# D\n\nA.\n\n[r]: http://u\n\nP.\n';
+  const st = () => ({ lines: md.split('\n'), blocks: buildBlockMap(md).blocks, stack: [] });
+  const run = (f) => { const x = st(); const r = f(x); return { md: r.lines.join('\n'), ops: x.stack.length }; };
+  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.P.')), { md: '# D\n\nA.P.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: merge');
+  assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 3, 7)), { md: '# D\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: span removal');
+  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.\n\n[r]: http://u\n\nQ.')), { md: '# D\n\nA.\n\n[r]: http://u\n\nQ.\n', ops: 1 }, 'v3173 N2b: carried verbatim, not doubled');
+  assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 7, 7)), { md: '# D\n\nA.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: a range that does not span it is unchanged');
+  const two = 'A.\n\n[r]: http://u\n"t"\n\n[s]: http://v\n\nP.\n\nZ.\n';
+  const s2 = { lines: two.split('\n'), blocks: buildBlockMap(two).blocks, stack: [] };
+  assert.strictEqual(commitRangeEdit(s2, 1, 8, 'A.P.').lines.join('\n'), 'A.P.\n\n[r]: http://u\n"t"\n\n[s]: http://v\n\nZ.\n', 'v3173 N2b: a two-line definition and a second one, in order');
+  const only = '[r]: http://u\n';
+  assert.strictEqual(commitInsertionAt({ lines: only.split('\n'), blocks: [], stack: [] }, null, ['X']).lines.join('\n'), 'X\n\n[r]: http://u\n', 'v3173 N2b: a definition-only file');
+  assert.strictEqual(commitInsertionAt({ lines: ['', '', ''], blocks: [], stack: [] }, null, ['X']).lines.join('\n'), 'X\n', 'v3173 N2b: a blank file is unchanged');
+}
+
 console.log('editor-client.test.js OK');
