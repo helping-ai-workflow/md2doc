@@ -5344,14 +5344,16 @@ check('escape: Control+b on a selection after Ctrl+S on an untouched paragraph i
 }, { md: BASE_MD });
 // Added (D8 for a transient): Escape in a transient with text abandons it and
 // the caret goes back where Enter was pressed, so the next key is kept.
-check('escape: Escape in a typed-into transient puts the caret back and the next key is kept', DESKTOP, async (page, boot) => {
+// v3.17.3 R10: Esc in a transient with text commits it (as leaving does), so
+// the caret stays at the end of the committed text and the next key lands there.
+check('escape: Escape in a typed-into transient commits it and the next key is kept', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
   await page.keyboard.press('Enter'); await renderIdle(page);
-  await page.keyboard.type('new'); await page.keyboard.press('Escape');
-  assert.strictEqual(await transientCount(page), 0, 'the transient is gone');
-  assert.deepStrictEqual(await caretNow(page), { text: 'Alpha.', offset: 6, transient: false });
+  await page.keyboard.type('new'); await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await transientCount(page), 0, 'the transient is committed');
+  assert.deepStrictEqual(await caretNow(page), { text: 'new', offset: 3, transient: false });
   await page.keyboard.type('Y');
-  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.Y\n\nOmega.\n');
+  assert.strictEqual(await commitAndRead(page, boot), '# D\n\nAlpha.\n\nnewY\n\nOmega.\n');
 }, { md: BASE_MD });
 
 // ── v3.14.0 B4 fix round 1 ──
