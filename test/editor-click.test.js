@@ -7656,41 +7656,55 @@ for (const hold of [100, 250]) {
 }
 
 // R94 (I2, L208b): a ⠿ gesture picked while another commit renders waits for
-// it, then acts on the block it was opened on — or refuses with the notice
-// when that block was redrawn. Never on the block one paragraph up. Measured
-// at ffbdd7c: ⠿ 刪除 on `Omega.` deleted `Middle.`.
+// it, then acts on the block it was opened on. Never on the block one
+// paragraph up. Measured at ffbdd7c: ⠿ 刪除 on `Omega.` deleted `Middle.`.
 const FF_GUTTER_MD = '# D\n\nAlpha para one.\n\nMiddle.\n\nOmega.\n';
 const FF_SPLIT = '# D\n\nAlpha\n\npara one.\n\nMiddle.\n';
-// Final re-review N3: the branch that runs is the refusal — the split's
-// render replaces every block below it, so the pressed `Omega.` node is gone
-// once the render lands — and these checks pin that branch, then show the
-// next gesture on the redrawn block acts on it.
-check('gutter-settle: ⠿ 刪除 picked while a split above renders is refused with the notice and deletes nothing; the next 刪除 deletes it (R94)', DESKTOP, async (page, boot) => {
+// Final re-review N3: the split's render replaces every block below it, so
+// the pressed `Omega.` node is gone once the render lands. Until v3.17.3 that
+// branch refused with the notice and these checks pinned the refusal;
+// v3.17.3 B4 (R17) finds the block again by what it read on screen
+// (settledGestureBlock()), so they pin that it is acted on, once, and the
+// twin check below pins the refusal that remains (a block that cannot be
+// told from another one).
+check('gutter-settle: ⠿ 刪除 picked while a split above renders waits for it and deletes the block it was opened on (R94, R17)', DESKTOP, async (page, boot) => {
   await delayRender(page, 2500);
   await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
   await gutterMenu(page, await blockByText(page, 'Omega.'), '刪除');
   await wait(2500); await settleR86(page); await wait(2600); await settleR86(page);
   await page.unroute('**/api/render');
   assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
-    { notice: '文件已更新，請重試這個操作', disk: FF_SPLIT + '\nOmega.\n' }, 'refused, nothing deleted');
-  await gutterMenu(page, await blockByText(page, 'Omega.'), '刪除'); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), FF_SPLIT, 'the next 刪除 deletes the block it was opened on');
+    { notice: null, disk: FF_SPLIT }, 'deleted once the split landed, no notice');
+  await tb(page, 'undo'); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), FF_SPLIT + '\nOmega.\n', 'one 復原 brings it back: the delete was one step');
 }, { md: FF_GUTTER_MD });
-check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders is refused with the notice and opens no box; the next one edits the block (R94, L208b)', DESKTOP, async (page, boot) => {
+check('gutter-settle: ⠿ MD 原始碼 picked while a split above renders waits for it and opens the box on the block it was opened on (R94, L208b, R17)', DESKTOP, async (page, boot) => {
   await delayRender(page, 2500);
   await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
   await gutterMenu(page, await blockByText(page, 'Omega.'), 'MD 原始碼');
   await wait(2500); await settleR86(page); await wait(2600); await settleR86(page);
   await page.unroute('**/api/render');
   const rawValue = () => page.evaluate(() => { const t = document.querySelector('textarea.ed-raw'); return t ? t.value : null; });
-  assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page), disk: await saveAndRead(page, boot) },
-    { box: null, notice: '文件已更新，請重試這個操作', disk: FF_SPLIT + '\nOmega.\n' }, 'refused, no box, nothing written');
-  await gutterMenu(page, await blockByText(page, 'Omega.'), 'MD 原始碼');
-  assert.strictEqual(await rawValue(), 'Omega.', 'the next MD 原始碼 holds the block it was opened on');
+  // Read before any save: Ctrl+S would resolve the untouched box. The bytes
+  // at the end prove nothing else was written.
+  assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
+    { box: 'Omega.', notice: null }, 'the box holds the block it was opened on');
   await page.focus('textarea.ed-raw'); await page.keyboard.press('Control+End'); await page.keyboard.type('X');
   await page.keyboard.press('Control+Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), FF_SPLIT + '\nOmega.X\n');
 }, { md: FF_GUTTER_MD });
+check('gutter-settle: ⠿ 刪除 picked while a split above renders, on the first of two identical paragraphs, is refused with the notice and deletes nothing; the next 刪除 deletes it (R94, R17, R35)', DESKTOP, async (page, boot) => {
+  const SPLIT_TWINS = '# D\n\nAlpha\n\npara one.\n\nTwin.\n\nTwin.\n';
+  await delayRender(page, 2500);
+  await focusSurface(page, 'Alpha para one.', 5); await page.keyboard.press('Enter'); await wait(100);
+  await gutterMenu(page, await guMark(page, 'Twin.'), '刪除');
+  await wait(2500); await settleR86(page); await wait(2600); await settleR86(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual({ notice: await noticeText(page), disk: await saveAndRead(page, boot) },
+    { notice: '文件已更新，請重試這個操作', disk: SPLIT_TWINS }, 'refused, nothing deleted');
+  await gutterMenu(page, await guMark(page, 'Twin.'), '刪除'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\npara one.\n\nTwin.\n', 'the next 刪除 deletes one of them');
+}, { md: '# D\n\nAlpha para one.\n\nTwin.\n\nTwin.\n' });
 
 // R100 (final re-review, named risk (a)): a degraded block (blockquote,
 // fenced code) clicked while a split above it renders. The click opened the
@@ -11019,6 +11033,230 @@ check('v3173 N4: typing 1. above a 1) list joins it with 1) and renumbers it', D
   await typeAtStart(page, 'Intro', '1. ');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1) Intro\n2) a\n3) b\n');
 }, { md: '# D\n\nIntro\n\n1) a\n2) b\n' });
+
+// ── v3173 Task 8: actions during an in-flight write (B4, A12, A13) ──
+// `/api/render` requests outstanding right now (the commit in flight).
+const rendersOut = (page) => renderCounters.get(page).n;
+const conflictShown = (page) => page.evaluate(() => !!document.querySelector('.ed-conflict'));
+// Until no render has been out for 300 ms: a gesture that waited for the
+// write starts its own render a poll after that write lands, which a bare
+// renderIdle() can return just before.
+async function rendersQuiet(page) {
+  for (let i = 0; i < 8; i++) {
+    await renderIdle(page); await wait(300);
+    if (!rendersOut(page)) return;
+  }
+  throw new Error('rendersQuiet: still rendering after 8 rounds (' + rendersOut(page) + ' out)');
+}
+// ⠿ → `label` on the block holding `text`, reporting how many renders were
+// out at the moment of the menu press (the guard that the press really fell
+// inside the flight).
+async function gutterPressDuringFlight(page, text, label) {
+  const sel = await blockByText(page, text);
+  await page.hover(sel); await wait(150);
+  await page.click(sel + ' > .ed-handle'); await wait(200);
+  const out = rendersOut(page);
+  await page.evaluate((l) => [...document.querySelectorAll('.ed-handle-menu-btn')].find((b) => b.textContent.trim() === l).click(), label);
+  return out;
+}
+const B4_MD = '# D\n\nAlpha.\n\nOmega.\n\nZeta.\n';
+// R17: the ⠿ action waits for the write and then acts on the block it named;
+// Zeta. below proves it was not some other block, and one 復原 restoring it
+// proves the delete was one step.
+check('v3173 B4: ⠿ 刪除 on another block during a 1500 ms render deletes it once the render lands', DESKTOP, async (page, boot) => {
+  await delayRender(page, 1500);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await wait(100);
+  const out = await gutterPressDuringFlight(page, 'Omega.', '刪除');
+  assert.ok(out > 0, 'guard: the press fell inside the render (' + out + ' out)');
+  await rendersQuiet(page);
+  assert.deepStrictEqual({ list: await blockList(page), conflict: await conflictShown(page), notice: await noticeText(page),
+    renders: renderTotal(page) - t0 },
+  { list: ['heading:D', 'paragraph:Alpha.X', 'paragraph:Zeta.'], conflict: false, notice: null, renders: 2 },
+  'the typing\'s write, then the delete\'s');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\nZeta.\n');
+  await tb(page, 'undo'); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\nOmega.\n\nZeta.\n', 'one 復原 brings the block back');
+}, { md: B4_MD });
+// Review Focus 5: a second ⠿ action pressed while the first one waits gives
+// its own one step, after it.
+check('v3173 B4: two ⠿ 刪除 pressed during one 1500 ms render each delete their own block', DESKTOP, async (page, boot) => {
+  await delayRender(page, 1500);
+  const t0 = renderTotal(page);
+  await focusSurface(page, 'Alpha.', 6); await page.keyboard.type('X');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await wait(100);
+  const out1 = await gutterPressDuringFlight(page, 'Omega.', '刪除');
+  await wait(100);
+  const out2 = await gutterPressDuringFlight(page, 'Zeta.', '刪除');
+  assert.ok(out1 > 0 && out2 > 0, 'guard: both presses fell inside the render (' + out1 + ', ' + out2 + ')');
+  await rendersQuiet(page);
+  assert.deepStrictEqual({ list: await blockList(page), conflict: await conflictShown(page), renders: renderTotal(page) - t0 },
+    { list: ['heading:D', 'paragraph:Alpha.X'], conflict: false, renders: 3 }, 'the typing\'s write, then one per delete');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n');
+  await tb(page, 'undo'); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\nZeta.\n', 'one 復原 brings back the last delete only');
+}, { md: B4_MD });
+
+// A12: the toolbar 復原 pressed while the raw box's commit renders undoes that
+// commit once it lands — one press, one step. Omega.Y underneath is the step
+// a press that undid twice would also take back.
+for (const ms of [50, 500]) {
+  check('v3173 A12: one toolbar 復原 during the render after a raw-box Ctrl+Enter restores the file (pressed at ' + ms + ' ms)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Y');
+    await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+    await delayRender(page, 1500);
+    await gutterMenu(page, await blockByText(page, 'Alpha.'), 'MD 原始碼');
+    assert.strictEqual(await page.evaluate(() => !!document.querySelector('textarea.ed-raw')), true, 'guard: raw box open');
+    await page.focus('textarea.ed-raw');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.type('Beta\n\nGamma');
+    const t0 = renderTotal(page);
+    await page.keyboard.press('Control+Enter');
+    await wait(ms);
+    const out = rendersOut(page);
+    await page.click('[data-ed-tb="undo"]');
+    assert.ok(out > 0, 'guard: the press fell inside the render (' + out + ' out)');
+    await rendersQuiet(page);
+    assert.deepStrictEqual({ list: await blockList(page), conflict: await conflictShown(page), renders: renderTotal(page) - t0 },
+      { list: ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.Y'], conflict: false, renders: 2 }, 'the raw commit\'s write, then the undo\'s');
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.Y\n', 'one press undid the raw commit only');
+    await tb(page, 'redo'); await wait(300);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nBeta\n\nGamma\n\nOmega.Y\n', 'and 重做 brings it back in one step');
+  }, { md: BASE_MD });
+}
+// Review Focus 5: two presses during the render are two steps — the raw
+// commit, then Omega.Y — never one, never three.
+check('v3173 A12: two toolbar 復原 during the render after a raw-box Ctrl+Enter undo two steps', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Y');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+  await delayRender(page, 1500);
+  await gutterMenu(page, await blockByText(page, 'Alpha.'), 'MD 原始碼');
+  await page.focus('textarea.ed-raw');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('Beta\n\nGamma');
+  const t0 = renderTotal(page);
+  await page.keyboard.press('Control+Enter');
+  await wait(50); await page.click('[data-ed-tb="undo"]');
+  await wait(300); await page.click('[data-ed-tb="undo"]');
+  assert.ok(rendersOut(page) > 0, 'guard: both presses fell inside the render');
+  await rendersQuiet(page);
+  assert.deepStrictEqual({ list: await blockList(page), conflict: await conflictShown(page), renders: renderTotal(page) - t0 },
+    { list: ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.'], conflict: false, renders: 3 }, 'the raw commit, then one render per undo');
+  assert.strictEqual(await saveAndRead(page, boot), BASE_MD);
+}, { md: BASE_MD });
+
+// A13: a press in the diagram source (or the in-place code edit) is that
+// editor's own text selection — never a block-selection drag, never a click
+// that resolves the editor.
+const A13_MD = '# D\n\nAlpha.\n\nBravo.\n\n```dot\ndigraph { a -> b }\n```\n\nOmega.\n';
+const A13_SRC = 'textarea.ed-diagram-src';
+const A13_CODE = 'pre[data-ed-code-edit]';
+// A point inside the editor `sel` a few characters into its first line, so a
+// drag upward from it has text to select (from the very first character
+// there is none: the selection stops at the editor's start). A textarea's
+// characters have no rectangles: 24 px in on its first line is its third
+// character in both engines (measured: selectionStart 2).
+const ownEditorPoint = (page, sel) => page.evaluate((q) => {
+  const ed = document.querySelector(q);
+  let x; let y;
+  if (ed.tagName === 'TEXTAREA') {
+    const r = ed.getBoundingClientRect();
+    x = r.left + 24; y = r.top + 12;
+  } else {
+    const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT);
+    let n = w.nextNode();
+    while (n && n.data.length < 4) n = w.nextNode();
+    const rg = document.createRange(); rg.setStart(n, 3); rg.setEnd(n, 4);
+    const b = rg.getBoundingClientRect();
+    x = b.left + b.width / 2; y = b.top + b.height / 2;
+  }
+  const hit = document.elementFromPoint(x, y);
+  return { x, y, inside: !!(hit && hit.closest && hit.closest(q)) };
+}, sel);
+const textPoint = (page, t) => page.evaluate((s) => {
+  const walker = document.createTreeWalker(document.querySelector('.content'), NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const i = n.data.indexOf(s);
+    if (i === -1) continue;
+    const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + s.length);
+    const b = r.getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+  }
+  return null;
+}, t);
+// Whether blocks are selected, the editor `sel` is still open and focused,
+// and it holds a non-empty text selection (the textarea's own range, or the
+// document selection inside the code edit).
+const a13State = (page, sel) => page.evaluate((q) => {
+  const ed = document.querySelector(q);
+  let textSelected = false;
+  if (ed && ed.tagName === 'TEXTAREA') textSelected = ed.selectionEnd > ed.selectionStart;
+  else if (ed) { const s = getSelection(); textSelected = !!s.rangeCount && !s.isCollapsed && ed.contains(s.anchorNode); }
+  return { selected: document.querySelectorAll('.ed-block.ed-selected').length, open: !!ed,
+    focused: !!ed && document.activeElement === ed, textSelected };
+}, sel);
+// Press in the editor `sel`, move to `to` in steps, read the state at the
+// end of the move (before the release) and again after it.
+async function dragFromOwnEditor(page, sel, to) {
+  const from = await ownEditorPoint(page, sel);
+  assert.strictEqual(from.inside, true, 'guard: the press lands in ' + sel);
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  const steps = 12;
+  for (let i = 1; i <= steps; i++) {
+    await page.mouse.move(from.x + (to.x - from.x) * i / steps, from.y + (to.y - from.y) * i / steps);
+    await wait(30);
+  }
+  const mid = await a13State(page, sel);
+  await page.mouse.up(); await wait(400);
+  return { mid, after: await a13State(page, sel) };
+}
+// A point on the page margin left of the content, level with `sel`, that
+// is outside every block.
+const marginPoint = (page, sel) => page.evaluate((q) => {
+  const r = document.querySelector(q).getBoundingClientRect();
+  const c = document.querySelector('.content').getBoundingClientRect();
+  const x = Math.max(4, c.left - 60); const y = r.top + 12;
+  const hit = document.elementFromPoint(x, y);
+  return { x, y, inBlock: !!(hit && hit.closest && hit.closest('.ed-block')) };
+}, sel);
+const A13_WANT = { selected: 0, open: true, focused: true, textSelected: true };
+check('v3173 A13: a drag that starts in the diagram source textarea selects text, not blocks', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg'); await renderIdle(page);
+  const to = await textPoint(page, 'Alpha.');
+  assert.ok(to, 'guard: Alpha. is on screen');
+  assert.deepStrictEqual(await dragFromOwnEditor(page, A13_SRC, to), { mid: A13_WANT, after: A13_WANT });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), A13_MD, 'nothing written');
+}, { md: A13_MD });
+check('v3173 A13: a drag from the diagram source out to the page margin keeps the panel open', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg'); await renderIdle(page);
+  const to = await marginPoint(page, A13_SRC);
+  assert.strictEqual(to.inBlock, false, 'guard: the release point is outside every block');
+  assert.deepStrictEqual(await dragFromOwnEditor(page, A13_SRC, to), { mid: A13_WANT, after: A13_WANT });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), A13_MD, 'nothing written');
+}, { md: A13_MD });
+check('v3173 A13: a drag that starts in an open code edit selects text, not blocks', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the edit is open');
+  const to = await textPoint(page, 'Alpha.');
+  assert.deepStrictEqual(await dragFromOwnEditor(page, A13_CODE, to), { mid: A13_WANT, after: A13_WANT });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'nothing written');
+}, { md: CODE_MD });
+check('v3173 A13: a drag from an open code edit out to the page margin keeps the edit open', DESKTOP, async (page, boot) => {
+  await clickText(page, 'endmodule'); await renderIdle(page);
+  assert.strictEqual((await codeEditUntil(page) || {}).focused, true, 'guard: the edit is open');
+  const to = await marginPoint(page, A13_CODE);
+  assert.strictEqual(to.inBlock, false, 'guard: the release point is outside every block');
+  assert.deepStrictEqual(await dragFromOwnEditor(page, A13_CODE, to), { mid: A13_WANT, after: A13_WANT });
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'nothing written');
+}, { md: CODE_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
