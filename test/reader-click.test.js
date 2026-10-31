@@ -2228,6 +2228,36 @@ check('frozen: after a small wheel inside a nested hit the row is revealed and c
   assert.ok(row.mid >= 0.2 && row.mid <= 0.6, 'the row is centred, ' + JSON.stringify(row));
 });
 
+// ── v3173 Task 9 (C11): search finds text inside a native inline svg ──
+const C11_MD = ['# C11 doc', '', '## Head one', '',
+  '<svg id="c11" width="200" height="40" xmlns="http://www.w3.org/2000/svg"><text id="c11t" x="4" y="24">Zeta label</text></svg>', '',
+  filler('c11', 3), ''];
+let c11Url = null;
+const c11 = () => c11Url || (c11Url = fixtureUrl('c11', C11_MD));
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check('v3173 C11: search for text inside an inline svg highlights it (' + label + ')', vp, async (page) => {
+    await gotoTheme(page, c11());
+    await page.fill('#doc-search-input', 'Zeta label');
+    await page.press('#doc-search-input', 'Enter');
+    await wait(400);
+    const st = await page.evaluate(() => {
+      const hit = document.querySelector('svg .svg-hit, svg text.svg-hit');
+      const r = hit ? hit.getBoundingClientRect() : null;
+      const cs = hit ? getComputedStyle(hit) : null;
+      return { hits: document.querySelectorAll('svg .svg-hit').length, inView: !!r && r.top >= 0 && r.bottom <= innerHeight && r.right <= innerWidth,
+        stroke: cs ? cs.stroke : null, text: hit ? hit.textContent : null };
+    });
+    assert.strictEqual(st.hits, 1, 'one svg hit ' + JSON.stringify(st));
+    assert.strictEqual(st.inView, true, 'the hit is in the viewport ' + JSON.stringify(st));
+    assert.notStrictEqual(st.stroke, 'none', 'the hit is painted with a halo ' + JSON.stringify(st));
+    // On a phone the search box lives in the closed drawer, so clear it from the page.
+    await page.evaluate(() => document.getElementById('doc-search-clear').click());
+    await wait(300);
+    const after = await page.evaluate(() => ({ hits: document.querySelectorAll('.svg-hit').length, text: document.getElementById('c11t').textContent, kids: document.getElementById('c11t').childNodes.length }));
+    assert.deepStrictEqual(after, { hits: 0, text: 'Zeta label', kids: 1 }, 'cleared');
+  });
+}
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

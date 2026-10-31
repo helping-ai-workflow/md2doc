@@ -651,6 +651,10 @@ console.log('md2doc dot WASM test passed');
   assert.match(await editBody('<svg width="20" height="10"><text>x</text></svg>\n'), /data-svg-plate="1"/, 'edit mode marks a one-line svg paragraph');
   assert.doesNotMatch(await editBody('Text <svg width="5"><circle r="2"/></svg> after\n'), /data-svg-plate/, 'svg in prose is not marked');
   assert.doesNotMatch(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /inline-svg/, 'still no inline-svg wrapper in edit mode');
+  // v3.17.3 C10: an svg in a list item's own text is marked too (tight, loose, svg-only).
+  assert.match(await editBody('- item <svg width="20" height="10"><text>x</text></svg>\n- two\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'tight list item with an svg is marked');
+  assert.match(await editBody('- a\n\n  <svg width="20" height="10"><text>x</text></svg>\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'loose list item with an svg is marked');
+  assert.doesNotMatch(await editBody('- item\n- two\n'), /data-svg-plate/, 'a list without an svg is not marked');
   assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
     /inline-svg/, 'edit mode emits no inline-svg wrapper');
   console.log('md2doc inline svg wrapper test passed');

@@ -11352,6 +11352,38 @@ check('v3173 A13: after dragging selected source text inside the panel, a click 
   assert.strictEqual(await saveAndRead(page, boot), A13_MD.replace(DOT_SRC, moved.value));
 }, { md: A13_MD });
 
+// ── v3173 Task 9: reader and headings (C10, C13) ──
+const C10_SVG = '<svg width="40" height="20" xmlns="http://www.w3.org/2000/svg"><text x="2" y="14">S</text></svg>';
+const C10_MD = '# L\n\n- item ' + C10_SVG + '\n- plain\n';
+check('v3173 C10: dark mode gives an inline svg in a list item a white plate on the edit page', DESKTOP, async (page, boot) => {
+  const read = () => page.evaluate(() => { const s = document.querySelector('.content .ed-li-text svg'); const cs = getComputedStyle(s); return { bg: cs.backgroundColor, ink: cs.color }; });
+  assert.strictEqual((await read()).bg, 'rgba(0, 0, 0, 0)', 'light: no plate');
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
+  assert.strictEqual(await saveAndRead(page, boot), C10_MD, 'no byte changes');
+}, { md: C10_MD });
+const C13_MD = '# Top\n\n## Use C\n\nTail.\n';
+const c13Type = async (page, sel, text) => {
+  await page.click(sel); await page.keyboard.press('End');
+  await page.keyboard.type(text); await renderIdle(page);
+};
+check('v3173 C13: typing " #" at a heading\'s end survives save and reload', DESKTOP, async (page, boot) => {
+  await c13Type(page, '.content h2', ' #');
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use C \\#\n\nTail.\n');
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('.ed-toolbar'); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.content h2').textContent.replace(/\s+/g, ' ').trim().replace(/^[\d.]+ /, '')), 'Use C #');
+}, { md: C13_MD });
+const C13_CJK = '# Top\n\n## 標題\n\nTail.\n';
+check('v3173 C13: a CJK heading ending in ＃-like text is untouched', DESKTOP, async (page, boot) => {
+  await c13Type(page, '.content h2', '＃');
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## 標題＃\n\nTail.\n');
+}, { md: C13_CJK });
+const C13_HAND = '# Top\n\n## Use C #\n\nTail.\n';
+check('v3173 C13: a hand-written closing sequence that is not edited stays byte-identical', DESKTOP, async (page, boot) => {
+  await c13Type(page, '.content p', 'X');
+  assert.strictEqual(await saveAndRead(page, boot), '# Top\n\n## Use C #\n\nTail.X\n');
+}, { md: C13_HAND });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
