@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { definitionCanStartAt, transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -2846,7 +2846,7 @@ function countInCode(source, needle) {
   const run = (f) => { const x = st(); const r = f(x); return { md: r.lines.join('\n'), ops: x.stack.length }; };
   assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.P.')), { md: '# D\n\nA.P.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: merge');
   assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 3, 7)), { md: '# D\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: span removal');
-  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.\n\n[r]: http://u\n\nQ.')), { md: '# D\n\nA.\n\n[r]: http://u\n\nQ.\n', ops: 1 }, 'v3173 N2b: carried verbatim, not doubled');
+  assert.deepStrictEqual(run((x) => commitRangeEdit(x, 3, 7, 'A.\n\n[r]: http://u\n\nQ.', { carriesGap: true })), { md: '# D\n\nA.\n\n[r]: http://u\n\nQ.\n', ops: 1 }, 'v3173 N2b: a caller that carries the gap verbatim is not doubled');
   assert.deepStrictEqual(run((x) => commitRangeRemoval(x, 7, 7)), { md: '# D\n\nA.\n\n[r]: http://u\n', ops: 1 }, 'v3173 N2b: a range that does not span it is unchanged');
   const two = 'A.\n\n[r]: http://u\n"t"\n\n[s]: http://v\n\nP.\n\nZ.\n';
   const s2 = { lines: two.split('\n'), blocks: buildBlockMap(two).blocks, stack: [] };
@@ -2877,51 +2877,49 @@ function countInCode(source, needle) {
   assert.strictEqual(x.stack.length, 0, 'v3173 N2b: M4 no op pushed');
 }
 
-// v3173 N2b fix round 2: a definition right under an ATX heading or a thematic
-// break is carried by a block move verbatim and is recognised as carried (no
-// second copy); definitionCanStartAt() agrees with marked (via blockmap.js)
-// in the direction that matters — it never calls a line a definition that
-// marked reads as text — over a seeded corpus, and on the shapes marked
-// accepts a definition after.
+// v3173 N2b fix rounds 2–3 (R56): no scan of the new text decides whether a
+// definition is already in it. A caller whose text replays every gap line
+// verbatim says so (carriesGap) and is not doubled; every other caller has the
+// definitions appended, whatever its text looks like ('<!--', '$$' and fences
+// included). One row per flagged caller's shape, and a census of the flagged
+// callers: a new one has to be added here, with its reason in client.js.
 {
   const { buildBlockMap } = require('../lib/editor/blockmap.js');
   const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
   const out = (r) => (r.op === null ? null : r.lines.join('\n'));
-  const head = '# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n';
-  assert.strictEqual(out(commitRangeEdit(mk(head), 3, 8, 'P.\n\nA.\n\n# H\n[r]: http://u')), '# D\n\nP.\n\nA.\n\n# H\n[r]: http://u\n', 'v3173 N2b: after a heading, one copy');
-  const hr = '# D\n\nA.\n\n---\n[r]: http://u\n\nP.\n';
-  assert.strictEqual(out(commitRangeEdit(mk(hr), 3, 8, 'P.\n\nA.\n\n---\n[r]: http://u')), '# D\n\nP.\n\nA.\n\n---\n[r]: http://u\n', 'v3173 N2b: after a thematic break, one copy');
-  assert.strictEqual(out(commitRangeEdit(mk(head), 3, 8, 'P.\n\nA.\nx\n[r]: http://u')), '# D\n\nP.\n\nA.\nx\n[r]: http://u\n\n[r]: http://u\n', 'v3173 N2b: under paragraph text it is text, so the definition is kept');
-  const at = (src, i) => definitionCanStartAt(src.split('\n'))[i];
-  for (const [src, i] of [['[r]: u', 0], ['A.\n\n[r]: u', 2], ['# H\n[r]: u', 1], ['---\n[r]: u', 1], ['***\n[r]: u', 1],
-    ['T\n===\n[r]: u', 2], ['T\n---\n[r]: u', 2], ['\x60\x60\x60\nc\n\x60\x60\x60\n[r]: u', 3], ['    c\n[r]: u', 1],
-    ['[r]: u\n[s]: v', 1], ['[r]: u "t"\n[s]: v', 1], ['- x\n\n[r]: u', 2]]) {
-    assert.strictEqual(at(src, i), true, 'v3173 N2b: a definition can start at line ' + i + ' of ' + JSON.stringify(src));
+  const recOf = (st, text) => st.blocks.find((b) => st.lines[b.startLine - 1] === text);
+  // commitBlockMove(): P. dragged above A., past a definition under a heading / a break.
+  for (const [src, mid] of [['# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n', '# H'], ['# D\n\nA.\n\n---\n[r]: http://u\n\nP.\n', '---']]) {
+    const st = mk(src);
+    assert.strictEqual(out(commitBlockMove(st, recOf(st, 'P.'), recOf(st, 'A.'))), '# D\n\nP.\n\nA.\n\n' + mid + '\n[r]: http://u\n',
+      'v3173 N2b: a block move after ' + mid + ' leaves one copy');
   }
-  for (const [src, i] of [['A.\n[r]: u', 1], ['- x\n[r]: u', 1], ['> q\n[r]: u', 1], ['- x\n\n  [r]: u', 2], ['<div>\n[r]: u', 1],
-    ['\x60\x60\x60\n[r]: u\n\x60\x60\x60', 1], ['| a | b |\n***\n  [s]: u\n---', 2], ['[r]: u "t"\n"x"\n[s]: v', 2]]) {
-    assert.strictEqual(at(src, i), false, 'v3173 N2b: no definition at line ' + i + ' of ' + JSON.stringify(src));
+  // pullListItemUp() with survivors: head + the gap sliced from lines + the re-serialized list.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\nA.\n\n[r]: http://u\n\n- x\n- y\n'), 3, 8, 'A.x\n\n[r]: http://u\n\n- y', { carriesGap: true })),
+    '# D\n\nA.x\n\n[r]: http://u\n\n- y\n', 'v3173 N2b: the pull-up shape leaves one copy');
+  // tabSpanAcrossLists(): segments with the lines between them sliced verbatim.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\n## A\n\n[r]: http://u\n\n- x\n'), 3, 7, '### A\n\n[r]: http://u\n\n  - x', { carriesGap: true })),
+    '# D\n\n### A\n\n[r]: http://u\n\n  - x\n', 'v3173 N2b: the Tab-span shape leaves one copy');
+  // changeHeadingDepthsInSpan(): the range sliced, heading lines rewritten.
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\n## A\n\n[r]: http://u\n\n## P\n'), 3, 7, '### A\n\n[r]: http://u\n\n### P', { carriesGap: true })),
+    '# D\n\n### A\n\n[r]: http://u\n\n### P\n', 'v3173 N2b: the heading-depth shape leaves one copy');
+  // Unflagged text keeps the definition, whatever looks like a copy of it.
+  const md = 'A.\n\n[r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '<!--\n\n[r]: http://u\n-->\n\nA.P.')), '<!--\n\n[r]: http://u\n-->\n\nA.P.\n\n[r]: http://u\n', 'v3173 N2b: a copy in an html comment is not the definition');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '$$\n\n[r]: http://u\n$$\n\nA.P.')), '$$\n\n[r]: http://u\n$$\n\nA.P.\n\n[r]: http://u\n', 'v3173 N2b: a copy in a $$ block is not the definition');
+  assert.strictEqual(out(commitRangeEdit(mk('# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n'), 3, 8, 'P.\n\nA.\nx\n[r]: http://u')),
+    '# D\n\nP.\n\nA.\nx\n[r]: http://u\n\n[r]: http://u\n', 'v3173 N2b: unflagged text has the definition appended');
+  // The census: every `carriesGap:` in client.js, by enclosing function.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const fns = [];
+  for (let at = src.indexOf('carriesGap:'); at !== -1; at = src.indexOf('carriesGap:', at + 1)) {
+    const head = src.slice(0, at);
+    const m = [...head.matchAll(/\n {2}(?:async )?function ([A-Za-z0-9_]+)\(/g)].pop();
+    fns.push(m ? m[1] : '?');
   }
-  const { marked } = require('marked');
-  const defRe = marked.Lexer.rules.block.gfm.def;
-  const soup = ['A.', 'text', '', '', '', '[r]: http://u', '  [s]: http://v', '[t]: http://w "T"', '"t"', '# H', '---', '***', '===', 'T',
-    '\x60\x60\x60', '~~~', '    ind', '> q', '- x', '1. o', '  more', '<div>', '| a | b |', '|---|---|', '- - -', '--', '-', '[x]:', '\tcode'];
-  let seed = 11;
-  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor((seed / 2147483648) * n); };
-  let wrong = 0, defs = 0;
-  for (let it = 0; it < 4000; it++) {
-    const ls = [];
-    for (let j = 2 + rnd(8); j > 0; j--) ls.push(soup[rnd(soup.length)]);
-    const src = ls.concat(['', 'Z.']).join('\n') + '\n';
-    const rows = src.split('\n');
-    const can = definitionCanStartAt(rows);
-    const real = new Set();
-    for (const b of buildBlockMap(src).blocks) for (const d of b.defLinesAbove || []) real.add(b.startLine - d - 1);
-    defs += real.size;
-    rows.forEach((row, i) => { if (can[i] && defRe.test(row + '\n') && !real.has(i)) wrong++; });
-  }
-  assert.ok(defs > 500, 'v3173 N2b: the corpus holds definitions (' + defs + ')');
-  assert.strictEqual(wrong, 0, 'v3173 N2b: no line read as a definition that marked reads as text');
+  assert.deepStrictEqual([...new Set(fns)].sort(), ['changeHeadingDepthsInSpan', 'commitBlockMove', 'commitRangeRemoval',
+    'commitTypingThenStructure', 'pullListItemUp', 'retryPendingStructure', 'tabSpanAcrossLists'],
+    'v3173 N2b: the callers allowed to say their text carries the gap (a new one needs its reason and a row here)');
 }
 
 console.log('editor-client.test.js OK');
