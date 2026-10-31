@@ -11099,6 +11099,51 @@ check('v3173 B4: two ⠿ 刪除 pressed during one 1500 ms render each delete th
   await tb(page, 'undo'); await wait(300);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.X\n\nZeta.\n', 'one 復原 brings back the last delete only');
 }, { md: B4_MD });
+// Fix round 1 (R46): the re-find acts only when the block read uniquely at
+// the press AND after the write, and the write was not an undo or redo (whose
+// result is not on screen at the press). Otherwise the notice, as before.
+// (a) The reviewer's case: two `Omega.` on screen, the in-flight undo turns
+// the first back into `Alpha.`; ⠿ 刪除 on the first used to delete the
+// second, silently (measured: `# D\n\nAlpha.\n`).
+check('v3173 B4: ⠿ 刪除 on the first of two identical paragraphs while an undo renders is refused and deletes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('Shift+Home');
+  await page.keyboard.type('Omega.');
+  await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nOmega.\n\nOmega.\n', 'guard: two identical paragraphs');
+  await delayRender(page, 1500);
+  await page.click('[data-ed-tb="undo"]'); await wait(100);
+  const out = await gutterPressDuringFlight(page, 'Omega.', '刪除');
+  assert.ok(out > 0, 'guard: the press fell inside the undo\'s render (' + out + ' out)');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual({ list: await blockList(page), notice: await noticeText(page) },
+    { list: ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.'], notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.\n');
+}, { md: BASE_MD });
+// (b) Two identical paragraphs at the press, a write that is not an undo in
+// flight (the second one converted to a heading), so after it lands the
+// first is the only paragraph reading `Twin.`: refused all the same — the
+// press could not tell which one it named.
+check('v3173 B4: ⠿ 刪除 on one of two identical paragraphs while another write renders is refused and deletes nothing', DESKTOP, async (page, boot) => {
+  // 3000 ms: the two-step ⠿ menu takes about 1.3 s before the press.
+  await delayRender(page, 3000);
+  const second = await page.evaluate(() => {
+    const p = [...document.querySelectorAll('.content .ed-block[data-block-type="paragraph"]')].filter((b) => b.textContent.trim() === 'Twin.')[1];
+    p.setAttribute('data-b4-second', '1'); return '[data-b4-second="1"]';
+  });
+  await gutterMenu(page, second, ['轉換成', '標題 1']);
+  const atPress = await blockList(page);
+  const first = await guMark(page, 'Twin.');
+  const out = await gutterPressDuringFlight(page, 'Twin.', '刪除');
+  assert.ok(first && out > 0, 'guard: the press fell inside the conversion\'s render (' + out + ' out)');
+  assert.deepStrictEqual(atPress, ['heading:D', 'paragraph:Twin.', 'paragraph:Twin.', 'paragraph:End.'], 'guard: two identical paragraphs on screen at the press');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  assert.deepStrictEqual({ list: await blockList(page), notice: await noticeText(page) },
+    { list: ['heading:D', 'paragraph:Twin.', 'heading:Twin.', 'paragraph:End.'], notice: '文件已更新，請重試這個操作' });
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nTwin.\n\n# Twin.\n\nEnd.\n');
+}, { md: '# D\n\nTwin.\n\nTwin.\n\nEnd.\n' });
 
 // A12: the toolbar 復原 pressed while the raw box's commit renders undoes that
 // commit once it lands — one press, one step. Omega.Y underneath is the step
@@ -11125,6 +11170,32 @@ for (const ms of [50, 500]) {
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\nOmega.Y\n', 'one press undid the raw commit only');
     await tb(page, 'redo'); await wait(300);
     assert.strictEqual(await saveAndRead(page, boot), '# D\n\nBeta\n\nGamma\n\nOmega.Y\n', 'and 重做 brings it back in one step');
+  }, { md: BASE_MD });
+}
+// Fix round 1 (R47): the same with the keyboard's Ctrl+Z / Ctrl+Y.
+for (const ms of [50, 500]) {
+  check('v3173 A12: one Ctrl+Z during the render after a raw-box Ctrl+Enter restores the file (pressed at ' + ms + ' ms)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Omega.', 6); await page.keyboard.type('Y');
+    await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
+    await delayRender(page, 1500);
+    await gutterMenu(page, await blockByText(page, 'Alpha.'), 'MD 原始碼');
+    await page.focus('textarea.ed-raw');
+    await page.keyboard.press('Control+a');
+    await page.keyboard.type('Beta\n\nGamma');
+    const t0 = renderTotal(page);
+    await page.keyboard.press('Control+Enter');
+    await wait(ms);
+    const out = rendersOut(page);
+    const focusAtPress = await page.evaluate(() => { const a = document.activeElement; return a ? a.tagName + '.' + a.className : null; });
+    await page.keyboard.press('Control+z');
+    assert.ok(out > 0, 'guard: the press fell inside the render (' + out + ' out)');
+    await rendersQuiet(page);
+    // Measured before the fix: the press went to the box (focus is still in
+    // it) and undid nothing — `Beta` / `Gamma` stayed, one render.
+    assert.deepStrictEqual({ focusAtPress, list: await blockList(page), renders: renderTotal(page) - t0, disk: await saveAndRead(page, boot) },
+      { focusAtPress: 'TEXTAREA.ed-raw', list: ['heading:D', 'paragraph:Alpha.', 'paragraph:Omega.Y'], renders: 2, disk: '# D\n\nAlpha.\n\nOmega.Y\n' });
+    await page.keyboard.press('Control+y'); await rendersQuiet(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nBeta\n\nGamma\n\nOmega.Y\n', 'and Ctrl+Y brings it back in one step');
   }, { md: BASE_MD });
 }
 // Review Focus 5: two presses during the render are two steps — the raw
@@ -11257,6 +11328,29 @@ check('v3173 A13: a drag from an open code edit out to the page margin keeps the
   await page.keyboard.press('Escape'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'nothing written');
 }, { md: CODE_MD });
+// Fix round 1 (R47 M2): a native drag of selected source text inside the
+// textarea ends without a pointerup (Chromium sends pointercancel), so the
+// press's mark used to stay set and swallowed the next click that came with
+// no press of its own — here a synthetic click outside every block, which
+// resolves (commits) the panel.
+check('v3173 A13: after dragging selected source text inside the panel, a click outside every block still commits the panel', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg'); await renderIdle(page);
+  await diagSelect(page, 0, 7);
+  const from = await ownEditorPoint(page, A13_SRC);
+  const end = await page.evaluate(() => { const r = document.querySelector('textarea.ed-diagram-src').getBoundingClientRect(); return { x: r.right - 40, y: r.top + 12 }; });
+  await page.mouse.move(from.x, from.y); await page.mouse.down();
+  for (let i = 1; i <= 10; i++) { await page.mouse.move(from.x + (end.x - from.x) * i / 10, end.y); await wait(30); }
+  await page.mouse.up(); await wait(400);
+  const moved = await diagPanel(page);
+  assert.ok(moved && moved.value !== DOT_SRC && moved.value.replace(/\s/g, '').length === DOT_SRC.replace(/\s/g, '').length,
+    'guard: the drag moved text inside the source: ' + JSON.stringify(moved && moved.value));
+  const t0 = renderTotal(page);
+  await page.evaluate(() => document.querySelector('.content').click());
+  await rendersQuiet(page);
+  assert.deepStrictEqual({ panel: !!(await diagPanel(page)), renders: renderTotal(page) - t0 }, { panel: false, renders: 1 },
+    'the click resolved the panel and wrote it');
+  assert.strictEqual(await saveAndRead(page, boot), A13_MD.replace(DOT_SRC, moved.value));
+}, { md: A13_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
