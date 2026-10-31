@@ -10950,6 +10950,20 @@ check('v3173 A9: two adjacent lists with different bullets keep their own', DESK
   await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('new');
   assert.strictEqual(await commitAndRead(page, boot), '# D\n\n- alpha\n* charlie\n* new\n');
 }, { md: '# D\n\n- alpha\n* charlie\n' });
+// Review I1: an item moved into a list takes that list's marker — the list's
+// own items decide, never the moved item's old marker (it used to win a 1:1
+// tie and rewrite the untouched `- alpha`).
+check('v3173 A9: an item dragged into a one-item list takes that list\'s marker', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'moved', 'alpha');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nPara\n\n- moved\n- alpha\n');
+}, { md: '# D\n\n* moved\n\nPara\n\n- alpha\n' });
+check('v3173 A9: two * items dragged into a one-item - list take its marker', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'm1', 'm2'), 2, 'guard: two items selected');
+  await dragBlock(page, 'm1', 'alpha');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nPara\n\n- m1\n- m2\n- alpha\n');
+}, { md: '# D\n\n* m1\n* m2\n\nPara\n\n- alpha\n' });
 // A7 (R6): converting a paragraph into the ordered list below renumbers that
 // list, as one undo step.
 check('v3173 A7: converting a paragraph into the ordered list below renumbers it', DESKTOP, async (page, boot) => {

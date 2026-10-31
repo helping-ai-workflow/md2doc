@@ -1300,6 +1300,32 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   ], { carryOver: { 0: ['* [ ] a'] } }).md, '* [ ] a\n* [x] B');
 }
 
+// Review I1: the vote is tiered — the run's own carried items decide, then
+// its re-serialised items; an item opts.foreign() names (moved in by the
+// gesture) only when nobody else in its run has a source.
+{
+  const moved = (el) => el.getAttribute('data-block-id') === '0';
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'moved'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 0: ['* moved'], 1: ['- alpha'] }, foreign: moved }).md, '- moved\n- alpha');
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'm1'), liBlock({ id: '3' }, 'm2'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 0: ['* m1'], 3: ['* m2'], 1: ['- alpha'] },
+    foreign: (el) => el.getAttribute('data-block-id') !== '1' }).md, '- m1\n- m2\n- alpha');
+  // Carried beats re-serialised: an edited item whose source says `*` does not
+  // outvote the carried `-` items of its run on a tie.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'X'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 1: ['- alpha'] }, sourceMarker: () => '*' }).md, '- X\n- alpha');
+  // A run of moved items only keeps their own style.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'a'), liBlock({ id: '1' }, 'b'),
+  ], { carryOver: { 0: ['* a'], 1: ['* b'] }, foreign: () => true }).md, '* a\n* b');
+}
+
 // ── v3.17.3 A7 (R6): `firstOrdinal` starts the first run at that number ────
 {
   const r = serializeBlocks([
@@ -1308,6 +1334,23 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     liBlock({ id: '2', type: 'ol' }, 'b'),
   ], { carryOver: { 0: ['1. a'], 1: ['   1. k'], 2: ['2. b'] }, firstOrdinal: 9 });
   assert.strictEqual(r.md, '9. a\n   1. k\n10. b');
+  // Review M2: crossing 9 -> 10 moves the marker width from 3 to 4 columns, so
+  // a carried child and a carried hard-wrapped continuation both shift by one
+  // column (§3.4 colDelta) and the result is still ONE list with a, b at the
+  // top and k nested under a.
+  const w = serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'k'),
+    liBlock({ id: '2', type: 'ol' }, 'b'),
+  ], { carryOver: { 0: ['1. a', '   wrapped'], 1: ['   1. k'], 2: ['2. b'] }, firstOrdinal: 10 });
+  assert.strictEqual(w.md, '10. a\n    wrapped\n    1. k\n11. b');
+  const wl = marked.lexer(w.md + '\n').filter((t) => t.type === 'list');
+  assert.strictEqual(wl.length, 1, 'one list');
+  assert.deepStrictEqual(wl[0].items.map((it) => it.tokens.filter((t) => t.type !== 'list').map((t) => t.text).join('|')),
+    ['a\nwrapped', 'b']);
+  assert.deepStrictEqual(wl[0].items[0].tokens.filter((t) => t.type === 'list').map((l) => l.items.map((it) => it.text)),
+    [['k']]);
+  assert.strictEqual(wl[0].start, 10);
 }
 
 
