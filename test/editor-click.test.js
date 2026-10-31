@@ -11543,6 +11543,16 @@ check('v3173 N2b: an indented definition kept after a converted list is written 
   await gutterMenu(page, await blockByText(page, 'P.'), '刪除');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- A.\n\n[r]: http://u\n');
 }, { md: N2B_IND_MD });
+// Fix round 2: a definition right under an ATX heading is carried by a block move
+// verbatim; it is recognised as carried, so no second copy is written.
+const N2B_HEAD_MD = '# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n';
+check('v3173 N2b: dragging a block past a definition under a heading leaves one copy', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'P.', 'A.');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nP.\n\nA.\n\n# H\n[r]: http://u\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2B_HEAD_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: N2B_HEAD_MD });
 // Fix round 1 (M4): a convert that changes nothing writes nothing and moves nothing.
 check('v3173 N2b: converting the paragraphs around a definition to 文字 changes nothing', DESKTOP, async (page, boot) => {
   assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');

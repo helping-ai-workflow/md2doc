@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { definitionCanStartAt, transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -2875,6 +2875,53 @@ function countInCode(source, needle) {
   const x = mk(md);
   assert.strictEqual(commitRangeEdit(x, 3, 7, 'A.\n\nP.').op, null, 'v3173 N2b: M4 nothing changed');
   assert.strictEqual(x.stack.length, 0, 'v3173 N2b: M4 no op pushed');
+}
+
+// v3173 N2b fix round 2: a definition right under an ATX heading or a thematic
+// break is carried by a block move verbatim and is recognised as carried (no
+// second copy); definitionCanStartAt() agrees with marked (via blockmap.js)
+// in the direction that matters — it never calls a line a definition that
+// marked reads as text — over a seeded corpus, and on the shapes marked
+// accepts a definition after.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  const head = '# D\n\nA.\n\n# H\n[r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(head), 3, 8, 'P.\n\nA.\n\n# H\n[r]: http://u')), '# D\n\nP.\n\nA.\n\n# H\n[r]: http://u\n', 'v3173 N2b: after a heading, one copy');
+  const hr = '# D\n\nA.\n\n---\n[r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(hr), 3, 8, 'P.\n\nA.\n\n---\n[r]: http://u')), '# D\n\nP.\n\nA.\n\n---\n[r]: http://u\n', 'v3173 N2b: after a thematic break, one copy');
+  assert.strictEqual(out(commitRangeEdit(mk(head), 3, 8, 'P.\n\nA.\nx\n[r]: http://u')), '# D\n\nP.\n\nA.\nx\n[r]: http://u\n\n[r]: http://u\n', 'v3173 N2b: under paragraph text it is text, so the definition is kept');
+  const at = (src, i) => definitionCanStartAt(src.split('\n'))[i];
+  for (const [src, i] of [['[r]: u', 0], ['A.\n\n[r]: u', 2], ['# H\n[r]: u', 1], ['---\n[r]: u', 1], ['***\n[r]: u', 1],
+    ['T\n===\n[r]: u', 2], ['T\n---\n[r]: u', 2], ['\x60\x60\x60\nc\n\x60\x60\x60\n[r]: u', 3], ['    c\n[r]: u', 1],
+    ['[r]: u\n[s]: v', 1], ['[r]: u "t"\n[s]: v', 1], ['- x\n\n[r]: u', 2]]) {
+    assert.strictEqual(at(src, i), true, 'v3173 N2b: a definition can start at line ' + i + ' of ' + JSON.stringify(src));
+  }
+  for (const [src, i] of [['A.\n[r]: u', 1], ['- x\n[r]: u', 1], ['> q\n[r]: u', 1], ['- x\n\n  [r]: u', 2], ['<div>\n[r]: u', 1],
+    ['\x60\x60\x60\n[r]: u\n\x60\x60\x60', 1], ['| a | b |\n***\n  [s]: u\n---', 2], ['[r]: u "t"\n"x"\n[s]: v', 2]]) {
+    assert.strictEqual(at(src, i), false, 'v3173 N2b: no definition at line ' + i + ' of ' + JSON.stringify(src));
+  }
+  const { marked } = require('marked');
+  const defRe = marked.Lexer.rules.block.gfm.def;
+  const soup = ['A.', 'text', '', '', '', '[r]: http://u', '  [s]: http://v', '[t]: http://w "T"', '"t"', '# H', '---', '***', '===', 'T',
+    '\x60\x60\x60', '~~~', '    ind', '> q', '- x', '1. o', '  more', '<div>', '| a | b |', '|---|---|', '- - -', '--', '-', '[x]:', '\tcode'];
+  let seed = 11;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return Math.floor((seed / 2147483648) * n); };
+  let wrong = 0, defs = 0;
+  for (let it = 0; it < 4000; it++) {
+    const ls = [];
+    for (let j = 2 + rnd(8); j > 0; j--) ls.push(soup[rnd(soup.length)]);
+    const src = ls.concat(['', 'Z.']).join('\n') + '\n';
+    const rows = src.split('\n');
+    const can = definitionCanStartAt(rows);
+    const real = new Set();
+    for (const b of buildBlockMap(src).blocks) for (const d of b.defLinesAbove || []) real.add(b.startLine - d - 1);
+    defs += real.size;
+    rows.forEach((row, i) => { if (can[i] && defRe.test(row + '\n') && !real.has(i)) wrong++; });
+  }
+  assert.ok(defs > 500, 'v3173 N2b: the corpus holds definitions (' + defs + ')');
+  assert.strictEqual(wrong, 0, 'v3173 N2b: no line read as a definition that marked reads as text');
 }
 
 console.log('editor-client.test.js OK');
