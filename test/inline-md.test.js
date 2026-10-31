@@ -486,6 +486,24 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
     assert.strictEqual(attrDecode(m[1]), x, 'rendered alt of ' + JSON.stringify(src));
     assert.strictEqual(p(src).alt, x, 'parse back of ' + JSON.stringify(src));
   }
+  // Final review M2 (R25 / R7): a character reference in a source alt is read
+  // the way the reader shows it — numeric (decimal, hex) and the named ones
+  // amp, lt, gt, quot, apos, nbsp — and the field's text, written back, renders
+  // to that same text. An unknown name stays as written.
+  const shown = (t) => t.replace(/&(quot|amp|lt|gt|apos|nbsp|#x[0-9a-f]+|#[0-9]+);/gi, (m, n) => (
+    n[0] === '#' ? String.fromCodePoint(n[1].toLowerCase() === 'x' ? parseInt(n.slice(2), 16) : parseInt(n.slice(1), 10))
+      : { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'", nbsp: '\u00a0' }[n.toLowerCase()]));
+  for (const [srcAlt, field] of [['a &lt; b', 'a < b'], ['&gt;&quot;&apos;', '>"\''], ['x&nbsp;y', 'x\u00a0y'],
+    ['&#65;&#x42;&#X43;', 'ABC'], ['a&amp;lt;b', 'a&lt;b'], ['&bogus; &lt', '&bogus; &lt'], ['a&#96;b &#92;', 'a`b \\']]) {
+    const src = '![' + srcAlt + '](assets/a.png "T")';
+    const before = /alt="([^"]*)"/.exec(marked.parse(src));
+    assert.strictEqual(shown(before[1]), field, 'guard: the reader shows ' + JSON.stringify(field) + ' for ' + JSON.stringify(src));
+    assert.strictEqual(p(src).alt, field, 'v3173 M2: the field shows the reader\'s alt for ' + JSON.stringify(src));
+    const out = rw(src, { alt: p(src).alt + ' x' });
+    const after = /^<p><img src="assets\/a\.png" alt="([^"]*)" title="T"><\/p>\s*$/.exec(marked.parse(out));
+    assert.ok(after, 'still one image: ' + JSON.stringify(out));
+    assert.strictEqual(shown(after[1]), field + ' x', 'v3173 M2: written ' + JSON.stringify(out) + ' renders the field\'s text');
+  }
 }
 
 console.log('inline-md.test.js OK');

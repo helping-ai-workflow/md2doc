@@ -2756,11 +2756,28 @@ function countInCode(source, needle) {
 // -- v3.15.0 B2 fix round 1 (R58): a list item joining an adjacent list ----
 {
   const B = (id, t, s, e) => ({ id, type: t, startLine: s, endLine: e });
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above'), [2, 4]);
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below'), [4, 5]);
-  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above'), [1, 1]);
-  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both'), [2, 5], 'R62: both separators');
-  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null), [3, 3]);
+  // Final review I1: the blocks are passed, and a blank run is taken only when
+  // it reaches a block (the four rows above the I1 rows were lines-only).
+  const gb = [B(0, 'li', 1, 1), B(1, 'paragraph', 4, 4), B(2, 'li', 6, 6)];
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'above', gb), [2, 4]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'below', gb), [4, 5]);
+  assert.deepStrictEqual(growOverBlanks(['P'], 1, 1, 'above', [B(0, 'paragraph', 1, 1)]), [1, 1]);
+  assert.deepStrictEqual(growOverBlanks(['- a', '', '', 'P', '', '- b'], 4, 4, 'both', gb), [2, 5], 'R62: both separators');
+  assert.deepStrictEqual(growOverBlanks(['- a', '', 'P'], 3, 3, null, [B(0, 'li', 1, 1), B(1, 'paragraph', 3, 3)]), [3, 3]);
+  // Final review I1 (R54): a run that stops at a line no block owns (a
+  // definition) is not taken: the join would make that line the item's text.
+  const gd = ['- a', '', '[r]: http://u', '', 'P', '', '- b'];
+  const gdb = [B(0, 'li', 1, 1), B(1, 'paragraph', 5, 5), B(2, 'li', 7, 7)];
+  assert.deepStrictEqual(growOverBlanks(gd, 5, 5, 'above', gdb), [5, 5], 'v3173 I1: a definition above stops the join');
+  assert.deepStrictEqual(growOverBlanks(gd, 5, 5, 'both', gdb), [5, 6], 'v3173 I1: only the side that reaches its list');
+  assert.deepStrictEqual(growOverBlanks(['P', '', '[r]: http://u', '', '- a'], 1, 1, 'below', [B(0, 'paragraph', 1, 1), B(1, 'li', 5, 5)]), [1, 1],
+    'v3173 I1: a definition below stops the join');
+  {
+    const sd = { lines: ['# D', '', 'Intro', '', '[r]: http://u', '', '- a', '- b'],
+      blocks: [B(0, 'heading', 1, 1), B(1, 'paragraph', 3, 3), B(2, 'li', 7, 7), B(3, 'li', 8, 8)], stack: new UndoStack() };
+    const rd = commitShortcut(sd, { blockId: 1 }, ['\\- Intro'], ['- Intro'], 'below');
+    assert.deepStrictEqual(rd.lines, ['# D', '', '- Intro', '', '[r]: http://u', '', '- a', '- b'], 'v3173 I1: the shortcut keeps the blank line above a definition');
+  }
   // A real paragraph below a list: op 1 the literal, op 2 the item over the
   // separator too, so the list stays tight; one undo gives the literal back
   // where it was.
@@ -2911,15 +2928,22 @@ function countInCode(source, needle) {
     '# D\n\nP.\n\nA.\nx\n[r]: http://u\n\n[r]: http://u\n', 'v3173 N2b: unflagged text has the definition appended');
   // The census: every `carriesGap:` in client.js, by enclosing function.
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
-  const fns = [];
-  for (let at = src.indexOf('carriesGap:'); at !== -1; at = src.indexOf('carriesGap:', at + 1)) {
-    const head = src.slice(0, at);
+  // Final review I3: every site counts — `carriesGap:` with any spacing and a
+  // shorthand `carriesGap,` / `carriesGap }` — and the count is pinned per
+  // function, so a second site in an allowed function needs its row too.
+  const sites = {};
+  for (const hit of src.matchAll(/carriesGap\s*:|\bcarriesGap\s*[,}]/g)) {
+    const head = src.slice(0, hit.index);
     const m = [...head.matchAll(/\n {2}(?:async )?function ([A-Za-z0-9_]+)\(/g)].pop();
-    fns.push(m ? m[1] : '?');
+    const fn = m ? m[1] : '?';
+    sites[fn] = (sites[fn] || 0) + 1;
   }
-  assert.deepStrictEqual([...new Set(fns)].sort(), ['changeHeadingDepthsInSpan', 'commitBlockMove', 'commitRangeRemoval',
-    'commitTypingThenStructure', 'pullListItemUp', 'retryPendingStructure', 'tabSpanAcrossLists'],
-    'v3173 N2b: the callers allowed to say their text carries the gap (a new one needs its reason and a row here)');
+  assert.deepStrictEqual(sites, {
+    changeHeadingDepthsInSpan: 1, commitBlockMove: 1, commitRangeRemoval: 1, commitTypingThenStructure: 1,
+    // serialize()'s two-end text (the lines between the ends sliced verbatim) and its commit
+    moveDroppedText: 2,
+    pullListItemUp: 2, retryPendingStructure: 1, tabSpanAcrossLists: 1,
+  }, 'v3173 N2b: the callers allowed to say their text carries the gap (a new one needs its reason and a row here)');
 }
 
 console.log('editor-client.test.js OK');

@@ -11562,6 +11562,91 @@ check('v3173 N2b: converting the paragraphs around a definition to 文字 change
   assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'no op to undo');
 }, { md: N2_MD });
 
+// ── v3173 final review fix wave ──
+// I1 (R54): a list item made above a definition does not join the list below
+// it. The blank lines between them do not reach the list (the definition is in
+// between), so the join would eat only the first blank and make the definition
+// the new item's lazy continuation; the blank line stays and nothing joins.
+const I1_UL_MD = '# D\n\nIntro\n\n[r]: http://u\n\n- a\n- b\n';
+const I1_OL_MD = '# D\n\nIntro\n\n[r]: http://u\n\n1. a\n2. b\n';
+check('v3173 I1: typing - at the start of a paragraph above a definition and a list keeps the blank line', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Intro', '- ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- Intro\n\n[r]: http://u\n\n- a\n- b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n\\- Intro\n\n[r]: http://u\n\n- a\n- b\n', 'one Ctrl+Z shows the literal');
+}, { md: I1_UL_MD });
+check('v3173 I1: typing 1. at the start of a paragraph above a definition and an ordered list keeps the blank line', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Intro', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. Intro\n\n[r]: http://u\n\n1. a\n2. b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1\\. Intro\n\n[r]: http://u\n\n1. a\n2. b\n', 'one Ctrl+Z shows the literal');
+}, { md: I1_OL_MD });
+check('v3173 I1: converting a paragraph above a definition and a list to 項目符號列表 keeps the blank line', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- Intro\n\n[r]: http://u\n\n- a\n- b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), I1_UL_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: I1_UL_MD });
+check('v3173 I1: converting a paragraph above a definition and an ordered list to 編號列表 keeps the blank line', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Intro'), ['轉換成', '編號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. Intro\n\n[r]: http://u\n\n1. a\n2. b\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), I1_OL_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: I1_OL_MD });
+// The list above the definition: the same, on the other side (the typed
+// number stays 1., the item is not numbered into the list it does not join).
+check('v3173 I1: typing 1. at the start of a paragraph below an ordered list and a definition keeps the blank line', DESKTOP, async (page, boot) => {
+  await typeAtStart(page, 'Outro', '1. ');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n1. a\n2. b\n\n[r]: http://u\n\n1. Outro\n');
+}, { md: '# D\n\n1. a\n2. b\n\n[r]: http://u\n\nOutro\n' });
+check('v3173 I1: converting a paragraph below a list and a definition to 項目符號列表 keeps the blank line', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Outro'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- a\n- b\n\n[r]: http://u\n\n- Outro\n');
+}, { md: '# D\n\n- a\n- b\n\n[r]: http://u\n\nOutro\n' });
+// I2: the alt field opened by keyboard, then a click into body text. The click
+// is an edit's caret; the field's blur must not hand focus back to 替代文字.
+check('v3173 A1: keyboard-opened alt field, then a click in text, types into the text', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('ArrowDown'); await wait(250);
+  await page.keyboard.press('Enter'); await wait(300);
+  await page.keyboard.press('Tab'); await wait(100);
+  assert.strictEqual(await imgTbFocusLabel(page), '替代文字', 'guard: focus on 替代文字');
+  await page.keyboard.press('Enter'); await wait(400);
+  assert.strictEqual(await page.evaluate(() => document.activeElement && document.activeElement.className), 'ed-imgtb-input', 'guard: the alt field has focus');
+  await page.keyboard.type('x');
+  const box = await page.evaluate(() => { const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => e.textContent === 'Omega.'); const r = s.getBoundingClientRect(); return { x: r.left + r.width - 2, y: r.top + r.height / 2 }; });
+  await page.mouse.click(box.x, box.y); await wait(400);
+  const ae = await page.evaluate(() => { const a = document.activeElement; return { tag: a.tagName, text: (a.textContent || '').slice(0, 30) }; });
+  assert.deepStrictEqual(ae, { tag: 'P', text: 'Omega.' }, 'focus is in the clicked text');
+  await page.keyboard.type('Q'); await wait(300);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\nOmega.Q\n');
+}, IMG_OPTS);
+// M2: a character reference in a source alt is shown decoded in the field, and
+// what is written re-renders to what the field showed.
+check('v3173 A3: an alt with a character reference is shown and written as the reader shows it', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'a < b', 'the field shows the decoded alt');
+  await page.keyboard.press('End');
+  await page.keyboard.type(' x'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content img')].map((i) => i.getAttribute('alt'))), ['a < b x'], 'the image shows what the field showed');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![a < b x](assets/a.png "T")\n\nOmega.\n');
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'a < b x', 'reopened: the field shows the written text');
+}, { md: '# D\n\nAlpha.\n\n![a &lt; b](assets/a.png "T")\n\nOmega.\n', assets: { 'assets/a.png': PNG_160 } });
+// I3 (R56): a text drag across a definition writes the definition once.
+const N2B_DRAG_MD = 'Alpha bravo charlie.\n\n[r]: http://u\n\nOmega delta.\n';
+check('v3173 N2b: dragging text across a definition leaves one copy', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\n[r]: http://u\n\nOmega dbravoelta.\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2B_DRAG_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: N2B_DRAG_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
