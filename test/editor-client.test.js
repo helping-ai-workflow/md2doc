@@ -2856,4 +2856,25 @@ function countInCode(source, needle) {
   assert.strictEqual(commitInsertionAt({ lines: ['', '', ''], blocks: [], stack: [] }, null, ['X']).lines.join('\n'), 'X\n', 'v3173 N2b: a blank file is unchanged');
 }
 
+// v3173 N2b fix round 1: text the user wrote replaces its range verbatim (I1);
+// a definition-shaped line inside a fence is not the definition (M2); a kept
+// indented definition is written at column 0 (M3); a rewrite that changes
+// nothing but the definitions' absence is no op (M4).
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
+  const md = '# D\n\nA.\n\n[r]: http://u\n\nP.\n';
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n\nP.', { verbatim: true })), '# D\n\nA.\n\nP.\n', 'v3173 N2b: I1 deleted in the raw box');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n\n[r]: http://v\n\nP.', { verbatim: true })), '# D\n\nA.\n\n[r]: http://v\n\nP.\n', 'v3173 N2b: I1 edited in the raw box, one copy');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 1, 5, '\x60\x60\x60\n[r]: http://u\n\x60\x60\x60')), '\x60\x60\x60\n[r]: http://u\n\x60\x60\x60\n\n[r]: http://u\n\nP.\n', 'v3173 N2b: M2 a fenced copy is code');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 7, 'A.\n[r]: http://u\nP.')), '# D\n\nA.\n[r]: http://u\nP.\n\n[r]: http://u\n', 'v3173 N2b: M2 a copy inside a paragraph is text');
+  const ind = '# D\n\nA.\n\n  [r]: http://u\n\nP.\n';
+  assert.strictEqual(out(commitRangeEdit(mk(ind), 3, 7, '- A.\n- P.')), '# D\n\n- A.\n- P.\n\n[r]: http://u\n', 'v3173 N2b: M3 column 0 after a list');
+  assert.strictEqual(out(commitRangeRemoval(mk(ind), 3, 7)), '# D\n\n[r]: http://u\n', 'v3173 N2b: M3 removal');
+  const x = mk(md);
+  assert.strictEqual(commitRangeEdit(x, 3, 7, 'A.\n\nP.').op, null, 'v3173 N2b: M4 nothing changed');
+  assert.strictEqual(x.stack.length, 0, 'v3173 N2b: M4 no op pushed');
+}
+
 console.log('editor-client.test.js OK');

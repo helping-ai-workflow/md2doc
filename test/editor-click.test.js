@@ -11502,11 +11502,55 @@ check('v3173 N2b: Delete pulling the only list item up across a definition keeps
   await page.click((await blockByText(page, 'A.')) + ' p'); await page.keyboard.press('End');
   await page.keyboard.press('Delete'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.x\n\n[r]: http://u\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.\n\n[r]: http://u\n\n- x\n', 'one Ctrl+Z restores the original bytes');
 }, { md: '# D\n\nA.\n\n[r]: http://u\n\n- x\n' });
 check('v3173 N2b: typing into a document that holds only a definition keeps the definition', DESKTOP, async (page, boot) => {
   await page.keyboard.type('X'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), 'X\n\n[r]: http://u\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '[r]: http://u\n', 'one Ctrl+Z restores the original bytes');
 }, { md: '[r]: http://u\n' });
+// Fix round 1 (I1, R55): text typed into the raw box replaces what it covers verbatim.
+const n2bSpanRaw = async (page, value) => {
+  assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');
+  await gutterMenu(page, await blockByText(page, 'A.'), 'MD 原始碼');
+  assert.strictEqual(await page.evaluate(() => (document.querySelector('textarea.ed-raw') || {}).value), 'A.\n\n[r]: http://u\n\nP.', 'the box shows the definition');
+  await page.evaluate((v) => { const ta = document.querySelector('textarea.ed-raw'); ta.value = v; ta.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+  await page.focus('textarea.ed-raw');
+  await page.keyboard.press('Control+Enter'); await renderIdle(page);
+};
+check('v3173 N2b: deleting a definition in the raw box removes it', DESKTOP, async (page, boot) => {
+  await n2bSpanRaw(page, 'A.\n\nP.');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.\n\nP.\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+check('v3173 N2b: editing a definition in the raw box leaves one copy', DESKTOP, async (page, boot) => {
+  await n2bSpanRaw(page, 'A.\n\n[r]: http://v\n\nP.');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nA.\n\n[r]: http://v\n\nP.\n');
+  await n2bUndo(page, boot);
+}, { md: N2_MD });
+// Fix round 1 (M3): a kept indented definition is written at column 0, so the list
+// written before it cannot absorb it; deleting that list's last item keeps it.
+const N2B_IND_MD = '# D\n\nA.\n\n  [r]: http://u\n\nP.\n';
+check('v3173 N2b: an indented definition kept after a converted list is written at column 0', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');
+  await gutterMenu(page, await blockByText(page, 'A.'), ['轉換成', '項目符號列表']);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- A.\n- P.\n\n[r]: http://u\n');
+  await page.keyboard.press('Escape'); await wait(200);
+  assert.strictEqual(await page.evaluate(() => document.querySelectorAll('.ed-block.ed-selected').length), 0, 'guard: the selection is cleared');
+  await gutterMenu(page, await blockByText(page, 'P.'), '刪除');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- A.\n\n[r]: http://u\n');
+}, { md: N2B_IND_MD });
+// Fix round 1 (M4): a convert that changes nothing writes nothing and moves nothing.
+check('v3173 N2b: converting the paragraphs around a definition to 文字 changes nothing', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'A.', 'P.'), 2, 'guard: two blocks selected');
+  await gutterMenu(page, await blockByText(page, 'A.'), ['轉換成', '文字']);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'no byte changes');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), N2_MD, 'no op to undo');
+}, { md: N2_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
