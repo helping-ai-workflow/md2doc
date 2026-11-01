@@ -11737,10 +11737,11 @@ async function gutterGeometry(page, sel) {
     // renumbered as a continuation of the first — rewriting an ordinal in a
     // list the user never touched.
     //
-    // NOTE on what is NOT asserted: the serializer has always re-emitted every
-    // line inside the committed range in its canonical form ('1)' -> '1.',
-    // '*' -> '-'), pre-S1 included, because the commit unit is the whole run.
-    // The S1 regression is the ORDINAL, and that is what these pin.
+    // v3.17.3 A9 (R5): these used to pin the delimiter canonicalised as well
+    // ('1) y' -> '1. y') — the serializer wrote every line of the committed
+    // range as '1.' / '-'. It now writes each run in the style its own source
+    // lines use, so the second token keeps its ')' AND restarts at 1; the
+    // ordinal is still what these pin, and now the delimiter too.
     {
       const { srv: lsrv, url: lurl, mdPath: lmdPath } =
         await setupListDoc(['# List doc', '', '- a', '  1. x', '  1) y', '- d', '']);
@@ -11753,7 +11754,7 @@ async function gutterGeometry(page, sel) {
         await page.waitForFunction(
           () => document.querySelector('.content').textContent.includes('aZ'), { timeout: 5000 });
         const fileText = await saveAndRead(page, lmdPath);
-        assert.strictEqual(fileText, '# List doc\n\n- aZ\n  1. x\n  1. y\n- d\n',
+        assert.strictEqual(fileText, '# List doc\n\n- aZ\n  1. x\n  1) y\n- d\n',
           'I2: the second nested ORDERED token opens its own run and restarts at 1 — it must ' +
           'never be renumbered as "2." , got:\n' + JSON.stringify(fileText));
         await page.close();
@@ -11788,7 +11789,7 @@ async function gutterGeometry(page, sel) {
             () => document.querySelector('.content').textContent.includes('aZ'), { timeout: 5000 });
           const fileText = await saveAndRead(page, lmdPath);
           assert.strictEqual(fileText,
-            '# List doc\n\n- aZ\n  - b\n    1. p\n    1. q\n  - c\n- d\n',
+            '# List doc\n\n- aZ\n  - b\n    1. p\n    1) q\n  - c\n- d\n',
             'I2: a depth-2 list-start must not cut the depth-0 run short, and the depth-2 ' +
             'tokens each restart at 1, got:\n' + JSON.stringify(fileText));
           await page.close();
@@ -11809,7 +11810,7 @@ async function gutterGeometry(page, sel) {
             () => document.querySelector('.content').textContent.includes('pZ'), { timeout: 5000 });
           const fileText = await saveAndRead(page, lmdPath);
           assert.strictEqual(fileText,
-            '# List doc\n\n- a\n  - b\n    1. pZ\n    1. q\n  - c\n- d\n',
+            '# List doc\n\n- a\n  - b\n    1. pZ\n    1) q\n  - c\n- d\n',
             'I2: editing a nested list-start item must keep its 4-column indent — the span ' +
             'has to start at the OUTERMOST ancestor or the sublist de-nests, got:\n' +
             JSON.stringify(fileText));

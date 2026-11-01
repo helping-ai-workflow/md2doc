@@ -52,6 +52,9 @@ eq(cm.stripMarker([], 'paragraph').ok, false, 'no source lines is not strippable
 eq(cm.emitAs(['alpha'], 'text', {}), ['alpha'], 'to text');
 eq(cm.emitAs(['alpha'], 'h1', {}), ['# alpha'], 'to h1');
 eq(cm.emitAs(['alpha'], 'h6', {}), ['###### alpha'], 'to h6');
+eq(cm.emitAs(['Use C #'], 'h2', {}), ['## Use C \\#'], 'to h2 keeps a trailing closing-sequence-looking #');
+eq(cm.emitAs(['Use C \\#'], 'h2', {}), ['## Use C \\#'], 'to h2: an already escaped # is not escaped twice');
+eq(cm.emitAs(['C#'], 'h2', {}), ['## C#'], 'to h2: a # glued to a word is text already');
 eq(cm.emitAs(['alpha'], 'ul', {}), ['- alpha'], 'to bullet list');
 eq(cm.emitAs(['alpha'], 'ol', {}), ['1. alpha'], 'to ordered list');
 eq(cm.emitAs(['alpha'], 'task', {}), ['- [ ] alpha'], 'to task list');

@@ -23,7 +23,7 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
-Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the next one since v3.15.0, the last one since v3.17.0):
+Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the next one since v3.15.0, the next one since v3.17.0, the last one since v3.17.3):
 
 | File | Purpose | Anchor |
 |---|---|---|
@@ -33,13 +33,15 @@ Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since
 | `lib/wave-overflow.js` | Data-label width estimate (Helvetica AFM table) and the labels wider than their segment: the CLI's stderr overflow warning (`renderMarkdown`'s `warnWaveOverflow` option) and the editor's 「改每拍 K×」 suggestion. In the browser it lands at `window.__md2docWave['wave-overflow.js']` (the server's CommonJS shim) | `function overflowOf(doc)` |
 | `lib/editor/block-catalog.js` | The block catalogue behind the editor's "/" menu (＋ and the toolbar's 在上方／在下方插入 open the same menu): the 16 items in four groups (基本 / 清單 / 區塊 / 圖表), the menu filter (case-insensitive prefix match on each word of an item's label and keywords), the empty skeleton each item writes (`TABLE_SKELETON` is the one 3 × 2 table for every entry point), and the Markdown-shortcut matcher (`matchShortcut`, `shortcutLines`). Pure UMD, no DOM: `window.md2docBlockCatalog`, injected by `lib/editor/server.js` the same way as `convert-md.js`, interpolated raw into a `<script>` (so never a closing script tag in it); tested by `test/block-catalog.test.js` | `function filterSlashItems(` |
 | `lib/editor/code-edit.js` | The pure core of the editor's in-place code editing, no DOM and no editor state: the language table (`CODE_LANGS`, equal to `lib/highlight.js`'s registered list; a unit row keeps them in step) with `langLabel` / `filterLangs` / `setFenceLang` for the language chip and menu; `parseFence` / `buildFence` for the fence around the body (the fence is lengthened past any backtick run in the body, char and info string kept); `newlineWithIndent` (Enter keeps the indent) and `indentLines` (Tab / Shift+Tab); and `TextHistory`, the edit's own Ctrl+Z stack. UMD: `window.md2docCodeEdit`, injected by `lib/editor/server.js` the same way as `block-catalog.js`, so never a closing script tag in it; tested by `test/code-edit.test.js` | `function buildFence(` |
+| `lib/editor/dot-preview.js` + `lib/editor/dot-worker.js` | The Graphviz preview's worker thread: `dot-preview.js` keeps one `worker_threads` Worker alive (created on the first preview, `unref`'d while idle, recreated after a crash) and hands each source to `dot-worker.js`, which calls `renderDotSvg` off the main thread, so a large diagram's layout never blocks the editor server. An engine error comes back as an ordinary Error (the server answers 422); a dead worker is flagged `crashed` (the server answers 500). `/api/preview` is the only caller; tested by the `graphviz worker` row in `test/editor-server.test.js` | `function createDotPreview(` |
 
 **`/api/preview` is not `/api/render`.** `POST /api/render` re-renders the document with
 `renderMarkdown` and records its draw.io references with `trackDrawioRefs` (the staleness
 heartbeat reads them). `POST /api/preview` (v3.17.0) serves the diagram panel's live Graphviz
-preview of a source that is not saved yet, so it is stateless: it calls `renderDotSvg` only,
+preview of a source that is not saved yet, so it is stateless: it calls `renderDotSvg` only
+(since v3.17.3 in a worker thread, `lib/editor/dot-preview.js` / `lib/editor/dot-worker.js`),
 never `renderMarkdown` and never `trackDrawioRefs`, and it answers 200 `{svg}`, 422 `{error}`
-(the engine's first line) or 400 / 403 / 415. Do not route a preview through `/api/render`:
+(the engine's first line), 500 `{error}` (the worker died) or 400 / 403 / 415. Do not route a preview through `/api/render`:
 that would record an unsaved source's references and re-render the whole document on every keystroke.
 Mermaid previews never reach the server (`md2docTheme.renderMermaid` in the page).
 

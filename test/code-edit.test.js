@@ -84,6 +84,11 @@ assert.deepStrictEqual(ce.indentLines('a\nb', 0, 3, true), { text: 'a\nb', selSt
 // collapsed caret touches its own line
 assert.deepStrictEqual(ce.indentLines('a\nb', 3, 3, false), { text: 'a\n  b', selStart: 5, selEnd: 5 });
 assert.deepStrictEqual(ce.indentLines('a\nb', 1, 1, false), { text: '  a\nb', selStart: 3, selEnd: 3 });
+// v3.17.3 C3: a selection that starts exactly at a line's end does not touch that line
+assert.deepStrictEqual(ce.indentLines('ab\ncd', 2, 4, false), { text: 'ab\n  cd', selStart: 2, selEnd: 6 });
+assert.deepStrictEqual(ce.indentLines('  ab\n  cd', 4, 7, true), { text: '  ab\ncd', selStart: 4, selEnd: 5 });
+// ... and a collapsed caret at a line's end still touches its own line
+assert.deepStrictEqual(ce.indentLines('ab\ncd', 2, 2, false), { text: '  ab\ncd', selStart: 4, selEnd: 4 });
 
 // history
 const h = new ce.TextHistory({ text: '', selStart: 0, selEnd: 0 });

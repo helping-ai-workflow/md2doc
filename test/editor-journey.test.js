@@ -1845,6 +1845,17 @@ async function main() {
     // reachability is a layout question tracked separately, not an implicit
     // precondition of this matrix. 1000px gives every button clear margin.
     await setViewportSettled(ctx.page, { width: 1000, height: 600 });
+    // v3.17.3 T1: counts file-picker opens. Headless Chromium answers a picker
+    // with `cancel` at once, and the page now removes a cancelled picker's
+    // input (A6), so the 'image' row cannot count input[type=file] elements.
+    await ctx.page.evaluate(() => {
+      window.__edPickerOpens = 0;
+      const orig = HTMLInputElement.prototype.click;
+      HTMLInputElement.prototype.click = function (...args) {
+        if (this.type === 'file') window.__edPickerOpens += 1;
+        return orig.apply(this, args);
+      };
+    });
     // v3.15.0 T5: the 🔗 button opens the in-place URL field, not a native
     // prompt; the 'link' row answers it through its `afterPress` hook.
     if (state === 'nest') {
@@ -1923,7 +1934,8 @@ async function main() {
       marks: blocks.map((b) => Array.from(b.querySelectorAll('strong, em, del, a, code'))
         .map((e) => e.tagName + '(' + clean(e.textContent) + ')').join('+')).join(' | '),
       toolbarMenu: !!document.querySelector('.ed-toolbar-menu'),
-      filePickers: document.querySelectorAll('input[type="file"]').length,
+      // v3.17.3 T1 (was: input[type="file"] elements present): picker opens.
+      filePickers: window.__edPickerOpens || 0,
       sidebarOpen: document.body.hasAttribute('data-sidebar-open'),
       toggleExpanded: tg ? tg.getAttribute('aria-expanded') : null,
     };

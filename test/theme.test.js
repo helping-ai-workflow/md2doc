@@ -46,7 +46,8 @@ check('direct roles never claim a reader literal', () => {
   // '#ffffff' is ed-chrome's light value too; it must still rewrite to bg.
   const out = T.applyThemeTokens('  .x {\n    background: #ffffff;\n  }');
   assert.ok(out.includes('var(--md-bg)'), 'reader #ffffff still maps to bg: ' + out);
-  for (const t of direct) assert.ok(/^(ed|syn)-/.test(t.name), 'direct role names start ed- or syn-: ' + t.name);
+  // svg-hit (v3.17.3) is the one reader-side direct role: the svg plate is white in both themes.
+  for (const t of direct) assert.ok(/^(ed|syn)-/.test(t.name) || t.name === 'svg-hit', 'direct role names start ed- or syn-: ' + t.name);
 });
 check('applyThemeTokens rewrites a role literal and leaves an unknown one alone', () => {
   const out = T.applyThemeTokens('  body {\n    color: #24292e;\n    background: #FFFFFF;\n    border-color: #123456;\n  }');

@@ -1244,5 +1244,114 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   ]).md, '- \\-- -\n- \\- -- -');
 }
 
+// ── v3.17.3 A9 (R5): a run keeps the markers its own source lines use ──────
+// Re-serialising after an edit to item 2: items 1 and 3 are bystanders
+// (carried), item 2 is the edited one (re-serialised). Every item keeps the
+// list's own bullet character / ordinal delimiter, and every result still
+// re-lexes as ONE list.
+{
+  const run = (type, src) => serializeBlocks([
+    liBlock({ id: '0', type }, 'a'),
+    liBlock({ id: '1', type }, 'B'),
+    liBlock({ id: '2', type }, 'c'),
+  ], { carryOver: { 0: [src[0]], 2: [src[2]] } }).md;
+  assert.strictEqual(run('ul', ['* a', '* b', '* c']), '* a\n* B\n* c');
+  assert.strictEqual(run('ul', ['+ a', '+ b', '+ c']), '+ a\n+ B\n+ c');
+  assert.strictEqual(run('ol', ['1) a', '2) b', '3) c']), '1) a\n2) B\n3) c');
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol' }, 'B'),
+  ], { carryOver: { 0: ['1) a'] } }).md, '1) a\n2) B');
+  assert.strictEqual(marked.lexer('* a\n* B\n* c\n').filter((t) => t.type === 'list').length, 1);
+  assert.strictEqual(marked.lexer('1) a\n2) B\n3) c\n').filter((t) => t.type === 'list').length, 1);
+  // A nested `*` under a `-` parent keeps both markers — editing the parent
+  // (the child is carried) and editing the child (its own source line is
+  // what opts.sourceMarker hands back, the way client.js answers it).
+  const srcMarker = (el) => ({ 0: '-', 1: '*' })[el.getAttribute('data-block-id')];
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0', indent: 0 }, 'P'),
+    liBlock({ id: '1', indent: 1 }, 'q'),
+  ], { carryOver: { 1: ['  * q'] }, sourceMarker: srcMarker }).md, '- P\n  * q');
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0', indent: 0 }, 'p'),
+    liBlock({ id: '1', indent: 1 }, 'Q'),
+  ], { carryOver: { 0: ['- p'] }, sourceMarker: srcMarker }).md, '- p\n  * Q');
+  // A new item (no source line at all) takes its run's marker; a run below a
+  // different-marker run at the same depth keeps its own (two lists).
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'a'),
+    liBlock({ id: null }, 'new'),
+    liBlock({ id: '1' }, 'b'),
+  ], { carryOver: { 0: ['* a'], 1: ['* b'] } }).md, '* a\n* new\n* b');
+  const two = [liBlock({ id: '0' }, 'a'), el('div', {
+    class: 'ed-block', 'data-block-id': '1', 'data-block-type': 'li', 'data-list-type': 'ul',
+    'data-task': '0', 'data-indent': '0', 'data-list-start': '1',
+  }, el('div', { class: 'ed-li-text' }, 'c'))];
+  assert.strictEqual(serializeBlocks(two, { carryOver: { 0: ['- a'], 1: ['* c'] } }).md, '- a\n* c');
+  // A style the run's type cannot carry (a `*` source on an item that is now
+  // ordered) is ignored, and no source at all is the canonical marker.
+  assert.strictEqual(serializeBlocks([liBlock({ id: '0', type: 'ol' }, 'a')],
+    { sourceMarker: () => '*' }).md, '1. a');
+  assert.strictEqual(serializeBlocks([liBlock({ id: '0' }, 'a')]).md, '- a');
+  // A task item keeps its bullet character in front of the checkbox.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0', task: true }, 'a'),
+    liBlock({ id: '1', task: true, checked: true }, 'B'),
+  ], { carryOver: { 0: ['* [ ] a'] } }).md, '* [ ] a\n* [x] B');
+}
+
+// Review I1: the vote is tiered — the run's own carried items decide, then
+// its re-serialised items; an item opts.foreign() names (moved in by the
+// gesture) only when nobody else in its run has a source.
+{
+  const moved = (el) => el.getAttribute('data-block-id') === '0';
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'moved'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 0: ['* moved'], 1: ['- alpha'] }, foreign: moved }).md, '- moved\n- alpha');
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'm1'), liBlock({ id: '3' }, 'm2'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 0: ['* m1'], 3: ['* m2'], 1: ['- alpha'] },
+    foreign: (el) => el.getAttribute('data-block-id') !== '1' }).md, '- m1\n- m2\n- alpha');
+  // Carried beats re-serialised: an edited item whose source says `*` does not
+  // outvote the carried `-` items of its run on a tie.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'X'),
+    liBlock({ id: '1' }, 'alpha'),
+  ], { carryOver: { 1: ['- alpha'] }, sourceMarker: () => '*' }).md, '- X\n- alpha');
+  // A run of moved items only keeps their own style.
+  assert.strictEqual(serializeBlocks([
+    liBlock({ id: '0' }, 'a'), liBlock({ id: '1' }, 'b'),
+  ], { carryOver: { 0: ['* a'], 1: ['* b'] }, foreign: () => true }).md, '* a\n* b');
+}
+
+// ── v3.17.3 A7 (R6): `firstOrdinal` starts the first run at that number ────
+{
+  const r = serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'k'),
+    liBlock({ id: '2', type: 'ol' }, 'b'),
+  ], { carryOver: { 0: ['1. a'], 1: ['   1. k'], 2: ['2. b'] }, firstOrdinal: 9 });
+  assert.strictEqual(r.md, '9. a\n   1. k\n10. b');
+  // Review M2: crossing 9 -> 10 moves the marker width from 3 to 4 columns, so
+  // a carried child and a carried hard-wrapped continuation both shift by one
+  // column (§3.4 colDelta) and the result is still ONE list with a, b at the
+  // top and k nested under a.
+  const w = serializeBlocks([
+    liBlock({ id: '0', type: 'ol' }, 'a'),
+    liBlock({ id: '1', type: 'ol', indent: 1 }, 'k'),
+    liBlock({ id: '2', type: 'ol' }, 'b'),
+  ], { carryOver: { 0: ['1. a', '   wrapped'], 1: ['   1. k'], 2: ['2. b'] }, firstOrdinal: 10 });
+  assert.strictEqual(w.md, '10. a\n    wrapped\n    1. k\n11. b');
+  const wl = marked.lexer(w.md + '\n').filter((t) => t.type === 'list');
+  assert.strictEqual(wl.length, 1, 'one list');
+  assert.deepStrictEqual(wl[0].items.map((it) => it.tokens.filter((t) => t.type !== 'list').map((t) => t.text).join('|')),
+    ['a\nwrapped', 'b']);
+  assert.deepStrictEqual(wl[0].items[0].tokens.filter((t) => t.type === 'list').map((l) => l.items.map((it) => it.text)),
+    [['k']]);
+  assert.strictEqual(wl[0].start, 10);
+}
+
 
 console.log('list-md.test.js OK');
