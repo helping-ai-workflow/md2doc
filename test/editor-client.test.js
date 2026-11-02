@@ -2894,6 +2894,28 @@ function countInCode(source, needle) {
   assert.strictEqual(x.stack.length, 0, 'v3173 N2b: M4 no op pushed');
 }
 
+// v3174 D5 (R8): a gesture that replays some gap lines verbatim names them
+// (replayedLines, 1-indexed source lines); a definition group whose every line
+// is named is not appended again, every other group still is.
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: [] });
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  const md = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- d\n';
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 9, '- b\n\n[r]: http://u\n\n- c\n- d\n- a', { replayedLines: new Set([5, 6, 7]) })),
+    '# D\n\n- b\n\n[r]: http://u\n\n- c\n- d\n- a\n', 'v3174 D5: a replayed definition is not appended again');
+  assert.strictEqual(out(commitRangeEdit(mk(md), 3, 9, '- b\n- c\n- d\n- a', { replayedLines: new Set() })),
+    '# D\n\n- b\n- c\n- d\n- a\n\n[r]: http://u\n', 'v3174 D5: a definition not replayed is still appended');
+  // Two groups, only the first replayed: the second is appended once, the first is not.
+  const two = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n\n[s]: http://v\n\n- d\n';
+  assert.strictEqual(out(commitRangeEdit(mk(two), 3, 12, '- b\n\n[r]: http://u\n\n- c\n- d\n- a', { replayedLines: new Set([5, 6, 7]) })),
+    '# D\n\n- b\n\n[r]: http://u\n\n- c\n- d\n- a\n\n[s]: http://v\n', 'v3174 D5: only the replayed group is skipped');
+  // A group counts as replayed only when EVERY one of its lines is named.
+  const multi = '# D\n\n- a\n\n[r]: http://u\n"t"\n\n- c\n';
+  assert.strictEqual(out(commitRangeEdit(mk(multi), 3, 8, '- c\n- a', { replayedLines: new Set([5]) })),
+    '# D\n\n- c\n- a\n\n[r]: http://u\n"t"\n', 'v3174 D5: a group with a line not named is appended');
+}
+
 // v3173 N2b fix rounds 2–3 (R56): no scan of the new text decides whether a
 // definition is already in it. A caller whose text replays every gap line
 // verbatim says so (carriesGap) and is not doubled; every other caller has the
@@ -2944,6 +2966,19 @@ function countInCode(source, needle) {
     moveDroppedText: 2,
     pullListItemUp: 2, retryPendingStructure: 1, tabSpanAcrossLists: 1,
   }, 'v3173 N2b: the callers allowed to say their text carries the gap (a new one needs its reason and a row here)');
+  // v3174 D5 (R8): the same census for `replayedLines`, the per-line form of the
+  // flag. Its one caller names the gaps it slices from `lines`; the other hits
+  // are keepDefinitionLines()'s parameter and commitRangeEdit()'s pass-through.
+  const replayed = {};
+  for (const hit of src.matchAll(/replayedLines\s*:|\breplayedLines\s*[,}]/g)) {
+    const head = src.slice(0, hit.index);
+    const m = [...head.matchAll(/\n {2}(?:async )?function ([A-Za-z0-9_]+)\(/g)].pop();
+    const fn = m ? m[1] : '?';
+    replayed[fn] = (replayed[fn] || 0) + 1;
+  }
+  assert.deepStrictEqual(replayed, { moveSpanAcrossLists: 1 },
+    'v3174 D5: the callers allowed to name the lines they replay (a new one needs its reason and a row here)');
+  assert.strictEqual(src.split('opts && opts.replayedLines').length - 1, 1, 'v3174 D5: commitRangeEdit() hands the set to keepDefinitionLines() once');
 }
 
 console.log('editor-client.test.js OK');

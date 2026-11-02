@@ -11820,6 +11820,58 @@ check('v3174 D3: scope pin, 程式碼 leaves the definition directly below', DES
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nH\n```\n[r]: http://u\n\nP [link][r].\n');
 }, { md: D3_MD });
 
+// ── v3174 D5 (R8): a span moved across a definition writes it once ──
+// moveSpanAcrossLists() replays the lines between two blocks that stay
+// neighbours, and names them, so the definition among them is not appended
+// a second time after the region.
+const D5_MD = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- d\n';
+const d5Case = (label, gesture, expected) => check('v3174 D5: ' + label + ' writes the definition once', DESKTOP, async (page, boot) => {
+  await gesture(page);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), D5_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: D5_MD });
+d5Case('⠿ dragging a to the end', (page) => dragBlock(page, 'a', null),
+  '# D\n\n- b\n\n[r]: http://u\n\n- c\n- d\n- a\n');
+d5Case('⠿ dragging d before b', (page) => dragBlock(page, 'd', 'b'),
+  '# D\n\n- a\n- d\n- b\n\n[r]: http://u\n\n- c\n');
+d5Case('⠿ dragging b..c to the end', async (page) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'b', null);
+}, '# D\n\n- a\n- d\n- b\n\n[r]: http://u\n\n- c\n');
+d5Case('⠿ dragging b..c before a', async (page) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'b', 'a');
+}, '# D\n\n- b\n\n[r]: http://u\n\n- c\n- a\n- d\n');
+// Review Focus 4: the same text inside a fence is code, not the definition; the
+// replayed gap is named by line, so the fence's copy decides nothing.
+const D5_FENCE_MD = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n\n```\n[r]: http://u\n```\n';
+check('v3174 D5: a definition-looking line in a fence is not taken for the real one', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a', '[r]');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- b\n\n[r]: http://u\n\n- c\n- a\n\n```\n[r]: http://u\n```\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), D5_FENCE_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: D5_FENCE_MD });
+
+// ── v3174 D7 (R9): Tab / Shift+Tab over two lists separated by a definition ──
+// A definition is no block, so the two lists used to be one Tab group and the
+// second list's first item (no headroom) zeroed the whole batch. They are two
+// groups now, as with a paragraph between: b moves, c (a list start) cannot.
+const d7Case = (label, md, key, expected) => check('v3174 D7: ' + label, DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await page.keyboard.press(key); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z restores the original bytes');
+}, { md });
+d7Case('Tab over two lists separated by a definition indents', D5_MD, 'Tab',
+  '# D\n\n- a\n  - b\n\n[r]: http://u\n\n- c\n- d\n');
+d7Case('Shift+Tab over two lists separated by a definition outdents', '# D\n\n- a\n  - b\n\n[r]: http://u\n\n- c\n- e\n', 'Shift+Tab',
+  '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- e\n');
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
