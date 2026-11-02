@@ -11782,6 +11782,44 @@ check('v3174 D4: an external file dropped after an in-page drag that never dropp
   assert.strictEqual(await saveAndRead(page, boot), 'Top para.\n\n![pic](assets/a.png)\n\nBottom para.\n\n![](assets/' + added + ')\n');
 }, D4_OPTS);
 
+// ── v3174 D3 (R7): a converted block keeps a blank line to the non-blank line next to it ──
+// Without it a link reference definition (or a paragraph) directly below / above the
+// converted block is absorbed as a lazy line of the new paragraph / item / quote.
+const D3_MD = '# D\n\n## H\n[r]: http://u\n\nP [link][r].\n';
+const d3Headings = async (page) => page.evaluate(() => {
+  const b = [...document.querySelectorAll('.ed-block')].find((x) => x.getAttribute('data-block-type') === 'heading' && /H$/.test(x.textContent.trim()));
+  return '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]';
+});
+const d3Case = (label, expected, undoToo) => check('v3174 D3: heading + definition converted to ' + label + ' keeps the definition', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', label]);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  if (undoToo) {
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), D3_MD, 'one Ctrl+Z restores the original bytes');
+  }
+}, { md: D3_MD });
+d3Case('文字', '# D\n\nH\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('項目符號列表', '# D\n\n- H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('編號列表', '# D\n\n1. H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('待辦清單', '# D\n\n- [ ] H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('引用', '# D\n\n> H\n\n[r]: http://u\n\nP [link][r].\n', true);
+check('v3174 D3: heading directly above and below a paragraph converted to 文字', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '文字']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nP.\n\nH\n\nQ.\n');
+}, { md: '# D\n\nP.\n## H\nQ.\n' });
+check('v3174 D3: scope pin, 標題 3 leaves the definition directly below', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '標題 3']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n### H\n[r]: http://u\n\nP [link][r].\n');
+}, { md: D3_MD });
+check('v3174 D3: scope pin, 程式碼 leaves the definition directly below', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '程式碼']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nH\n```\n[r]: http://u\n\nP [link][r].\n');
+}, { md: D3_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
