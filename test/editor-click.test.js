@@ -11722,8 +11722,7 @@ const D2_PLAIN_MD = 'Alpha  \nbravo end.\n\nPlain tail.\n';
 check('v3174 D2: a fragment with a line break dropped into inline code is refused', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alphabravo end.', 3, 8);
   await dragSelectionTo(page, SURFACE_SEL, 'Omega code delta.', 8);
-  const notice = await shownNotice(page);
-  assert.ok(notice && notice.length > 0, 'the refusal notice is shown');
+  assert.strictEqual(await shownNotice(page), '這段文字無法放在這裡，原文保持不動', 'the refusal notice is shown');
   assert.strictEqual(await saveAndRead(page, boot), D2_MD, 'the file is unchanged');
   assert.deepStrictEqual(await surfaceTexts(page), ['Alphabravo end.', 'Omega code delta.']);
 }, { md: D2_MD });
@@ -11761,6 +11760,13 @@ check('v3174 D4: an in-page image drag carrying Files is refused, not uploaded',
   await wait(500); await renderIdle(page);
   const notice = await shownNotice(page);
   assert.ok(notice && notice.length > 0, 'the refusal notice is shown');
+  assert.strictEqual(await saveAndRead(page, boot), D4_MD, 'the file is unchanged');
+  assert.deepStrictEqual(fs.readdirSync(assetsDir).sort(), ['a.png'], 'nothing was copied into assets/');
+}, D4_OPTS);
+check('v3174 D4: a picture dragged with Files and dropped on itself is not uploaded', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: true, list: [['dragstart', 'img'], ['dragenter', 'img'], ['dragover', 'img'], ['drop', 'img'], ['dragend', 'img']] });
+  await wait(500); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), D4_MD, 'the file is unchanged');
   assert.deepStrictEqual(fs.readdirSync(assetsDir).sort(), ['a.png'], 'nothing was copied into assets/');
 }, D4_OPTS);
