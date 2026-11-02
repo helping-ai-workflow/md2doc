@@ -10679,7 +10679,9 @@ check('v3173 N1: Backspace at a paragraph\'s start after a tight list joins as b
 // the target's insertFromDrop, so the text was gone from both blocks. A real
 // native drag: the selection is pressed in its middle, moved in steps to the
 // left edge (+1px) of character `destOffset` of the element matching
-// `destSel` whose trimmed text is `destText`, and released. Returns the
+// `destSel` whose trimmed text is `destText` (a `destOffset` equal to the
+// text's length: the right edge (-1px) of its last character, v3.17.4 D1),
+// and released. Returns the
 // browser's own caret offset at the release point (caretPositionFromPoint /
 // caretRangeFromPoint, measured before the press), so each check pins where
 // the browser puts the drop. ──
@@ -10691,16 +10693,21 @@ async function dragSelectionTo(page, destSel, destText, destOffset) {
     const host = [...document.querySelectorAll(sel)].find((e) => e.textContent.trim() === t);
     if (!host) return null;
     const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
-    let left = o; let b = null;
+    let left = o; let b = null; let last = null; let atEnd = false;
     for (let n = w.nextNode(); n; n = w.nextNode()) {
       if (left < n.data.length) {
         const cr = document.createRange(); cr.setStart(n, left); cr.setEnd(n, left + 1);
         b = cr.getBoundingClientRect(); break;
       }
       left -= n.data.length;
+      if (n.data.length) last = n;
+    }
+    if (!b && left === 0 && last) {
+      const cr = document.createRange(); cr.setStart(last, last.data.length - 1); cr.setEnd(last, last.data.length);
+      b = cr.getBoundingClientRect(); atEnd = true;
     }
     if (!b) return null;
-    const x = b.left + 1; const y = b.top + b.height / 2;
+    const x = atEnd ? b.right - 1 : b.left + 1; const y = b.top + b.height / 2;
     let node = null; let off = 0;
     if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); if (p) { node = p.offsetNode; off = p.offset; } }
     else if (document.caretRangeFromPoint) { const p = document.caretRangeFromPoint(x, y); if (p) { node = p.startContainer; off = p.startOffset; } }
@@ -10823,18 +10830,19 @@ check('v3173 B2: text dragged out of a table cell into a paragraph is refused wi
   assert.ok(await shownNotice(page), 'a notice says why');
   assert.strictEqual(await saveAndRead(page, boot), B2_REFUSE_MD);
 }, { md: B2_REFUSE_MD });
-// Scope pin (green before the fix): a drop inside the same block is the
-// browser's own move and commits through the burst; no text is lost. It pins
-// known defect N3 (R39, deferred): Chromium's own move writes a U+00A0. The
-// spacing and the landing point are each engine's own (measured before the
-// fix: Chromium keeps both spaces, the first as a no-break space (U+00A0),
-// and drops before the `.`; WebKit's smart delete takes one space and its
-// drop point, past the deleted word, lands after the `.`).
-check('v3173 B2: same-block drag is the browser\'s own move (pins known defect N3: Chromium writes U+00A0)', DESKTOP, async (page, boot) => {
+// A drop inside the same block is the editor's own move since v3.17.4 D1
+// (R4), written by moveDroppedText() as one op, the same bytes in both
+// engines. Before, it was the browser's own move and this check pinned known
+// defect N3 (R39): measured then, Chromium kept both spaces, the first as a
+// no-break space (U+00A0), and dropped before the `.`; WebKit's smart delete
+// took one space and its drop point, past the deleted word, landed after
+// the `.`.
+check('v3173 B2: same-block drag is the editor\'s own move (v3174 D1)', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
   assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
-  const want = engineOf(page) === 'webkit' ? 'Alpha charlie.bravo\n\nOmega delta.\n' : 'Alpha\u00a0 charliebravo.\n\nOmega delta.\n';
-  assert.strictEqual(await saveAndRead(page, boot), want);
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, 'Alpha  charliebravo.\n\nOmega delta.\n');
+  assert.ok(!/\u00a0/.test(disk), 'no U+00A0 on disk');
   assert.strictEqual(await shownNotice(page), null, 'no notice');
 }, { md: B2_MD });
 // A drop that did not start in the editor (another app, the reader) is not
@@ -11648,6 +11656,61 @@ check('v3173 N2b: dragging text across a definition leaves one copy', DESKTOP, a
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), N2B_DRAG_MD, 'one Ctrl+Z restores the original bytes');
 }, { md: N2B_DRAG_MD });
+
+// ── v3.17.4 Task 1: D1 (R4) ──
+// A drag inside its own block is the editor's own move, as a drag to another
+// block is (R12): moveDroppedText() writes it as one op, so the bytes come
+// from the serializer and never from Chromium's own move, which left a
+// U+00A0 where it closed the gap. Expected bytes: the dragged text leaves
+// [from, to) and goes in at the drop offset, less the dragged length when
+// the drop is past it; nothing is collapsed, as in a cross-block move.
+check('v3174 D1: a word dragged later in its own paragraph moves with no U+00A0', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19, 'the browser drops before the `.`');
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha  charliebravo.', 'Omega delta.']);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charliebravo.\n\nOmega delta.\n');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD, 'one Ctrl+Z restores the file');
+}, { md: B2_MD });
+check('v3174 D1: a word dragged to the start of its own paragraph', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 0), 0);
+  assert.strictEqual(await saveAndRead(page, boot), 'bravoAlpha  charlie.\n\nOmega delta.\n');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+check('v3174 D1: the first word dragged to the end', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 0, 5);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, ' bravo charlieAlpha.\n\nOmega delta.\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+check('v3174 D1: a drop inside the dragged text is a no-op', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 8), 8);
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha bravo charlie.', 'Omega delta.'], 'the screen is unchanged');
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+// Review Focus 2: a list item rewrites its run (the marker is kept) and a
+// heading stays one line. Each `bravo` goes to its block's very end.
+const D1_LIST_HEAD_MD = '- Alpha bravo charlie.\n- two\n\n## Head bravo end\n';
+check('v3174 D1: same-block drag in a list item and a heading', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 20), 20, 'the list item: after the `.`');
+  let disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '- Alpha  charlie.bravo\n- two\n\n## Head bravo end\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk (list item)');
+  assert.strictEqual(await shownNotice(page), null, 'no notice (list item)');
+  await selectInSurface(page, 'Head bravo end', 5, 10);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Head bravo end', 14), 14, 'the heading: after `end`');
+  disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '- Alpha  charlie.bravo\n- two\n\n## Head  endbravo\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk (heading)');
+  assert.strictEqual(await shownNotice(page), null, 'no notice (heading)');
+}, { md: D1_LIST_HEAD_MD });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
