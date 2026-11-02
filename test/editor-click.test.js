@@ -11872,6 +11872,22 @@ d7Case('Tab over two lists separated by a definition indents', D5_MD, 'Tab',
 d7Case('Shift+Tab over two lists separated by a definition outdents', '# D\n\n- a\n  - b\n\n[r]: http://u\n\n- c\n- e\n', 'Shift+Tab',
   '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- e\n');
 
+// ── v3.17.4 Task 5: E1 (R10) ──
+// The page decodes every named reference itself, so the field shows what the
+// reader shows; an untouched alt writes nothing, an edited one writes the
+// character.
+check('v3174 E1: the alt field shows &copy; as the character, and an edit writes the character', DESKTOP, async (page, boot) => {
+  const md = '![a &copy; b](assets/a.png)\n';
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'a \u00a9 b', 'the field shows the character');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), md, 'no change writes nothing');
+  await openAlt(page);
+  await page.keyboard.press('End');
+  await page.keyboard.type('x'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '![a \u00a9 bx](assets/a.png)\n');
+}, { md: '![a &copy; b](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

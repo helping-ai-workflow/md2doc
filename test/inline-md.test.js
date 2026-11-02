@@ -467,6 +467,20 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(rw('![a](<my pic.png> "T")', { dest: 'assets/dot.png' }), '![a](assets/dot.png "T")');
   // v3.17.3 A3 (was '![b\\\\c](x.png)  '): a backslash in the alt is written as a
   // character reference, because marked renders `\\` in an alt as two backslashes.
+  // v3.17.4 E1: any `&name;` goes through the installed decoder; numerics need none.
+  {
+    const im = require('../lib/editor/inline-md.js');
+    assert.strictEqual(p('![a &copy; b](x.png)').alt, 'a &copy; b', 'no decoder: an unknown name stays literal');
+    assert.strictEqual(p('![a &lt; &amp; &quot;](x.png)').alt, 'a < & "', 'no decoder: the six names still decode');
+    assert.strictEqual(p('![&#169; &#xA9;](x.png)').alt, '\u00a9 \u00a9', 'numeric references decode');
+    im.setNamedReferenceDecoder((n) => ({ copy: '\u00a9' })[n]);
+    try {
+      assert.strictEqual(p('![a &copy; b](x.png)').alt, 'a \u00a9 b');
+      assert.strictEqual(p('![a &nope; b](x.png)').alt, 'a &nope; b', 'a name the decoder does not know stays literal');
+      assert.strictEqual(rw('![a](x.png)', { alt: 'a \u00a9 b' }), '![a \u00a9 b](x.png)', 'the character is written as is');
+    } finally { im.setNamedReferenceDecoder(null); }
+    assert.strictEqual(p('![a &copy; b](x.png)').alt, 'a &copy; b', 'reset restores the default');
+  }
   assert.strictEqual(rw('![a](x.png)  ', { alt: 'b\\c' }), '![b&#92;c](x.png)  ');
   assert.strictEqual(rw('![a](x.png)', {}), '![a](x.png)');
   assert.strictEqual(rw('not an image', { alt: 'z' }), 'not an image');
