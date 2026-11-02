@@ -7411,6 +7411,9 @@ for (const [label, items, idx, want] of [
 check('render-guard: "# " typed where the reconciliation failed again writes nothing, and converts once the screen is drawn (R86)', DESKTOP, async (page, boot) => {
   const t0 = await staleAfterFailedReconcile(page, [1500, 2000, 300, 300], [false, true, true, true]);
   await focusSurface(page, 'Omega.', 0); await settleR86(page);
+  // v3.17.4 E4: 3 -> 4. The click now waits for the flight at its entry
+  // (settledGestureBlock), so the owed redraw runs before the refusal instead of
+  // after it; every assertion below it is unchanged.
   assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the press ran the owed reconciliation, and it failed too');
   await page.keyboard.type('# '); await settleR86(page);
   assert.strictEqual(renderTotal(page) - t0, 4, 'nothing was committed');
@@ -7715,6 +7718,7 @@ check('gutter-settle: ⠿ 刪除 picked while a split above renders, on the firs
 // both engines; identical at ffbdd7c). Now the click waits for the render;
 // the split's render replaces every block below it, so the click is refused
 // with the notice, and the next click opens the block's own lines.
+// v3.17.4 E4 (R13): the click now waits and opens on its own, see the checks.
 // v3.17.0 T2 (R21): a code block's click opens the in-place edit on its body
 // (`seed` is that body), a quote's the raw box; `opened` reads whichever is
 // open, so "no box" also means "no code edit".
@@ -7728,7 +7732,7 @@ const openedEditorSel = (type) => (type === 'code' ? 'pre[data-ed-code-edit]' : 
 for (const [label, md, type, seed, typed, want] of [
   ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
   ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
-  check('raw-box: ' + label + ' clicked below a split that is still rendering is refused, and the next click edits its own lines (R100)', DESKTOP, async (page, boot) => {
+  check('raw-box: ' + label + ' clicked below a split that is still rendering waits for the render and opens its own lines (R100, v3.17.4 E4)', DESKTOP, async (page, boot) => {
     const clickBlock = async () => {
       const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
       assert.ok(box, 'guard: the ' + type + ' block is on screen');
@@ -7740,10 +7744,12 @@ for (const [label, md, type, seed, typed, want] of [
     await clickBlock(); await wait(300);
     assert.strictEqual(await rawValue(), null, 'no box opens while the split renders');
     await wait(2500); await settleR86(page);
+    // v3.17.4 E4 (R13), migrated from "refused with the notice, the next click
+    // opens it": the click waits for the render, finds the block again by what
+    // it read on screen and opens it on that one click, on the block's own
+    // lines (`seed`), with no notice.
     assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
-      { box: null, notice: '文件已更新，請重試這個操作' }, 'the click is refused once the render lands');
-    await clickBlock(); await wait(300);
-    assert.strictEqual(await rawValue(), seed, 'the next click opens the block\'s own lines');
+      { box: seed, notice: null }, 'the click opens the block\'s own lines once the render lands');
     await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
     await page.unroute('**/api/render');
@@ -7773,7 +7779,7 @@ check('raw-box: a quote below a split clicked while the undo renders, whose redr
   await wait(600);
   await clickQuote(); await wait(200);
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
   assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
     { box: null, notice: '文件已更新，請重試這個操作' }, 'refused: no box on the stale screen');
   assert.strictEqual(await saveAndRead(page, boot), SPLIT + '> Omega.\n', 'nothing written');
@@ -8535,7 +8541,7 @@ check('code-edit: a reconciliation that lands while the edit is open reopens it 
   // first, and the block opens once the redraw has failed too.
   await clickText(page, 'code');
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
   await page.keyboard.press('End'); await page.keyboard.type(' ab');
   assert.deepStrictEqual(await codeEdit(page), { text: 'code ab', caret: 7, focused: true }, 'guard: the edit is open on the stale screen');
   await page.keyboard.press('Escape');
@@ -8847,7 +8853,7 @@ check('code-chips: the language chip on a code block below a split whose undo an
   await hoverCodeBlock(page);
   await page.click('.ed-code-lang'); await wait(200);
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
+  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
   assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
     { edit: null, menu: null, notice: '文件已更新，請重試這個操作' }, 'refused: no edit on the stale screen');
   assert.strictEqual(await saveAndRead(page, boot), SPLIT + '```\ncode\n```\n', 'nothing written');
@@ -11931,6 +11937,45 @@ check('v3174 E3: a kept draft reads unsaved and survives scrolling back', DESKTO
   await page.keyboard.press('Escape'); await wait(300);
   assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'Esc discards it');
 }, { md: IMG_LONG_MD, assets: { 'assets/a.png': PNG_160 } });
+
+// ── v3174 E4: a click on a degraded block while a write renders ──
+// R13: the click waits for the write, finds the block again by what it read on
+// screen (unique at the press and after the settle), and opens it. Refused with
+// the notice only when that re-find fails.
+async function splitThenClick(page, sel) {
+  await delayRender(page, 1200);
+  await focusSurface(page, 'Alpha bravo.', 5);
+  await page.keyboard.press('Enter');
+  await wait(50);
+  const out = rendersOut(page);
+  await page.locator(sel).first().click();
+  assert.ok(out > 0, 'guard: the click fell inside the split\'s render (' + out + ' out)');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  await wait(300);
+}
+check('v3174 E4: clicking a quote while a split renders opens its raw box after the render', DESKTOP, async (page) => {
+  await splitThenClick(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    raw: [...document.querySelectorAll('textarea.ed-raw')].map((t) => t.value),
+    active: !!(document.activeElement && document.activeElement.matches('textarea.ed-raw')) })),
+  { raw: ['> Quote line.'], active: true });
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\nAlpha bravo.\n\n> Quote line.\n\nOmega.\n' });
+check('v3174 E4: the same with a fenced code block opens the in-place code edit', DESKTOP, async (page) => {
+  await splitThenClick(page, '.ed-block[data-block-type="code"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    edit: document.querySelectorAll('pre[data-ed-code-edit]').length,
+    active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')) })),
+  { edit: 1, active: true });
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\nAlpha bravo.\n\n```\ncode line\n```\n\nOmega.\n' });
+check('v3174 E4: two identical quotes — refused with the notice', DESKTOP, async (page, boot) => {
+  await splitThenClick(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length })), { raw: 0 });
+  assert.strictEqual(await noticeText(page), '文件已更新，請重試這個操作');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\nbravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n');
+}, { md: '# D\n\nAlpha bravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
