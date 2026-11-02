@@ -11888,6 +11888,50 @@ check('v3174 E1: the alt field shows &copy; as the character, and an edit writes
   assert.strictEqual(await saveAndRead(page, boot), '![a \u00a9 bx](assets/a.png)\n');
 }, { md: '![a &copy; b](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
 
+// ── v3.17.4 Task 6: E2, E3 (R11, R12) ──
+// Tab / Shift+Tab in the keyboard-opened alt field act as Enter and hand focus
+// back to the image's block selection; a kept draft is unsaved work and
+// outlives the scrolls that hide the toolbar.
+const focusedSelectedBlock = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { selected: !!a && !!a.classList && a.classList.contains('ed-selected') && !!a.querySelector('img'), body: a === document.body };
+});
+const keyboardAlt = async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('ArrowDown'); await wait(250);
+  await page.keyboard.press('Enter'); await wait(300);
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.strictEqual((await imgTbState(page)).inputShown, true, 'guard: the keyboard-opened field is showing');
+};
+for (const [label, key] of [['Tab', 'Tab'], ['Shift+Tab', 'Shift+Tab']]) {
+  check('v3174 E2: ' + label + ' in the keyboard-opened alt field applies the alt and returns to the image\'s selection', DESKTOP, async (page, boot) => {
+    await keyboardAlt(page);
+    await page.keyboard.press('End'); await page.keyboard.type('XY');
+    await page.keyboard.press(key); await renderIdle(page); await wait(300);
+    assert.strictEqual(await imgTbState(page), null, 'the toolbar is closed');
+    assert.deepStrictEqual(await focusedSelectedBlock(page), { selected: true, body: false }, 'focus is on the selected image block');
+    await page.keyboard.type('z'); await wait(200);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip topXY](assets/a.png "T")\n\nOmega.\n');
+  }, IMG_OPTS);
+}
+check('v3174 E3: a kept draft reads unsaved and survives scrolling back', DESKTOP, async (page) => {
+  await page.evaluate(() => { document.querySelector('.content img').scrollIntoView({ block: 'center' }); });
+  await wait(200);
+  await openAlt(page);
+  await page.keyboard.press('End'); await page.keyboard.type('XYZ'); await wait(150);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  assert.strictEqual(await imgTbState(page), null, 'guard: the toolbar went with the image');
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'dirty', dot: true, guard: true }, 'the kept draft is unsaved work');
+  await page.evaluate(() => { document.querySelector('.content img').scrollIntoView({ block: 'center' }); });
+  await wait(500);
+  await page.mouse.move(5, 5); await wait(150);
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'chip topXYZ', 'reopened: the draft is back');
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'Esc discards it');
+}, { md: IMG_LONG_MD, assets: { 'assets/a.png': PNG_160 } });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
