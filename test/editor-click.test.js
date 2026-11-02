@@ -11712,6 +11712,70 @@ check('v3174 D1: same-block drag in a list item and a heading', DESKTOP, async (
   assert.strictEqual(await shownNotice(page), null, 'no notice (heading)');
 }, { md: D1_LIST_HEAD_MD });
 
+// ── v3.17.4 Task 2: D2 (R5) + D4 (R6) ──
+// D2: a dragged fragment that holds a line break cannot be written into
+// inline code (the code span has no way to hold one), so the drop is refused
+// with the notice and the file stays as it was. Into plain text the break is
+// kept, as before.
+const D2_MD = 'Alpha  \nbravo end.\n\nOmega `code` delta.\n';
+const D2_PLAIN_MD = 'Alpha  \nbravo end.\n\nPlain tail.\n';
+check('v3174 D2: a fragment with a line break dropped into inline code is refused', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alphabravo end.', 3, 8);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega code delta.', 8);
+  const notice = await shownNotice(page);
+  assert.ok(notice && notice.length > 0, 'the refusal notice is shown');
+  assert.strictEqual(await saveAndRead(page, boot), D2_MD, 'the file is unchanged');
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alphabravo end.', 'Omega code delta.']);
+}, { md: D2_MD });
+check('v3174 D2: the same fragment into plain text keeps the break', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alphabravo end.', 3, 8);
+  await dragSelectionTo(page, SURFACE_SEL, 'Plain tail.', 6);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpvo end.\n\nPlain ha\\\nbratail.\n');
+}, { md: D2_PLAIN_MD });
+
+// D4: an in-page drag that carried Files from its dragstart on (a picture
+// dragged out of the document) is not an upload: it is refused. A drag whose
+// dragstart carried none, that never ended, does not turn a later external
+// file drop into a refusal either.
+const D4_MD = 'Top para.\n\n![pic](assets/a.png)\n\nBottom para.\n';
+const D4_OPTS = { md: D4_MD, assets: { 'assets/a.png': PNG_1PX } };
+async function d4Fire(page, steps) {
+  return page.evaluate(async ({ steps, png }) => {
+    const img = document.querySelector('.content img');
+    const para = [...document.querySelectorAll('.content .ed-wys-armed')].find((e) => e.textContent === 'Bottom para.');
+    const mkFile = () => new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], 'x.png', { type: 'image/png' });
+    const R = img.getBoundingClientRect(); const P = para.getBoundingClientRect();
+    const dt = new DataTransfer();
+    if (steps.files) dt.items.add(mkFile());
+    else dt.setData('text/uri-list', img.src);
+    for (const [type, where] of steps.list) {
+      const el = where === 'img' ? img : para; const B = where === 'img' ? R : P;
+      el.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true, clientX: B.left + 5, clientY: B.top + 5 }));
+    }
+  }, { steps, png: PNG_1PX });
+}
+check('v3174 D4: an in-page image drag carrying Files is refused, not uploaded', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: true, list: [['dragstart', 'img'], ['dragenter', 'para'], ['dragover', 'para'], ['drop', 'para'], ['dragend', 'img']] });
+  await wait(500); await renderIdle(page);
+  const notice = await shownNotice(page);
+  assert.ok(notice && notice.length > 0, 'the refusal notice is shown');
+  assert.strictEqual(await saveAndRead(page, boot), D4_MD, 'the file is unchanged');
+  assert.deepStrictEqual(fs.readdirSync(assetsDir).sort(), ['a.png'], 'nothing was copied into assets/');
+}, D4_OPTS);
+check('v3174 D4: an external file dropped after an in-page drag that never dropped still uploads', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: false, list: [['dragstart', 'img']] });
+  await d4Fire(page, { files: true, list: [['dragenter', 'para'], ['dragover', 'para'], ['drop', 'para']] });
+  await wait(800); await renderIdle(page);
+  const now = fs.readdirSync(assetsDir).sort();
+  assert.strictEqual(now.length, 2, 'assets/ gained one file: ' + now.join(','));
+  const added = now.filter((f) => f !== 'a.png')[0];
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'Top para.\n\n![pic](assets/a.png)\n\nBottom para.\n\n![](assets/' + added + ')\n');
+}, D4_OPTS);
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
