@@ -224,6 +224,16 @@ eq(
   noLineStartComment('li before', '<ul><li>前</li></ul><b>「x」</b>後');
   noLineStartComment('br at the end of a span before', '<p><span>前<br></span><b>「x」</b>後</p>');
   noLineStartComment('br at the end of a nested span before', '<p><span>前<span><br></span></span><b>「x」</b>後</p>');
+  // re-review round 3, I1': an EMPTY block still writes a line edge
+  noLineStartComment('empty p before', '<p>前</p><p></p><b>「x」</b>後');
+  noLineStartComment('empty p between', '前<p></p><b>「x」</b>後');
+  noLineStartComment('empty div before', '<div>前<div></div><b>「x」</b>後</div>');
+  noLineStartComment('empty list before', '<div>前<ul><li></li></ul><b>「x」</b>後</div>');
+  noLineStartComment('empty table before', '<div>前<table><tr><td></td></tr></table><b>「x」</b></div>');
+  // ...while an inline element that writes nothing is still looked past: a
+  // bold holding only a <br> is dropped by its rule, and Word's empty <o:p>
+  pasted('bold holding only a br', '<p>aa<b><br></b><b>「x」</b>後</p>', 'aa<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', 'aa「x」後');
+  pasted('word o:p', '<p>前<o:p></o:p><b>「x」</b>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
   pasted('br in a span before, bytes', '<p>前<span><br></span><b>「x」</b>後</p>', '前  \n**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
   pasted('div after', '<p>前<b>「x」</b></p><div>後</div>', '前<!-- -->**「x」**\n\n後', '<strong>「x」</strong>', '前「x」 後');
   // final review I2, paste side
