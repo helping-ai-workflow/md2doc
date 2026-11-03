@@ -1381,6 +1381,23 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     assert.deepStrictEqual(await read(), { n: 4, bgs: [W, W, W, W], graph: 'rgba(0, 0, 0, 0)' });
   });
 }
+// A task item puts its svg inside span.task-text (tight: li > .task-text, loose: li > p > .task-text);
+// the edit page plates the same item, so the reader must too (R14).
+const E5_TASK_MD = ['# E5 task', '', '- [ ] a ' + E5_SVG, '- [ ] ' + E5_SVG, '- [x] b', '', 'Between.', '',
+  '- [ ] c ' + E5_SVG, '', '- [ ] ' + E5_SVG, '', '- [ ] d', ''];
+let e5TaskUrl = null;
+const e5Task = () => e5TaskUrl || (e5TaskUrl = fixtureUrl('e5-task', E5_TASK_MD));
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': v3174 E5: dark plates an svg in a tight or loose task item, with or without text beside it', vp, async (page) => {
+    await gotoTheme(page, e5Task());
+    const read = () => page.evaluate(() => Array.from(document.querySelectorAll('.content li.task-item svg')).map((s) =>
+      (s.parentElement.classList.contains('task-text') ? (s.closest('p') ? 'loose ' : 'tight ') : 'other ') + getComputedStyle(s).backgroundColor));
+    const T = 'rgba(0, 0, 0, 0)'; const W = 'rgb(255, 255, 255)';
+    assert.deepStrictEqual(await read(), ['tight ' + T, 'tight ' + T, 'loose ' + T, 'loose ' + T]);
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    assert.deepStrictEqual(await read(), ['tight ' + W, 'tight ' + W, 'loose ' + W, 'loose ' + W]);
+  });
+}
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);
