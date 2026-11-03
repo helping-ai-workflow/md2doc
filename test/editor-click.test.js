@@ -12064,6 +12064,60 @@ check('v3174 E4: two identical quotes pressed during a split\'s render and relea
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Twin.\n\n> Twin.\n\nAlpha\n\nbravo.\n\nOmega.\n');
 }, { md: '# D\n\n> Twin.\n\n> Twin.\n\nAlpha bravo.\n\nOmega.\n' });
 
+// ── v3.17.5 M1 + R1 + R2: marks whose edges CommonMark would not take ──
+// Every way a user reached it on 4d7669f, in one document: Delete down to a
+// leading space in bold, Ctrl+B on 「引號」, Ctrl+B on a selection ending in a
+// space, and a pasted HTML bold next to punctuation. Measured then, in order:
+// `alpha ** charlie** delta`, `前面**「引號」**後面`, `alpha **charlie **delta`,
+// `前面**「引號」**後面` — each shown with literal asterisks after a reload.
+// After the save the page is reloaded and the rendered paragraphs must show
+// bold with the editor's own text; then every block is touched and saved
+// again, which must not move a byte (the `<!-- -->` is not in the DOM's text,
+// so the second save has to put it back by the same rule).
+async function commitByHeading(page) {
+  await renderIdle(page);
+  await page.locator('.ed-block[data-block-type="heading"]').first().click();
+  await renderIdle(page);
+}
+const M1_MD = '# D\n\nalpha **b charlie** delta\n\n前面「引號」後面\n\nbravo charlie delta\n\nOmega.\n';
+check('v3175 M1: mark edges are written so the reader takes them, and stay put', DESKTOP, async (page, boot) => {
+  // each step commits the previous block, so its render settles first
+  await focusSurface(page, 'alpha b charlie delta', 6);
+  await page.keyboard.press('Delete');
+  await commitByHeading(page);
+  await focusSurface(page, '前面「引號」後面', 0);
+  await selectInFocused(page, 2, 6);
+  await page.keyboard.press('Control+b');
+  await commitByHeading(page);
+  await focusSurface(page, 'bravo charlie delta', 0);
+  await selectInFocused(page, 6, 14);
+  await page.keyboard.press('Control+b');
+  await commitByHeading(page);
+  await focusSurface(page, 'Omega.', 6);
+  await clipboardEvent(page, 'paste', '前面「引號」後面', '<p>前面<b>「引號」</b>後面</p>');
+  const first = await commitAndRead(page, boot);
+  // the space Delete leaves is a plain one in one engine and an NBSP in another
+  const m = /^# D\n\nalpha ([  ]+)\*\*charlie\*\* delta\n\n/.exec(first);
+  assert.ok(m, 'leading space moved outside: ' + JSON.stringify(first));
+  assert.strictEqual(first.slice(m[0].length),
+    '前面<!-- -->**「引號」**<!-- -->後面\n\nbravo **charlie** delta\n\nOmega.\n\n前面<!-- -->**「引號」**<!-- -->後面\n');
+  await page.reload({ waitUntil: 'load' }); await page.waitForSelector('.ed-toolbar'); await renderIdle(page);
+  const shown = () => page.evaluate(() => [...document.querySelectorAll('.content p')].map((p) =>
+    [p.textContent.replace(/\s+/g, ' '), [...p.querySelectorAll('strong')].map((s) => s.textContent)]));
+  const want = [['alpha charlie delta', ['charlie']], ['前面「引號」後面', ['「引號」']], ['bravo charlie delta', ['charlie']],
+    ['Omega.', []], ['前面「引號」後面', ['「引號」']]];
+  assert.deepStrictEqual(await shown(), want, 'rendered: bold taken, no literal delimiter');
+  for (const t of ['alpha ' + m[1] + 'charlie delta', '前面「引號」後面', 'bravo charlie delta']) {
+    await focusSurface(page, t, 1);
+    await page.keyboard.type('x'); await page.keyboard.press('Backspace');
+  }
+  // the pasted copy: the second paragraph with that text
+  await page.evaluate(() => { const s = [...document.querySelectorAll('.ed-wys-armed')].filter((e) => e.textContent === '前面「引號」後面')[1]; s.setAttribute('data-m1', '1'); });
+  await page.click('[data-m1="1"]'); await wait(150);
+  await page.keyboard.press('End'); await page.keyboard.type('x'); await page.keyboard.press('Backspace');
+  assert.strictEqual(await commitAndRead(page, boot), first, 'a second save of every touched block keeps the bytes');
+}, { md: M1_MD });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];

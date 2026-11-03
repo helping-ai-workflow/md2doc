@@ -175,4 +175,37 @@ eq(
   'nothing on the clipboard -> empty text, does not throw'
 );
 
+// --- v3.17.5 R2: pasted bold / italic whose text starts or ends with
+//     punctuation next to a word character. turndown already moves edge
+//     whitespace outside the delimiters; punctuation it wrapped blind, and the
+//     result lands in the file as source (client.js's 'markdown' paste branch).
+//     Measured on 4d7669f: `前面<b>「引號」</b>後面` -> `前面**「引號」**後面`,
+//     shown with literal asterisks. The oracle is the reader's own marked
+//     (requiring lib/md2doc.js installs its extensions), last in the file.
+{
+  const { marked } = require('marked');
+  require('../lib/md2doc.js');
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+  const shownText = (h) => h.replace(/<[^>]*>/g, '').replace(/&(amp|lt|gt|quot|#39);/g, (m, n) => ENT[n])
+    .replace(/\s+/g, ' ').trim();
+  function pasted(name, html, bytes, want, text) {
+    const md = pm.htmlToMarkdown(html);
+    eq(md, bytes, 'v3175 R2 ' + name + ': bytes');
+    const out = marked.parse(md);
+    ok(out.includes(want), 'v3175 R2 ' + name + ': ' + JSON.stringify(out) + ' lacks ' + JSON.stringify(want));
+    eq(shownText(out), text, 'v3175 R2 ' + name + ': the reader shows the pasted text');
+  }
+  pasted('cjk brackets', '<p>前面<b>「引號」</b>後面</p>', '前面<!-- -->**「引號」**<!-- -->後面', '<strong>「引號」</strong>', '前面「引號」後面');
+  pasted('cjk full stop', '<p><strong>中文。</strong>後面</p>', '**中文。**<!-- -->後面', '<strong>中文。</strong>', '中文。後面');
+  pasted('em', '<p>a<em>中文。</em>後</p>', 'a*中文。*<!-- -->後', '<em>中文。</em>', 'a中文。後');
+  pasted('symbol', '<p>x<strong>$5</strong>y</p>', 'x<!-- -->**$5**y', '<strong>$5</strong>', 'x$5y');
+  pasted('nested run guarded outside', '<p>a<b><i>「x」</i></b>b</p>', 'a<!-- -->***「x」***<!-- -->b', '「x」</', 'a「x」b');
+  pasted('through a span', '<p>前<span><b>「x」</b></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  // nothing where the neighbour already satisfies the rule
+  pasted('punct neighbours', '<p>「<b>引號</b>」</p>', '「**引號**」', '<strong>引號</strong>', '「引號」');
+  pasted('space neighbours', '<p>前 <b>「x」</b> 後</p>', '前 **「x」** 後', '<strong>「x」</strong>', '前 「x」 後');
+  pasted('turndown space', '<p>alpha<b> 「x」</b> delta</p>', 'alpha **「x」** delta', '<strong>「x」</strong>', 'alpha 「x」 delta');
+  pasted('word edges', '<p>x<b>中</b>y</p>', 'x**中**y', '<strong>中</strong>', 'x中y');
+}
+
 console.log('paste-md.test.js: ' + checks + ' checks passed');

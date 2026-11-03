@@ -520,4 +520,73 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   }
 }
 
+// v3.17.5 M1 + R1: a mark's delimiters must be ones CommonMark accepts. An
+// opening run is only left-flanking when the character after it is not
+// whitespace and, if it is punctuation (marked: \p{P}\p{S}), the character
+// before it is whitespace, punctuation or the start; the closing run mirrors
+// that. Measured on 4d7669f: `alpha ** charlie** delta` (Delete down to a
+// leading space), `前面**「引號」**後面` (Ctrl+B on 「引號」) and
+// `alpha **charlie **delta` all render their asterisks literally.
+//
+// The oracle is the reader's own marked: requiring lib/md2doc.js installs its
+// extensions (sub/superscript, KaTeX) on the shared instance, so this block
+// sits last in the file and nothing above it sees them.
+{
+  require('../lib/md2doc.js');
+  const reader = (md) => marked.parse(md).trim().replace(/^<p>|<\/p>$/g, '');
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+  const shownText = (h) => h.replace(/<[^>]*>/g, '').replace(/&(amp|lt|gt|quot|#39);/g, (m, n) => ENT[n])
+    .replace(/\s+/g, ' ');
+  const p = (...kids) => el('p', {}, ...kids);
+  const hb = () => el('br', { 'data-hard-break': '1' });
+  // nodes -> exact bytes, and the reader must show `want` (an HTML fragment)
+  // and exactly the editor's own text: a delimiter the reader did not take
+  // shows up as an extra character.
+  function edge(name, nodes, bytes, want) {
+    const root = p(...nodes);
+    const md = serializeInline(root).md;
+    assert.strictEqual(md, bytes, 'v3175 M1 ' + name + ': bytes');
+    const out = reader(md);
+    assert.strictEqual(shownText(out), root.textContent.replace(/\s+/g, ' '),
+      'v3175 M1 ' + name + ': the reader shows other text than the editor, ' + JSON.stringify(out));
+    assert.ok(out.includes(want), 'v3175 M1 ' + name + ': ' + JSON.stringify(out) + ' lacks ' + JSON.stringify(want));
+  }
+  // whitespace edges move outside the delimiters, byte for byte
+  edge('leading space', ['alpha ', el('strong', {}, ' charlie'), ' delta'], 'alpha  **charlie** delta', '<strong>charlie</strong>');
+  edge('leading space, no space before', ['alpha', el('strong', {}, ' charlie'), ' delta'], 'alpha **charlie** delta', 'alpha <strong>charlie</strong> delta');
+  edge('trailing space', ['alpha ', el('strong', {}, 'charlie '), 'delta'], 'alpha **charlie** delta', 'alpha <strong>charlie</strong> delta');
+  edge('em both sides', ['a', el('em', {}, ' x '), 'b'], 'a *x* b', 'a <em>x</em> b');
+  edge('del leading', ['a', el('del', {}, ' x'), 'b'], 'a ~~x~~b', 'a <del>x</del>b');
+  edge('nested strong>em', ['a', el('strong', {}, el('em', {}, ' x')), 'b'], 'a ***x***b', '<em><strong>x</strong></em>');
+  edge('nbsp', ['a', el('strong', {}, ' x'), 'b'], 'a **x**b', '<strong>x</strong>');
+  edge('ideographic space', ['前', el('strong', {}, '中文　'), '後'], '前**中文**　後', '<strong>中文</strong>');
+  edge('trailing hard break', ['a ', el('strong', {}, 'x', hb()), 'b'], 'a **x**\\\nb', '<strong>x</strong><br>');
+  edge('several spaces', ['a', el('strong', {}, '  x  '), 'b'], 'a  **x**  b', '<strong>x</strong>');
+  // a mark holding only whitespace (or nothing) is no mark at all
+  edge('whitespace only', ['a', el('strong', {}, ' '), 'b'], 'a b', 'a b');
+  assert.strictEqual(serializeInline(p('a', el('strong', {}), 'b')).md, 'ab', 'v3175 M1: an empty mark writes nothing');
+  assert.strictEqual(serializeInline(p('a', el('em', {}, el('strong', {}, ' ')), 'b')).md, 'a b', 'v3175 M1: nested whitespace-only marks write only the space');
+  // punctuation edges next to a word character get `<!-- -->` on that side only
+  edge('cjk brackets', ['前面', el('strong', {}, '「引號」'), '後面'], '前面<!-- -->**「引號」**<!-- -->後面', '<strong>「引號」</strong>');
+  edge('cjk full stop', [el('strong', {}, '中文。'), '後面'], '**中文。**<!-- -->後面', '<strong>中文。</strong>');
+  edge('colon label', [el('strong', {}, '注意：'), '請看'], '**注意：**<!-- -->請看', '<strong>注意：</strong>');
+  edge('symbol', ['x', el('strong', {}, '$5'), 'y'], 'x<!-- -->**$5**y', '<strong>$5</strong>');
+  edge('em punct', ['a', el('em', {}, '中文。'), '後'], 'a*中文。*<!-- -->後', '<em>中文。</em>');
+  edge('escaped star head', ['a', el('strong', {}, '*x'), 'b'], 'a<!-- -->**\\*x**b', '<strong>*x</strong>');
+  edge('escaped star tail', ['a', el('strong', {}, 'x*'), 'b'], 'a**x\\***<!-- -->b', '<strong>x*</strong>');
+  edge('nested run guarded outside', ['a', el('em', {}, el('strong', {}, '「x」')), 'b'], 'a<!-- -->***「x」***<!-- -->b', '<strong>「x」</strong>');
+  edge('across a bare span', [el('span', {}, el('strong', {}, '中文。')), '後'], '**中文。**<!-- -->後', '<strong>中文。</strong>');
+  edge('across a bare span, opening', ['前', el('span', {}, el('strong', {}, '「x」'))], '前<!-- -->**「x」**', '<strong>「x」</strong>');
+  // ...and nothing where the neighbour already satisfies the rule
+  edge('punct neighbours', ['「', el('strong', {}, '引號'), '」'], '「**引號**」', '<strong>引號</strong>');
+  edge('space neighbours', ['前面 ', el('strong', {}, '「x」'), ' 後面'], '前面 **「x」** 後面', '<strong>「x」</strong>');
+  edge('line ends', [el('strong', {}, '「x」')], '**「x」**', '<strong>「x」</strong>');
+  edge('word edges', ['x', el('strong', {}, '中'), 'y'], 'x**中**y', '<strong>中</strong>');
+  edge('del punct', ['a', el('del', {}, '「x」'), 'b'], 'a~~「x」~~b', '<del>「x」</del>');
+  edge('next to a link', [el('strong', {}, 'x。'), el('a', { href: 'http://x' }, 'lnk')], '**x。**[lnk](http://x)', '<strong>x。</strong><a');
+  // the same-tag guard (v3.4.0) is untouched, and a hoisted space replaces it
+  edge('same-tag guard', [el('strong', {}, 'a'), el('strong', {}, 'b')], '**a**<!-- -->**b**', '<strong>a</strong><!-- --><strong>b</strong>');
+  edge('same-tag, space between', [el('strong', {}, 'a'), el('strong', {}, ' b')], '**a** **b**', '<strong>a</strong> <strong>b</strong>');
+}
+
 console.log('inline-md.test.js OK');
