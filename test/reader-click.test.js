@@ -1360,6 +1360,44 @@ for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
     assert.ok(dark.ratio >= 4.5, 'dark: the text reads on the plate ' + JSON.stringify(dark));
   });
 }
+// v3.17.4 E5: every Markdown-native inline svg is plated in dark, not only the svg-only ones.
+const E5_SVG = '<svg width="40" height="20" xmlns="http://www.w3.org/2000/svg"><text x="2" y="14">S</text></svg>';
+const E5_MD = ['# E5', '', '- ' + E5_SVG, '- plain', '', 'Between.', '', '- a ' + E5_SVG, '- tight text', '', 'Between.', '', '- a ' + E5_SVG, '', '- loose', '', 'Text ' + E5_SVG + ' more.', '',
+  '\x60\x60\x60dot', 'digraph { a -> b }', '\x60\x60\x60', ''];
+let e5Url = null;
+const e5 = () => e5Url || (e5Url = fixtureUrl('e5', E5_MD));
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': v3174 E5: dark plates every inline svg beside text or in a tight item, not a diagram', vp, async (page) => {
+    await gotoTheme(page, e5());
+    const read = () => page.evaluate(() => {
+      const bg = (el) => getComputedStyle(el).backgroundColor;
+      const svgs = Array.from(document.querySelectorAll('.content > ul > li svg, .content > p svg')).filter((s) => !s.closest('.graphviz'));
+      return { n: svgs.length, bgs: svgs.map(bg), graph: bg(document.querySelector('.content .graphviz svg')) };
+    });
+    const light = await read();
+    assert.deepStrictEqual(light, { n: 4, bgs: ['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)'], graph: 'rgba(0, 0, 0, 0)' });
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    const W = 'rgb(255, 255, 255)';
+    assert.deepStrictEqual(await read(), { n: 4, bgs: [W, W, W, W], graph: 'rgba(0, 0, 0, 0)' });
+  });
+}
+// A task item puts its svg inside span.task-text (tight: li > .task-text, loose: li > p > .task-text);
+// the edit page plates the same item, so the reader must too (R14).
+const E5_TASK_MD = ['# E5 task', '', '- [ ] a ' + E5_SVG, '- [ ] ' + E5_SVG, '- [x] b', '', 'Between.', '',
+  '- [ ] c ' + E5_SVG, '', '- [ ] ' + E5_SVG, '', '- [ ] d', ''];
+let e5TaskUrl = null;
+const e5Task = () => e5TaskUrl || (e5TaskUrl = fixtureUrl('e5-task', E5_TASK_MD));
+for (const [label, vp] of [['desktop', DESKTOP], ['phone', PHONE]]) {
+  check(label + ': v3174 E5: dark plates an svg in a tight or loose task item, with or without text beside it', vp, async (page) => {
+    await gotoTheme(page, e5Task());
+    const read = () => page.evaluate(() => Array.from(document.querySelectorAll('.content li.task-item svg')).map((s) =>
+      (s.parentElement.classList.contains('task-text') ? (s.closest('p') ? 'loose ' : 'tight ') : 'other ') + getComputedStyle(s).backgroundColor));
+    const T = 'rgba(0, 0, 0, 0)'; const W = 'rgb(255, 255, 255)';
+    assert.deepStrictEqual(await read(), ['tight ' + T, 'tight ' + T, 'loose ' + T, 'loose ' + T]);
+    await page.click('#md2doc-theme-toggle'); await wait(500);
+    assert.deepStrictEqual(await read(), ['tight ' + W, 'tight ' + W, 'loose ' + W, 'loose ' + W]);
+  });
+}
 check('desktop: WaveDrom stays recoloured through its later redraw passes', DESKTOP, async (page) => {
   await page.addInitScript(() => { try { localStorage.setItem('md2doc-theme', 'dark'); } catch (e) {} });
   await gotoTheme(page); await wait(2000);

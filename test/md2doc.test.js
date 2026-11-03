@@ -646,10 +646,27 @@ console.log('md2doc dot WASM test passed');
   const gv = (await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).html;
   assert.match(gv, /<div class="graphviz"><svg/, 'guard: the graphviz svg is rendered');
   assert.doesNotMatch(gv, /class="inline-svg"/, 'a graphviz svg is not inside .inline-svg');
+  // v3.17.4 E5: every Markdown-native inline svg is plated, whatever sits beside it.
+  const E5S = '<svg width="20" height="10"><text>x</text></svg>';
+  const e5tight = await body('- ' + E5S + '\n- x\n');
+  assert.match(e5tight, /<li data-svg-plate="1">\s*<svg/, 'E5: tight item holding an svg is plated: ' + e5tight);
+  assert.strictEqual((e5tight.match(/data-svg-plate/g) || []).length, 1, 'E5: only the item with the svg is plated');
+  assert.match(await body('- a ' + E5S + '\n'), /<li data-svg-plate="1">/, 'E5: tight item with text beside the svg is plated');
+  assert.match(await body('- a ' + E5S + '\n\n- b\n'), /<p data-svg-plate="1">a <svg/, 'E5: loose item paragraph with text is plated');
+  assert.match(await body('Text ' + E5S + ' more.\n'), /<p data-svg-plate="1">Text <svg/, 'E5: paragraph with text is plated');
+  for (const [mark, cls] of [[' ', 'task-item'], ['x', 'task-item is-checked']]) {
+    const tk = await body('- [' + mark + '] x ' + E5S + '\n');
+    assert.match(tk, new RegExp('<li class="' + cls + '" data-svg-plate="1"><input[^>]*> <span class="task-text">x <svg'), 'E5: task item [' + mark + '] keeps task-item + task-text and is plated: ' + tk);
+  }
+  assert.doesNotMatch(await body('- a\n  - b ' + E5S + '\n'), /<li data-svg-plate="1">\s*a/, 'E5: an outer item is not plated for a nested item svg');
+  assert.doesNotMatch((await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).bodyHtml, /data-svg-plate/, 'E5: a graphviz diagram is not plated');
+  assert.doesNotMatch(await body('Use the `<svg>` element.\n'), /data-svg-plate/, 'E5: a code span naming svg is not plated');
   const editBody = (md) => body(md, { editMode: true });
   assert.match(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /<div class="ed-block" data-block-id="\d+" data-block-type="[a-z]+" data-svg-plate="1">/, 'edit mode marks an svg-only block');
   assert.match(await editBody('<svg width="20" height="10"><text>x</text></svg>\n'), /data-svg-plate="1"/, 'edit mode marks a one-line svg paragraph');
-  assert.doesNotMatch(await editBody('Text <svg width="5"><circle r="2"/></svg> after\n'), /data-svg-plate/, 'svg in prose is not marked');
+  // v3.17.4 E5 (R14), migrated from 'svg in prose is not marked': the edit page marks it, like the reader.
+  assert.match(await editBody('Text <svg width="5"><circle r="2"/></svg> after\n'), /<div class="ed-block" data-block-id="\d+" data-block-type="[a-z]+" data-svg-plate="1">/, 'svg beside text in a paragraph is marked');
+  assert.doesNotMatch(await editBody('Use the `<svg>` element.\n'), /data-svg-plate/, 'a code span naming svg is not marked');
   assert.doesNotMatch(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /inline-svg/, 'still no inline-svg wrapper in edit mode');
   // v3.17.3 C10: an svg in a list item's own text is marked too (tight, loose, svg-only).
   assert.match(await editBody('- item <svg width="20" height="10"><text>x</text></svg>\n- two\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'tight list item with an svg is marked');

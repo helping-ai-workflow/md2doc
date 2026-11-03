@@ -7147,9 +7147,8 @@ for (const [label, holds, fails] of [
 // R83 states (a box open while a render is dropped, or while a
 // reconciliation redraw is out) are no longer reachable, and these checks pin
 // the gate instead: the click opens nothing while a render is out; once it
-// lands, the click is refused when that render replaced the block (it does
-// here: the split's render and the reconciliation redraw both replace the
-// quote) or opens it on the block's own lines; and what is typed into the box
+// lands, the click opens it on the block's own lines, or (v3.17.4 E4, R13) is
+// refused only when the block cannot be found again; and what is typed into the box
 // the next click opens is written. The R86 guard below still reaches its
 // state (a box opened on the screen a failed reconciliation left) and keeps
 // pinning it. History: 95ba1a9 moved these from ⠿ MD 原始碼 to this quote
@@ -7165,16 +7164,17 @@ const rawOpen = (page) => page.evaluate(() => !!document.querySelector('textarea
 // fails keeps its text and the failure card, and the next save writes the
 // text. Was: the box opened during the split's render and committed while
 // that render was dropped.
-check('render-guard: a quote clicked during a split\'s render is refused once it lands; the box the next click opens keeps its text and the card when its commit fails (R80, R100)', DESKTOP, async (page, boot) => {
+check('render-guard: a quote clicked during a split\'s render opens once it lands (v3.17.4 E4); the box keeps its text and the card when its commit fails (R80, R100)', DESKTOP, async (page, boot) => {
   await scriptRenders(page, [1500, 2500], [false, true]);
   await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
   await openQuoteBox(page);
   assert.strictEqual(await rawOpen(page), false, 'no box opens while the split renders');
   await renderIdle(page); await wait(300); await renderIdle(page);
+  // v3.17.4 E4 (R13), migrated from "refused once the render replaced the
+  // quote, the next click opens it": a plain split (no undo or redo), the quote
+  // is unique, so the one click opens its raw box once the render lands.
   assert.deepStrictEqual({ box: await rawOpen(page), notice: await noticeText(page), ids: await allBlocksHaveIds(page) },
-    { box: false, notice: '文件已更新，請重試這個操作', ids: true }, 'refused once the render replaced the quote');
-  await openQuoteBox(page);
-  assert.strictEqual(await rawOpen(page), true, 'guard: raw box open');
+    { box: true, notice: null, ids: true }, 'opened once the render replaced the quote');
   await page.focus('textarea.ed-raw');
   await page.keyboard.press('End');
   await page.keyboard.type(' typed');
@@ -7715,6 +7715,7 @@ check('gutter-settle: ⠿ 刪除 picked while a split above renders, on the firs
 // both engines; identical at ffbdd7c). Now the click waits for the render;
 // the split's render replaces every block below it, so the click is refused
 // with the notice, and the next click opens the block's own lines.
+// v3.17.4 E4 (R13): the click now waits and opens on its own, see the checks.
 // v3.17.0 T2 (R21): a code block's click opens the in-place edit on its body
 // (`seed` is that body), a quote's the raw box; `opened` reads whichever is
 // open, so "no box" also means "no code edit".
@@ -7728,7 +7729,7 @@ const openedEditorSel = (type) => (type === 'code' ? 'pre[data-ed-code-edit]' : 
 for (const [label, md, type, seed, typed, want] of [
   ['a quote', '# D\n\nAlpha para one.\n\nMiddle.\n\n> Omega.\n', 'blockquote', '> Omega.', '> NEW', '> NEW'],
   ['a code block', '# D\n\nAlpha para one.\n\nMiddle.\n\n\x60\x60\x60\ncode\n\x60\x60\x60\n', 'code', 'code', 'NEW', '\x60\x60\x60\nNEW\n\x60\x60\x60']]) {
-  check('raw-box: ' + label + ' clicked below a split that is still rendering is refused, and the next click edits its own lines (R100)', DESKTOP, async (page, boot) => {
+  check('raw-box: ' + label + ' clicked below a split that is still rendering waits for the render and opens its own lines (R100, v3.17.4 E4)', DESKTOP, async (page, boot) => {
     const clickBlock = async () => {
       const box = await page.locator('.ed-block[data-block-type="' + type + '"]').first().boundingBox();
       assert.ok(box, 'guard: the ' + type + ' block is on screen');
@@ -7740,10 +7741,12 @@ for (const [label, md, type, seed, typed, want] of [
     await clickBlock(); await wait(300);
     assert.strictEqual(await rawValue(), null, 'no box opens while the split renders');
     await wait(2500); await settleR86(page);
+    // v3.17.4 E4 (R13), migrated from "refused with the notice, the next click
+    // opens it": the click waits for the render, finds the block again by what
+    // it read on screen and opens it on that one click, on the block's own
+    // lines (`seed`), with no notice.
     assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
-      { box: null, notice: '文件已更新，請重試這個操作' }, 'the click is refused once the render lands');
-    await clickBlock(); await wait(300);
-    assert.strictEqual(await rawValue(), seed, 'the next click opens the block\'s own lines');
+      { box: seed, notice: null }, 'the click opens the block\'s own lines once the render lands');
     await page.focus(openedEditorSel(type)); await page.keyboard.press('Control+a'); await page.keyboard.type(typed);
     await page.keyboard.press('Control+Enter'); await renderIdle(page);
     await page.unroute('**/api/render');
@@ -7756,8 +7759,10 @@ for (const [label, md, type, seed, typed, want] of [
 // failed and so did the redraw). The quote below the split was still on
 // screen, so the box opened seeded from the stale `blocks` against the new
 // `lines` — `paragraph text.` — and its second Ctrl+Enter deleted that
-// paragraph (measured at 6208f4c, both engines). Now that click is refused;
-// the next clicks run the owed redraw and then open the quote's own lines.
+// paragraph (measured at 6208f4c, both engines). Now that click is refused
+// by the epoch / drawn-content rule (the node survives, so it is R102's
+// guard that refuses, not a lost node); a later click, once the owed
+// reconciliation is settled (settleR86), opens the quote's own lines.
 check('raw-box: a quote below a split clicked while the undo renders, whose redraw then fails, is refused and writes nothing over another block (R102, I-R1)', DESKTOP, async (page, boot) => {
   const MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n> Omega.\n';
   const SPLIT = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\n';
@@ -10679,7 +10684,9 @@ check('v3173 N1: Backspace at a paragraph\'s start after a tight list joins as b
 // the target's insertFromDrop, so the text was gone from both blocks. A real
 // native drag: the selection is pressed in its middle, moved in steps to the
 // left edge (+1px) of character `destOffset` of the element matching
-// `destSel` whose trimmed text is `destText`, and released. Returns the
+// `destSel` whose trimmed text is `destText` (a `destOffset` equal to the
+// text's length: the right edge (-1px) of its last character, v3.17.4 D1),
+// and released. Returns the
 // browser's own caret offset at the release point (caretPositionFromPoint /
 // caretRangeFromPoint, measured before the press), so each check pins where
 // the browser puts the drop. ──
@@ -10691,16 +10698,21 @@ async function dragSelectionTo(page, destSel, destText, destOffset) {
     const host = [...document.querySelectorAll(sel)].find((e) => e.textContent.trim() === t);
     if (!host) return null;
     const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
-    let left = o; let b = null;
+    let left = o; let b = null; let last = null; let atEnd = false;
     for (let n = w.nextNode(); n; n = w.nextNode()) {
       if (left < n.data.length) {
         const cr = document.createRange(); cr.setStart(n, left); cr.setEnd(n, left + 1);
         b = cr.getBoundingClientRect(); break;
       }
       left -= n.data.length;
+      if (n.data.length) last = n;
+    }
+    if (!b && left === 0 && last) {
+      const cr = document.createRange(); cr.setStart(last, last.data.length - 1); cr.setEnd(last, last.data.length);
+      b = cr.getBoundingClientRect(); atEnd = true;
     }
     if (!b) return null;
-    const x = b.left + 1; const y = b.top + b.height / 2;
+    const x = atEnd ? b.right - 1 : b.left + 1; const y = b.top + b.height / 2;
     let node = null; let off = 0;
     if (document.caretPositionFromPoint) { const p = document.caretPositionFromPoint(x, y); if (p) { node = p.offsetNode; off = p.offset; } }
     else if (document.caretRangeFromPoint) { const p = document.caretRangeFromPoint(x, y); if (p) { node = p.startContainer; off = p.startOffset; } }
@@ -10823,18 +10835,19 @@ check('v3173 B2: text dragged out of a table cell into a paragraph is refused wi
   assert.ok(await shownNotice(page), 'a notice says why');
   assert.strictEqual(await saveAndRead(page, boot), B2_REFUSE_MD);
 }, { md: B2_REFUSE_MD });
-// Scope pin (green before the fix): a drop inside the same block is the
-// browser's own move and commits through the burst; no text is lost. It pins
-// known defect N3 (R39, deferred): Chromium's own move writes a U+00A0. The
-// spacing and the landing point are each engine's own (measured before the
-// fix: Chromium keeps both spaces, the first as a no-break space (U+00A0),
-// and drops before the `.`; WebKit's smart delete takes one space and its
-// drop point, past the deleted word, lands after the `.`).
-check('v3173 B2: same-block drag is the browser\'s own move (pins known defect N3: Chromium writes U+00A0)', DESKTOP, async (page, boot) => {
+// A drop inside the same block is the editor's own move since v3.17.4 D1
+// (R4), written by moveDroppedText() as one op, the same bytes in both
+// engines. Before, it was the browser's own move and this check pinned known
+// defect N3 (R39): measured then, Chromium kept both spaces, the first as a
+// no-break space (U+00A0), and dropped before the `.`; WebKit's smart delete
+// took one space and its drop point, past the deleted word, landed after
+// the `.`.
+check('v3173 B2: same-block drag is the editor\'s own move (v3174 D1)', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
   assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
-  const want = engineOf(page) === 'webkit' ? 'Alpha charlie.bravo\n\nOmega delta.\n' : 'Alpha\u00a0 charliebravo.\n\nOmega delta.\n';
-  assert.strictEqual(await saveAndRead(page, boot), want);
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, 'Alpha  charliebravo.\n\nOmega delta.\n');
+  assert.ok(!/\u00a0/.test(disk), 'no U+00A0 on disk');
   assert.strictEqual(await shownNotice(page), null, 'no notice');
 }, { md: B2_MD });
 // A drop that did not start in the editor (another app, the reader) is not
@@ -11649,6 +11662,408 @@ check('v3173 N2b: dragging text across a definition leaves one copy', DESKTOP, a
   assert.strictEqual(await saveAndRead(page, boot), N2B_DRAG_MD, 'one Ctrl+Z restores the original bytes');
 }, { md: N2B_DRAG_MD });
 
+// ── v3.17.4 Task 1: D1 (R4) ──
+// A drag inside its own block is the editor's own move, as a drag to another
+// block is (R12): moveDroppedText() writes it as one op, so the bytes come
+// from the serializer and never from Chromium's own move, which left a
+// U+00A0 where it closed the gap. Expected bytes: the dragged text leaves
+// [from, to) and goes in at the drop offset, less the dragged length when
+// the drop is past it; nothing is collapsed, as in a cross-block move.
+check('v3174 D1: a word dragged later in its own paragraph moves with no U+00A0', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19, 'the browser drops before the `.`');
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha  charliebravo.', 'Omega delta.']);
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charliebravo.\n\nOmega delta.\n');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD, 'one Ctrl+Z restores the file');
+}, { md: B2_MD });
+check('v3174 D1: a word dragged to the start of its own paragraph', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 0), 0);
+  assert.strictEqual(await saveAndRead(page, boot), 'bravoAlpha  charlie.\n\nOmega delta.\n');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+check('v3174 D1: the first word dragged to the end', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 0, 5);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 19), 19);
+  const disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, ' bravo charlieAlpha.\n\nOmega delta.\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk');
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+check('v3174 D1: a drop inside the dragged text is a no-op', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 8), 8);
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alpha bravo charlie.', 'Omega delta.'], 'the screen is unchanged');
+  assert.strictEqual(await saveAndRead(page, boot), B2_MD);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+}, { md: B2_MD });
+// Review Focus 2: a list item rewrites its run (the marker is kept) and a
+// heading stays one line. Each `bravo` goes to its block's very end.
+const D1_LIST_HEAD_MD = '- Alpha bravo charlie.\n- two\n\n## Head bravo end\n';
+check('v3174 D1: same-block drag in a list item and a heading', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Alpha bravo charlie.', 20), 20, 'the list item: after the `.`');
+  let disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '- Alpha  charlie.bravo\n- two\n\n## Head bravo end\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk (list item)');
+  assert.strictEqual(await shownNotice(page), null, 'no notice (list item)');
+  await selectInSurface(page, 'Head bravo end', 5, 10);
+  assert.strictEqual(await dragSelectionTo(page, SURFACE_SEL, 'Head bravo end', 14), 14, 'the heading: after `end`');
+  disk = await saveAndRead(page, boot);
+  assert.strictEqual(disk, '- Alpha  charlie.bravo\n- two\n\n## Head  endbravo\n');
+  assert.ok(!/ /.test(disk), 'no U+00A0 on disk (heading)');
+  assert.strictEqual(await shownNotice(page), null, 'no notice (heading)');
+}, { md: D1_LIST_HEAD_MD });
+
+// ── v3.17.4 Task 2: D2 (R5) + D4 (R6) ──
+// D2: a dragged fragment that holds a line break cannot be written into
+// inline code (the code span has no way to hold one), so the drop is refused
+// with the notice and the file stays as it was. Into plain text the break is
+// kept, as before.
+const D2_MD = 'Alpha  \nbravo end.\n\nOmega `code` delta.\n';
+const D2_PLAIN_MD = 'Alpha  \nbravo end.\n\nPlain tail.\n';
+check('v3174 D2: a fragment with a line break dropped into inline code is refused', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alphabravo end.', 3, 8);
+  await dragSelectionTo(page, SURFACE_SEL, 'Omega code delta.', 8);
+  assert.strictEqual(await shownNotice(page), '這段文字無法放在這裡，原文保持不動', 'the refusal notice is shown');
+  assert.strictEqual(await saveAndRead(page, boot), D2_MD, 'the file is unchanged');
+  assert.deepStrictEqual(await surfaceTexts(page), ['Alphabravo end.', 'Omega code delta.']);
+}, { md: D2_MD });
+check('v3174 D2: the same fragment into plain text keeps the break', DESKTOP, async (page, boot) => {
+  await selectInSurface(page, 'Alphabravo end.', 3, 8);
+  await dragSelectionTo(page, SURFACE_SEL, 'Plain tail.', 6);
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'Alpvo end.\n\nPlain ha\\\nbratail.\n');
+}, { md: D2_PLAIN_MD });
+
+// D4: an in-page drag that carried Files from its dragstart on (a picture
+// dragged out of the document) is not an upload: it is refused. A drag whose
+// dragstart carried none, that never ended, does not turn a later external
+// file drop into a refusal either.
+const D4_MD = 'Top para.\n\n![pic](assets/a.png)\n\nBottom para.\n';
+const D4_OPTS = { md: D4_MD, assets: { 'assets/a.png': PNG_1PX } };
+async function d4Fire(page, steps) {
+  return page.evaluate(async ({ steps, png }) => {
+    const img = document.querySelector('.content img');
+    const para = [...document.querySelectorAll('.content .ed-wys-armed')].find((e) => e.textContent === 'Bottom para.');
+    const mkFile = () => new File([Uint8Array.from(atob(png), (c) => c.charCodeAt(0))], 'x.png', { type: 'image/png' });
+    const R = img.getBoundingClientRect(); const P = para.getBoundingClientRect();
+    const dt = new DataTransfer();
+    if (steps.files) dt.items.add(mkFile());
+    else dt.setData('text/uri-list', img.src);
+    for (const [type, where] of steps.list) {
+      const el = where === 'img' ? img : para; const B = where === 'img' ? R : P;
+      el.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true, clientX: B.left + 5, clientY: B.top + 5 }));
+    }
+  }, { steps, png: PNG_1PX });
+}
+check('v3174 D4: an in-page image drag carrying Files is refused, not uploaded', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: true, list: [['dragstart', 'img'], ['dragenter', 'para'], ['dragover', 'para'], ['drop', 'para'], ['dragend', 'img']] });
+  await wait(500); await renderIdle(page);
+  const notice = await shownNotice(page);
+  assert.ok(notice && notice.length > 0, 'the refusal notice is shown');
+  assert.strictEqual(await saveAndRead(page, boot), D4_MD, 'the file is unchanged');
+  assert.deepStrictEqual(fs.readdirSync(assetsDir).sort(), ['a.png'], 'nothing was copied into assets/');
+}, D4_OPTS);
+check('v3174 D4: a picture dragged with Files and dropped on itself is not uploaded', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: true, list: [['dragstart', 'img'], ['dragenter', 'img'], ['dragover', 'img'], ['drop', 'img'], ['dragend', 'img']] });
+  await wait(500); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), D4_MD, 'the file is unchanged');
+  assert.deepStrictEqual(fs.readdirSync(assetsDir).sort(), ['a.png'], 'nothing was copied into assets/');
+}, D4_OPTS);
+check('v3174 D4: an external file dropped after an in-page drag that never dropped still uploads', DESKTOP, async (page, boot) => {
+  const assetsDir = path.join(path.dirname(boot.mdPath), 'assets');
+  await d4Fire(page, { files: false, list: [['dragstart', 'img']] });
+  await d4Fire(page, { files: true, list: [['dragenter', 'para'], ['dragover', 'para'], ['drop', 'para']] });
+  await wait(800); await renderIdle(page);
+  const now = fs.readdirSync(assetsDir).sort();
+  assert.strictEqual(now.length, 2, 'assets/ gained one file: ' + now.join(','));
+  const added = now.filter((f) => f !== 'a.png')[0];
+  assert.strictEqual(await shownNotice(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'Top para.\n\n![pic](assets/a.png)\n\nBottom para.\n\n![](assets/' + added + ')\n');
+}, D4_OPTS);
+
+// ── v3174 D3 (R7): a converted block keeps a blank line to the non-blank line next to it ──
+// Without it a link reference definition (or a paragraph) directly below / above the
+// converted block is absorbed as a lazy line of the new paragraph / item / quote.
+const D3_MD = '# D\n\n## H\n[r]: http://u\n\nP [link][r].\n';
+const d3Headings = async (page) => page.evaluate(() => {
+  const b = [...document.querySelectorAll('.ed-block')].find((x) => x.getAttribute('data-block-type') === 'heading' && /H$/.test(x.textContent.trim()));
+  return '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]';
+});
+const d3Case = (label, expected, undoToo) => check('v3174 D3: heading + definition converted to ' + label + ' keeps the definition', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', label]);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  if (undoToo) {
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), D3_MD, 'one Ctrl+Z restores the original bytes');
+  }
+}, { md: D3_MD });
+d3Case('文字', '# D\n\nH\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('項目符號列表', '# D\n\n- H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('編號列表', '# D\n\n1. H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('待辦清單', '# D\n\n- [ ] H\n\n[r]: http://u\n\nP [link][r].\n', true);
+d3Case('引用', '# D\n\n> H\n\n[r]: http://u\n\nP [link][r].\n', true);
+check('v3174 D3: heading directly above and below a paragraph converted to 文字', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '文字']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nP.\n\nH\n\nQ.\n');
+}, { md: '# D\n\nP.\n## H\nQ.\n' });
+check('v3174 D3: scope pin, 標題 3 leaves the definition directly below', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '標題 3']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n### H\n[r]: http://u\n\nP [link][r].\n');
+}, { md: D3_MD });
+check('v3174 D3: scope pin, 程式碼 leaves the definition directly below', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await d3Headings(page), ['轉換成', '程式碼']);
+  await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nH\n```\n[r]: http://u\n\nP [link][r].\n');
+}, { md: D3_MD });
+// Final review I4: converting a block to its OWN type changes nothing, so it
+// writes nothing and pushes no undo step, even with a tight neighbour (the
+// separating blank line is for a real conversion only). The edit before it
+// proves the step: Ctrl+Z after the convert must undo that edit, not a phantom
+// convert.
+const d3BlockSel = (page, type, text) => page.evaluate(([ty, tx]) => {
+  const b = [...document.querySelectorAll('.ed-block[data-block-type="' + ty + '"]')].find((x) => x.textContent.trim() === tx);
+  return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+}, [type, text]);
+for (const [label, md, type, text, item] of [
+  ['文字 on a paragraph under a tight heading', '# D\n\n## H\nP.\n\nZ.\n', 'paragraph', 'P.', '文字'],
+  ['引用 on a quote under a tight paragraph', '# D\n\nP.\n> q\n\nZ.\n', 'blockquote', 'q', '引用'],
+]) {
+  check('v3174 D3: own-type ' + label + ' writes nothing and pushes no undo step', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Z.', 2);
+    await page.keyboard.type('x');
+    const typed = md.replace('Z.\n', 'Z.x\n');
+    assert.strictEqual(await saveAndRead(page, boot), typed, 'guard: the edit before the convert is saved');
+    const sel = await d3BlockSel(page, type, text);
+    assert.ok(sel, 'guard: the ' + type + ' block is found');
+    await gutterMenu(page, sel, ['轉換成', item]);
+    await renderIdle(page);
+    assert.strictEqual((await dirtyMarks(page)).status, 'clean', 'nothing changed, so the page stays clean');
+    assert.strictEqual(await saveAndRead(page, boot), typed, 'the convert wrote nothing');
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), md, 'Ctrl+Z undoes the edit before the convert');
+  }, { md });
+}
+
+// ── v3174 D5 (R8): a span moved across a definition writes it once ──
+// moveSpanAcrossLists() replays the lines between two blocks that stay
+// neighbours, and names them, so the definition among them is not appended
+// a second time after the region.
+const D5_MD = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- d\n';
+const d5Case = (label, gesture, expected) => check('v3174 D5: ' + label + ' writes the definition once', DESKTOP, async (page, boot) => {
+  await gesture(page);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), D5_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: D5_MD });
+d5Case('⠿ dragging a to the end', (page) => dragBlock(page, 'a', null),
+  '# D\n\n- b\n\n[r]: http://u\n\n- c\n- d\n- a\n');
+d5Case('⠿ dragging d before b', (page) => dragBlock(page, 'd', 'b'),
+  '# D\n\n- a\n- d\n- b\n\n[r]: http://u\n\n- c\n');
+d5Case('⠿ dragging b..c to the end', async (page) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'b', null);
+}, '# D\n\n- a\n- d\n- b\n\n[r]: http://u\n\n- c\n');
+d5Case('⠿ dragging b..c before a', async (page) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await dragBlock(page, 'b', 'a');
+}, '# D\n\n- b\n\n[r]: http://u\n\n- c\n- a\n- d\n');
+// Review Focus 4: the same text inside a fence is code, not the definition; the
+// replayed gap is named by line, so the fence's copy decides nothing.
+const D5_FENCE_MD = '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n\n```\n[r]: http://u\n```\n';
+check('v3174 D5: a definition-looking line in a fence is not taken for the real one', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'a', '[r]');
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n- b\n\n[r]: http://u\n\n- c\n- a\n\n```\n[r]: http://u\n```\n');
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), D5_FENCE_MD, 'one Ctrl+Z restores the original bytes');
+}, { md: D5_FENCE_MD });
+
+// ── v3174 D7 (R9): Tab / Shift+Tab over two lists separated by a definition ──
+// A definition is no block, so the two lists used to be one Tab group and the
+// second list's first item (no headroom) zeroed the whole batch. They are two
+// groups now, as with a paragraph between: b moves, c (a list start) cannot.
+const d7Case = (label, md, key, expected) => check('v3174 D7: ' + label, DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'b', 'c'), 2, 'guard: two blocks selected');
+  await page.keyboard.press(key); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no refusal');
+  assert.strictEqual(await saveAndRead(page, boot), expected);
+  await page.keyboard.press('Control+z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z restores the original bytes');
+}, { md });
+d7Case('Tab over two lists separated by a definition indents', D5_MD, 'Tab',
+  '# D\n\n- a\n  - b\n\n[r]: http://u\n\n- c\n- d\n');
+d7Case('Shift+Tab over two lists separated by a definition outdents', '# D\n\n- a\n  - b\n\n[r]: http://u\n\n- c\n- e\n', 'Shift+Tab',
+  '# D\n\n- a\n- b\n\n[r]: http://u\n\n- c\n- e\n');
+
+// ── v3.17.4 Task 5: E1 (R10) ──
+// The page decodes every named reference itself, so the field shows what the
+// reader shows; an untouched alt writes nothing, an edited one writes the
+// character.
+check('v3174 E1: the alt field shows &copy; as the character, and an edit writes the character', DESKTOP, async (page, boot) => {
+  const md = '![a &copy; b](assets/a.png)\n';
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'a \u00a9 b', 'the field shows the character');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), md, 'no change writes nothing');
+  await openAlt(page);
+  await page.keyboard.press('End');
+  await page.keyboard.type('x'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '![a \u00a9 bx](assets/a.png)\n');
+}, { md: '![a &copy; b](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
+// Final review I5: the reader's alt is an attribute, where a legacy name such
+// as &not or &copy followed by more letters is NOT decoded; the field must read
+// the same, or an edit writes the legacy prefix (&notit; -> \u00acit;) to disk.
+const E1_ATTR_MD = '![a &notit; b &copyx; c &degree; d &copy; e](assets/a.png)\n';
+check('v3174 E1: a name the reader leaves literal in the alt attribute stays literal in the field and in an edit', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  assert.deepStrictEqual(await page.evaluate(() => [document.querySelector('.ed-imgtb-input').value, document.querySelector('.content img').alt]),
+    ['a &notit; b &copyx; c &degree; d \u00a9 e', 'a &notit; b &copyx; c &degree; d \u00a9 e'], 'the field reads what the page\'s img.alt reads');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), E1_ATTR_MD, 'no change writes nothing');
+  await openAlt(page);
+  await page.keyboard.press('End');
+  await page.keyboard.type('x'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '![a &amp;notit; b &amp;copyx; c &amp;degree; d \u00a9 ex](assets/a.png)\n');
+}, { md: E1_ATTR_MD, assets: { 'assets/a.png': PNG_160 } });
+
+// ── v3.17.4 Task 6: E2, E3 (R11, R12) ──
+// Tab / Shift+Tab in the keyboard-opened alt field act as Enter and hand focus
+// back to the image's block selection; a kept draft is unsaved work and
+// outlives the scrolls that hide the toolbar.
+const focusedSelectedBlock = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { selected: !!a && !!a.classList && a.classList.contains('ed-selected') && !!a.querySelector('img'), body: a === document.body };
+});
+const keyboardAlt = async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.press('ArrowDown'); await wait(250);
+  await page.keyboard.press('Enter'); await wait(300);
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter'); await wait(300);
+  assert.strictEqual((await imgTbState(page)).inputShown, true, 'guard: the keyboard-opened field is showing');
+};
+for (const [label, key] of [['Tab', 'Tab'], ['Shift+Tab', 'Shift+Tab']]) {
+  check('v3174 E2: ' + label + ' in the keyboard-opened alt field applies the alt and returns to the image\'s selection', DESKTOP, async (page, boot) => {
+    await keyboardAlt(page);
+    await page.keyboard.press('End'); await page.keyboard.type('XY');
+    await page.keyboard.press(key); await renderIdle(page); await wait(300);
+    assert.strictEqual(await imgTbState(page), null, 'the toolbar is closed');
+    assert.deepStrictEqual(await focusedSelectedBlock(page), { selected: true, body: false }, 'focus is on the selected image block');
+    await page.keyboard.type('z'); await wait(200);
+    assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip topXY](assets/a.png "T")\n\nOmega.\n');
+  }, IMG_OPTS);
+}
+check('v3174 E3: a kept draft reads unsaved and survives scrolling back', DESKTOP, async (page) => {
+  await page.evaluate(() => { document.querySelector('.content img').scrollIntoView({ block: 'center' }); });
+  await wait(200);
+  await openAlt(page);
+  await page.keyboard.press('End'); await page.keyboard.type('XYZ'); await wait(150);
+  await page.evaluate(() => window.scrollBy(0, 1500)); await wait(500);
+  assert.strictEqual(await imgTbState(page), null, 'guard: the toolbar went with the image');
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'dirty', dot: true, guard: true }, 'the kept draft is unsaved work');
+  await page.evaluate(() => { document.querySelector('.content img').scrollIntoView({ block: 'center' }); });
+  await wait(500);
+  await page.mouse.move(5, 5); await wait(150);
+  await openAlt(page);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-imgtb-input').value), 'chip topXYZ', 'reopened: the draft is back');
+  await page.keyboard.press('Escape'); await wait(300);
+  assert.deepStrictEqual(await dirtyMarks(page), { status: 'clean', dot: false, guard: false }, 'Esc discards it');
+}, { md: IMG_LONG_MD, assets: { 'assets/a.png': PNG_160 } });
+
+// ── v3174 E4: a click on a degraded block while a write renders ──
+// R13: the click waits for the write, finds the block again by what it read on
+// screen (unique at the press and after the settle), and opens it. Refused with
+// the notice only when that re-find fails.
+async function splitThenClick(page, sel) {
+  await delayRender(page, 1200);
+  await focusSurface(page, 'Alpha bravo.', 5);
+  await page.keyboard.press('Enter');
+  await wait(50);
+  const out = rendersOut(page);
+  await page.locator(sel).first().click();
+  assert.ok(out > 0, 'guard: the click fell inside the split\'s render (' + out + ' out)');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  await wait(300);
+}
+check('v3174 E4: clicking a quote while a split renders opens its raw box after the render', DESKTOP, async (page) => {
+  await splitThenClick(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    raw: [...document.querySelectorAll('textarea.ed-raw')].map((t) => t.value),
+    active: !!(document.activeElement && document.activeElement.matches('textarea.ed-raw')) })),
+  { raw: ['> Quote line.'], active: true });
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\nAlpha bravo.\n\n> Quote line.\n\nOmega.\n' });
+check('v3174 E4: the same with a fenced code block opens the in-place code edit', DESKTOP, async (page) => {
+  await splitThenClick(page, '.ed-block[data-block-type="code"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    edit: document.querySelectorAll('pre[data-ed-code-edit]').length,
+    active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')) })),
+  { edit: 1, active: true });
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: '# D\n\nAlpha bravo.\n\n```\ncode line\n```\n\nOmega.\n' });
+check('v3174 E4: two identical quotes — refused with the notice', DESKTOP, async (page, boot) => {
+  await splitThenClick(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length })), { raw: 0 });
+  assert.strictEqual(await noticeText(page), '文件已更新，請重試這個操作');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\nbravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n');
+}, { md: '# D\n\nAlpha bravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n' });
+// Final review I3: the press comes during the write and the write lands while
+// the button is still down. The render replaces the pressed node, no click
+// follows (R50), and the release opens the block, found again by the print the
+// PRESS took. The block sits above the split, so it stays under the pointer.
+async function splitThenHold(page, sel) {
+  await delayRender(page, 1200);
+  await focusSurface(page, 'Alpha bravo.', 5);
+  await page.keyboard.press('Enter');
+  await wait(50);
+  const box = await page.locator(sel).first().boundingBox();
+  await page.evaluate((s) => { window.__e4Pressed = document.querySelector(s); }, sel);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  const out = rendersOut(page);
+  assert.ok(out > 0, 'guard: the press fell inside the split\'s render (' + out + ' out)');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  await renderIdle(page); await wait(200);
+  assert.strictEqual(await page.evaluate(() => window.__e4Pressed.isConnected), false, 'guard: the render replaced the pressed node before the release');
+  await page.mouse.up();
+  await wait(300); await renderIdle(page);
+}
+check('v3174 E4: a quote pressed during a split\'s render and released after it lands opens its raw box', DESKTOP, async (page) => {
+  await splitThenHold(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    raw: [...document.querySelectorAll('textarea.ed-raw')].map((t) => t.value),
+    active: !!(document.activeElement && document.activeElement.matches('textarea.ed-raw')),
+    notice: (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null })),
+  { raw: ['> Quote line.'], active: true, notice: null });
+}, { md: '# D\n\n> Quote line.\n\nAlpha bravo.\n\nOmega.\n' });
+check('v3174 E4: a code block pressed during a split\'s render and released after it lands opens the in-place code edit', DESKTOP, async (page) => {
+  await splitThenHold(page, '.ed-block[data-block-type="code"]');
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const ed = document.querySelectorAll('pre[data-ed-code-edit]');
+    return { edit: ed.length, text: ed.length ? ed[0].textContent : null,
+      active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')),
+      notice: (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null };
+  }), { edit: 1, text: 'code line', active: true, notice: null });
+}, { md: '# D\n\n```\ncode line\n```\n\nAlpha bravo.\n\nOmega.\n' });
+check('v3174 E4: two identical quotes pressed during a split\'s render and released after it — refused with the notice', DESKTOP, async (page, boot) => {
+  await splitThenHold(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length })), { raw: 0 });
+  assert.strictEqual(await noticeText(page), '文件已更新，請重試這個操作');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Twin.\n\n> Twin.\n\nAlpha\n\nbravo.\n\nOmega.\n');
+}, { md: '# D\n\n> Twin.\n\n> Twin.\n\nAlpha bravo.\n\nOmega.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
@@ -11690,3 +12105,14 @@ check('v3173 N2b: dragging text across a definition leaves one copy', DESKTOP, a
   console.log('editor-click: ' + ran + ' checks passed');
   process.exit(0);
 })();
+
+// ── v3.17.4 Task 8 (E5, R14): the edit page plates an svg beside text in a paragraph ──
+const E5_SVG = '<svg width="40" height="20" xmlns="http://www.w3.org/2000/svg"><text x="2" y="14">S</text></svg>';
+const E5_MD = '# P\n\nText ' + E5_SVG + ' more.\n';
+check('v3174 E5: edit page plates an svg beside text in a paragraph', DESKTOP, async (page, boot) => {
+  const read = () => page.evaluate(() => { const s = document.querySelector('.content p svg'); const cs = getComputedStyle(s); return { bg: cs.backgroundColor, ink: cs.color }; });
+  assert.strictEqual((await read()).bg, 'rgba(0, 0, 0, 0)', 'light: no plate');
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
+  assert.strictEqual(await saveAndRead(page, boot), E5_MD, 'no byte changes');
+}, { md: E5_MD });
