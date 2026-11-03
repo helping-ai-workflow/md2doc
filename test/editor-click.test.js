@@ -12017,3 +12017,14 @@ check('v3174 E4: two identical quotes — refused with the notice', DESKTOP, asy
   console.log('editor-click: ' + ran + ' checks passed');
   process.exit(0);
 })();
+
+// ── v3.17.4 Task 8 (E5, R14): the edit page plates an svg beside text in a paragraph ──
+const E5_SVG = '<svg width="40" height="20" xmlns="http://www.w3.org/2000/svg"><text x="2" y="14">S</text></svg>';
+const E5_MD = '# P\n\nText ' + E5_SVG + ' more.\n';
+check('v3174 E5: edit page plates an svg beside text in a paragraph', DESKTOP, async (page, boot) => {
+  const read = () => page.evaluate(() => { const s = document.querySelector('.content p svg'); const cs = getComputedStyle(s); return { bg: cs.backgroundColor, ink: cs.color }; });
+  assert.strictEqual((await read()).bg, 'rgba(0, 0, 0, 0)', 'light: no plate');
+  await page.locator('#md2doc-theme-toggle').click(); await wait(300);
+  assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
+  assert.strictEqual(await saveAndRead(page, boot), E5_MD, 'no byte changes');
+}, { md: E5_MD });
