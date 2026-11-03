@@ -27,8 +27,9 @@ All notable changes to this project will be documented here. This project adhere
 
 ### Fixed — 閱讀頁
 
-- **只有「整段只有 SVG」的段落，行內 SVG 在深色模式才有白底；SVG 旁邊有文字、或在緊湊清單項目裡，黑色的字看不
-  見。** 現在每個行內 SVG 都有白底，閱讀頁與編輯頁相同。
+- **只有「整段只有 SVG」的段落，行內 SVG 在深色模式才有白底；SVG 旁邊有文字、或在緊湊清單項目裡，SVG 的黑色線條
+  和文字在深色背景上看不見。** 現在段落與清單項目裡的行內 SVG 都有白底，閱讀頁與編輯頁相同。包在連結或 `<em>`
+  裡的 SVG、表格儲存格和標題裡的 SVG 不在此列。
 - **緊湊的待辦項目裡放了 SVG，項目失去核取方塊的樣式。** 現在待辦項目的樣式和 SVG 白底並存。
 
 ### Known limitations
