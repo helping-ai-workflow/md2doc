@@ -7147,9 +7147,8 @@ for (const [label, holds, fails] of [
 // R83 states (a box open while a render is dropped, or while a
 // reconciliation redraw is out) are no longer reachable, and these checks pin
 // the gate instead: the click opens nothing while a render is out; once it
-// lands, the click is refused when that render replaced the block (it does
-// here: the split's render and the reconciliation redraw both replace the
-// quote) or opens it on the block's own lines; and what is typed into the box
+// lands, the click opens it on the block's own lines, or (v3.17.4 E4, R13) is
+// refused only when the block cannot be found again; and what is typed into the box
 // the next click opens is written. The R86 guard below still reaches its
 // state (a box opened on the screen a failed reconciliation left) and keeps
 // pinning it. History: 95ba1a9 moved these from ⠿ MD 原始碼 to this quote
@@ -7165,16 +7164,17 @@ const rawOpen = (page) => page.evaluate(() => !!document.querySelector('textarea
 // fails keeps its text and the failure card, and the next save writes the
 // text. Was: the box opened during the split's render and committed while
 // that render was dropped.
-check('render-guard: a quote clicked during a split\'s render is refused once it lands; the box the next click opens keeps its text and the card when its commit fails (R80, R100)', DESKTOP, async (page, boot) => {
+check('render-guard: a quote clicked during a split\'s render opens once it lands (v3.17.4 E4); the box keeps its text and the card when its commit fails (R80, R100)', DESKTOP, async (page, boot) => {
   await scriptRenders(page, [1500, 2500], [false, true]);
   await focusSurface(page, 'Bravo paragraph text.', 5); await page.keyboard.press('Enter');
   await openQuoteBox(page);
   assert.strictEqual(await rawOpen(page), false, 'no box opens while the split renders');
   await renderIdle(page); await wait(300); await renderIdle(page);
+  // v3.17.4 E4 (R13), migrated from "refused once the render replaced the
+  // quote, the next click opens it": a plain split (no undo or redo), the quote
+  // is unique, so the one click opens its raw box once the render lands.
   assert.deepStrictEqual({ box: await rawOpen(page), notice: await noticeText(page), ids: await allBlocksHaveIds(page) },
-    { box: false, notice: '文件已更新，請重試這個操作', ids: true }, 'refused once the render replaced the quote');
-  await openQuoteBox(page);
-  assert.strictEqual(await rawOpen(page), true, 'guard: raw box open');
+    { box: true, notice: null, ids: true }, 'opened once the render replaced the quote');
   await page.focus('textarea.ed-raw');
   await page.keyboard.press('End');
   await page.keyboard.type(' typed');
@@ -7411,9 +7411,6 @@ for (const [label, items, idx, want] of [
 check('render-guard: "# " typed where the reconciliation failed again writes nothing, and converts once the screen is drawn (R86)', DESKTOP, async (page, boot) => {
   const t0 = await staleAfterFailedReconcile(page, [1500, 2000, 300, 300], [false, true, true, true]);
   await focusSurface(page, 'Omega.', 0); await settleR86(page);
-  // v3.17.4 E4: 3 -> 4. The click now waits for the flight at its entry
-  // (settledGestureBlock), so the owed redraw runs before the refusal instead of
-  // after it; every assertion below it is unchanged.
   assert.strictEqual(renderTotal(page) - t0, 4, 'guard: the press ran the owed reconciliation, and it failed too');
   await page.keyboard.type('# '); await settleR86(page);
   assert.strictEqual(renderTotal(page) - t0, 4, 'nothing was committed');
@@ -7762,8 +7759,10 @@ for (const [label, md, type, seed, typed, want] of [
 // failed and so did the redraw). The quote below the split was still on
 // screen, so the box opened seeded from the stale `blocks` against the new
 // `lines` — `paragraph text.` — and its second Ctrl+Enter deleted that
-// paragraph (measured at 6208f4c, both engines). Now that click is refused;
-// the next clicks run the owed redraw and then open the quote's own lines.
+// paragraph (measured at 6208f4c, both engines). Now that click is refused
+// by the epoch / drawn-content rule (the node survives, so it is R102's
+// guard that refuses, not a lost node); a later click, once the owed
+// reconciliation is settled (settleR86), opens the quote's own lines.
 check('raw-box: a quote below a split clicked while the undo renders, whose redraw then fails, is refused and writes nothing over another block (R102, I-R1)', DESKTOP, async (page, boot) => {
   const MD = '# D\n\nAlpha para one.\n\nBravo paragraph text.\n\n> Omega.\n';
   const SPLIT = '# D\n\nAlpha para one.\n\nBravo\n\nparagraph text.\n\n';
@@ -7779,7 +7778,7 @@ check('raw-box: a quote below a split clicked while the undo renders, whose redr
   await wait(600);
   await clickQuote(); await wait(200);
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
   assert.deepStrictEqual({ box: await rawValue(), notice: await noticeText(page) },
     { box: null, notice: '文件已更新，請重試這個操作' }, 'refused: no box on the stale screen');
   assert.strictEqual(await saveAndRead(page, boot), SPLIT + '> Omega.\n', 'nothing written');
@@ -8541,7 +8540,7 @@ check('code-edit: a reconciliation that lands while the edit is open reopens it 
   // first, and the block opens once the redraw has failed too.
   await clickText(page, 'code');
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
   await page.keyboard.press('End'); await page.keyboard.type(' ab');
   assert.deepStrictEqual(await codeEdit(page), { text: 'code ab', caret: 7, focused: true }, 'guard: the edit is open on the stale screen');
   await page.keyboard.press('Escape');
@@ -8853,7 +8852,7 @@ check('code-chips: the language chip on a code block below a split whose undo an
   await hoverCodeBlock(page);
   await page.click('.ed-code-lang'); await wait(200);
   await settleR86(page); await wait(300); await settleR86(page);
-  assert.strictEqual(renderTotal(page) - t0, 4, 'guard: split, undo, the redraw that failed, and the owed redraw the click ran');
+  assert.strictEqual(renderTotal(page) - t0, 3, 'guard: split, undo, and the redraw that failed');
   assert.deepStrictEqual({ edit: await codeEdit(page), menu: await langMenu(page), notice: await noticeText(page) },
     { edit: null, menu: null, notice: '文件已更新，請重試這個操作' }, 'refused: no edit on the stale screen');
   assert.strictEqual(await saveAndRead(page, boot), SPLIT + '```\ncode\n```\n', 'nothing written');
