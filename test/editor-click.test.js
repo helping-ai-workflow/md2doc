@@ -11892,6 +11892,21 @@ check('v3174 E1: the alt field shows &copy; as the character, and an edit writes
   await page.keyboard.type('x'); await page.keyboard.press('Enter'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '![a \u00a9 bx](assets/a.png)\n');
 }, { md: '![a &copy; b](assets/a.png)\n', assets: { 'assets/a.png': PNG_160 } });
+// Final review I5: the reader's alt is an attribute, where a legacy name such
+// as &not or &copy followed by more letters is NOT decoded; the field must read
+// the same, or an edit writes the legacy prefix (&notit; -> \u00acit;) to disk.
+const E1_ATTR_MD = '![a &notit; b &copyx; c &degree; d &copy; e](assets/a.png)\n';
+check('v3174 E1: a name the reader leaves literal in the alt attribute stays literal in the field and in an edit', DESKTOP, async (page, boot) => {
+  await openAlt(page);
+  assert.deepStrictEqual(await page.evaluate(() => [document.querySelector('.ed-imgtb-input').value, document.querySelector('.content img').alt]),
+    ['a &notit; b &copyx; c &degree; d \u00a9 e', 'a &notit; b &copyx; c &degree; d \u00a9 e'], 'the field reads what the page\'s img.alt reads');
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), E1_ATTR_MD, 'no change writes nothing');
+  await openAlt(page);
+  await page.keyboard.press('End');
+  await page.keyboard.type('x'); await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '![a &amp;notit; b &amp;copyx; c &amp;degree; d \u00a9 ex](assets/a.png)\n');
+}, { md: E1_ATTR_MD, assets: { 'assets/a.png': PNG_160 } });
 
 // ── v3.17.4 Task 6: E2, E3 (R11, R12) ──
 // Tab / Shift+Tab in the keyboard-opened alt field act as Enter and hand focus
