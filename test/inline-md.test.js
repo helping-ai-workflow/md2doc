@@ -584,6 +584,18 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   edge('word edges', ['x', el('strong', {}, '中'), 'y'], 'x**中**y', '<strong>中</strong>');
   edge('del punct', ['a', el('del', {}, '「x」'), 'b'], 'a~~「x」~~b', '<del>「x」</del>');
   edge('next to a link', [el('strong', {}, 'x。'), el('a', { href: 'http://x' }, 'lnk')], '**x。**[lnk](http://x)', '<strong>x。</strong><a');
+  // final review I1: a closing run touching the next mark's opening run fuses
+  // with it, so the character outside each is the one inside the other
+  edge('cross-tag fused, punct closes', [el('strong', {}, '注意：'), el('em', {}, '斜體')], '**注意：**<!-- -->*斜體*', '<strong>注意：</strong><!-- --><em>斜體</em>');
+  edge('cross-tag fused, em first', [el('em', {}, '注意：'), el('strong', {}, '粗體')], '*注意：*<!-- -->**粗體**', '<em>注意：</em><!-- --><strong>粗體</strong>');
+  // ...but not the opening side: once the left run has closed, marked sees a
+  // `*` (punctuation) before what is left of the run
+  edge('cross-tag fused, punct opens', [el('strong', {}, '粗'), el('em', {}, '「x」')], '**粗***「x」*', '<strong>粗</strong><em>「x」</em>');
+  edge('cross-tag fused, punct both', [el('strong', {}, '「a」'), el('em', {}, '「b」')], '**「a」***「b」*', '<strong>「a」</strong><em>「b」</em>');
+  // final review I2: marked reads the character before an opening run as one
+  // UTF-16 unit, so an astral symbol there counts as a word character
+  edge('emoji before', ['📌', el('strong', {}, '「重點」'), '請看'], '📌<!-- -->**「重點」**<!-- -->請看', '<strong>「重點」</strong>');
+  edge('emoji after', [el('strong', {}, '「x」'), '😀'], '**「x」**😀', '<strong>「x」</strong>');
   // the same-tag guard (v3.4.0) is untouched, and a hoisted space replaces it
   edge('same-tag guard', [el('strong', {}, 'a'), el('strong', {}, 'b')], '**a**<!-- -->**b**', '<strong>a</strong><!-- --><strong>b</strong>');
   edge('same-tag, space between', [el('strong', {}, 'a'), el('strong', {}, ' b')], '**a** **b**', '<strong>a</strong> <strong>b</strong>');

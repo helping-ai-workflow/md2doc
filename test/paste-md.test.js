@@ -201,6 +201,17 @@ eq(
   pasted('symbol', '<p>x<strong>$5</strong>y</p>', 'x<!-- -->**$5**y', '<strong>$5</strong>', 'x$5y');
   pasted('nested run guarded outside', '<p>a<b><i>「x」</i></b>b</p>', 'a<!-- -->***「x」***<!-- -->b', '「x」</', 'a「x」b');
   pasted('through a span', '<p>前<span><b>「x」</b></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  // final review I3: an empty element beside the bold (a Word bookmark, an
+  // empty span) is skipped, and a wrapper turndown writes no syntax for is
+  // looked through
+  pasted('empty anchor before', '<p>前<a name="_Toc1"></a><b>「x」</b>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('empty span after', '<p>前<b>「x」</b><span></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('through u', '<p><u><b>「x」</b></u>後</p>', '**「x」**<!-- -->後', '<strong>「x」</strong>', '「x」後');
+  pasted('through sup', '<p>前<sup><b>「x」</b></sup></p>', '前<!-- -->**「x」**', '<strong>「x」</strong>', '前「x」');
+  // final review I2, paste side
+  pasted('emoji before', '<p>📌<b>「重點」</b>請看</p>', '📌<!-- -->**「重點」**<!-- -->請看', '<strong>「重點」</strong>', '📌「重點」請看');
+  // final review (minor): a hard break at the edge of a pasted bold
+  pasted('hard break at the end', '<p><b>x<br></b>y</p>', '**x**  \ny', '<strong>x</strong><br>', 'xy');
   // nothing where the neighbour already satisfies the rule
   pasted('punct neighbours', '<p>「<b>引號</b>」</p>', '「**引號**」', '<strong>引號</strong>', '「引號」');
   pasted('space neighbours', '<p>前 <b>「x」</b> 後</p>', '前 **「x」** 後', '<strong>「x」</strong>', '前 「x」 後');
