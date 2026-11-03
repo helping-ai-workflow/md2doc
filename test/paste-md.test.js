@@ -208,6 +208,24 @@ eq(
   pasted('empty span after', '<p>前<b>「x」</b><span></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
   pasted('through u', '<p><u><b>「x」</b></u>後</p>', '**「x」**<!-- -->後', '<strong>「x」</strong>', '「x」後');
   pasted('through sup', '<p>前<sup><b>「x」</b></sup></p>', '前<!-- -->**「x」**', '<strong>「x」</strong>', '前「x」');
+  // re-review C1 / I1: the separator never lands at the start of a line --
+  // marked reads a line opening `<!--` as an HTML block, which ends the
+  // paragraph and leaves the stars literal. A <br> inside a skipped wrapper,
+  // or a block before / after, is a line edge: nothing is looked past it.
+  function noLineStartComment(name, html) {
+    const md = pm.htmlToMarkdown(html);
+    ok(!/(^|\n)<!--/.test(md), 'v3175 R2 ' + name + ': no line starts with the separator, ' + JSON.stringify(md));
+    ok(/<strong>「x」<\/strong>/.test(marked.parse(md)), 'v3175 R2 ' + name + ': bold taken, ' + JSON.stringify(marked.parse(md)));
+  }
+  noLineStartComment('br in a span before', '<p>前<span><br></span><b>「x」</b>後</p>');
+  noLineStartComment('br in a Word span before', '<p>前<span lang="EN-US"><span></span><br></span><b>「x」</b>後</p>');
+  noLineStartComment('div before', '<div>前</div><b>「x」</b>後');
+  noLineStartComment('p before', '<p>前</p><b>「x」</b>後');
+  noLineStartComment('li before', '<ul><li>前</li></ul><b>「x」</b>後');
+  noLineStartComment('br at the end of a span before', '<p><span>前<br></span><b>「x」</b>後</p>');
+  noLineStartComment('br at the end of a nested span before', '<p><span>前<span><br></span></span><b>「x」</b>後</p>');
+  pasted('br in a span before, bytes', '<p>前<span><br></span><b>「x」</b>後</p>', '前  \n**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('div after', '<p>前<b>「x」</b></p><div>後</div>', '前<!-- -->**「x」**\n\n後', '<strong>「x」</strong>', '前「x」 後');
   // final review I2, paste side
   pasted('emoji before', '<p>📌<b>「重點」</b>請看</p>', '📌<!-- -->**「重點」**<!-- -->請看', '<strong>「重點」</strong>', '📌「重點」請看');
   // final review (minor): a hard break at the edge of a pasted bold
