@@ -654,6 +654,10 @@ console.log('md2doc dot WASM test passed');
   assert.match(await body('- a ' + E5S + '\n'), /<li data-svg-plate="1">/, 'E5: tight item with text beside the svg is plated');
   assert.match(await body('- a ' + E5S + '\n\n- b\n'), /<p data-svg-plate="1">a <svg/, 'E5: loose item paragraph with text is plated');
   assert.match(await body('Text ' + E5S + ' more.\n'), /<p data-svg-plate="1">Text <svg/, 'E5: paragraph with text is plated');
+  for (const [mark, cls] of [[' ', 'task-item'], ['x', 'task-item is-checked']]) {
+    const tk = await body('- [' + mark + '] x ' + E5S + '\n');
+    assert.match(tk, new RegExp('<li class="' + cls + '" data-svg-plate="1"><input[^>]*> <span class="task-text">x <svg'), 'E5: task item [' + mark + '] keeps task-item + task-text and is plated: ' + tk);
+  }
   assert.doesNotMatch(await body('- a\n  - b ' + E5S + '\n'), /<li data-svg-plate="1">\s*a/, 'E5: an outer item is not plated for a nested item svg');
   assert.doesNotMatch((await renderMarkdown('# G\n\n```dot\ndigraph { a -> b; }\n```\n', fake, {})).bodyHtml, /data-svg-plate/, 'E5: a graphviz diagram is not plated');
   assert.doesNotMatch(await body('Use the `<svg>` element.\n'), /data-svg-plate/, 'E5: a code span naming svg is not plated');
