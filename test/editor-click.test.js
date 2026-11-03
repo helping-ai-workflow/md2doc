@@ -11824,6 +11824,34 @@ check('v3174 D3: scope pin, 程式碼 leaves the definition directly below', DES
   await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\n```\nH\n```\n[r]: http://u\n\nP [link][r].\n');
 }, { md: D3_MD });
+// Final review I4: converting a block to its OWN type changes nothing, so it
+// writes nothing and pushes no undo step, even with a tight neighbour (the
+// separating blank line is for a real conversion only). The edit before it
+// proves the step: Ctrl+Z after the convert must undo that edit, not a phantom
+// convert.
+const d3BlockSel = (page, type, text) => page.evaluate(([ty, tx]) => {
+  const b = [...document.querySelectorAll('.ed-block[data-block-type="' + ty + '"]')].find((x) => x.textContent.trim() === tx);
+  return b ? '.ed-block[data-block-id="' + b.getAttribute('data-block-id') + '"]' : null;
+}, [type, text]);
+for (const [label, md, type, text, item] of [
+  ['文字 on a paragraph under a tight heading', '# D\n\n## H\nP.\n\nZ.\n', 'paragraph', 'P.', '文字'],
+  ['引用 on a quote under a tight paragraph', '# D\n\nP.\n> q\n\nZ.\n', 'blockquote', 'q', '引用'],
+]) {
+  check('v3174 D3: own-type ' + label + ' writes nothing and pushes no undo step', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'Z.', 2);
+    await page.keyboard.type('x');
+    const typed = md.replace('Z.\n', 'Z.x\n');
+    assert.strictEqual(await saveAndRead(page, boot), typed, 'guard: the edit before the convert is saved');
+    const sel = await d3BlockSel(page, type, text);
+    assert.ok(sel, 'guard: the ' + type + ' block is found');
+    await gutterMenu(page, sel, ['轉換成', item]);
+    await renderIdle(page);
+    assert.strictEqual((await dirtyMarks(page)).status, 'clean', 'nothing changed, so the page stays clean');
+    assert.strictEqual(await saveAndRead(page, boot), typed, 'the convert wrote nothing');
+    await page.keyboard.press('Control+z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), md, 'Ctrl+Z undoes the edit before the convert');
+  }, { md });
+}
 
 // ── v3174 D5 (R8): a span moved across a definition writes it once ──
 // moveSpanAcrossLists() replays the lines between two blocks that stay
