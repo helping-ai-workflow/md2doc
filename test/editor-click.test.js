@@ -12018,6 +12018,51 @@ check('v3174 E4: two identical quotes — refused with the notice', DESKTOP, asy
   assert.strictEqual(await noticeText(page), '文件已更新，請重試這個操作');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha\n\nbravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n');
 }, { md: '# D\n\nAlpha bravo.\n\n> Twin.\n\n> Twin.\n\nOmega.\n' });
+// Final review I3: the press comes during the write and the write lands while
+// the button is still down. The render replaces the pressed node, no click
+// follows (R50), and the release opens the block, found again by the print the
+// PRESS took. The block sits above the split, so it stays under the pointer.
+async function splitThenHold(page, sel) {
+  await delayRender(page, 1200);
+  await focusSurface(page, 'Alpha bravo.', 5);
+  await page.keyboard.press('Enter');
+  await wait(50);
+  const box = await page.locator(sel).first().boundingBox();
+  await page.evaluate((s) => { window.__e4Pressed = document.querySelector(s); }, sel);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  const out = rendersOut(page);
+  assert.ok(out > 0, 'guard: the press fell inside the split\'s render (' + out + ' out)');
+  await rendersQuiet(page);
+  await page.unroute('**/api/render');
+  await renderIdle(page); await wait(200);
+  assert.strictEqual(await page.evaluate(() => window.__e4Pressed.isConnected), false, 'guard: the render replaced the pressed node before the release');
+  await page.mouse.up();
+  await wait(300); await renderIdle(page);
+}
+check('v3174 E4: a quote pressed during a split\'s render and released after it lands opens its raw box', DESKTOP, async (page) => {
+  await splitThenHold(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({
+    raw: [...document.querySelectorAll('textarea.ed-raw')].map((t) => t.value),
+    active: !!(document.activeElement && document.activeElement.matches('textarea.ed-raw')),
+    notice: (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null })),
+  { raw: ['> Quote line.'], active: true, notice: null });
+}, { md: '# D\n\n> Quote line.\n\nAlpha bravo.\n\nOmega.\n' });
+check('v3174 E4: a code block pressed during a split\'s render and released after it lands opens the in-place code edit', DESKTOP, async (page) => {
+  await splitThenHold(page, '.ed-block[data-block-type="code"]');
+  assert.deepStrictEqual(await page.evaluate(() => {
+    const ed = document.querySelectorAll('pre[data-ed-code-edit]');
+    return { edit: ed.length, text: ed.length ? ed[0].textContent : null,
+      active: !!(document.activeElement && document.activeElement.matches('pre[data-ed-code-edit]')),
+      notice: (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || null };
+  }), { edit: 1, text: 'code line', active: true, notice: null });
+}, { md: '# D\n\n```\ncode line\n```\n\nAlpha bravo.\n\nOmega.\n' });
+check('v3174 E4: two identical quotes pressed during a split\'s render and released after it — refused with the notice', DESKTOP, async (page, boot) => {
+  await splitThenHold(page, '.ed-block[data-block-type="blockquote"]');
+  assert.deepStrictEqual(await page.evaluate(() => ({ raw: document.querySelectorAll('textarea.ed-raw').length })), { raw: 0 });
+  assert.strictEqual(await noticeText(page), '文件已更新，請重試這個操作');
+  assert.strictEqual(await saveAndRead(page, boot), '# D\n\n> Twin.\n\n> Twin.\n\nAlpha\n\nbravo.\n\nOmega.\n');
+}, { md: '# D\n\n> Twin.\n\n> Twin.\n\nAlpha bravo.\n\nOmega.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
