@@ -1357,13 +1357,13 @@ async function main() {
   //   文字」那個子句，那截字會連著標記一起被刪掉。
   // keeps-br：斜體裡剩下的是使用者打的硬斷行 <br> —— 它的 textContent 是空的，
   //   但它不是空殼。少了「沒有子元素」那個子句，那個斷行會被刪掉。
-  //   ⚠ 這一列釘住的磁碟形狀【不會】原樣讀回來：實測 marked.parseInline() 把
-  //   `Alpha *\<換行>****ital* bold** text here.` 讀成
-  //   `Alpha *<br>*<strong><em>ital</em> bold</strong> text here.`，也就是那對
-  //   星號變成字面值。原因是「只裝著一個硬斷行的 <em>」在 markdown 裡沒有拼法
-  //   —— inline-md.js 的 EM 分支無條件在兩側輸出 `*`，所以任何送去序列化的
-  //   <em><br></em> 都會長成這樣，與本修無關。在「重新載入後斷行的斜體外衣掉
-  //   了」與「斷行直接消失」之間，這裡選前者：不掉內容。
+  //   v3.4.0 起這一列釘的是 `Alpha *\<換行>****ital* bold** text here.`，
+  //   marked.parseInline() 讀成 `Alpha *<br>*<strong>…`（那對星號變成字面值）。
+  //   v3.17.5 M1 起 inline-md.js 把標記邊緣的硬斷行搬到分隔符外面，只裝著斷行
+  //   的 <em> 只寫出那個斷行（ledger R5），所以磁碟是
+  //   `Alpha \<換行>***ital* bold** text here.`，實測讀成
+  //   `Alpha <br><strong><em>ital</em> bold</strong> text here.`。斷行照舊留著
+  //   —— 這一列守的「不要刪過頭」不變，只是斜體外衣不再寫成讀不回來的星號。
   //
   // ⚠ 已知的鄰居，【沒有】被任何一列釘住，而且它也會產出使用者回報的那個症狀：
   //   分隔符連讀。留下來的標記【正確地】活著（它裝著東西）時，它的收尾分隔符
@@ -1379,7 +1379,7 @@ async function main() {
     ['keeps-text', '# Doc\n\nAlpha *ital* bold text here.\n',
       '# Doc\n\nAlpha *it****al* bold** text here.\n'],
     ['keeps-br', '# Doc\n\nAlpha *\\\nital* bold text here.\n',
-      '# Doc\n\nAlpha *\\\n****ital* bold** text here.\n'],
+      '# Doc\n\nAlpha \\\n***ital* bold** text here.\n'],
   ]) {
     const ctx = await newPage(md);
     await ctx.page.evaluate((kind) => {

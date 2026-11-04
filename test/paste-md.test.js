@@ -175,4 +175,76 @@ eq(
   'nothing on the clipboard -> empty text, does not throw'
 );
 
+// --- v3.17.5 R2: pasted bold / italic whose text starts or ends with
+//     punctuation next to a word character. turndown already moves edge
+//     whitespace outside the delimiters; punctuation it wrapped blind, and the
+//     result lands in the file as source (client.js's 'markdown' paste branch).
+//     Measured on 4d7669f: `前面<b>「引號」</b>後面` -> `前面**「引號」**後面`,
+//     shown with literal asterisks. The oracle is the reader's own marked
+//     (requiring lib/md2doc.js installs its extensions), last in the file.
+{
+  const { marked } = require('marked');
+  require('../lib/md2doc.js');
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+  const shownText = (h) => h.replace(/<[^>]*>/g, '').replace(/&(amp|lt|gt|quot|#39);/g, (m, n) => ENT[n])
+    .replace(/\s+/g, ' ').trim();
+  function pasted(name, html, bytes, want, text) {
+    const md = pm.htmlToMarkdown(html);
+    eq(md, bytes, 'v3175 R2 ' + name + ': bytes');
+    const out = marked.parse(md);
+    ok(out.includes(want), 'v3175 R2 ' + name + ': ' + JSON.stringify(out) + ' lacks ' + JSON.stringify(want));
+    eq(shownText(out), text, 'v3175 R2 ' + name + ': the reader shows the pasted text');
+  }
+  pasted('cjk brackets', '<p>前面<b>「引號」</b>後面</p>', '前面<!-- -->**「引號」**<!-- -->後面', '<strong>「引號」</strong>', '前面「引號」後面');
+  pasted('cjk full stop', '<p><strong>中文。</strong>後面</p>', '**中文。**<!-- -->後面', '<strong>中文。</strong>', '中文。後面');
+  pasted('em', '<p>a<em>中文。</em>後</p>', 'a*中文。*<!-- -->後', '<em>中文。</em>', 'a中文。後');
+  pasted('symbol', '<p>x<strong>$5</strong>y</p>', 'x<!-- -->**$5**y', '<strong>$5</strong>', 'x$5y');
+  pasted('nested run guarded outside', '<p>a<b><i>「x」</i></b>b</p>', 'a<!-- -->***「x」***<!-- -->b', '「x」</', 'a「x」b');
+  pasted('through a span', '<p>前<span><b>「x」</b></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  // final review I3: an empty element beside the bold (a Word bookmark, an
+  // empty span) is skipped, and a wrapper turndown writes no syntax for is
+  // looked through
+  pasted('empty anchor before', '<p>前<a name="_Toc1"></a><b>「x」</b>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('empty span after', '<p>前<b>「x」</b><span></span>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('through u', '<p><u><b>「x」</b></u>後</p>', '**「x」**<!-- -->後', '<strong>「x」</strong>', '「x」後');
+  pasted('through sup', '<p>前<sup><b>「x」</b></sup></p>', '前<!-- -->**「x」**', '<strong>「x」</strong>', '前「x」');
+  // re-review C1 / I1: the separator never lands at the start of a line --
+  // marked reads a line opening `<!--` as an HTML block, which ends the
+  // paragraph and leaves the stars literal. A <br> inside a skipped wrapper,
+  // or a block before / after, is a line edge: nothing is looked past it.
+  function noLineStartComment(name, html) {
+    const md = pm.htmlToMarkdown(html);
+    ok(!/(^|\n)<!--/.test(md), 'v3175 R2 ' + name + ': no line starts with the separator, ' + JSON.stringify(md));
+    ok(/<strong>「x」<\/strong>/.test(marked.parse(md)), 'v3175 R2 ' + name + ': bold taken, ' + JSON.stringify(marked.parse(md)));
+  }
+  noLineStartComment('br in a span before', '<p>前<span><br></span><b>「x」</b>後</p>');
+  noLineStartComment('br in a Word span before', '<p>前<span lang="EN-US"><span></span><br></span><b>「x」</b>後</p>');
+  noLineStartComment('div before', '<div>前</div><b>「x」</b>後');
+  noLineStartComment('p before', '<p>前</p><b>「x」</b>後');
+  noLineStartComment('li before', '<ul><li>前</li></ul><b>「x」</b>後');
+  noLineStartComment('br at the end of a span before', '<p><span>前<br></span><b>「x」</b>後</p>');
+  noLineStartComment('br at the end of a nested span before', '<p><span>前<span><br></span></span><b>「x」</b>後</p>');
+  // re-review round 3, I1': an EMPTY block still writes a line edge
+  noLineStartComment('empty p before', '<p>前</p><p></p><b>「x」</b>後');
+  noLineStartComment('empty p between', '前<p></p><b>「x」</b>後');
+  noLineStartComment('empty div before', '<div>前<div></div><b>「x」</b>後</div>');
+  noLineStartComment('empty list before', '<div>前<ul><li></li></ul><b>「x」</b>後</div>');
+  noLineStartComment('empty table before', '<div>前<table><tr><td></td></tr></table><b>「x」</b></div>');
+  // ...while an inline element that writes nothing is still looked past: a
+  // bold holding only a <br> is dropped by its rule, and Word's empty <o:p>
+  pasted('bold holding only a br', '<p>aa<b><br></b><b>「x」</b>後</p>', 'aa<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', 'aa「x」後');
+  pasted('word o:p', '<p>前<o:p></o:p><b>「x」</b>後</p>', '前<!-- -->**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('br in a span before, bytes', '<p>前<span><br></span><b>「x」</b>後</p>', '前  \n**「x」**<!-- -->後', '<strong>「x」</strong>', '前「x」後');
+  pasted('div after', '<p>前<b>「x」</b></p><div>後</div>', '前<!-- -->**「x」**\n\n後', '<strong>「x」</strong>', '前「x」 後');
+  // final review I2, paste side
+  pasted('emoji before', '<p>📌<b>「重點」</b>請看</p>', '📌<!-- -->**「重點」**<!-- -->請看', '<strong>「重點」</strong>', '📌「重點」請看');
+  // final review (minor): a hard break at the edge of a pasted bold
+  pasted('hard break at the end', '<p><b>x<br></b>y</p>', '**x**  \ny', '<strong>x</strong><br>', 'xy');
+  // nothing where the neighbour already satisfies the rule
+  pasted('punct neighbours', '<p>「<b>引號</b>」</p>', '「**引號**」', '<strong>引號</strong>', '「引號」');
+  pasted('space neighbours', '<p>前 <b>「x」</b> 後</p>', '前 **「x」** 後', '<strong>「x」</strong>', '前 「x」 後');
+  pasted('turndown space', '<p>alpha<b> 「x」</b> delta</p>', 'alpha **「x」** delta', '<strong>「x」</strong>', 'alpha 「x」 delta');
+  pasted('word edges', '<p>x<b>中</b>y</p>', 'x**中**y', '<strong>中</strong>', 'x中y');
+}
+
 console.log('paste-md.test.js: ' + checks + ' checks passed');
