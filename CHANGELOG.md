@@ -3,6 +3,28 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v3.17.6 — 2026-11-04
+
+### Fixed — 編輯器
+
+- **表格任一格的行內程式碼裡有 `|`（原始碼寫成 `` `a \| b` ``），整張表就只能用原始碼編輯。** GFM 表格本來就允
+  許在程式碼裡寫 `\|`，paperwork 的 design-doc 也大量使用（例如 `` `rxc_fc_inbw \| rxc_flowctrl` ``）。現在
+  這種表格照常在原處編輯，程式碼裡顯示 `|`；寫回時程式碼裡的 `|` 一律寫成 `\|`（不用 `&#124;`，它在程式碼裡
+  不會被解碼），一般文字裡的 `|` 照舊寫成 `&#124;`。沒有動到的表格位元組不變。實測 paperwork-workspace-rtk 的
+  `spec/`：2231 張表中原本有 67 張因此被降級，現在 0 張；其中 55 張變成可在原處編輯（另 12 張還有別的不支援元
+  素），這些可編輯表格裡 79 個含 `\|` 的程式碼片段逐字保留。
+- 唯一仍無法寫回的是程式碼裡 `|` 前面緊接奇數個反斜線（例如程式碼內容是 `a\|b`）：GFM 的表格寫法表達不了
+  它，這種表格維持原始碼編輯。
+
+### Changed — 文件
+
+- `lib/editor/table-md.js` 與測試裡說「`\|` 是 gate 的已知陷阱」「gate 不接受 `\|`」的註解是錯的，已更正。
+  paperwork 10.4.0 的 G-MD-TABLE-PIPE（`scan_table_rows_for_unescaped_pipe_in_backtick`）反而要求程式碼裡寫
+  `\|`；唯一提到這種寫法有風險的是 `scripts/gate/hwe1.py` 的 `_hwe1_requirement_units` docstring，說的是該
+  helper 用 `split("|")` 切 hwe1 需求列，而它自己註明目前沒有 gate 讀那些儲存格的內容。`test/gate-compat.test.js`
+  第 4 條不變式改成比照 paperwork 的實際規則：程式碼裡沒有未跳脫的 `|`、每列的欄數與分隔列相同、一般文字的
+  `|` 寫成 `&#124;`。
+
 ## v3.17.5 — 2026-11-03
 
 ### Fixed — 編輯器

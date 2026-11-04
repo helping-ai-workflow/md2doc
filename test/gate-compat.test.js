@@ -13,9 +13,16 @@
 //   3. a table emission contains ONLY '|'-prefixed lines (no orphan cell
 //      lines — i.e. no line inside a table emission is anything other than
 //      a full '|'-delimited row)
-//   4. a literal '|' inside a cell is emitted as '&#124;', never a bare
-//      backslash-escaped '\|' (a different, NOT-supported escaping
-//      convention some other markdown table renderers use)
+//   4. a literal '|' in a cell's plain text is emitted as '&#124;'; a '|'
+//      inside a code span is emitted as '\|' (v3.17.6). The second half is
+//      paperwork's own rule, not md2doc's: G-MD-TABLE-PIPE
+//      (`scan_table_rows_for_unescaped_pipe_in_backtick`,
+//      scripts/gate/shared.py, paperwork 10.4.0) hard-FAILs an unescaped pipe
+//      inside a backtick span of a table row, and its fix hint is '\|'; the
+//      md_table_shape check (`unescaped_pipe_count`, scripts/_md_table_cell.py)
+//      counts cell breaks as pipes NOT preceded by a backslash. Until v3.17.5
+//      this line said '\|' was "NOT supported" by the gate — 10.4.0 has no
+//      check that says so, and the paperwork-workspace-rtk design-docs use it.
 //
 // Per the task-6 brief: this file may be GREEN immediately if Tasks 2/5
 // were implemented correctly — that's expected and fine, it's a tripwire
@@ -84,15 +91,38 @@ function assertOnlyPipePrefixedLines(md, label) {
   });
 }
 
-function assertNoBareEscapedPipe(md, label) {
-  assert.ok(!/\\\|/.test(md),
-    label + ': a literal pipe must be emitted as &#124;, never the escaped-bar form \\|, got:\n' + md);
+// paperwork's code-span notion, ported as written (shared.py `_CODE_SPAN_RE`:
+// an opening backtick run, content, the same run length closing it) and its
+// "unescaped pipe" (`_md_table_cell.UNESCAPED_PIPE_RE`, `(?<!\\)\|`).
+const PW_CODE_SPAN_RE = /(`+)([\s\S]+?)\1(?!`)/g;
+const PW_UNESCAPED_PIPE_RE = /(?<!\\)\|/g;
+
+// Invariant 4, both halves, per table line.
+function assertPipeEscapes(md, label) {
+  const lines = md.split('\n');
+  const breaks = (line) => (line.match(PW_UNESCAPED_PIPE_RE) || []).length;
+  lines.forEach((line, i) => {
+    let m;
+    PW_CODE_SPAN_RE.lastIndex = 0;
+    while ((m = PW_CODE_SPAN_RE.exec(line)) !== null) {
+      assert.ok(!/(?<!\\)\|/.test(m[2]),
+        label + ': line ' + i + ': an unescaped pipe inside a code span (G-MD-TABLE-PIPE): ' +
+        JSON.stringify(line));
+    }
+    const plain = line.replace(PW_CODE_SPAN_RE, '');
+    assert.ok(!/\\\|/.test(plain),
+      label + ': line ' + i + ': a plain-text pipe must be emitted as &#124;, not \\|: ' +
+      JSON.stringify(line));
+    // md_table_shape: every row declares as many cell breaks as the separator.
+    assert.strictEqual(breaks(line), breaks(lines[1] || lines[0]),
+      label + ': line ' + i + ' declares a different column count: ' + JSON.stringify(line));
+  });
 }
 
 function assertGateCompatTable(md, label) {
   assertOnlyPipePrefixedLines(md, label);
   assertNoTrailingWhitespace(md, label);
-  assertNoBareEscapedPipe(md, label);
+  assertPipeEscapes(md, label);
 }
 
 // Task-3 (list-md.js) contract: every emitted list line is a marker line
@@ -210,7 +240,7 @@ function assertGateCompatListRoundTrips(md, label) {
   assertGateCompatTable(md, 'alignment variants');
 }
 
-// 3. a literal '|' inside a cell — must round-trip as '&#124;', never '\|'.
+// 3. a literal '|' in a cell's plain text — emitted as '&#124;'.
 {
   const t = table(tr(th({}, 'H')), [tr(td({}, 'a|b|c'))]);
   const { md } = tableMd.serializeTable(t);
@@ -280,6 +310,28 @@ function assertGateCompatListRoundTrips(md, label) {
   const { md } = tableMd.serializeTable(t);
   assertGateCompatTable(md, 'raw-newline-in-text-node cell');
   assert.ok(md.includes('<br>'), 'raw-newline-in-text-node cell: must contain the literal <br> token, got:\n' + md);
+}
+
+// 8b. v3.17.6: pipes inside code spans, the paperwork-workspace-rtk shape
+// (mac-tx-ctrl design-doc). Each code span carries '\|', the plain-text pipe
+// next to it '&#124;', and the row still declares three columns.
+{
+  const t = table(
+    tr(th({}, '判斷'), th({}, '條件'), th({}, '來源')),
+    [
+      tr(td({}, '送出 PAUSE 的水位判斷'),
+        td({}, '以 RX 側 ', el('code', {}, 'rxc_fc_inbw | rxc_flowctrl'), ' 為滿'),
+        td({}, '外部')),
+      tr(td({}, 'a|b'),
+        td({}, el('code', {}, 'cur_pfc[n] = (rg_pfc_req[n] | pfc_req[n]) & rg_pfc_pri_en[n]')),
+        td({}, '內部')),
+    ]
+  );
+  const { md, unsupported } = tableMd.serializeTable(t);
+  assert.deepStrictEqual(unsupported, [], 'code-pipe cells: must stay WYSIWYG-editable');
+  assertGateCompatTable(md, 'code-pipe cells');
+  assert.ok(md.includes('`rxc_fc_inbw \\| rxc_flowctrl`') && md.includes('| a&#124;b |'),
+    'code-pipe cells: each pipe takes its own escape, got:\n' + md);
 }
 
 // ── representative serializeInline() outputs (non-table context) ─────────

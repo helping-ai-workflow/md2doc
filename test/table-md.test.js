@@ -203,15 +203,97 @@ function table(headerRow, bodyRows) {
   assert.strictEqual(md, ['| H |', '|---|', '| a<br>b<br>c |'].join('\n'));
 }
 
-// Finding 4: a '|' inside a <code> span in a cell has no faithful
-// gate-safe emission (the &#124; entity doesn't decode inside a code
-// span, and `\|` is the gate's documented trap) — degrade-never-lose:
-// the cell (and therefore the whole table) is reported unsupported via
-// 'CODE' instead of silently corrupting the code span's content.
+// v3.17.6: a '|' inside a <code> span in a cell is written as `\|`. GFM
+// strips that escape when it splits the row into cells, BEFORE the cell is
+// parsed inline, so the code span shows a bare '|' (the &#124; entity would
+// not do: it is never decoded inside a code span). paperwork's quality gate
+// (G-MD-TABLE-PIPE, `scan_table_rows_for_unescaped_pipe_in_backtick` in
+// scripts/gate/shared.py, 10.4.0) asks for exactly this form, and the
+// paperwork-workspace-rtk design-docs are written in it. Until v3.17.5 such a
+// cell reported 'CODE' and the whole table fell back to raw-edit.
+//
+// CODE_PIPE_FIXTURE is the downstream shape, byte for byte: the mac-tx-ctrl
+// design-doc rows the defect report quotes. Minimal-form separator, so the
+// round trip has to reproduce the author's own bytes with or without
+// `originalMd`.
+const CODE_PIPE_FIXTURE = [
+  '| 判斷 | 條件 | 來源 |',
+  '|---|---|---|',
+  '| 送出 PAUSE 的水位判斷 | 以 RX 側 `rxc_fc_inbw \\| rxc_flowctrl` 為滿 | 外部 |',
+  '| PFC 期望狀態 | `cur_pfc[n] = (rg_pfc_req[n] \\| pfc_req[n]) & rg_pfc_pri_en[n]` | 內部 |',
+].join('\n');
+// The DOM renderMarkdown() actually produces for it (measured: the code
+// element's text carries the bare '|', `&` decoded from `&amp;`).
+function codePipeFixtureTable(thirdCell) {
+  return table(
+    tr(th({}, '判斷'), th({}, '條件'), th({}, '來源')),
+    [
+      tr(td({}, '送出 PAUSE 的水位判斷'),
+        td({}, '以 RX 側 ', el('code', {}, 'rxc_fc_inbw | rxc_flowctrl'), ' 為滿'),
+        td({}, thirdCell || '外部')),
+      tr(td({}, 'PFC 期望狀態'),
+        td({}, el('code', {}, 'cur_pfc[n] = (rg_pfc_req[n] | pfc_req[n]) & rg_pfc_pri_en[n]')),
+        td({}, '內部')),
+    ]
+  );
+}
+const CODE_PIPE_TEXT = {
+  header: ['判斷', '條件', '來源'],
+  rows: [
+    ['送出 PAUSE 的水位判斷', '以 RX 側 <code>rxc_fc_inbw | rxc_flowctrl</code> 為滿', '外部'],
+    ['PFC 期望狀態', '<code>cur_pfc[n] = (rg_pfc_req[n] | pfc_req[n]) & rg_pfc_pri_en[n]</code>', '內部'],
+  ],
+};
+// (a) untouched: byte-identical, with and without the original source
 {
-  const t = table(tr(th({}, 'H')), [tr(td({}, el('code', {}, 'a|b')))]);
+  for (const original of [CODE_PIPE_FIXTURE, undefined]) {
+    const label = 'code-pipe fixture, ' + (original ? 'with' : 'without') + ' originalMd';
+    const { md, unsupported } = serializeTable(codePipeFixtureTable(), original);
+    assert.deepStrictEqual(unsupported, [], label + ': must stay WYSIWYG-editable');
+    assert.strictEqual(md, CODE_PIPE_FIXTURE, label + ': must reproduce the source bytes');
+    assertTableRoundTrips(md, CODE_PIPE_TEXT, label);
+  }
+}
+// (b) another cell edited: the code spans keep their `\|`, nothing else moves
+{
+  const { md, unsupported } = serializeTable(codePipeFixtureTable('外部 SoC'), CODE_PIPE_FIXTURE);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, CODE_PIPE_FIXTURE.replace('| 外部 |', '| 外部 SoC |'));
+}
+// (c) code pipe and plain-text pipe in one cell: each gets its own escape
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, 'x|y ', el('code', {}, 'a|b')))]);
+  const { md, unsupported } = serializeTable(t);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, ['| H |', '|---|', '| x&#124;y `a\\|b` |'].join('\n'));
+  assertTableRoundTrips(md, { header: ['H'], rows: [['x|y <code>a|b</code>']] }, 'mixed pipes');
+}
+// (d) a code span that needs a longer fence keeps it, and its pipe escape
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, el('code', {}, 'a`|b')))]);
+  const { md, unsupported } = serializeTable(t);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, ['| H |', '|---|', '| `` a`\\|b `` |'].join('\n'));
+  assertTableRoundTrips(md, { header: ['H'], rows: [['<code>a`|b</code>']] }, 'fenced code pipe');
+}
+// (e) backslashes before the pipe. marked's splitCells() treats a pipe after
+// an ODD run of backslashes as escaped, then deletes one backslash. So code
+// text with an EVEN run before its '|' (0, 2, …) is written with one more
+// backslash and comes back exact; an ODD run cannot be written at all — one
+// more backslash makes the run even and the pipe a cell boundary. That one
+// keeps the pre-v3.17.6 refusal ('CODE', whole table to raw-edit).
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, el('code', {}, 'a\\\\|b')))]);
+  const { md, unsupported } = serializeTable(t);
+  assert.deepStrictEqual(unsupported, [], 'two backslashes before the pipe are writable');
+  assert.strictEqual(md, ['| H |', '|---|', '| `a\\\\\\|b` |'].join('\n'));
+  assertTableRoundTrips(md, { header: ['H'], rows: [['<code>a\\\\|b</code>']] }, 'even backslash run');
+}
+{
+  const t = table(tr(th({}, 'H')), [tr(td({}, el('code', {}, 'a\\|b')))]);
   const { unsupported } = serializeTable(t);
-  assert.ok(unsupported.includes('CODE'), 'code span containing | must be reported unsupported');
+  assert.ok(unsupported.includes('CODE'),
+    'code text with ONE backslash before its pipe has no table spelling and must refuse');
 }
 
 // Plain (non-code) pipe-in-text still works exactly as before — Finding 4
@@ -264,11 +346,14 @@ function table(headerRow, bodyRows) {
   // an unescaped '|' splits one cell into two columns
   rejects('| H |\n|---|\n| a|b |', { header: ['H'], rows: [['a|b']] },
     'an unescaped pipe splitting a cell in two');
-  // the escape spelling the paperwork gate rejects still round-trips through
-  // marked — which is exactly why a round-trip check alone is not enough and
-  // the byte assertions above stay
+  // the backslash spelling round-trips through marked too, yet the serializer
+  // writes plain-text pipes as '&#124;' — a round trip cannot tell the two
+  // spellings apart, which is why the byte assertions above stay. (This line
+  // used to call the form "gate-illegal"; paperwork 10.4.0 has no such rule —
+  // its G-MD-TABLE-PIPE check asks for '\|' inside code spans, see the
+  // v3.17.6 code-pipe cases above.)
   assertTableRoundTrips('| H |\n|---|\n| a\\|b |', { header: ['H'], rows: [['a|b']] },
-    'positive control: the backslash form round-trips but is gate-illegal');
+    'positive control: the backslash form round-trips');
   // an empty header row: re-lexes as a paragraph, the whole table disappears
   rejects('|  |\n||\n| A |', { header: [''], rows: [['A']] },
     'an empty header row that re-lexes as a paragraph');
