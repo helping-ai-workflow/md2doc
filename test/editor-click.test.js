@@ -2793,6 +2793,45 @@ check('tables: deleting the header of a header-only table removes the table', DE
   const disk = await saveAndRead(page, boot);
   assert.strictEqual(disk, '# T\n\nBefore.\n\nAfter.\n');
 }, { md: '# T\n\nBefore.\n\n| a | b |\n|---|---|\n\nAfter.\n' });
+// v3.17.6: a code span holding `\|` (GFM's pipe escape, the paperwork
+// design-doc form) used to send the whole table to raw-edit. The rows are the
+// mac-tx-ctrl design-doc shape the defect report quotes.
+const CODE_PIPE_MD = '# T\n\n| 判斷 | 條件 | 來源 |\n|---|---|---|\n' +
+  '| 送出 PAUSE 的水位判斷 | 以 RX 側 `rxc_fc_inbw \\| rxc_flowctrl` 為滿 | 外部 |\n' +
+  '| PFC 期望狀態 | `cur_pfc[n] = (rg_pfc_req[n] \\| pfc_req[n]) & rg_pfc_pri_en[n]` | 內部 |\n\nAfter.\n';
+const codePipeCell = (page, text) => page.locator('.ed-block[data-block-type="table"] td', { hasText: text });
+const cellArmed = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { raw: !!document.querySelector('textarea.ed-raw'), inCell: !!(a && a.closest && a.closest('td, th')),
+    notice: (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || '' };
+});
+check('tables: a code span with an escaped pipe edits in place, and a no-op leaves the file alone', DESKTOP, async (page, boot) => {
+  await codePipeCell(page, 'rxc_fc_inbw').click(); await wait(300);
+  assert.deepStrictEqual(await cellArmed(page), { raw: false, inCell: true, notice: '' }, 'the cell is edited in place');
+  const shown = await page.evaluate(() => [...document.querySelectorAll('.ed-block[data-block-type="table"] code')].map((c) => c.textContent));
+  assert.deepStrictEqual(shown, ['rxc_fc_inbw | rxc_flowctrl', 'cur_pfc[n] = (rg_pfc_req[n] | pfc_req[n]) & rg_pfc_pri_en[n]'], 'the code shows a bare pipe');
+  await page.locator('.ed-block[data-block-type="paragraph"]').last().click(); await wait(500);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_PIPE_MD, 'untouched table, untouched bytes');
+}, { md: CODE_PIPE_MD });
+// The paperwork design-docs also carry text the serializer spells differently
+// from the author (`[AD-…]` comes back as `\[AD-…\]`): 42 of the 55 tables
+// v3.17.6 made editable in paperwork-workspace-rtk. Arming one and leaving it
+// untouched must still write nothing.
+const CODE_PIPE_RESPELL_MD = '# T\n\n| 判斷 | 條件 |\n|---|---|\n' +
+  '| 送出 PAUSE 的水位判斷 | 以 RX 側 `rxc_fc_inbw \\| rxc_flowctrl` 為滿 [AD-MTXCTL-006] |\n\nAfter.\n';
+check('tables: arming an escaped-pipe table the serializer would respell, then leaving, writes nothing', DESKTOP, async (page, boot) => {
+  await codePipeCell(page, 'rxc_fc_inbw').click(); await wait(300);
+  assert.deepStrictEqual(await cellArmed(page), { raw: false, inCell: true, notice: '' }, 'the cell is edited in place');
+  await page.locator('.ed-block[data-block-type="paragraph"]').last().click(); await wait(500);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_PIPE_RESPELL_MD, 'untouched table, untouched bytes');
+}, { md: CODE_PIPE_RESPELL_MD });
+check('tables: editing beside an escaped-pipe code span keeps its \\| on disk', DESKTOP, async (page, boot) => {
+  await codePipeCell(page, '外部').click(); await wait(300);
+  assert.deepStrictEqual(await cellArmed(page), { raw: false, inCell: true, notice: '' }, 'the cell is edited in place');
+  await page.keyboard.press('End'); await page.keyboard.type(' SoC');
+  await page.locator('.ed-block[data-block-type="paragraph"]').last().click(); await wait(500);
+  assert.strictEqual(await saveAndRead(page, boot), CODE_PIPE_MD.replace('| 外部 |', '| 外部 SoC |'));
+}, { md: CODE_PIPE_MD });
 check('tables: the last column still refuses, and says how to remove the table', DESKTOP, async (page) => {
   await tableMenu(page, 'col', page.locator('.ed-block[data-block-type="table"] thead th').first(), '刪除欄');
   const t = await page.evaluate(() => (document.querySelector('.ed-conflict .ed-msg-text') || {}).textContent || '');
