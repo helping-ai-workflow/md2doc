@@ -514,4 +514,66 @@ function table(headerRow, bodyRows) {
     'an untouched duplicate-header table must be byte-identical, got:\n' + md);
 }
 
+// ── v3.17.8 F1 / F3 ────────────────────────────────────────────────────────
+// Each row runs; failures are reported together.
+const tableMdLib = require('../lib/editor/table-md.js');
+const widthFailures = [];
+function widthRow(name, fn) {
+  try { fn(); } catch (e) { widthFailures.push(name + '\n    ' + String(e.message).split('\n').join('\n    ')); }
+}
+const WIDTH_FIXTURES = [
+  {
+    // 25. A header spelled 'a\_b' in the file still matches the DOM's 'a_b'
+    //     (compared by how it reads, not by bytes), so the hand-aligned
+    //     width memory survives an edit elsewhere, and so does the header.
+    name: '25 F1: header a\\_b keeps width memory',
+    orig: ['| a\\_b  | c    |', '|-------|------|', '| x [1] | y    |', '| z     | w    |'].join('\n'),
+    head: ['a_b', 'c'], rows: [['x [1]', 'y'], ['z', 'W']],
+    expect: ['| a\\_b  | c    |', '|-------|------|', '| x [1] | y    |', '| z     | W    |'].join('\n'),
+    base: ['| a_b | c    |', '|---|------|', '| x \\[1\\] | y    |', '| z | W    |'].join('\n'),
+  },
+  {
+    // 26. F3: '\\|' is an even backslash run, so that '|' IS a delimiter
+    //     (marked's splitCells parity rule). Read as one field, the row made
+    //     the original ragged and every width was dropped.
+    name: '26 F3: even backslash run before | is a delimiter',
+    orig: ['| h1 | h2    |', '|----|-------|', '| a \\\\| b     |', '| c  | d     |'].join('\n'),
+    head: ['h1', 'h2'], rows: [['a \\', 'b'], ['c', 'D']],
+    expect: ['| h1 | h2    |', '|----|-------|', '| a \\\\| b     |', '| c | D     |'].join('\n'),
+    base: ['| h1 | h2 |', '|---|---|', '| a \\\\ | b |', '| c | D |'].join('\n'),
+  },
+];
+for (const f of WIDTH_FIXTURES) {
+  widthRow(f.name, () => {
+    const t = table(tr(...f.head.map((h) => th({}, h))), f.rows.map((r) => tr(...r.map((c) => td({}, c)))));
+    const { md, unsupported } = serializeTable(t, f.orig);
+    assert.deepStrictEqual(unsupported, []);
+    assert.strictEqual(md, f.expect, 'got:\n' + md);
+    const tok = marked.lexer(md)[0];
+    assert.strictEqual(tok.type, 'table');
+    assert.deepStrictEqual(tok.rows.map((r) => r.map((c) => c.text)).length, f.rows.length);
+  });
+}
+// 27. F3 with no parser: the split fix is not parser-gated, so the width form
+//     is kept even then, while every cell takes the canonical spelling.
+widthRow('27 F3 + no parser: width kept, canonical cells', () => {
+  tableMdLib.setCellParser(null);
+  try {
+    const f = WIDTH_FIXTURES[1];
+    const t = table(tr(...f.head.map((h) => th({}, h))), f.rows.map((r) => tr(...r.map((c) => td({}, c)))));
+    const { md } = serializeTable(t, f.orig);
+    assert.strictEqual(md, ['| h1 | h2    |', '|----|-------|', '| a \\\\ | b     |', '| c | D     |'].join('\n'),
+      'got:\n' + md);
+    // 25 with no parser: header bytes compared as before, so the old answer.
+    const g = WIDTH_FIXTURES[0];
+    const t2 = table(tr(...g.head.map((h) => th({}, h))), g.rows.map((r) => tr(...r.map((c) => td({}, c)))));
+    assert.strictEqual(serializeTable(t2, g.orig).md, g.base, 'case 25 with no parser');
+  } finally {
+    tableMdLib.setCellParser();
+  }
+});
+if (widthFailures.length) {
+  throw new Error('v3.17.8 width rows failed (' + widthFailures.length + '):\n  ' + widthFailures.join('\n  '));
+}
+
 console.log('table-width: all cases OK');

@@ -10335,7 +10335,9 @@ check('v3173 C9: a column alignment set through the menu still marks the table e
   await page.locator('.ed-te-menu button[aria-label="置中"]').click(); await wait(250);
   assert.strictEqual((await dirtyMarks(page)).status, 'dirty', 'an alignment is an edit');
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD.replace('|-|-|', '|-|:-:|').replace('|a|b|', '| a | b |').replace('|x|y|', '| x | y |'),
+  // v3.17.8 F1: rows whose cells did not change are written as they were, so
+  // only the separator moves (it used to rebuild `|a|b|` as `| a | b |` too).
+  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD.replace('|-|-|', '|-|:-:|'),
     'the alignment reached the file');
 }, { md: A6_TABLE_MD });
 
