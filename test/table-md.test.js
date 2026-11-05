@@ -700,6 +700,24 @@ f1Row('D7 lazy row with visible text, header renamed and its cell edited', () =>
   const { md } = serializeTable(domTable(['Label', 'Note'], [['p', 'q'], ['see below', '']]), orig);
   assert.strictEqual(md, L('| Label | Note |', '|---|---|', '| p | q |', '| see below |  |'), 'got:\n' + md);
 });
+// Re-review R2 / R3: a lazy row is paired by position, never through the
+// renamed-header column map (every header renamed left nothing to pair on),
+// and an ordinary row whose mapped cells happen to match cannot take it.
+f1Row('D7 lazy row survives every header renamed', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'B'], [['p', 'q'], ['', '']]), orig);
+  assert.strictEqual(md, L('| A | B |', '|---|---|', '| p | q |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row survives a renamed one-column header', () => {
+  const orig = L('| Name |', '|---|', '| p |', '</content>');
+  const { md } = serializeTable(domTable(['A'], [['p'], ['']]), orig);
+  assert.strictEqual(md, L('| A |', '|---|', '| p |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row is not taken by a deleted look-alike row', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p |  |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'Note'], [['', '']]), orig);
+  assert.strictEqual(md, L('| A | Note |', '|---|---|', '</content>'), 'got:\n' + md);
+});
 // Guards for the exceptions (green before the fix too): `</br>` is a line
 // break to the browser and `</p>` an empty paragraph, so a cell whose break
 // was deleted must not read the same as the original and get it back.

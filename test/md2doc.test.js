@@ -830,6 +830,14 @@ console.log('md2doc dot WASM test passed');
   assert.ok(h.includes('<p><a href="#sec">see <a href="#ref">[ref]</a></a> and <a href="#s" title="t">see <a href="#a">[a, §2]</a> and <a href="#b">[b]</a></a></p>'), 'D8 link label with citations: ' + h);
   h = await body('![see [[r]]](x.png)\n');
   assert.ok(h.includes('<img src="x.png" alt="see [r]">'), 'D8 image alt with a citation: ' + h);
+  // an escaped `\[[` in a label is not a citation (re-review R1): not masked,
+  // so marked reads the label as it always would (here: no link at all)
+  h = await body('[a \\[[x]]](u)\n');
+  assert.ok(h.includes('<p>[a [[x]]](u)</p>'), 'D8 escaped citation in a label stays literal: ' + h);
+  h = await body('[a [[r]] \\[[s]]](u)\n');
+  assert.ok(h.includes('<p>[a <a href="#r">[r]</a> [[s]]](u)</p>'), 'D8 only the unescaped one cites: ' + h);
+  h = await body('![a \\[[r]]](i.png)\n');
+  assert.ok(h.includes('<p>![a [[r]]](i.png)</p>'), 'D8 escaped citation in an alt: ' + h);
   h = await body('[[x]](u)\n');
   assert.ok(h.includes('<p><a href="#x">[x]</a>(u)</p>'), 'D8 a citation then (u) is not a link: ' + h);
   // edit mode: the block map still lines up
