@@ -466,7 +466,7 @@ node over the file's characters, a backslash directly before the backtick counti
 to a require-time `citation` inline extension plus a `link` tokenizer override for citations inside a
 link label; the +46 are comment prose and the extension's renderer literal, all outside the HTML
 template): **406** every backtick byte, **4** `` \` `` escapes (one line), **402** structural, in a
-7263-line file. Counted with node over the file's characters, a backslash
+7268-line file. Counted with node over the file's characters, a backslash
 directly before the backtick counting as an escape.
 
 Both totals are even, which is the property the check is really after; an odd one either

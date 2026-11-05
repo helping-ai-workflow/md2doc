@@ -845,6 +845,13 @@ console.log('md2doc dot WASM test passed');
   // (`[a](u "t [[y]]")` keeps `title="t [[y]]"`); the link used to fall apart.
   h = await body('[a [[x]] b](u "t [[y]]") and [c [[x]]]([[y]])\n');
   assert.ok(h.includes('<p><a href="u" title="t [[y]]">a <a href="#x">[x]</a> b</a> and <a href="%5B%5By%5D%5D">c <a href="#x">[x]</a></a></p>'), 'D8 citation in a cited link\'s title / href: ' + h);
+  // re-review round 4: a backtick inside a nested bracket is a plain
+  // character to marked's label (only the outer level reads code spans), so
+  // the label scan must not skip a code span there either
+  h = await body('[a [`] b `x` [[c]]](u)\n');
+  assert.ok(h.includes('<p><a href="u">a [<code>] b </code>x` <a href="#c">[c]</a></a></p>'), 'D8 backtick in a nested bracket: ' + h);
+  h = await body('[x [`] c](u "[[y]]`") z]](v)\n');
+  assert.ok(!h.includes('\u0000'), 'D8 no mask byte leaks into the output: ' + JSON.stringify(h));
   // re-review round 3 C3: the link tokenizer masked the whole rest of the
   // paragraph at every `[`, and each unclosed `[[` scanned to the end of the
   // line: one 8000-character line of `[[a ` took 10 s (v3.17.8: 26 ms).
