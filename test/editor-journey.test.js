@@ -1365,16 +1365,14 @@ async function main() {
   //   `Alpha <br><strong><em>ital</em> bold</strong> text here.`。斷行照舊留著
   //   —— 這一列守的「不要刪過頭」不變，只是斜體外衣不再寫成讀不回來的星號。
   //
-  // ⚠ 已知的鄰居，【沒有】被任何一列釘住，而且它也會產出使用者回報的那個症狀：
-  //   分隔符連讀。留下來的標記【正確地】活著（它裝著東西）時，它的收尾分隔符
-  //   會緊貼著新標記的起始分隔符。實測 `Alpha *` + 反引號 c 反引號 + `ital*
-  //   bold text here.`，從 `ital` 開頭起算的粗體：
-  //     第一次存檔 `Alpha *`+`` `c` ``+`****ital* bold** text here.`
-  //     重新載入再編輯 `Alpha \*`+`` `c` ``+`\****ital* bold** text here.Z`
-  //   這不是空標記 —— <em> 裝著那個 code span，本檔的判別式正確地留下它。壞的
-  //   是 `*` 後面緊接著 `***` 讀不回來，成因在 inline-md.js 怎麼挑分隔符長度，
-  //   跟本修同源但不同層。刻意不加斷言：釘住現在這個（錯的）位元組，會讓將來
-  //   真正的修法為了錯的理由紅掉。
+  // 鄰居（歷史紀錄）：留下來的標記【正確地】活著（它裝著東西）時，它的收尾
+  //   分隔符曾經緊貼著新標記的起始分隔符。v3.4.0 實測 `Alpha *` + 反引號 c
+  //   反引號 + `ital* bold text here.`，從 `ital` 開頭起算的粗體，第一次存檔
+  //   `Alpha *`+`` `c` ``+`****ital* bold** text here.`，讀不回來。v3.17.5 的
+  //   分隔符修正之後，71fedaa 上同一個手勢寫出
+  //   `Alpha *`+`` `c` ``+`*<!-- -->***ital* bold** text here.`，讀得回來。
+  //   同一族還活著的形狀（巢狀標記被 marked 的 rule of 3 讀錯）由下面的
+  //   v3.17.7 那一列與 inline-md.test.js 的 fuzz 守。
   for (const [name, md, expect] of [
     ['keeps-text', '# Doc\n\nAlpha *ital* bold text here.\n',
       '# Doc\n\nAlpha *it****al* bold** text here.\n'],
@@ -1405,6 +1403,57 @@ async function main() {
     await ctx.page.close(); ctx.srv.close();
   }
   console.log('journey: an emptied mark goes, a mark that still holds something stays — OK');
+
+  // ── v3.17.7：工具列手勢寫出的位元組，閱讀器要讀回同樣的標記 ─────────────
+  //
+  // 三列都是 71fedaa 上真的手勢（選一段字、按工具列）存出來讀錯的位元組：
+  //   N1 粗體套在斜體裡 code 後面的 `i`：`Alpha *`c`**i**tal* bold…` —— marked
+  //      的 rule of 3 把斜體吃掉，星號變字面值。修法在 inline-md.js：用編輯頁裡
+  //      的 marked（server.js 注入）讀回自己的位元組，讀錯才改寫內層標記成
+  //      `__`。這一列紅 = 編輯頁沒有 marked 或檢查沒跑，單元測試量不到這一層。
+  //   N2 緊貼著 `~~one~~` 的 `two` 加刪除線：`~~one~~~~two~~` 讀成一個 del。
+  //   N3 緊貼著 `` `one` `` 的 `two` 加行內程式碼：`` `one``two` `` 讀成一個 code。
+  // 選取用「可見文字的位移」，跟 T9-4 一樣直接落在 text node 上。
+  for (const [name, md, from, to, tb, expect] of [
+    ['N1 bold inside em after code', '# Doc\n\nAlpha *`c`ital* bold text here.\n', 7, 8, 'bold',
+      '# Doc\n\nAlpha *`c`__i__<!-- -->tal* bold text here.\n'],
+    ['N2 strike next to strike', '# Doc\n\nAlpha ~~one~~two three.\n', 9, 12, 'strike',
+      '# Doc\n\nAlpha ~~one~~<!-- -->~~two~~ three.\n'],
+    ['N3 code next to code', '# Doc\n\nAlpha `one`two three.\n', 9, 12, 'inline-code',
+      '# Doc\n\nAlpha `one`<!-- -->`two` three.\n'],
+  ]) {
+    const ctx = await newPage(md);
+    const picked = await ctx.page.evaluate((a, b) => {
+      const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+      const texts = [];
+      const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n; let all = '';
+      while ((n = w.nextNode())) { texts.push([n, all.length]); all += n.data; }
+      // 起點取「從這裡開始的 text node」，終點取「在這裡結束的 text node」
+      const at = (off, end) => {
+        for (let i = texts.length - 1; i >= 0; i--) {
+          const [t, s] = texts[i];
+          if (end ? s < off : s <= off) return [t, off - s];
+        }
+        return null;
+      };
+      const s0 = at(a, false); const s1 = at(b, true);
+      const r = document.createRange();
+      r.setStart(s0[0], s0[1]); r.setEnd(s1[0], s1[1]);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      el.focus();
+      document.dispatchEvent(new Event('selectionchange'));
+      return r.toString();
+    }, from, to);
+    await new Promise((r) => setTimeout(r, 250));
+    await pressClick(ctx.page, '[data-ed-tb="' + tb + '"]', 80);
+    await new Promise((r) => setTimeout(r, 400));
+    const disk = await saveAndRead(ctx);
+    assert.strictEqual(disk, expect, name + '（選到 ' + JSON.stringify(picked) + '）：got\n' + JSON.stringify(disk));
+    assert.strictEqual(ctx.errs.length, 0, name + '：不得有 pageerror: ' + ctx.errs.join(' | '));
+    await ctx.page.close(); ctx.srv.close();
+  }
+  console.log('journey: v3.17.7 toolbar marks read back as written (nested, adjacent del, adjacent code) — OK');
 
   // ── T9-4 的其他手勢：Shift+Enter／貼上／清單裡按 Enter ────────────────
   //
