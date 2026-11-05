@@ -718,6 +718,25 @@ f1Row('D7 lazy row is not taken by a deleted look-alike row', () => {
   const { md } = serializeTable(domTable(['A', 'Note'], [['', '']]), orig);
   assert.strictEqual(md, L('| A | Note |', '|---|---|', '</content>'), 'got:\n' + md);
 });
+// Re-review round 3 C1: a lazy row is paired in the file's order. Paired
+// before everything else, a lazy line took the first row that read like it,
+// so an ordinary row reading the same as a lazy line below it swapped lines
+// with it on a no-op.
+f1Row('D7 a row reading like the lazy line below it keeps its order (no-op)', () => {
+  const orig = L('| A | B |', '|---|---|', '| see below |  |', 'see below');
+  const { md } = serializeTable(domTable(['A', 'B'], [['see below', ''], ['see below', '']]), orig);
+  assert.strictEqual(md, orig, 'got:\n' + md);
+});
+f1Row('D7 an empty row above a lazy </content> keeps its order (no-op)', () => {
+  const orig = L('| A | B |', '|---|---|', '|  |  |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'B'], [['', ''], ['', '']]), orig);
+  assert.strictEqual(md, orig, 'got:\n' + md);
+});
+f1Row('D7 a row reading like the lazy line below it, header renamed', () => {
+  const orig = L('| A | B |', '|---|---|', '| see below |  |', 'see below');
+  const { md } = serializeTable(domTable(['X', 'B'], [['see below', ''], ['see below', '']]), orig);
+  assert.strictEqual(md, L('| X | B |', '|---|---|', '| see below |  |', 'see below'), 'got:\n' + md);
+});
 // Guards for the exceptions (green before the fix too): `</br>` is a line
 // break to the browser and `</p>` an empty paragraph, so a cell whose break
 // was deleted must not read the same as the original and get it back.

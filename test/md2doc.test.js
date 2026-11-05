@@ -840,6 +840,22 @@ console.log('md2doc dot WASM test passed');
   assert.ok(h.includes('<p>![a [[r]]](i.png)</p>'), 'D8 escaped citation in an alt: ' + h);
   h = await body('[[x]](u)\n');
   assert.ok(h.includes('<p><a href="#x">[x]</a>(u)</p>'), 'D8 a citation then (u) is not a link: ' + h);
+  // re-review round 3 C4: a citation in the title or href of a link whose
+  // label also cites is literal there, as it is when the label has none
+  // (`[a](u "t [[y]]")` keeps `title="t [[y]]"`); the link used to fall apart.
+  h = await body('[a [[x]] b](u "t [[y]]") and [c [[x]]]([[y]])\n');
+  assert.ok(h.includes('<p><a href="u" title="t [[y]]">a <a href="#x">[x]</a> b</a> and <a href="%5B%5By%5D%5D">c <a href="#x">[x]</a></a></p>'), 'D8 citation in a cited link\'s title / href: ' + h);
+  // re-review round 3 C3: the link tokenizer masked the whole rest of the
+  // paragraph at every `[`, and each unclosed `[[` scanned to the end of the
+  // line: one 8000-character line of `[[a ` took 10 s (v3.17.8: 26 ms).
+  {
+    const t0 = Date.now();
+    await body('[[a '.repeat(2000) + '](u)\n');
+    await body('[a] '.repeat(8000) + '[[c]]\n');
+    await body('see [[ref\n'.repeat(8000));
+    const ms = Date.now() - t0;
+    assert.ok(ms < 2000, 'D8 many [[ / [ in one paragraph stay fast: ' + ms + ' ms');
+  }
   // edit mode: the block map still lines up
   const e = await renderMarkdown('x [[ref-1, §2]] `[[c]]`\n\ntail\n', fake, { editMode: true });
   assert.deepStrictEqual(e.blocks.map((b) => [b.startLine, b.endLine]), [[1, 1], [3, 3]], 'D8 edit-mode lines');

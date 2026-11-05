@@ -464,9 +464,9 @@ node over the file's characters, a backslash directly before the backtick counti
 
 **Measured at v3.17.9** (the `[[...]]` citation moved from a text pre-pass inside `renderMarkdown`
 to a require-time `citation` inline extension plus a `link` tokenizer override for citations inside a
-link label; the +22 are comment prose and the extension's renderer literal, all outside the HTML
-template): **382** every backtick byte, **4** `` \` `` escapes (one line), **378** structural, in a
-7217-line file. Counted with node over the file's characters, a backslash
+link label; the +46 are comment prose and the extension's renderer literal, all outside the HTML
+template): **406** every backtick byte, **4** `` \` `` escapes (one line), **402** structural, in a
+7263-line file. Counted with node over the file's characters, a backslash
 directly before the backtick counting as an escape.
 
 Both totals are even, which is the property the check is really after; an odd one either
