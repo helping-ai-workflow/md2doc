@@ -608,15 +608,20 @@ f1Row('F1 I3 edited text that spells an unknown reference is written as typed', 
   const { md } = serializeTable(domTable(['a', 'b'], [['© x', 'K']]), orig);
   assert.strictEqual(md, L('| a | b |', '|---|---|', '| © x | K |'), 'untouched reference cell, got:\n' + md);
 });
-// v3.17.8 final review M2: a row whose last '|' is escaped (`| q \|`) is
-// still split with that '|' as the closing delimiter, as before v3.17.8, so
-// the width memory is kept.
-f1Row('F1 M2 trailing escaped pipe keeps the width memory', () => {
-  const orig = L('| name   | v   |', '|--------|-----|', '| p      | q \\|', '| r      | s   |');
-  const { md } = serializeTable(domTable(['name', 'v'], [['p', 'q |'], ['R', 's']]), orig);
-  // column 0 is uniform (8) and keeps it; column 1's `| q \|` field is 4 wide
-  // against 5 elsewhere, so it was never a width source.
-  assert.strictEqual(md.split('\n')[3], '| R      | s |', 'width kept, got:\n' + md);
+// v3.17.8 re-review N1: a row whose last '|' is escaped (`| q \|`) is not a
+// row the reuse can read. Round 1 split it with that '|' as the closing
+// delimiter (to keep the width memory, M2), and an edit from `q |` to `q \`
+// then read "the same" as the field ` q \` alone and the original line came
+// back: the edit was lost. The edited cell must be written.
+f1Row('F1 N1 an edit in a row whose last | is escaped is written', () => {
+  {
+    const { md } = serializeTable(domTable(['a', 'b'], [['p', 'q \\']]), L('| a | b |', '|---|---|', '| p | q \\|'));
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| p | q \\\\ |'), 'body row, got:\n' + md);
+  }
+  {
+    const { md } = serializeTable(domTable(['a', 'b \\'], [['p', 'q']]), L('| a | b \\|', '|---|---|', '| p | q |'));
+    assert.strictEqual(md.split('\n')[0], '| a | b \\\\ |', 'header row, got:\n' + md);
+  }
 });
 // v3.17.8 final review M1: pairing is linear. 3000 rows that all differ
 // from the original took ~3 s; a 2000 x 8 table with one edit ~600 ms.
