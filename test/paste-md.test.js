@@ -247,4 +247,37 @@ eq(
   pasted('word edges', '<p>x<b>中</b>y</p>', 'x**中**y', '<strong>中</strong>', 'x中y');
 }
 
+// v3.17.7 F2: a `|` in a pasted table cell is a cell boundary to GFM unless an
+// ODD run of backslashes precedes it (marked's splitCells(), the parity rule
+// v3.17.6 wrote down in table-md.js). escapePipes() used to skip every `|`
+// with a `\` before it, so a cell whose text held `\|` (turndown writes that
+// backslash as `\\`) was cut in two. Measured on 71fedaa:
+//   <td>a \| b</td>          -> `| a \\| b |`   -> cells `a \` and `b`
+//   <td><code>a \| b</code>  -> `` `a \| b` `` -> the code shows `a | b`
+{
+  const { Marked } = require('marked');
+  const gfm = new Marked({ gfm: true });
+  // [cell html] -> the body row's cells as the reader renders them
+  function bodyCells(cellHtml) {
+    const md = pm.htmlToMarkdown('<table><tr><th>h</th><th>k</th></tr><tr><td>' + cellHtml + '</td><td>x</td></tr></table>');
+    const body = gfm.parse(md).replace(/\n/g, '').match(/<tbody><tr>(.*?)<\/tr><\/tbody>/);
+    return { md, cells: body ? body[1].split('</td>').filter(Boolean).map((c) => c.replace(/^<td>/, '')) : null };
+  }
+  function cellsAre(name, cellHtml, firstCell) {
+    const got = bodyCells(cellHtml);
+    eq(got.cells, [firstCell, 'x'], 'v3177 F2 ' + name + ' (md ' + JSON.stringify(got.md) + ')');
+  }
+  cellsAre('text, one backslash', 'a \\| b', 'a \\| b');
+  cellsAre('text, two backslashes', 'a \\\\| b', 'a \\\\| b');
+  cellsAre('text, bare pipe', 'a | b', 'a | b');
+  cellsAre('code, bare pipe', '<code>a | b</code>', '<code>a | b</code>');
+  cellsAre('code, two backslashes', '<code>a \\\\| b</code>', '<code>a \\\\| b</code>');
+  // An odd run before the `|` in code has no GFM spelling at all (v3.17.6):
+  // the backslash that keeps the pipe in the cell is the one GFM deletes. The
+  // characters are kept, written as text; only the code style is lost.
+  cellsAre('code, one backslash', '<code>a \\| b</code>', 'a \\| b');
+  // code without a pipe is untouched
+  cellsAre('code, no pipe', '<code>a \\ b</code>', '<code>a \\ b</code>');
+}
+
 console.log('paste-md.test.js: ' + checks + ' checks passed');

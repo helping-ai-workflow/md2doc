@@ -601,4 +601,147 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   edge('same-tag, space between', [el('strong', {}, 'a'), el('strong', {}, ' b')], '**a** **b**', '<strong>a</strong> <strong>b</strong>');
 }
 
+// v3.17.7: what the reader shows must be what the editor held, mark for mark.
+//
+// marksOf() flattens either side to one entry per non-space character: the
+// character plus the sorted set of S(trong) / E(m) / D(el) around it; a code
+// span is one entry holding its whole text. Whitespace is left out because
+// splitEdges() moves it across a delimiter on purpose, and <br> because a
+// hard break is checked by its own rows above.
+{
+  const reader = (md) => marked.parseInline(md);
+  const p = (...kids) => el('p', {}, ...kids);
+  const hb = () => el('br', { 'data-hard-break': '1' });
+  const MARK = { STRONG: 'S', B: 'S', EM: 'E', I: 'E', DEL: 'D', S: 'D' };
+  function domMarks(node, marks, out) {
+    if (node.nodeType === 3) {
+      for (const ch of node.textContent) if (!/\s/.test(ch)) out.push(ch + '[' + marks + ']');
+      return out;
+    }
+    if (node.nodeName === 'CODE') { out.push('`' + node.textContent + '[' + marks + ']'); return out; }
+    const k = MARK[node.nodeName];
+    const next = k && marks.indexOf(k) === -1 ? (marks + k).split('').sort().join('') : marks;
+    for (const c of node.childNodes) domMarks(c, next, out);
+    return out;
+  }
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" };
+  function htmlMarks(h) {
+    const out = []; const open = []; let code = null; let m;
+    const re = /<!--[\s\S]*?-->|<(\/?)([a-z]+)\b[^>]*>|&(amp|lt|gt|quot|#39);|([^<&]+|[<&])/g;
+    const cur = () => [...new Set(open)].sort().join('');
+    while ((m = re.exec(h))) {
+      if (m[0].startsWith('<!--')) continue;
+      if (m[2]) {
+        if (m[2] === 'code') {
+          if (m[1]) { out.push('`' + code + '[' + cur() + ']'); code = null; } else code = '';
+          continue;
+        }
+        const k = { strong: 'S', em: 'E', del: 'D' }[m[2]];
+        if (!k) continue;
+        if (m[1]) open.splice(open.lastIndexOf(k), 1); else open.push(k);
+        continue;
+      }
+      const t = m[3] ? ENT[m[3]] : m[4];
+      if (code !== null) { code += t; continue; }
+      for (const ch of t) if (!/\s/.test(ch)) out.push(ch + '[' + cur() + ']');
+    }
+    return out;
+  }
+  function readsBack(name, root, bytes) {
+    const md = serializeInline(root).md;
+    if (bytes !== undefined) assert.strictEqual(md, bytes, 'v3177 ' + name + ': bytes');
+    assert.strictEqual(htmlMarks(reader(md)).join(''), domMarks(root, '', []).join(''),
+      'v3177 ' + name + ': the reader shows other marks than the editor held; md ' +
+      JSON.stringify(md) + ' reads ' + JSON.stringify(reader(md)));
+    return md;
+  }
+
+  // N2: two strikethroughs side by side get the same guard two bolds do.
+  // Measured on 71fedaa (strike `two` after `~~one~~` in the editor):
+  // `~~one~~~~two~~` reads `<del>one~~~~two</del>`.
+  readsBack('adjacent del', p('Alpha ', el('del', {}, 'one'), el('del', {}, 'two'), ' three.'),
+    'Alpha ~~one~~<!-- -->~~two~~ three.');
+  readsBack('adjacent del, space between', p(el('del', {}, 'a'), el('del', {}, ' b')), '~~a~~ ~~b~~');
+  readsBack('del then bold', p(el('del', {}, 'a'), el('strong', {}, 'b')), '~~a~~**b**');
+  // N3: two code spans side by side. On 71fedaa (inline-code on `two` after
+  // `` `one` ``) the file got `` `one``two` ``: one code span, "one``two".
+  readsBack('adjacent code', p('Alpha ', el('code', {}, 'one'), el('code', {}, 'two'), ' three.'),
+    'Alpha `one`<!-- -->`two` three.');
+  readsBack('adjacent code, fenced', p(el('code', {}, 'a`b'), el('code', {}, 'c')), '`` a`b ``<!-- -->`c`');
+
+  // N1: a mark nested in another `*` mark whose runs marked's emphasis scan
+  // miscounts. Each row is the shape a real gesture produced on 71fedaa
+  // (toolbar over a random range), with the bytes it wrote then.
+  //   *`c`**i**tal*                     -> em lost, stars literal
+  readsBack('bold inside em after code', p('Alpha ', el('em', {}, el('code', {}, 'c'), el('strong', {}, 'i'), 'tal'), ' bold'),
+    'Alpha *`c`__i__<!-- -->tal* bold');
+  //   前面「引號<!-- -->*」**粗**後面，中文*。 -> em lost
+  readsBack('bold inside em after a bracket', p('前面「引號', el('em', {}, '」', el('strong', {}, '粗'), '後面，中文'), '。'));
+  //   *~~a**a**~~*  and  *~~**,中**~~*   (del between the two `*` marks)
+  readsBack('bold in del in em', p(el('em', {}, el('del', {}, 'a', el('strong', {}, 'a')))));
+  readsBack('punct bold in del in em', p('x ', el('em', {}, el('del', {}, el('strong', {}, ',中'))), ' y'));
+  readsBack('em in bold, both inner bolds', p(el('em', {}, el('strong', {}, 'a'), el('strong', {}, el('code', {}, 'c')))));
+
+  // What already reads right is written exactly as before.
+  readsBack('unchanged: bold over an em', p('Alpha ', el('strong', {}, el('em', {}, 'ital'), ' bold'), ' text'),
+    'Alpha ***ital* bold** text');
+  readsBack('unchanged: full cover', p(el('strong', {}, el('em', {}, 'both'))), '***both***');
+  readsBack('unchanged: intraword bold in em', p(el('em', {}, 'a', el('strong', {}, 'i'), 'tal')), '*a**i**tal*');
+
+  // A repaired spelling never puts `<!--` at the start of a line: there it
+  // opens an HTML block and ends the paragraph (v3.17.5 C1). After a newline
+  // the character before an opening run is whitespace, so it needs no guard.
+  for (const [name, root] of [
+    ['after a hard break', p(el('em', {}, 'a', hb(), el('strong', {}, 'i'), 'tal'))],
+    ['after a hard break, code first', p(el('em', {}, el('code', {}, 'c'), hb(), el('strong', {}, 'i'), 'tal'))],
+    ['after a hard break, in a span', p(el('em', {}, 'a', hb(), el('span', {}, el('strong', {}, '「粗」')), '後面'))],
+  ]) {
+    const md = readsBack(name, root);
+    assert.ok(!/(^|\n)[ \t]*<!--/.test(md), 'v3177 ' + name + ': `<!--` at a line start: ' + JSON.stringify(md));
+  }
+
+  // Tables write a code `|` through a placeholder (table-md.js); the check
+  // reads it as the `|` the cell will show.
+  {
+    const PH = '';
+    const cell = p(el('em', {}, el('code', {}, 'a|b'), el('strong', {}, 'i'), 'tal'));
+    const md = serializeInline(cell, { codePipe: PH }).md;
+    assert.strictEqual(md, '*`a' + PH + 'b`__i__<!-- -->tal*', 'v3177 table cell: repaired with the placeholder kept');
+  }
+
+  // The whole family, by fuzz: random trees of strong / em / del / code /
+  // text, no mark inside itself (the toolbar unwraps that) and no two code
+  // spans side by side without a guard. Fixed seed so a red run reproduces.
+  // On 71fedaa this generator failed 7725 of 20000 (55 shapes).
+  {
+    let seed = 20261105;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    const WORDS = ['a', 'bc', '中', '文字', 'ital'];
+    const PUNCT = ['。', '「', '」', '：', ',', '.', '('];
+    const text = () => { const r = rnd(); return r < 0.6 ? pick(WORDS) : r < 0.8 ? pick(WORDS) + ' ' + pick(WORDS) : r < 0.9 ? pick(PUNCT) + pick(WORDS) : pick(WORDS) + pick(PUNCT); };
+    const MARKS = ['strong', 'em', 'del'];
+    function gen(depth, anc) {
+      const kids = [];
+      const k = 1 + Math.floor(rnd() * 3);
+      for (let i = 0; i < k; i++) {
+        const r = rnd();
+        const prev = kids[kids.length - 1];
+        const avail = MARKS.filter((m) => anc.indexOf(m) === -1);
+        if (depth < 3 && r < 0.55 && avail.length) { const m = pick(avail); kids.push(el(m, {}, ...gen(depth + 1, anc.concat(m)))); }
+        else if (r < 0.62 && !(prev && prev.nodeName === 'CODE')) kids.push(el('code', {}, pick(['c', 'x y'])));
+        else kids.push(text());
+      }
+      return kids;
+    }
+    let bad = 0; let first = null;
+    for (let i = 0; i < 4000; i++) {
+      const root = p(...gen(0, []));
+      const md = serializeInline(root).md;
+      if (htmlMarks(reader(md)).join('') !== domMarks(root, '', []).join('')) { bad++; if (!first) first = md; }
+    }
+    assert.strictEqual(bad, 0, 'v3177 nested fuzz: ' + bad + ' of 4000 read back wrong, first ' + JSON.stringify(first));
+  }
+}
+
 console.log('inline-md.test.js OK');
