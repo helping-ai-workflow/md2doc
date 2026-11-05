@@ -687,6 +687,19 @@ f1Row('D7 a stray end tag in a piped cell keeps its bytes', () => {
   const { md } = serializeTable(domTable(['a', 'b'], [['x', 'Y']]), orig);
   assert.strictEqual(md, L('| a | b |', '|---|---|', '| x</span> | Y |'), 'got:\n' + md);
 });
+// Final review #1: a lazy row's text is in the file only, so it must not
+// depend on its column keeping its header name. Renaming column 0 left that
+// column unmatched and the row came out `|  |  |`.
+f1Row('D7 lazy row survives a renamed first header', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', '</content>');
+  const { md } = serializeTable(domTable(['Label', 'Note'], [['p', 'q'], ['', '']]), orig);
+  assert.strictEqual(md, L('| Label | Note |', '|---|---|', '| p | q |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row with visible text, header renamed and its cell edited', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', 'see above');
+  const { md } = serializeTable(domTable(['Label', 'Note'], [['p', 'q'], ['see below', '']]), orig);
+  assert.strictEqual(md, L('| Label | Note |', '|---|---|', '| p | q |', '| see below |  |'), 'got:\n' + md);
+});
 // Guards for the exceptions (green before the fix too): `</br>` is a line
 // break to the browser and `</p>` an empty paragraph, so a cell whose break
 // was deleted must not read the same as the original and get it back.

@@ -821,6 +821,17 @@ console.log('md2doc dot WASM test passed');
   // anchor's markup, and a patch release does not re-lay-out such tables.
   h = await body('| id | src |\n|---|---|\n| R-1 | [[upstream-spec §3.1#verify]] |\n| R-2 | [[upstream-spec §2.3]] |\n');
   assert.ok(h.includes('<colgroup><col class="col-narrow"><col class="col-prose"></colgroup>'), 'D8 citation column class unchanged: ' + h);
+  // a citation inside a link label or an image alt (final review #2): marked's
+  // label allows one nested bracket level and `[[...]]` is two, so without
+  // the link tokenizer's masking the whole link fell apart into text. The
+  // link HTML is v3.17.8's (measured on main ba94128); the alt is the
+  // citation's visible text (v3.17.8 put the anchor's markup there).
+  h = await body('[see [[ref]]](#sec) and [see [[a, §2]] and [[b]]](#s "t")\n');
+  assert.ok(h.includes('<p><a href="#sec">see <a href="#ref">[ref]</a></a> and <a href="#s" title="t">see <a href="#a">[a, §2]</a> and <a href="#b">[b]</a></a></p>'), 'D8 link label with citations: ' + h);
+  h = await body('![see [[r]]](x.png)\n');
+  assert.ok(h.includes('<img src="x.png" alt="see [r]">'), 'D8 image alt with a citation: ' + h);
+  h = await body('[[x]](u)\n');
+  assert.ok(h.includes('<p><a href="#x">[x]</a>(u)</p>'), 'D8 a citation then (u) is not a link: ' + h);
   // edit mode: the block map still lines up
   const e = await renderMarkdown('x [[ref-1, §2]] `[[c]]`\n\ntail\n', fake, { editMode: true });
   assert.deepStrictEqual(e.blocks.map((b) => [b.startLine, b.endLine]), [[1, 1], [3, 3]], 'D8 edit-mode lines');
