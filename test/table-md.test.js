@@ -362,4 +362,300 @@ const CODE_PIPE_TEXT = {
     'a ragged row whose extra column is dropped on re-lex');
 }
 
+// ── v3.17.8 F1: a table edit keeps the bytes of every cell it did not change ──
+// Before this, any edit re-serialized every cell from the DOM, so a cell
+// nobody touched came back respelled: '[' as '\[', a plain-text '\|' as
+// '&#124;'. Same meaning, but a git diff full of rows the user never edited.
+// Now a current cell reuses the ORIGINAL field's bytes when a private plain
+// Marked reads both spellings the same (setCellParser() swaps it for these
+// rows), and a row whose cells are all reused, in the original columns, with
+// no column widened, is the original line itself.
+//
+// Every row runs, then the failures are reported together, so a red run names
+// each row instead of stopping at the first.
+const tableMdLib = require('../lib/editor/table-md.js');
+const L = (...l) => l.join('\n');
+function cellsOf(row, tag) {
+  return row.map((c) => (tag === 'th' ? th : td)({}, ...(Array.isArray(c) ? c : [c])));
+}
+function domTable(head, rows) {
+  return table(tr(...cellsOf(head, 'th')), rows.map((r) => tr(...cellsOf(r, 'td'))));
+}
+const plainText = (c) => (Array.isArray(c) ? c.map((x) => (typeof x === 'string' ? x : x.textContent)).join('') : c);
+// Each fixture: the file's table, the DOM the editor shows after the gesture,
+// the bytes it must now write, and `base` — what the serializer wrote before
+// v3.17.8, which is what it must still write with no parser (row 9).
+const F1_FIXTURES = [
+  {
+    name: 'F1-1 one cell edited, untouched [ and _ keep their bytes',
+    orig: L('| a | b |', '|---|---|', '| x [y] | p _q |', '| r | s |'),
+    head: ['a', 'b'], rows: [['x [y]', 'p _q'], ['R', 's']],
+    expect: L('| a | b |', '|---|---|', '| x [y] | p _q |', '| R | s |'),
+    base: L('| a | b |', '|---|---|', '| x \\[y\\] | p \\_q |', '| R | s |'),
+  },
+  {
+    name: 'F1-2 a plain-text \\| in an untouched row stays \\|',
+    orig: L('| a | b |', '|---|---|', '| p \\| q | k |', '| r | s |'),
+    head: ['a', 'b'], rows: [['p | q', 'k'], ['R', 's']],
+    expect: L('| a | b |', '|---|---|', '| p \\| q | k |', '| R | s |'),
+    base: L('| a | b |', '|---|---|', '| p &#124; q | k |', '| R | s |'),
+  },
+  {
+    // Regression guard, green before the fix too: the edited cell itself is
+    // never reused (its original reads differently), so it takes the
+    // canonical spelling; its neighbour in the same row keeps its bytes.
+    name: 'F1-3 the edited cell gets the canonical spelling',
+    orig: L('| a | b |', '|---|---|', '| [q] | y_ |'),
+    head: ['a', 'b'], rows: [['[q]_w*', 'y_']],
+    expect: L('| a | b |', '|---|---|', '| \\[q\\]\\_w\\* | y_ |'),
+    base: L('| a | b |', '|---|---|', '| \\[q\\]\\_w\\* | y\\_ |'),
+  },
+  {
+    name: 'F1-4a row inserted above untouched rows',
+    orig: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '| y [2] | m |', '| z [3] | n |'),
+    head: ['a', 'b'], rows: [['x [1]', 'k [1]'], ['', ''], ['y [2]', 'm'], ['z [3]', 'n']],
+    expect: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '|  |  |', '| y [2] | m |', '| z [3] | n |'),
+    base: L('| a | b |', '|---|---|', '| x \\[1\\] | k \\[1\\] |', '|  |  |', '| y \\[2\\] | m |', '| z \\[3\\] | n |'),
+  },
+  {
+    name: 'F1-4b row deleted',
+    orig: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '| y [2] | m |', '| z [3] | n |'),
+    head: ['a', 'b'], rows: [['x [1]', 'k [1]'], ['z [3]', 'n']],
+    expect: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '| z [3] | n |'),
+    base: L('| a | b |', '|---|---|', '| x \\[1\\] | k \\[1\\] |', '| z \\[3\\] | n |'),
+  },
+  {
+    name: 'F1-4c row moved to the top',
+    orig: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '| y [2] | m |', '| z [3] | n |'),
+    head: ['a', 'b'], rows: [['z [3]', 'n'], ['x [1]', 'k [1]'], ['y [2]', 'm']],
+    expect: L('| a | b |', '|---|---|', '| z [3] | n |', '| x [1] | k [1] |', '| y [2] | m |'),
+    base: L('| a | b |', '|---|---|', '| z \\[3\\] | n |', '| x \\[1\\] | k \\[1\\] |', '| y \\[2\\] | m |'),
+  },
+  {
+    name: 'F1-4d row moved down, another row edited',
+    orig: L('| a | b |', '|---|---|', '| x [1] | k [1] |', '| y [2] | m |', '| z [3] | n |'),
+    head: ['a', 'b'], rows: [['y [2]', 'M'], ['z [3]', 'n'], ['x [1]', 'k [1]']],
+    expect: L('| a | b |', '|---|---|', '| y [2] | M |', '| z [3] | n |', '| x [1] | k [1] |'),
+    base: L('| a | b |', '|---|---|', '| y \\[2\\] | M |', '| z \\[3\\] | n |', '| x \\[1\\] | k \\[1\\] |'),
+  },
+  {
+    name: 'F1-5a column inserted in the middle',
+    orig: L('| a | b |', '|---|---|', '| x [1] | y [2] |'),
+    head: ['a', '', 'b'], rows: [['x [1]', '', 'y [2]']],
+    expect: L('| a |  | b |', '|---|---|---|', '| x [1] |  | y [2] |'),
+    base: L('| a |  | b |', '|---|---|---|', '| x \\[1\\] |  | y \\[2\\] |'),
+  },
+  {
+    name: 'F1-5b column deleted',
+    orig: L('| a | b |', '|---|---|', '| x [1] | y [2] |'),
+    head: ['b'], rows: [['y [2]']],
+    expect: L('| b |', '|---|', '| y [2] |'),
+    base: L('| b |', '|---|', '| y \\[2\\] |'),
+  },
+  {
+    name: 'R5 an unescaped ~ is reused only byte-equal; its neighbour is reused',
+    orig: L('| a | b |', '|---|---|', '| p~q | [k] |', '| $5 | m |', '| r | s |'),
+    head: ['a', 'b'], rows: [['p~q', '[k]'], ['$5', 'm'], ['R', 's']],
+    expect: L('| a | b |', '|---|---|', '| p\\~q | [k] |', '| $5 | m |', '| R | s |'),
+    base: L('| a | b |', '|---|---|', '| p\\~q | \\[k\\] |', '| $5 | m |', '| R | s |'),
+  },
+];
+const f1Failures = [];
+function f1Row(name, fn) {
+  try { fn(); } catch (e) { f1Failures.push(name + '\n    ' + String(e.message).split('\n').join('\n    ')); }
+}
+for (const f of F1_FIXTURES) {
+  f1Row(f.name, () => {
+    const { md, unsupported } = serializeTable(domTable(f.head, f.rows), f.orig);
+    assert.deepStrictEqual(unsupported, []);
+    assert.strictEqual(md, f.expect, 'got:\n' + md);
+    assertTableRoundTrips(md, { header: f.head.map(plainText), rows: f.rows.map((r) => r.map(plainText)) }, f.name);
+  });
+}
+// F1-5c a column MOVE: the width memory is still refused; no throw, content right.
+f1Row('F1-5c column moved', () => {
+  const orig = L('| a | b |', '|---|---|', '| x [1] | y [2] |', '| z | w |');
+  const { md, unsupported } = serializeTable(domTable(['b', 'a'], [['y [2]', 'x [1]'], ['W', 'z']]), orig);
+  assert.deepStrictEqual(unsupported, []);
+  assertTableRoundTrips(md, { header: ['b', 'a'], rows: [['y [2]', 'x [1]'], ['W', 'z']] }, 'column moved');
+});
+// Reuse never hides an unsupported cell: a SUB in an untouched-looking cell
+// still reports, so the table falls back to raw-edit as before.
+f1Row('F1 unsupported still reported', () => {
+  const orig = L('| a | b |', '|---|---|', '| H~2~O | k |');
+  const res = serializeTable(table(tr(th({}, 'a'), th({}, 'b')),
+    [tr(td({}, 'H', el('sub', {}, '2'), 'O'), td({}, 'K'))]), orig);
+  assert.deepStrictEqual(res.unsupported, ['SUB']);
+});
+// An HTML comment in an untouched cell (paperwork's hwe1 tables carry
+// `<!-- [[source, Cl.x]] -->` citation anchors) is invisible, so the DOM walk
+// drops it; the cell still reads the same, and it keeps its comment.
+f1Row('F1 untouched cell keeps its HTML comment', () => {
+  const orig = L('| id | src |', '|---|---|', '| [R-1] | Cl.2<!-- [[ieee, Cl.2]] --><br>quote |', '| r | s |');
+  const t = table(tr(th({}, 'id'), th({}, 'src')), [
+    tr(td({}, '[R-1]'), td({}, 'Cl.2', { nodeType: 8, nodeName: '#comment', textContent: ' [[ieee, Cl.2]] ' }, el('br', {}), 'quote')),
+    tr(td({}, 'R'), td({}, 's'))]);
+  const { md, unsupported } = serializeTable(t, orig);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, L('| id | src |', '|---|---|', '| [R-1] | Cl.2<!-- [[ieee, Cl.2]] --><br>quote |', '| R | s |'), 'got:\n' + md);
+});
+// Row 9: no parser → every fixture writes exactly what it wrote before v3.17.8.
+f1Row('F1-9 parser off: pre-v3.17.8 bytes', () => {
+  tableMdLib.setCellParser(null);
+  try {
+    for (const f of F1_FIXTURES) {
+      const { md } = serializeTable(domTable(f.head, f.rows), f.orig);
+      assert.strictEqual(md, f.base, f.name + ' with no parser, got:\n' + md);
+    }
+  } finally {
+    tableMdLib.setCellParser();
+  }
+});
+
+// Row 10: property. Random small tables of plain text drawn from a pool of
+// the characters an escape decision turns on; each cell's ORIGINAL is a
+// random spelling of the same text (kept only when marked reads it back as
+// that text); one random body cell is then edited. Every untouched cell must
+// come back byte for byte, and the whole output must read as the DOM.
+f1Row('F1-10 property: untouched cells keep their bytes', () => {
+  let seed = 0x5eed1781;
+  const rnd = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const POOL = ['a', 'b', 'x', 'q', '[', ']', '_', '|', '*', '`', '&', '<', ' ', '1'];
+  const SPELL = {
+    '[': ['[', '\\['], ']': [']', '\\]'], '_': ['_', '\\_'], '|': ['\\|', '&#124;'],
+    '*': ['\\*', '&#42;'], '`': ['\\`', '&#96;'], '&': ['&', '&amp;', '\\&'], '<': ['&lt;', '\\<', '<'],
+  };
+  const text = () => {
+    const n = 1 + Math.floor(rnd() * 6);
+    let s = '';
+    for (let i = 0; i < n; i++) s += pick(POOL);
+    s = s.trim();
+    return s === '' ? 'a' : s;
+  };
+  const spell = (s) => s.split('').map((ch) => (SPELL[ch] ? pick(SPELL[ch]) : ch)).join('');
+  // the cell's text as marked shows it, from a one-column table
+  const readCell = (field) => {
+    const toks = marked.lexer('| h |\n|---|\n| ' + field + ' |');
+    if (toks.length !== 1 || toks[0].type !== 'table' || toks[0].rows.length !== 1) return null;
+    const html = marked.parseInline(toks[0].rows[0][0].text);
+    if (/<[a-z/]/i.test(html)) return null;
+    return decodeEntities(html);
+  };
+  const splitRow = (line) => {
+    const out = []; let cur = ''; const inner = line.trim().slice(1, -1);
+    for (let i = 0; i < inner.length; i++) {
+      const c = inner[i];
+      if (c === '\\' && i + 1 < inner.length) { cur += c + inner[i + 1]; i++; continue; }
+      if (c === '|') { out.push(cur); cur = ''; continue; }
+      cur += c;
+    }
+    out.push(cur);
+    return out.map((f) => f.trim());
+  };
+  let reusedChecked = 0;
+  for (let iter = 0; iter < 300; iter++) {
+    const cols = 1 + Math.floor(rnd() * 3);
+    const nRows = 1 + Math.floor(rnd() * 4);
+    const head = []; const body = [];
+    for (let c = 0; c < cols; c++) head.push('h' + c + pick(['', '_x', ' [k]']));
+    for (let r = 0; r < nRows; r++) { const row = []; for (let c = 0; c < cols; c++) row.push(text()); body.push(row); }
+    const fieldOf = (s) => {
+      for (let k = 0; k < 6; k++) { const v = spell(s); if (readCell(v) === s) return v; }
+      return null;
+    };
+    const origHead = head.map(fieldOf); const origBody = body.map((r) => r.map(fieldOf));
+    if (origHead.some((f) => f === null) || origBody.some((r) => r.some((f) => f === null))) continue;
+    const pad = () => ' '.repeat(1 + Math.floor(rnd() * 2));
+    const line = (fields) => '|' + fields.map((f) => pad() + f + pad()).join('|') + '|';
+    const orig = [line(origHead), '|' + head.map(() => '---').join('|') + '|'].concat(origBody.map(line)).join('\n');
+    const er = Math.floor(rnd() * nRows); const ec = Math.floor(rnd() * cols);
+    const now = body.map((r) => r.slice()); now[er][ec] = now[er][ec] + 'Q';
+    const { md, unsupported } = serializeTable(domTable(head, now), orig);
+    assert.deepStrictEqual(unsupported, [], 'iter ' + iter);
+    assertTableRoundTrips(md, { header: head, rows: now }, 'property iter ' + iter + ' orig:\n' + orig);
+    const outLines = md.split('\n');
+    assert.deepStrictEqual(splitRow(outLines[0]), origHead, 'iter ' + iter + ' header bytes, orig:\n' + orig + '\nout:\n' + md);
+    for (let r = 0; r < nRows; r++) {
+      const got = splitRow(outLines[2 + r]);
+      for (let c = 0; c < cols; c++) {
+        if (r === er && c === ec) continue;
+        assert.strictEqual(got[c], origBody[r][c], 'iter ' + iter + ' cell ' + r + ',' + c + ' bytes, orig:\n' + orig + '\nout:\n' + md);
+        reusedChecked++;
+      }
+    }
+  }
+  assert.ok(reusedChecked > 300, 'the property must reach enough cells, reached ' + reusedChecked);
+});
+// v3.17.8 final review I3: a named reference the cell oracle cannot decode
+// (`&copy;`, `&rarr;`, `&AMP;`) gave the same reading as the typed TEXT
+// `\&copy;`, so editing a cell from © to the literal "&copy;" was overwritten
+// by the original bytes. Measured before: `| &copy; 2024 | K |`.
+f1Row('F1 I3 edited text that spells an unknown reference is written as typed', () => {
+  for (const name of ['copy', 'rarr', 'AMP']) {
+    const orig = L('| a | b |', '|---|---|', '| &' + name + '; 2024 | k |');
+    const { md } = serializeTable(domTable(['a', 'b'], [['&' + name + '; 2024', 'K']]), orig);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| \\&' + name + '; 2024 | K |'), name + ' got:\n' + md);
+  }
+  // an untouched cell with such a reference keeps its bytes: they are byte-equal? no —
+  // the DOM shows the decoded character, so it is respelled as before v3.17.8.
+  const orig = L('| a | b |', '|---|---|', '| &copy; x | k |');
+  const { md } = serializeTable(domTable(['a', 'b'], [['© x', 'K']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| © x | K |'), 'untouched reference cell, got:\n' + md);
+});
+// v3.17.8 re-review N1: a row whose last '|' is escaped (`| q \|`) is not a
+// row the reuse can read. Round 1 split it with that '|' as the closing
+// delimiter (to keep the width memory, M2), and an edit from `q |` to `q \`
+// then read "the same" as the field ` q \` alone and the original line came
+// back: the edit was lost. The edited cell must be written.
+f1Row('F1 N1 an edit in a row whose last | is escaped is written', () => {
+  {
+    const { md } = serializeTable(domTable(['a', 'b'], [['p', 'q \\']]), L('| a | b |', '|---|---|', '| p | q \\|'));
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| p | q \\\\ |'), 'body row, got:\n' + md);
+  }
+  {
+    const { md } = serializeTable(domTable(['a', 'b \\'], [['p', 'q']]), L('| a | b \\|', '|---|---|', '| p | q |'));
+    assert.strictEqual(md.split('\n')[0], '| a | b \\\\ |', 'header row, got:\n' + md);
+  }
+});
+// v3.17.8 final review M1: pairing is linear. 3000 rows that all differ
+// from the original took ~3 s; a 2000 x 8 table with one edit ~600 ms.
+f1Row('F1 M1 large tables stay fast', () => {
+  const big = (n, cols, f) => {
+    const head = Array.from({ length: cols }, (_, c) => 'h' + c);
+    const rows = Array.from({ length: n }, (_, r) => head.map((h, c) => f(r, c)));
+    return { head, rows };
+  };
+  const line = (cells) => '| ' + cells.join(' | ') + ' |';
+  const sep = (cols) => '|' + Array(cols).fill('---').join('|') + '|';
+  {
+    const { head, rows } = big(3000, 8, (r, c) => 'v' + r + '_' + c);
+    const orig = [line(head), sep(8)].concat(rows.map((row) => line(row.map((x) => x + 'old')))).join('\n');
+    const t0 = Date.now();
+    serializeTable(domTable(head, rows), orig);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 2500, '3000 x 8, every row differs: ' + ms + ' ms');
+  }
+  {
+    const { head, rows } = big(2000, 8, (r, c) => 'a [' + r + '] _' + c);
+    const orig = [line(head), sep(8)].concat(rows.map((row) => line(row))).join('\n');
+    rows[1000][3] = 'edited';
+    serializeTable(domTable(head, rows), orig);   // warm the cache
+    rows[1000][4] = 'edited too';
+    const t0 = Date.now();
+    const { md } = serializeTable(domTable(head, rows), orig);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 400, '2000 x 8, warm, one more edit: ' + ms + ' ms');
+    assert.strictEqual(md.split('\n')[2 + 999], line(rows[999]), 'an untouched row keeps its bytes');
+  }
+});
+if (f1Failures.length) {
+  throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
+}
+
 console.log('table-md.test.js OK');

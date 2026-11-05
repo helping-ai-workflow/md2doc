@@ -10335,7 +10335,9 @@ check('v3173 C9: a column alignment set through the menu still marks the table e
   await page.locator('.ed-te-menu button[aria-label="置中"]').click(); await wait(250);
   assert.strictEqual((await dirtyMarks(page)).status, 'dirty', 'an alignment is an edit');
   await page.locator('.ed-block[data-block-type="heading"]').first().click(); await renderIdle(page);
-  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD.replace('|-|-|', '|-|:-:|').replace('|a|b|', '| a | b |').replace('|x|y|', '| x | y |'),
+  // v3.17.8 F1: rows whose cells did not change are written as they were, so
+  // only the separator moves (it used to rebuild `|a|b|` as `| a | b |` too).
+  assert.strictEqual(await saveAndRead(page, boot), A6_TABLE_MD.replace('|-|-|', '|-|:-:|'),
     'the alignment reached the file');
 }, { md: A6_TABLE_MD });
 
@@ -12209,3 +12211,116 @@ check('v3174 E5: edit page plates an svg beside text in a paragraph', DESKTOP, a
   assert.deepStrictEqual(await read(), { bg: 'rgb(255, 255, 255)', ink: 'rgb(31, 35, 40)' });
   assert.strictEqual(await saveAndRead(page, boot), E5_MD, 'no byte changes');
 }, { md: E5_MD });
+
+// ── v3.17.8 D2: no bold / italic / strike / underline / link inside a code span ──
+// Markdown cannot hold a mark inside a code span (serializeCode() writes the
+// code's textContent), so a wrap there used to show in the DOM and vanish on save.
+// The selection is placed by VISIBLE-text offsets inside the armed paragraph.
+async function v3178Select(page, from, to) {
+  await page.locator('.ed-block[data-block-id="1"]').click({ position: { x: 4, y: 4 } }); await wait(200);
+  const picked = await page.evaluate(([a, b]) => {
+    const el = document.querySelector('.ed-block[data-block-id="1"] .ed-wys-armed');
+    const texts = []; let all = '';
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let n; while ((n = w.nextNode())) { texts.push([n, all.length]); all += n.data; }
+    const at = (off, end) => { for (let i = texts.length - 1; i >= 0; i--) { const [t, s] = texts[i]; if (end ? s < off : s <= off) return [t, off - s]; } return null; };
+    const s0 = at(a, false), s1 = at(b, true);
+    const r = document.createRange(); r.setStart(s0[0], s0[1]); r.setEnd(s1[0], s1[1]);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    el.focus();
+    document.dispatchEvent(new Event('selectionchange'));
+    return r.toString();
+  }, [from, to]);
+  await wait(300);
+  return picked;
+}
+const v3178Bars = (page) => page.evaluate(() => {
+  const o = { tb: {}, sel: {} };
+  for (const id of ['bold', 'italic', 'strike', 'inline-code', 'link']) { const b = document.querySelector('[data-ed-tb="' + id + '"]'); o.tb[id] = b ? { disabled: b.disabled, pressed: b.getAttribute('aria-pressed') } : null; }
+  for (const c of ['b', 'i', 's', 'u', 'code', 'link']) { const b = document.querySelector('.ed-seltb-' + c); o.sel[c] = b ? { ad: b.getAttribute('aria-disabled'), pressed: b.getAttribute('aria-pressed') } : null; }
+  return o;
+});
+const V3178_PLAIN = '# Doc\n\nAlpha `code` beta gamma.\n';
+
+check('v3178 D2: selection inside code -> bold/italic/strike/link are disabled on both toolbars', DESKTOP, async (page) => {
+  assert.strictEqual(await v3178Select(page, 7, 9), 'od');
+  const b = await v3178Bars(page);
+  for (const id of ['bold', 'italic', 'strike', 'link']) assert.strictEqual(b.tb[id].disabled, true, 'toolbar ' + id + ' ' + JSON.stringify(b));
+  for (const c of ['b', 'i', 's', 'u', 'link']) assert.strictEqual(b.sel[c].ad, 'true', 'selection toolbar ' + c + ' ' + JSON.stringify(b));
+  assert.strictEqual(b.tb['inline-code'].disabled, false, 'inline-code stays enabled ' + JSON.stringify(b));
+  assert.strictEqual(b.tb['inline-code'].pressed, 'true', 'and pressed (unwrap)');
+}, { md: V3178_PLAIN });
+
+check('v3178 D2: Ctrl+B / Ctrl+I / Ctrl+K inside code change nothing and open no prompt', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 7, 9), 'od');
+  await page.keyboard.press('Control+b'); await wait(150);
+  await page.keyboard.press('Control+i'); await wait(150);
+  await page.keyboard.press('Control+u'); await wait(150);
+  await page.keyboard.press('Control+k'); await wait(300);
+  const r = await page.evaluate(() => ({ html: document.querySelector('.ed-block[data-block-id="1"]').innerHTML, field: !!document.querySelector('.ed-linkbar') }));
+  assert.ok(!/<(strong|em|b|i|u|a)[ >]/.test(r.html), 'no mark element in the DOM: ' + r.html);
+  assert.strictEqual(r.field, false, 'no link field');
+  assert.strictEqual(await saveAndRead(page, boot), V3178_PLAIN, 'bytes unchanged');
+}, { md: V3178_PLAIN });
+
+check('v3178 D2: control - plain text next to code still bolds', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 11, 15), 'beta');
+  const b = await v3178Bars(page);
+  assert.strictEqual(b.tb.bold.disabled, false, JSON.stringify(b));
+  assert.strictEqual(b.sel.b.ad, null, JSON.stringify(b));
+  await page.locator('[data-ed-tb="bold"]').click(); await wait(400);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nAlpha `code` **beta** gamma.\n');
+}, { md: V3178_PLAIN });
+
+check('v3178 D2: bold around code, selection inside the code -> B is enabled, whole, and unwraps', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 7, 9), 'od');
+  const b = await v3178Bars(page);
+  assert.deepStrictEqual(b.tb.bold, { disabled: false, pressed: 'true' }, JSON.stringify(b));
+  assert.strictEqual(b.sel.b.ad, null, JSON.stringify(b));
+  assert.strictEqual(b.sel.b.pressed, 'true', JSON.stringify(b));
+  await page.locator('[data-ed-tb="bold"]').click(); await wait(400);
+  assert.strictEqual(await saveAndRead(page, boot), V3178_PLAIN);
+}, { md: '# Doc\n\nAlpha **`code`** beta gamma.\n' });
+
+// STRADDLE: the selection starts in plain text and ends inside the code.
+check('v3178 D2: straddle - selection from plain text into code, press B', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 3, 8), 'ha co');
+  await page.locator('[data-ed-tb="bold"]').click(); await wait(400);
+  const html = await page.evaluate(() => document.querySelector('.ed-block[data-block-id="1"]').innerHTML);
+  const disk = await saveAndRead(page, boot);
+  // MEASURED (Chromium, before and after D2): the wrap lands on the plain part and the
+  // code's first half; the code is split in two, and the bold is kept in the bytes.
+  assert.ok(/<strong>ha <code>co<\/code><\/strong><code>de<\/code>/.test(html), 'DOM: ' + html);
+  assert.strictEqual(disk, '# Doc\n\nAlp**ha `co`**`de` beta gamma.\n');
+}, { md: V3178_PLAIN });
+
+// v3.17.8 final review I1: a selection that runs one space past the code's end
+// (a double click on its last word does that) trims back inside the code, and
+// the wrap used to land there: `<code><strong>code</strong></code>`, saved as
+// plain `code`. The buttons and the press judge the trimmed range now.
+check('v3178 D2: selection "code " (trailing space) -> B / I / S disabled, the press writes nothing', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 6, 11), 'code ');
+  const b = await v3178Bars(page);
+  for (const id of ['bold', 'italic', 'strike']) assert.strictEqual(b.tb[id].disabled, true, 'toolbar ' + id + ' ' + JSON.stringify(b));
+  for (const c of ['b', 'i', 's', 'u']) assert.strictEqual(b.sel[c].ad, 'true', 'selection toolbar ' + c + ' ' + JSON.stringify(b));
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').click()); await wait(300);
+  const html = await page.evaluate(() => document.querySelector('.ed-block[data-block-id="1"]').innerHTML);
+  assert.ok(!/<code>[^<]*<(strong|b)\b/.test(html), 'no bold inside the code: ' + html);
+  assert.strictEqual(await saveAndRead(page, boot), V3178_PLAIN, 'bytes unchanged');
+}, { md: V3178_PLAIN });
+
+// v3.17.8 final review I2: a multi-cell selection's B wraps each cell's trimmed
+// text; a cell that is one code span (a signal-name column) trimmed to the
+// code's text node and the bold landed inside the code: the screen showed
+// bold, the file kept `` `sig_a` ``. The bold goes around the code now.
+const V3178_SIG = '# T\n\n| Signal | Note |\n|---|---|\n| `sig_a` | x |\n| `sig_b` | y |\n';
+check('v3178 D2: a cell range over a code-only column, selection-toolbar B -> **`sig`** on disk', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'sig_a', 0);
+  await shiftClickCell(page, 'sig_b'); await wait(300);
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').click()); await wait(400);
+  const html = await page.evaluate(() => document.querySelector('.content table').innerHTML);
+  assert.ok(!/<code>[^<]*<strong\b/.test(html), 'no bold inside a code: ' + html);
+  assert.strictEqual(await commitAndRead(page, boot),
+    '# T\n\n| Signal | Note |\n|---|---|\n| **`sig_a`** | x |\n| **`sig_b`** | y |\n');
+}, { md: V3178_SIG });

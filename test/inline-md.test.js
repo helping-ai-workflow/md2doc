@@ -799,4 +799,29 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   }
 }
 
+// v3.17.8 D3: text that spells an HTML character reference (`&amp;`, `&lt;`,
+// `&#38;`, `&#x26;`) is what the person typed, so it must not be decoded by
+// the reader. Measured on 3b51ce9: `a &amp; b` wrote `a &amp; b`, the reader
+// showed `a & b`. A bare `&` (`AT&T`, `a & b`, `&copy` with no `;`) is never
+// a reference and stays unescaped, so existing bytes do not move.
+{
+  const { Marked } = require('marked');
+  const m = new Marked({ gfm: true });
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"' };
+  // one pass, as a browser decodes: `&amp;lt;` shows `&lt;`, never `<`
+  const shows = (md) => m.parseInline(md).replace(/&(amp|lt|gt|quot);/g, (x, n) => ENT[n]);
+  for (const t of ['a &amp; b', 'x &lt;y', '&#38; and &#x26;', '&nbsp;', 'R&D;', 'p&amp;q &AMP; r']) {
+    const md = escapeText(t);
+    assert.strictEqual(shows(md), t, 'v3178 D3: ' + JSON.stringify(t) + ' wrote ' + JSON.stringify(md));
+  }
+  assert.strictEqual(escapeText('a &amp; b'), 'a \\&amp; b', 'v3178 D3: a reference-shaped & gets a backslash');
+  for (const t of ['AT&T', 'a & b', '&copy', '&', 'a&;b', '& amp;']) {
+    assert.strictEqual(escapeText(t), t, 'v3178 D3: ' + JSON.stringify(t) + ' is not a reference and stays as it was');
+  }
+  // the same through serializeInline, inside a mark, and next to the N1 check
+  assert.strictEqual(serializeInline(el('p', {}, el('strong', {}, '&amp;'))).md, '**\\&amp;**');
+  const nested = el('p', {}, el('em', {}, 'x &amp; ', el('strong', {}, 'b'), ' y'));
+  assert.strictEqual(shows(serializeInline(nested).md).replace(/<[^>]+>/g, ''), 'x &amp; b y', 'v3178 D3: N1 block with a reference');
+}
+
 console.log('inline-md.test.js OK');

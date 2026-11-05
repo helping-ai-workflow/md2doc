@@ -296,4 +296,28 @@ eq(
   cellsAre('code, no pipe', '<code>a \\ b</code>', '<code>a \\ b</code>');
 }
 
+// v3.17.8 D3 (paste): pasted TEXT that spells markup is text. Measured on
+// 3b51ce9: a page showing `a &amp; b` pasted as `a &amp; b` (reader: `a & b`),
+// one showing `<b>x</b> y` pasted as real bold, and `a <!-- c --> b` lost
+// its middle. turndown's escape() handles Markdown punctuation only.
+{
+  const { Marked } = require('marked');
+  const m = new Marked({ gfm: true });
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"' };
+  const text = (md) => m.parse(md).replace(/<[^>]+>/g, '').replace(/&(amp|lt|gt|quot);/g, (x, n) => ENT[n]).replace(/\s+/g, ' ').trim();
+  for (const [html, shown] of [
+    ['<p>a &amp;amp; b</p>', 'a &amp; b'],
+    ['<p>&lt;b&gt;x&lt;/b&gt; y</p>', '<b>x</b> y'],
+    ['<p>a &lt;!-- c --&gt; b</p>', 'a <!-- c --> b'],
+    ['<p>see &lt;http://x.y&gt;</p>', 'see <http://x.y>'],
+    ['<table><tr><th>h</th></tr><tr><td>x &amp;lt; y</td></tr></table>', 'h x &lt; y'],
+  ]) {
+    const md = pm.htmlToMarkdown(html);
+    eq(text(md), shown, 'v3178 D3 paste ' + JSON.stringify(html) + ' wrote ' + JSON.stringify(md));
+  }
+  // nothing that was not markup moves
+  eq(pm.htmlToMarkdown('<p>1 &lt; 2 &amp; AT&amp;T</p>'), '1 < 2 & AT&T', 'v3178 D3 paste: a bare < and & stay bare');
+  eq(pm.htmlToMarkdown('<p><code>&amp;amp; &lt;b&gt;</code></p>'), '`&amp; <b>`', 'v3178 D3 paste: code is literal already');
+}
+
 console.log('paste-md.test.js: ' + checks + ' checks passed');
