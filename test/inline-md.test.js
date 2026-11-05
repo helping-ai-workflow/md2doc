@@ -723,6 +723,19 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
     assert.ok(!/(^|\n)[ \t]*<!--/.test(md), 'v3177 ' + name + ': `<!--` at a line start: ' + JSON.stringify(md));
   }
 
+  // ...also when there are too many guards for the drop pass (re-review:
+  // nine repaired marks, the last after a hard break, kept a line-start
+  // `<!--` and the reader cut the paragraph there).
+  {
+    const kids = [el('code', {}, 'c')];
+    for (let i = 0; i < 9; i++) {
+      if (i === 8) kids.push(hb());
+      kids.push(el('strong', {}, 'i'), 'tal ');
+    }
+    const md = readsBack('many guards, last after a hard break', p('Alpha ', el('em', {}, ...kids), ' end'));
+    assert.ok(!/(^|\n)[ \t]*<!--/.test(md), 'v3177 many guards: `<!--` at a line start: ' + JSON.stringify(md));
+  }
+
   // Tables write a code `|` through a placeholder (table-md.js); the check
   // reads it as the `|` the cell will show.
   {
