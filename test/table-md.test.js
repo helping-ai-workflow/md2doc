@@ -592,6 +592,63 @@ f1Row('F1-10 property: untouched cells keep their bytes', () => {
   }
   assert.ok(reusedChecked > 300, 'the property must reach enough cells, reached ' + reusedChecked);
 });
+// v3.17.8 final review I3: a named reference the cell oracle cannot decode
+// (`&copy;`, `&rarr;`, `&AMP;`) gave the same reading as the typed TEXT
+// `\&copy;`, so editing a cell from © to the literal "&copy;" was overwritten
+// by the original bytes. Measured before: `| &copy; 2024 | K |`.
+f1Row('F1 I3 edited text that spells an unknown reference is written as typed', () => {
+  for (const name of ['copy', 'rarr', 'AMP']) {
+    const orig = L('| a | b |', '|---|---|', '| &' + name + '; 2024 | k |');
+    const { md } = serializeTable(domTable(['a', 'b'], [['&' + name + '; 2024', 'K']]), orig);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| \\&' + name + '; 2024 | K |'), name + ' got:\n' + md);
+  }
+  // an untouched cell with such a reference keeps its bytes: they are byte-equal? no —
+  // the DOM shows the decoded character, so it is respelled as before v3.17.8.
+  const orig = L('| a | b |', '|---|---|', '| &copy; x | k |');
+  const { md } = serializeTable(domTable(['a', 'b'], [['© x', 'K']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| © x | K |'), 'untouched reference cell, got:\n' + md);
+});
+// v3.17.8 final review M2: a row whose last '|' is escaped (`| q \|`) is
+// still split with that '|' as the closing delimiter, as before v3.17.8, so
+// the width memory is kept.
+f1Row('F1 M2 trailing escaped pipe keeps the width memory', () => {
+  const orig = L('| name   | v   |', '|--------|-----|', '| p      | q \\|', '| r      | s   |');
+  const { md } = serializeTable(domTable(['name', 'v'], [['p', 'q |'], ['R', 's']]), orig);
+  // column 0 is uniform (8) and keeps it; column 1's `| q \|` field is 4 wide
+  // against 5 elsewhere, so it was never a width source.
+  assert.strictEqual(md.split('\n')[3], '| R      | s |', 'width kept, got:\n' + md);
+});
+// v3.17.8 final review M1: pairing is linear. 3000 rows that all differ
+// from the original took ~3 s; a 2000 x 8 table with one edit ~600 ms.
+f1Row('F1 M1 large tables stay fast', () => {
+  const big = (n, cols, f) => {
+    const head = Array.from({ length: cols }, (_, c) => 'h' + c);
+    const rows = Array.from({ length: n }, (_, r) => head.map((h, c) => f(r, c)));
+    return { head, rows };
+  };
+  const line = (cells) => '| ' + cells.join(' | ') + ' |';
+  const sep = (cols) => '|' + Array(cols).fill('---').join('|') + '|';
+  {
+    const { head, rows } = big(3000, 8, (r, c) => 'v' + r + '_' + c);
+    const orig = [line(head), sep(8)].concat(rows.map((row) => line(row.map((x) => x + 'old')))).join('\n');
+    const t0 = Date.now();
+    serializeTable(domTable(head, rows), orig);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 2500, '3000 x 8, every row differs: ' + ms + ' ms');
+  }
+  {
+    const { head, rows } = big(2000, 8, (r, c) => 'a [' + r + '] _' + c);
+    const orig = [line(head), sep(8)].concat(rows.map((row) => line(row))).join('\n');
+    rows[1000][3] = 'edited';
+    serializeTable(domTable(head, rows), orig);   // warm the cache
+    rows[1000][4] = 'edited too';
+    const t0 = Date.now();
+    const { md } = serializeTable(domTable(head, rows), orig);
+    const ms = Date.now() - t0;
+    assert.ok(ms < 400, '2000 x 8, warm, one more edit: ' + ms + ' ms');
+    assert.strictEqual(md.split('\n')[2 + 999], line(rows[999]), 'an untouched row keeps its bytes');
+  }
+});
 if (f1Failures.length) {
   throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
 }

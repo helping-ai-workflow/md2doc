@@ -12293,3 +12293,34 @@ check('v3178 D2: straddle - selection from plain text into code, press B', DESKT
   assert.ok(/<strong>ha <code>co<\/code><\/strong><code>de<\/code>/.test(html), 'DOM: ' + html);
   assert.strictEqual(disk, '# Doc\n\nAlp**ha `co`**`de` beta gamma.\n');
 }, { md: V3178_PLAIN });
+
+// v3.17.8 final review I1: a selection that runs one space past the code's end
+// (a double click on its last word does that) trims back inside the code, and
+// the wrap used to land there: `<code><strong>code</strong></code>`, saved as
+// plain `code`. The buttons and the press judge the trimmed range now.
+check('v3178 D2: selection "code " (trailing space) -> B / I / S disabled, the press writes nothing', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await v3178Select(page, 6, 11), 'code ');
+  const b = await v3178Bars(page);
+  for (const id of ['bold', 'italic', 'strike']) assert.strictEqual(b.tb[id].disabled, true, 'toolbar ' + id + ' ' + JSON.stringify(b));
+  for (const c of ['b', 'i', 's', 'u']) assert.strictEqual(b.sel[c].ad, 'true', 'selection toolbar ' + c + ' ' + JSON.stringify(b));
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').click()); await wait(300);
+  const html = await page.evaluate(() => document.querySelector('.ed-block[data-block-id="1"]').innerHTML);
+  assert.ok(!/<code>[^<]*<(strong|b)\b/.test(html), 'no bold inside the code: ' + html);
+  assert.strictEqual(await saveAndRead(page, boot), V3178_PLAIN, 'bytes unchanged');
+}, { md: V3178_PLAIN });
+
+// v3.17.8 final review I2: a multi-cell selection's B wraps each cell's trimmed
+// text; a cell that is one code span (a signal-name column) trimmed to the
+// code's text node and the bold landed inside the code: the screen showed
+// bold, the file kept `` `sig_a` ``. The bold goes around the code now.
+const V3178_SIG = '# T\n\n| Signal | Note |\n|---|---|\n| `sig_a` | x |\n| `sig_b` | y |\n';
+check('v3178 D2: a cell range over a code-only column, selection-toolbar B -> **`sig`** on disk', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'sig_a', 0);
+  await shiftClickCell(page, 'sig_b'); await wait(300);
+  await page.evaluate(() => document.querySelector('.ed-seltb-b').click()); await wait(400);
+  const html = await page.evaluate(() => document.querySelector('.content table').innerHTML);
+  assert.ok(!/<code>[^<]*<strong\b/.test(html), 'no bold inside a code: ' + html);
+  assert.strictEqual(await commitAndRead(page, boot),
+    '# T\n\n| Signal | Note |\n|---|---|\n| **`sig_a`** | x |\n| **`sig_b`** | y |\n');
+}, { md: V3178_SIG });
