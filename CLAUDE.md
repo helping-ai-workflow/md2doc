@@ -462,6 +462,12 @@ change to the lib's JavaScript, `loadGraphviz` / `renderDotSvg` (the Graphviz ba
 `/api/preview` can share it, `247579e`), is string concatenation and moved it neither. Counted with
 node over the file's characters, a backslash directly before the backtick counting as an escape.
 
+**Measured at v3.17.9** (the `[[...]]` citation moved from a text pre-pass inside `renderMarkdown`
+to a require-time `citation` inline extension; the +8 are comment prose and the extension's renderer
+literal, all outside the HTML template): **368** every backtick byte, **4** `` \` `` escapes (one line),
+**364** structural, in a 7186-line file. Counted with node over the file's characters, a backslash
+directly before the backtick counting as an escape.
+
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader
 re-litigates it.

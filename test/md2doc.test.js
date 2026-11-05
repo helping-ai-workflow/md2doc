@@ -788,3 +788,42 @@ console.log('md2doc dot WASM test passed');
   }
   console.log('md2doc v3173 N2 block line test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.17.9 D8: `[[...]]` is a citation only where marked reads inline text.
+// The old raw-text pre-pass rewrote it inside code spans, fenced code and
+// HTML comments too, so the code showed `<a href=…>` as text and the editor
+// wrote that HTML back into the file on the first edit of the block.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'd8.md');
+  const body = async (md, o) => (await renderMarkdown(md, fake, o || {})).bodyHtml;
+  // inside code: literal
+  let h = await body('An `[[upstream-spec]]` anchor.\n');
+  assert.ok(h.includes('<code>[[upstream-spec]]</code>'), 'D8 code span keeps [[...]] literal: ' + h);
+  h = await body('```\nx = [[a]]\n```\n');
+  assert.ok(/<code[^>]*>x = \[\[a\]\]<\/code>/.test(h), 'D8 fenced code keeps [[...]] literal: ' + h);
+  h = await body('| a | b |\n|---|---|\n| `[[upstream-spec]]` x | [[ref]] |\n');
+  assert.ok(h.includes('<code>[[upstream-spec]]</code> x'), 'D8 code span in a table cell: ' + h);
+  assert.ok(h.includes('<a href="#ref">[ref]</a>'), 'D8 a real citation in a cell still links: ' + h);
+  h = await body('Cl.2<!-- [[ieee, Cl.2]] --> end\n');
+  assert.ok(h.includes('<!-- [[ieee, Cl.2]] -->'), 'D8 an HTML comment keeps its bytes: ' + h);
+  h = await body('An escaped \\[[x]] stays text.\n');
+  assert.ok(h.includes('An escaped [[x]] stays text.'), 'D8 \\[[x]] is literal text: ' + h);
+  // real citations: the HTML of v3.17.8, byte for byte
+  h = await body('A [[a & b]] z and [[real-ref, §3]].\n');
+  assert.ok(h.includes('<p>A <a href="#a &amp; b">[a &amp; b]</a> z and <a href="#real-ref">[real-ref, §3]</a>.</p>'), 'D8 citation HTML unchanged: ' + h);
+  // heading id and search text: the values v3.17.8 produced (measured on main ba94128)
+  const r = await renderMarkdown('# T\n\n## See [[ref-1, §2]] here\n\nA [[a & b]] z.\n', fake, {});
+  assert.ok(r.bodyHtml.includes('<h2 id="see-ref-1-2-here"'), 'D8 heading id unchanged: ' + r.bodyHtml);
+  assert.ok(r.html.includes('"title":"See [ref-1, §2] here","searchText":"See [ref-1, §2] here A [a & b] z."'), 'D8 section index text unchanged');
+  // a citation column keeps its v3.17.8 width class (measured on main ba94128:
+  // narrow, prose) — the old pre-pass made classifyColumns() measure the
+  // anchor's markup, and a patch release does not re-lay-out such tables.
+  h = await body('| id | src |\n|---|---|\n| R-1 | [[upstream-spec §3.1#verify]] |\n| R-2 | [[upstream-spec §2.3]] |\n');
+  assert.ok(h.includes('<colgroup><col class="col-narrow"><col class="col-prose"></colgroup>'), 'D8 citation column class unchanged: ' + h);
+  // edit mode: the block map still lines up
+  const e = await renderMarkdown('x [[ref-1, §2]] `[[c]]`\n\ntail\n', fake, { editMode: true });
+  assert.deepStrictEqual(e.blocks.map((b) => [b.startLine, b.endLine]), [[1, 1], [3, 3]], 'D8 edit-mode lines');
+  assert.ok(e.parts[0].includes('<code>[[c]]</code>'), 'D8 edit-mode code literal: ' + e.parts[0]);
+  console.log('md2doc v3179 D8 citation-in-code test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

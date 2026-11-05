@@ -1,6 +1,6 @@
 {
   "name": "@helping-ai-workflow/md2doc",
-  "version": "3.17.8",
+  "version": "3.17.9",
   "description": "Markdown → HTML / PDF renderer with WaveDrom, Mermaid, Graphviz, and draw.io support",
   "keywords": [
     "markdown",
