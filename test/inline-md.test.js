@@ -618,7 +618,12 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
       for (const ch of node.textContent) if (!/\s/.test(ch)) out.push(ch + '[' + marks + ']');
       return out;
     }
-    if (node.nodeName === 'CODE') { out.push('`' + node.textContent + '[' + marks + ']'); return out; }
+    if (node.nodeName === 'CODE') { out.push('`' + node.textContent.replace(/\s+/g, '') + '[' + marks + ']'); return out; }
+    // a citation is written `[[body]]`; parseInline() leaves it as text
+    if (node.nodeName === 'A' && /^#/.test(node.getAttribute('href') || '') && /^\[.*\]$/.test(node.textContent)) {
+      for (const ch of '[' + node.textContent + ']') out.push(ch + '[' + marks + ']');
+      return out;
+    }
     const k = MARK[node.nodeName];
     const next = k && marks.indexOf(k) === -1 ? (marks + k).split('').sort().join('') : marks;
     for (const c of node.childNodes) domMarks(c, next, out);
@@ -633,7 +638,7 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
       if (m[0].startsWith('<!--')) continue;
       if (m[2]) {
         if (m[2] === 'code') {
-          if (m[1]) { out.push('`' + code + '[' + cur() + ']'); code = null; } else code = '';
+          if (m[1]) { out.push('`' + code.replace(/\s+/g, '') + '[' + cur() + ']'); code = null; } else code = '';
           continue;
         }
         const k = { strong: 'S', em: 'E', del: 'D' }[m[2]];
@@ -682,6 +687,24 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   readsBack('punct bold in del in em', p('x ', el('em', {}, el('del', {}, el('strong', {}, ',中'))), ' y'));
   readsBack('em in bold, both inner bolds', p(el('em', {}, el('strong', {}, 'a'), el('strong', {}, el('code', {}, 'c')))));
 
+  // Final review: the check must not be fooled by a neighbour. Each of these
+  // held the repair off on a3255f5 (the reader showed `*` and lost the em):
+  //   text whose second character is `!` was skipped as if it were `<!--`;
+  //   a citation `[[r1]]` reads as that literal text to a plain parser while
+  //   the DOM holds `[r1]`, so the two sides never agreed;
+  //   a code span with spaces at both ends loses one each side when read.
+  readsBack('neighbour text with !', p(el('code', {}, 'k'), 's! ', el('em', {}, el('code', {}, 'c'), el('strong', {}, 'i'), 'tal')),
+    '`k`s! *`c`__i__<!-- -->tal*');
+  readsBack('citation in the block', p(el('a', { href: '#r' }, '[r1]'), ' ', el('em', {}, el('code', {}, 'c'), el('strong', {}, 'i'), 'tal')),
+    '[[r1]] *`c`__i__<!-- -->tal*');
+  readsBack('spaced code in the block', p(el('code', {}, ' x '), ' ', el('em', {}, el('code', {}, 'c'), el('strong', {}, 'i'), 'tal')),
+    '` x ` *`c`__i__<!-- -->tal*');
+  // ...and the del / code guards see a neighbour inside a bare span (the
+  // walk's own comment above promised that for EM already).
+  readsBack('adjacent del across a span', p(el('del', {}, 'one'), el('span', {}, el('del', {}, 'two'))), '~~one~~<!-- -->~~two~~');
+  readsBack('adjacent code across a span', p(el('code', {}, 'one'), el('span', {}, el('code', {}, 'two'))), '`one`<!-- -->`two`');
+  readsBack('adjacent em across a span', p(el('em', {}, 'a'), el('span', {}, el('em', {}, 'b'))), '*a*<!-- -->*b*');
+
   // What already reads right is written exactly as before.
   readsBack('unchanged: bold over an em', p('Alpha ', el('strong', {}, el('em', {}, 'ital'), ' bold'), ' text'),
     'Alpha ***ital* bold** text');
@@ -715,7 +738,9 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   // On 71fedaa this generator failed 7725 of 20000 (55 shapes).
   {
     let seed = 20261105;
-    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    // Math.imul: a plain `*` loses precision past 2^53 and the stream
+    // collapsed to a few hundred distinct trees (final review).
+    const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
     const pick = (a) => a[Math.floor(rnd() * a.length)];
     const WORDS = ['a', 'bc', '中', '文字', 'ital'];
     const PUNCT = ['。', '「', '」', '：', ',', '.', '('];
@@ -741,6 +766,23 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
       if (htmlMarks(reader(md)).join('') !== domMarks(root, '', []).join('')) { bad++; if (!first) first = md; }
     }
     assert.strictEqual(bad, 0, 'v3177 nested fuzz: ' + bad + ' of 4000 read back wrong, first ' + JSON.stringify(first));
+  }
+
+  // The check only runs where it can change something: a STRONG / EM inside
+  // another. Everything else (the per-keystroke shortcut check included) is
+  // written without a parse (final review: 400 repaired marks took 3.4 s
+  // when every block was parsed and every guard re-checked).
+  {
+    let calls = 0;
+    const { setInlineParser } = require('../lib/editor/inline-md.js');
+    const { Marked } = require('marked');
+    const m = new Marked({ gfm: true });
+    setInlineParser((s) => { calls++; return m.parseInline(s); });
+    serializeInline(p('a ', el('strong', {}, 'b'), ' ', el('em', {}, 'c'), el('del', {}, el('strong', {}, 'd'))));
+    assert.strictEqual(calls, 0, 'v3177: no nested star, no parse');
+    serializeInline(p(el('em', {}, 'a', el('strong', {}, 'b'), 'c')));
+    assert.strictEqual(calls, 1, 'v3177: a nested star that reads back costs one parse');
+    setInlineParser();
   }
 }
 

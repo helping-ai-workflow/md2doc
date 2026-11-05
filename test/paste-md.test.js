@@ -276,6 +276,22 @@ eq(
   // the backslash that keeps the pipe in the cell is the one GFM deletes. The
   // characters are kept, written as text; only the code style is lost.
   cellsAre('code, one backslash', '<code>a \\| b</code>', 'a \\| b');
+  // Every character, including the ones the reader would otherwise read as
+  // markup (final review: `^2^`, `~~y~~`, `$x$`, `<!--`, `&amp;` all came
+  // through as superscript, strikethrough, math, a swallowed comment, `&`).
+  {
+    const reader = require('marked').marked;
+    require('../lib/md2doc.js');
+    for (const code of ['a ^2^ \\| ~~y~~ $x$', 'a<!-- \\| -->', 'a &amp;copy; \\| <b>']) {
+      const md = pm.htmlToMarkdown('<table><tr><th>h</th></tr><tr><td><code>' +
+        code.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</code></td></tr></table>');
+      const html = reader.parse(md);
+      const cell = html.replace(/\n/g, '').match(/<tbody><tr><td>(.*?)<\/td><\/tr><\/tbody>/);
+      const shown = cell && cell[1].replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+      eq(shown, code, 'v3177 F2 unspellable code keeps every character (md ' + JSON.stringify(md) + ')');
+    }
+  }
   // code without a pipe is untouched
   cellsAre('code, no pipe', '<code>a \\ b</code>', '<code>a \\ b</code>');
 }
