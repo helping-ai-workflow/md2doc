@@ -828,4 +828,95 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(shows(serializeInline(nested).md).replace(/<[^>]+>/g, ''), 'x &amp; b y', 'v3178 D3: N1 block with a reference');
 }
 
+// v3.17.10: bytes the editor's DOM holds (a comment) or cannot hold (a stray
+// end tag, a processing instruction) were never written back, so editing the
+// block lost them (D9 in a cell, M-a in a paragraph / heading / list item).
+// Measured on c8e6025 in the real editor: `Alpha <!-- keep --> beta.` + Z ->
+// `Alpha  beta.Z`; `Alpha x</span> beta.` + Z -> `Alpha x beta.Z`.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const raw = (r) => cm('md2doc-raw:' + encodeURIComponent(r));
+  const s = (...kids) => serializeInline(el('p', {}, ...kids)).md;
+  // R2: a comment with text is written back as it was
+  assert.strictEqual(s('Alpha ', cm(' keep '), ' beta.'), 'Alpha <!-- keep --> beta.', 'v31710 R2: comment kept');
+  assert.strictEqual(s('Cl.2', cm(' [[ieee, Cl.2]] ')), 'Cl.2<!-- [[ieee, Cl.2]] -->', 'v31710 R2: citation anchor comment kept');
+  assert.strictEqual(s('a', cm('x\ny'), 'b'), 'a<!--x\ny-->b', 'v31710 R2: multi-line comment kept');
+  // a whitespace-only comment is the editor's own guard: re-decided by the walk
+  assert.strictEqual(s(el('strong', {}, 'a'), cm(' '), el('strong', {}, 'b')), '**a**<!-- -->**b**', 'v31710 R2: guard not doubled');
+  assert.strictEqual(s('a', cm(' '), 'b'), 'ab', 'v31710 R2: a guard with nothing to guard is dropped, as before');
+  // a comment between two marks already separates them: no extra guard
+  assert.strictEqual(s(el('strong', {}, 'a'), cm(' c '), el('strong', {}, 'b')), '**a**<!-- c -->**b**', 'v31710 R2: comment is the separator');
+  {
+    const md = s('x ', el('strong', {}, 'a', cm(' c ')), ' y');
+    assert.strictEqual(marked.parseInline(md), 'x <strong>a<!-- c --></strong> y', 'v31710 R2: comment inside a mark, got ' + JSON.stringify(md));
+  }
+  // R3: the edit-mode placeholder for an inline html token the DOM cannot hold
+  assert.strictEqual(s('Alpha x', raw('</span>'), ' beta.'), 'Alpha x</span> beta.', 'v31710 R3: stray end tag written back');
+  assert.strictEqual(s('a', raw('</my-tag >')), 'a</my-tag >', 'v31710 R3: spelling kept');
+  assert.strictEqual(s('a ', raw('<?pi x?>'), ' b'), 'a <?pi x?> b', 'v31710 R3: processing instruction written back');
+  assert.strictEqual(s('a ', raw('<!DOCTYPE x>'), ' b'), 'a <!DOCTYPE x> b', 'v31710 R3: declaration written back');
+  assert.strictEqual(s('a ', raw('<![CDATA[ x ]]>'), ' b'), 'a <![CDATA[ x ]]> b', 'v31710 R3: CDATA written back');
+  // a placeholder whose payload is anything else stays the comment it is
+  for (const bad of ['<script>alert(1)</script>', '<span>', '</span><b>', 'x', '</br>', '</p>', '</li>', '</b>', '</strong>']) {
+    const d = 'md2doc-raw:' + encodeURIComponent(bad);
+    assert.strictEqual(s('a', cm(d)), 'a<!--' + d + '-->', 'v31710 R3: forged payload ' + JSON.stringify(bad) + ' is not injected');
+  }
+  assert.strictEqual(s('a', cm('md2doc-raw:%E0%A4%A')), 'a<!--md2doc-raw:%E0%A4%A-->', 'v31710 R3: bad encoding stays a comment');
+  // typed text that spells a comment is still text
+  assert.ok(marked.parseInline(s('a <!-- b -->')).indexOf('<!--') === -1, 'v31710: typed comment text is escaped');
+  assert.deepStrictEqual(serializeInline(el('p', {}, 'a', cm(' c '))).unsupported, [], 'v31710: a comment is supported');
+}
+// R5: marked reads a line starting with `<!--` / `<?` / `<!X` / `<![CDATA[`
+// (or holding only a complete tag) as an HTML block, which ends the paragraph,
+// so such a leading run moves to the end of its line; a line of nothing else
+// joins the previous line (the first line: the next one).
+{
+  const cases = [
+    ['<!-- c --> x', 'x <!-- c -->'],
+    ['<!-- c -->x **b**', 'x **b**<!-- c -->'],
+    ['a\n<!-- c --> x', 'a\nx <!-- c -->'],
+    ['a\n<!-- c -->', 'a<!-- c -->'],
+    ['<!-- c -->\nb', 'b<!-- c -->'],
+    ['<!-- c --> x\\\ny', 'x <!-- c -->\\\ny'],
+    ['a\\\n<!-- c --> y', 'a\\\ny <!-- c -->'],
+    ['<?pi?> x', 'x <?pi?>'],
+    ['<!X y> x', 'x <!X y>'],
+    ['<![CDATA[z]]> x', 'x <![CDATA[z]]>'],
+    ['<!-- a --></span> x', 'x <!-- a --></span>'],
+    ['</span>\nb', 'b</span>'],
+    ['a\n</span>', 'a</span>'],
+  ];
+  for (const [input, want] of cases) {
+    assert.strictEqual(escapeBlockStarts(input), want, 'v31710 R5: ' + JSON.stringify(input));
+    const toks = marked.lexer(want).filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type), ['paragraph'], 'v31710 R5: one paragraph for ' + JSON.stringify(want));
+  }
+  // final review #1 / #3: text between two comments is not invisible, and a
+  // run followed only by a hard break must not stay first on its line
+  const more = [
+    ['<!-- c --> x <!-- d -->\nb', 'x <!-- d --> <!-- c -->\nb'],
+    ['a\\\n<!-- c --> x <!-- d -->\nb', 'a\\\nx <!-- d --> <!-- c -->\nb'],
+    ['<!-- c -->\\\nb', '\\\nb<!-- c -->'],
+    ['<!-- c --> \\\nb', '\\\nb<!-- c -->'],
+    ['a\n<!-- c -->\\\nb', 'a<!-- c -->\n\\\nb'],
+  ];
+  for (const [input, want] of more) {
+    assert.strictEqual(escapeBlockStarts(input), want, 'v31710 review: ' + JSON.stringify(input));
+    const toks = marked.lexer(want).filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type), ['paragraph'], 'v31710 review: one paragraph for ' + JSON.stringify(want));
+  }
+  // final review #2: linear, not exponential, in the number of comments
+  {
+    const line = '<!-- -->'.repeat(3000) + ' x';
+    const t0 = Date.now();
+    const got = escapeBlockStarts(line);
+    assert.ok(Date.now() - t0 < 500, 'v31710 review #2: 3000 comments took ' + (Date.now() - t0) + 'ms');
+    assert.strictEqual(got, 'x ' + '<!-- -->'.repeat(3000), 'v31710 review #2: moved');
+  }
+  // not a block start: left alone
+  for (const same of ['a </span>', '</span> x', 'a <!-- c --> b', '<!-- c -->', '\\<!-- c --> x', '&lt;!-- c --> x']) {
+    assert.strictEqual(escapeBlockStarts(same), same, 'v31710 R5: unchanged ' + JSON.stringify(same));
+  }
+}
+
 console.log('inline-md.test.js OK');
