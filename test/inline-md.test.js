@@ -619,9 +619,12 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
       return out;
     }
     if (node.nodeName === 'CODE') { out.push('`' + node.textContent.replace(/\s+/g, '') + '[' + marks + ']'); return out; }
-    // a citation is written `[[body]]`; parseInline() leaves it as text
+    // a citation is written `[[body]]`, and since v3.17.9 the reader's marked
+    // (this block runs after lib/md2doc.js installed its `citation` extension)
+    // shows it as the anchor the editor held, `[body]`. Before, the citation
+    // was a text pre-pass outside marked and this oracle read `[[body]]`.
     if (node.nodeName === 'A' && /^#/.test(node.getAttribute('href') || '') && /^\[.*\]$/.test(node.textContent)) {
-      for (const ch of '[' + node.textContent + ']') out.push(ch + '[' + marks + ']');
+      for (const ch of node.textContent) out.push(ch + '[' + marks + ']');
       return out;
     }
     const k = MARK[node.nodeName];
@@ -690,8 +693,9 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   // Final review: the check must not be fooled by a neighbour. Each of these
   // held the repair off on a3255f5 (the reader showed `*` and lost the em):
   //   text whose second character is `!` was skipped as if it were `<!--`;
-  //   a citation `[[r1]]` reads as that literal text to a plain parser while
-  //   the DOM holds `[r1]`, so the two sides never agreed;
+  //   a citation `[[r1]]` read as that literal text to the parser (before
+  //   v3.17.9 the citation was not part of marked) while the DOM holds `[r1]`,
+  //   so the two sides never agreed;
   //   a code span with spaces at both ends loses one each side when read.
   readsBack('neighbour text with !', p(el('code', {}, 'k'), 's! ', el('em', {}, el('code', {}, 'c'), el('strong', {}, 'i'), 'tal')),
     '`k`s! *`c`__i__<!-- -->tal*');

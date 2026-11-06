@@ -654,6 +654,102 @@ f1Row('F1 M1 large tables stay fast', () => {
     assert.strictEqual(md.split('\n')[2 + 999], line(rows[999]), 'an untouched row keeps its bytes');
   }
 });
+// v3.17.9 D7: a line with no '|' after a table is a row to marked (GFM: any
+// non-blank line continues the table). `</content>` there is a row whose DOM
+// cells are empty, because the browser drops a stray end tag; an edit of the
+// table wrote it back as `|  |  |` and the text was gone.
+const D7_ORIG = L('| a | b |', '|---|---|', '| p | q |', '</content>');
+f1Row('D7 lazy </content> row, no-op keeps the file', () => {
+  const { md, unsupported } = serializeTable(domTable(['a', 'b'], [['p', 'q'], ['', '']]), D7_ORIG);
+  assert.deepStrictEqual(unsupported, []);
+  assert.strictEqual(md, D7_ORIG, 'got:\n' + md);
+});
+f1Row('D7 lazy </content> row, another cell edited', () => {
+  const { md } = serializeTable(domTable(['a', 'b'], [['p', 'qX'], ['', '']]), D7_ORIG);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| p | qX |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row with visible text keeps its line', () => {
+  const orig = L('| a | b |', '|---|---|', '| p | q |', 'see above');
+  const { md } = serializeTable(domTable(['a', 'b'], [['P', 'q'], ['see above', '']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| P | q |', 'see above'), 'got:\n' + md);
+});
+f1Row('D7 lazy row edited in its empty cell keeps the stray tag in cell 1', () => {
+  const { md } = serializeTable(domTable(['a', 'b'], [['p', 'q'], ['', 'X']]), D7_ORIG);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| p | q |', '| </content> | X |'), 'got:\n' + md);
+});
+f1Row('D7 lazy row in a hand-aligned table is still its own line', () => {
+  const orig = L('| name | note |', '|------|------|', '| pq   | rs   |', '</content>');
+  const { md } = serializeTable(domTable(['name', 'note'], [['pq', 'rsX'], ['', '']]), orig);
+  assert.strictEqual(md, L('| name | note |', '|------|------|', '| pq   | rsX  |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 a stray end tag in a piped cell keeps its bytes', () => {
+  const orig = L('| a | b |', '|---|---|', '| x</span> | y |');
+  const { md } = serializeTable(domTable(['a', 'b'], [['x', 'Y']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| x</span> | Y |'), 'got:\n' + md);
+});
+// Final review #1: a lazy row's text is in the file only, so it must not
+// depend on its column keeping its header name. Renaming column 0 left that
+// column unmatched and the row came out `|  |  |`.
+f1Row('D7 lazy row survives a renamed first header', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', '</content>');
+  const { md } = serializeTable(domTable(['Label', 'Note'], [['p', 'q'], ['', '']]), orig);
+  assert.strictEqual(md, L('| Label | Note |', '|---|---|', '| p | q |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row with visible text, header renamed and its cell edited', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', 'see above');
+  const { md } = serializeTable(domTable(['Label', 'Note'], [['p', 'q'], ['see below', '']]), orig);
+  assert.strictEqual(md, L('| Label | Note |', '|---|---|', '| p | q |', '| see below |  |'), 'got:\n' + md);
+});
+// Re-review R2 / R3: a lazy row is paired by position, never through the
+// renamed-header column map (every header renamed left nothing to pair on),
+// and an ordinary row whose mapped cells happen to match cannot take it.
+f1Row('D7 lazy row survives every header renamed', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p | q |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'B'], [['p', 'q'], ['', '']]), orig);
+  assert.strictEqual(md, L('| A | B |', '|---|---|', '| p | q |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row survives a renamed one-column header', () => {
+  const orig = L('| Name |', '|---|', '| p |', '</content>');
+  const { md } = serializeTable(domTable(['A'], [['p'], ['']]), orig);
+  assert.strictEqual(md, L('| A |', '|---|', '| p |', '</content>'), 'got:\n' + md);
+});
+f1Row('D7 lazy row is not taken by a deleted look-alike row', () => {
+  const orig = L('| Name | Note |', '|---|---|', '| p |  |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'Note'], [['', '']]), orig);
+  assert.strictEqual(md, L('| A | Note |', '|---|---|', '</content>'), 'got:\n' + md);
+});
+// Re-review round 3 C1: a lazy row is paired in the file's order. Paired
+// before everything else, a lazy line took the first row that read like it,
+// so an ordinary row reading the same as a lazy line below it swapped lines
+// with it on a no-op.
+f1Row('D7 a row reading like the lazy line below it keeps its order (no-op)', () => {
+  const orig = L('| A | B |', '|---|---|', '| see below |  |', 'see below');
+  const { md } = serializeTable(domTable(['A', 'B'], [['see below', ''], ['see below', '']]), orig);
+  assert.strictEqual(md, orig, 'got:\n' + md);
+});
+f1Row('D7 an empty row above a lazy </content> keeps its order (no-op)', () => {
+  const orig = L('| A | B |', '|---|---|', '|  |  |', '</content>');
+  const { md } = serializeTable(domTable(['A', 'B'], [['', ''], ['', '']]), orig);
+  assert.strictEqual(md, orig, 'got:\n' + md);
+});
+f1Row('D7 a row reading like the lazy line below it, header renamed', () => {
+  const orig = L('| A | B |', '|---|---|', '| see below |  |', 'see below');
+  const { md } = serializeTable(domTable(['X', 'B'], [['see below', ''], ['see below', '']]), orig);
+  assert.strictEqual(md, L('| X | B |', '|---|---|', '| see below |  |', 'see below'), 'got:\n' + md);
+});
+// Guards for the exceptions (green before the fix too): `</br>` is a line
+// break to the browser and `</p>` an empty paragraph, so a cell whose break
+// was deleted must not read the same as the original and get it back.
+f1Row('D7 guard: </br> is not dropped from a reading', () => {
+  const orig = L('| a | b |', '|---|---|', '| a</br>b | c |');
+  const { md } = serializeTable(domTable(['a', 'b'], [['ab', 'c']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| ab | c |'), 'got:\n' + md);
+});
+f1Row('D7 guard: a matched end tag still reads as markup', () => {
+  const orig = L('| a | b |', '|---|---|', '| <b>x</b> | c |');
+  const { md } = serializeTable(domTable(['a', 'b'], [['x', 'c']]), orig);
+  assert.strictEqual(md, L('| a | b |', '|---|---|', '| x | c |'), 'got:\n' + md);
+});
 if (f1Failures.length) {
   throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
 }

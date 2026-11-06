@@ -4810,10 +4810,10 @@ async function main() {
         // degraded one. Does NOT buy a loud failure: such a row would still
         // pass with the wrapper installed, it just would not be measuring what
         // it thought. `marked.lexer(src)` takes the markdown as its first
-        // argument, and this fixture reaches it unchanged: md2doc.js's only
-        // transform between the file's bytes and the lex is the '[[...]]'
-        // citation rewrite that builds `mdPre`, and this string has no
-        // '[[...]]'. That is not left as reasoning either — if the guard
+        // argument, and this fixture reaches it unchanged: since v3.17.9
+        // md2doc.js lexes the file's bytes with no pre-pass at all (the
+        // '[[...]]' citation is an inline extension now, not a text rewrite).
+        // That is not left as reasoning either — if the guard
         // rejected the fixture, the `served` precondition below would fail,
         // because the served payload would then carry no degraded block.
         if (arguments[0] !== MD) return toks;

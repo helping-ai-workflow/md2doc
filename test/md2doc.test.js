@@ -788,3 +788,84 @@ console.log('md2doc dot WASM test passed');
   }
   console.log('md2doc v3173 N2 block line test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.17.9 D8: `[[...]]` is a citation only where marked reads inline text.
+// The old raw-text pre-pass rewrote it inside code spans, fenced code and
+// HTML comments too, so the code showed `<a href=…>` as text and the editor
+// wrote that HTML back into the file on the first edit of the block.
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'd8.md');
+  const body = async (md, o) => (await renderMarkdown(md, fake, o || {})).bodyHtml;
+  // inside code: literal
+  let h = await body('An `[[upstream-spec]]` anchor.\n');
+  assert.ok(h.includes('<code>[[upstream-spec]]</code>'), 'D8 code span keeps [[...]] literal: ' + h);
+  h = await body('```\nx = [[a]]\n```\n');
+  assert.ok(/<code[^>]*>x = \[\[a\]\]<\/code>/.test(h), 'D8 fenced code keeps [[...]] literal: ' + h);
+  h = await body('| a | b |\n|---|---|\n| `[[upstream-spec]]` x | [[ref]] |\n');
+  assert.ok(h.includes('<code>[[upstream-spec]]</code> x'), 'D8 code span in a table cell: ' + h);
+  assert.ok(h.includes('<a href="#ref">[ref]</a>'), 'D8 a real citation in a cell still links: ' + h);
+  h = await body('Cl.2<!-- [[ieee, Cl.2]] --> end\n');
+  assert.ok(h.includes('<!-- [[ieee, Cl.2]] -->'), 'D8 an HTML comment keeps its bytes: ' + h);
+  h = await body('An escaped \\[[x]] stays text.\n');
+  assert.ok(h.includes('An escaped [[x]] stays text.'), 'D8 \\[[x]] is literal text: ' + h);
+  // real citations: the HTML of v3.17.8, byte for byte
+  h = await body('A [[a & b]] z and [[real-ref, §3]].\n');
+  assert.ok(h.includes('<p>A <a href="#a &amp; b">[a &amp; b]</a> z and <a href="#real-ref">[real-ref, §3]</a>.</p>'), 'D8 citation HTML unchanged: ' + h);
+  // heading id and search text: the values v3.17.8 produced (measured on main ba94128)
+  const r = await renderMarkdown('# T\n\n## See [[ref-1, §2]] here\n\nA [[a & b]] z.\n', fake, {});
+  assert.ok(r.bodyHtml.includes('<h2 id="see-ref-1-2-here"'), 'D8 heading id unchanged: ' + r.bodyHtml);
+  assert.ok(r.html.includes('"title":"See [ref-1, §2] here","searchText":"See [ref-1, §2] here A [a & b] z."'), 'D8 section index text unchanged');
+  // a citation column keeps its v3.17.8 width class (measured on main ba94128:
+  // narrow, prose) — the old pre-pass made classifyColumns() measure the
+  // anchor's markup, and a patch release does not re-lay-out such tables.
+  h = await body('| id | src |\n|---|---|\n| R-1 | [[upstream-spec §3.1#verify]] |\n| R-2 | [[upstream-spec §2.3]] |\n');
+  assert.ok(h.includes('<colgroup><col class="col-narrow"><col class="col-prose"></colgroup>'), 'D8 citation column class unchanged: ' + h);
+  // a citation inside a link label or an image alt (final review #2): marked's
+  // label allows one nested bracket level and `[[...]]` is two, so without
+  // the link tokenizer's masking the whole link fell apart into text. The
+  // link HTML is v3.17.8's (measured on main ba94128); the alt is the
+  // citation's visible text (v3.17.8 put the anchor's markup there).
+  h = await body('[see [[ref]]](#sec) and [see [[a, §2]] and [[b]]](#s "t")\n');
+  assert.ok(h.includes('<p><a href="#sec">see <a href="#ref">[ref]</a></a> and <a href="#s" title="t">see <a href="#a">[a, §2]</a> and <a href="#b">[b]</a></a></p>'), 'D8 link label with citations: ' + h);
+  h = await body('![see [[r]]](x.png)\n');
+  assert.ok(h.includes('<img src="x.png" alt="see [r]">'), 'D8 image alt with a citation: ' + h);
+  // an escaped `\[[` in a label is not a citation (re-review R1): not masked,
+  // so marked reads the label as it always would (here: no link at all)
+  h = await body('[a \\[[x]]](u)\n');
+  assert.ok(h.includes('<p>[a [[x]]](u)</p>'), 'D8 escaped citation in a label stays literal: ' + h);
+  h = await body('[a [[r]] \\[[s]]](u)\n');
+  assert.ok(h.includes('<p>[a <a href="#r">[r]</a> [[s]]](u)</p>'), 'D8 only the unescaped one cites: ' + h);
+  h = await body('![a \\[[r]]](i.png)\n');
+  assert.ok(h.includes('<p>![a [[r]]](i.png)</p>'), 'D8 escaped citation in an alt: ' + h);
+  h = await body('[[x]](u)\n');
+  assert.ok(h.includes('<p><a href="#x">[x]</a>(u)</p>'), 'D8 a citation then (u) is not a link: ' + h);
+  // re-review round 3 C4: a citation in the title or href of a link whose
+  // label also cites is literal there, as it is when the label has none
+  // (`[a](u "t [[y]]")` keeps `title="t [[y]]"`); the link used to fall apart.
+  h = await body('[a [[x]] b](u "t [[y]]") and [c [[x]]]([[y]])\n');
+  assert.ok(h.includes('<p><a href="u" title="t [[y]]">a <a href="#x">[x]</a> b</a> and <a href="%5B%5By%5D%5D">c <a href="#x">[x]</a></a></p>'), 'D8 citation in a cited link\'s title / href: ' + h);
+  // re-review round 4: a backtick inside a nested bracket is a plain
+  // character to marked's label (only the outer level reads code spans), so
+  // the label scan must not skip a code span there either
+  h = await body('[a [`] b `x` [[c]]](u)\n');
+  assert.ok(h.includes('<p><a href="u">a [<code>] b </code>x` <a href="#c">[c]</a></a></p>'), 'D8 backtick in a nested bracket: ' + h);
+  h = await body('[x [`] c](u "[[y]]`") z]](v)\n');
+  assert.ok(!h.includes('\u0000'), 'D8 no mask byte leaks into the output: ' + JSON.stringify(h));
+  // re-review round 3 C3: the link tokenizer masked the whole rest of the
+  // paragraph at every `[`, and each unclosed `[[` scanned to the end of the
+  // line: one 8000-character line of `[[a ` took 10 s (v3.17.8: 26 ms).
+  {
+    const t0 = Date.now();
+    await body('[[a '.repeat(2000) + '](u)\n');
+    await body('[a] '.repeat(8000) + '[[c]]\n');
+    await body('see [[ref\n'.repeat(8000));
+    const ms = Date.now() - t0;
+    assert.ok(ms < 2000, 'D8 many [[ / [ in one paragraph stay fast: ' + ms + ' ms');
+  }
+  // edit mode: the block map still lines up
+  const e = await renderMarkdown('x [[ref-1, §2]] `[[c]]`\n\ntail\n', fake, { editMode: true });
+  assert.deepStrictEqual(e.blocks.map((b) => [b.startLine, b.endLine]), [[1, 1], [3, 3]], 'D8 edit-mode lines');
+  assert.ok(e.parts[0].includes('<code>[[c]]</code>'), 'D8 edit-mode code literal: ' + e.parts[0]);
+  console.log('md2doc v3179 D8 citation-in-code test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
