@@ -750,6 +750,40 @@ f1Row('D7 guard: a matched end tag still reads as markup', () => {
   const { md } = serializeTable(domTable(['a', 'b'], [['x', 'c']]), orig);
   assert.strictEqual(md, L('| a | b |', '|---|---|', '| x | c |'), 'got:\n' + md);
 });
+// v3.17.10 D9: the comment in a cell is written back by the DOM walk, so an
+// edit to that cell, or to another cell of a row that is then not reused
+// whole, keeps it. Measured on c8e6025 in the real editor: `one <!-- keep -->`
+// + Z in that cell -> `oneZ`; + Z in the next cell -> `one ` (untouched cell).
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const raw = (r) => cm('md2doc-raw:' + encodeURIComponent(r));
+  const orig = L('| a | b |', '|---|---|', '| one <!-- keep --> | two |');
+  const head = () => tr(th({}, 'a'), th({}, 'b'));
+  f1Row('v31710 D9 typed after the comment in that cell', () => {
+    const { md, unsupported } = serializeTable(table(head(), [tr(td({}, 'one ', cm(' keep '), 'Z'), td({}, 'two'))]), orig);
+    assert.deepStrictEqual(unsupported, []);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| one <!-- keep -->Z | two |'), 'got:\n' + md);
+  });
+  f1Row('v31710 D9 typed before the comment in that cell', () => {
+    const { md } = serializeTable(table(head(), [tr(td({}, 'oneZ ', cm(' keep ')), td({}, 'two'))]), orig);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| oneZ <!-- keep --> | two |'), 'got:\n' + md);
+  });
+  f1Row('v31710 D9 another cell of the row edited', () => {
+    const { md } = serializeTable(table(head(), [tr(td({}, 'one ', cm(' keep ')), td({}, 'twoZ'))]), orig);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| one <!-- keep --> | twoZ |'), 'got:\n' + md);
+  });
+  f1Row('v31710 M-a stray end tag in an edited cell', () => {
+    const o = L('| a | b |', '|---|---|', '| t</b>wo | k |');
+    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</b>'), 'woZ'), td({}, 'k'))]), o);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</b>woZ | k |'), 'got:\n' + md);
+  });
+  f1Row('v31710 guard (green since v3.17.9 R6): stray end tag, other cell edited', () => {
+    const o = L('| a | b |', '|---|---|', '| t</b>wo | k |');
+    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</b>'), 'wo'), td({}, 'kZ'))]), o);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</b>wo | kZ |'), 'got:\n' + md);
+  });
+}
+
 if (f1Failures.length) {
   throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
 }

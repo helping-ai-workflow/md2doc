@@ -299,5 +299,37 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
       '(v3.10.0: 124px -> 260px for the save-state text)');
   }
 
+  // v3.17.10 R3/R4: an inline html token the browser cannot keep in the DOM
+  // (a stray end tag of an allow-listed phrasing name, a processing
+  // instruction, a declaration, CDATA) is rendered in edit mode as a
+  // placeholder comment, so the editor can write it back. Reader output is
+  // unchanged.
+  {
+    const ph = (raw) => '<!--md2doc-raw:' + encodeURIComponent(raw) + '-->';
+    const src = [
+      '# T', '',
+      'Alpha x</span> beta <span>s</span> and t</b>.', '',
+      '## H x</my-tag> y', '',
+      '- li x</i> y', '',
+      '| a | b |', '|---|---|', '| t</b>wo | <span>k</span> |', '',
+      'p <?pi x?> q <!DOCTYPE z> r <![CDATA[ c ]]> s', '',
+      'n </strong> m </a> o </div> p </p> q </content>', '',
+      'keep <!-- c --> it', '',
+    ].join('\n');
+    const reader = await renderMarkdown(src, fake, {});
+    assert.ok(reader.bodyHtml.indexOf('md2doc-raw') === -1, 'v31710 R3: the reader never gets a placeholder');
+    const ed = (await renderMarkdown(src, fake, { editMode: true })).bodyHtml;
+    for (const raw of ['</span>', '</b>', '</my-tag>', '</i>', '<?pi x?>', '<!DOCTYPE z>', '<![CDATA[ c ]]>']) {
+      assert.ok(ed.indexOf(ph(raw)) !== -1, 'v31710 R3: edit mode carries ' + raw);
+    }
+    assert.strictEqual(ed.split(ph('</b>')).length - 1, 2, 'v31710 R3: the stray </b> in the paragraph and the one in the cell');
+    assert.ok(ed.indexOf(ph('</span>')) !== -1 && /<span>s<\/span>/.test(ed) && /<span>k<\/span>/.test(ed),
+      'v31710 R4: a matched end tag stays a tag');
+    for (const raw of ['</strong>', '</a>', '</div>', '</p>', '</content>']) {
+      assert.ok(ed.indexOf(ph(raw)) === -1, 'v31710 R4: ' + raw + ' is not on the allow-list');
+    }
+    assert.ok(ed.indexOf('keep <!-- c --> it') !== -1, 'v31710 R2: an ordinary comment is rendered as itself');
+  }
+
   console.log('editmode-render.test.js OK');
 })().catch((e) => { console.error(e); process.exit(1); });

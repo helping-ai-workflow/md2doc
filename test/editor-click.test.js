@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 'use strict';
+const { marked } = require('marked');
 
 // Editor click-through checks: the --edit page clicked for real in Chromium and
 // WebKit at a desktop (1440x900) and a phone (390x844) viewport. Assertions read
@@ -12158,6 +12159,47 @@ check('v3175 M1: mark edges are written so the reader takes them, and stay put',
   await page.keyboard.press('End'); await page.keyboard.type('x'); await page.keyboard.press('Backspace');
   assert.strictEqual(await commitAndRead(page, boot), first, 'a second save of every touched block keeps the bytes');
 }, { md: M1_MD });
+
+// ── v3.17.10: bytes the editor's DOM holds (an HTML comment) or cannot hold
+// (a stray end tag, a processing instruction) survive an edit of their block.
+// Measured on c8e6025 (v3.17.9) in this page: every row below lost them —
+// `| one <!-- keep --> | two |` + a key in the next cell wrote `| one  | …`,
+// `Alpha x</span> beta.` + a key wrote `Alpha x beta.…`. Each row types `Z`
+// at the start of a surface (found by its text), saves, and compares bytes.
+const V31710_ROWS = [
+  ['D9 comment in the edited cell', '| a | b |\n|---|---|\n| one <!-- keep --> | two |\n', 'one ', '| a | b |\n|---|---|\n| Zone <!-- keep --> | two |\n'],
+  ['D9 comment in the other cell', '| a | b |\n|---|---|\n| one <!-- keep --> | two |\n', 'two', '| a | b |\n|---|---|\n| one <!-- keep --> | Ztwo |\n'],
+  ['M-a stray end tag in the edited cell', '| a | b |\n|---|---|\n| t</b>wo | k |\n', 'two', '| a | b |\n|---|---|\n| Zt</b>wo | k |\n'],
+  ['M-a stray end tag in a paragraph', 'Alpha x</span> beta.\n', 'Alpha x beta.', 'ZAlpha x</span> beta.\n'],
+  ['M-a stray end tag in a list item', '- Alpha x</span> beta.\n- two\n', 'Alpha x beta.', '- ZAlpha x</span> beta.\n- two\n'],
+  ['M-a stray end tag in a heading', '## Alpha x</span> beta\n\ntext\n', 'Alpha x beta', '## ZAlpha x</span> beta\n\ntext\n'],
+  ['comment in a paragraph', 'Alpha <!-- keep --> beta.\n', 'Alpha  beta.', 'ZAlpha <!-- keep --> beta.\n'],
+  ['comment in a heading', '## Alpha <!-- keep --> beta\n\ntext\n', 'Alpha  beta', '## ZAlpha <!-- keep --> beta\n\ntext\n'],
+  ['processing instruction in a paragraph', 'Alpha <?pi x?> beta.\n', 'Alpha  beta.', 'ZAlpha <?pi x?> beta.\n'],
+];
+for (const [label, body, surface, want] of V31710_ROWS) {
+  check('v31710: ' + label + ' is kept by an edit', DESKTOP, async (page, boot) => {
+    await focusSurface(page, surface, 0);
+    await page.keyboard.type('Z'); await wait(200);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// R5: deleting the text before a comment leaves it first on the line, where
+// marked would read an HTML block and end the paragraph; it moves to the end
+// of the line instead, still in one paragraph.
+// Enter right before the comment splits the paragraph there (the gesture a
+// person uses to break a sentence off); the new paragraph starts with it.
+check('v31710: a comment left at the start of a paragraph moves to its end', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha  beta.', 5);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  const toks = marked.lexer(disk).filter((t) => t.type !== 'space');
+  assert.deepStrictEqual(toks.map((t) => t.type), ['heading', 'paragraph', 'paragraph'], 'two paragraphs, got ' + JSON.stringify(disk));
+  assert.strictEqual(toks[1].raw.trim(), 'Alpha', 'got ' + JSON.stringify(disk));
+  assert.ok(toks[2].raw.indexOf('<!-- keep -->') !== -1 && /beta\./.test(toks[2].raw), 'comment and text kept, got ' + JSON.stringify(disk));
+  assert.ok(!/^<!--/.test(toks[2].raw), 'not first on the line, got ' + JSON.stringify(disk));
+  assert.strictEqual(disk, '# Doc\n\nAlpha\n\nbeta. <!-- keep -->\n', 'the bytes on disk');
+}, { md: '# Doc\n\nAlpha <!-- keep --> beta.\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
