@@ -12169,12 +12169,15 @@ check('v3175 M1: mark edges are written so the reader takes them, and stay put',
 const V31710_ROWS = [
   ['D9 comment in the edited cell', '| a | b |\n|---|---|\n| one <!-- keep --> | two |\n', 'one ', '| a | b |\n|---|---|\n| Zone <!-- keep --> | two |\n'],
   ['D9 comment in the other cell', '| a | b |\n|---|---|\n| one <!-- keep --> | two |\n', 'two', '| a | b |\n|---|---|\n| one <!-- keep --> | Ztwo |\n'],
-  ['M-a stray end tag in the edited cell', '| a | b |\n|---|---|\n| t</b>wo | k |\n', 'two', '| a | b |\n|---|---|\n| Zt</b>wo | k |\n'],
+  ['M-a stray end tag in the edited cell', '| a | b |\n|---|---|\n| t</span>wo | k |\n', 'two', '| a | b |\n|---|---|\n| Zt</span>wo | k |\n'],
+  // final review #5: `<b/>` opens a b in the browser, so `</b>` closes it
+  ['a self-closed open tag and its end tag', 'x <b/>bold</b> y\n', 'x bold y', 'Zx **bold** y\n'],
   ['M-a stray end tag in a paragraph', 'Alpha x</span> beta.\n', 'Alpha x beta.', 'ZAlpha x</span> beta.\n'],
   ['M-a stray end tag in a list item', '- Alpha x</span> beta.\n- two\n', 'Alpha x beta.', '- ZAlpha x</span> beta.\n- two\n'],
   ['M-a stray end tag in a heading', '## Alpha x</span> beta\n\ntext\n', 'Alpha x beta', '## ZAlpha x</span> beta\n\ntext\n'],
   ['comment in a paragraph', 'Alpha <!-- keep --> beta.\n', 'Alpha  beta.', 'ZAlpha <!-- keep --> beta.\n'],
   ['comment in a heading', '## Alpha <!-- keep --> beta\n\ntext\n', 'Alpha  beta', '## ZAlpha <!-- keep --> beta\n\ntext\n'],
+  ['comment in a list item', '- Alpha <!-- keep --> beta.\n- two\n', 'Alpha  beta.', '- ZAlpha <!-- keep --> beta.\n- two\n'],
   ['processing instruction in a paragraph', 'Alpha <?pi x?> beta.\n', 'Alpha  beta.', 'ZAlpha <?pi x?> beta.\n'],
 ];
 for (const [label, body, surface, want] of V31710_ROWS) {
@@ -12200,6 +12203,28 @@ check('v31710: a comment left at the start of a paragraph moves to its end', DES
   assert.ok(!/^<!--/.test(toks[2].raw), 'not first on the line, got ' + JSON.stringify(disk));
   assert.strictEqual(disk, '# Doc\n\nAlpha\n\nbeta. <!-- keep -->\n', 'the bytes on disk');
 }, { md: '# Doc\n\nAlpha <!-- keep --> beta.\n' });
+
+// final review #1 / #3: a split that leaves text between comments, or a
+// comment right before a hard break, first on a line keeps one paragraph and
+// the text in its order.
+for (const [label, body, want] of [
+  ['text between two comments', 'Alpha <!-- c --> x <!-- d -->\nb.\n', '# Doc\n\nAlpha\n\nx <!-- d --> <!-- c -->\nb.\n'],
+  ['a comment before a hard break', 'Alpha <!-- keep -->\\\nbeta.\n', '# Doc\n\nAlpha\n\n\\\nbeta.<!-- keep -->\n'],
+]) {
+  check('v31710: Enter before ' + label + ' keeps one paragraph', DESKTOP, async (page, boot) => {
+    await focusSurface(page, await page.evaluate(() => document.querySelectorAll('.ed-wys-armed')[1].textContent), 5);
+    await page.keyboard.press('Enter'); await renderIdle(page);
+    const disk = await saveAndRead(page, boot);
+    assert.deepStrictEqual(marked.lexer(disk).filter((t) => t.type !== 'space').map((t) => t.type), ['heading', 'paragraph', 'paragraph'], 'got ' + JSON.stringify(disk));
+    assert.strictEqual(disk, want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// final review #4: a <b> opened in one block and closed in a later one must
+// not leave the edit page bolding every block after it.
+check('v31710: a <b> closed in a later block bolds nothing after it', DESKTOP, async (page) => {
+  const inB = await page.evaluate(() => [...document.querySelectorAll('.ed-block')].filter((b) => b.closest('b')).length);
+  assert.strictEqual(inB, 0, 'blocks inside a <b>');
+}, { md: '# Doc\n\n<b>one\n\ntwo</b>\n\nthree four\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

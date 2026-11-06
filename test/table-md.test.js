@@ -773,14 +773,14 @@ f1Row('D7 guard: a matched end tag still reads as markup', () => {
     assert.strictEqual(md, L('| a | b |', '|---|---|', '| one <!-- keep --> | twoZ |'), 'got:\n' + md);
   });
   f1Row('v31710 M-a stray end tag in an edited cell', () => {
-    const o = L('| a | b |', '|---|---|', '| t</b>wo | k |');
-    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</b>'), 'woZ'), td({}, 'k'))]), o);
-    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</b>woZ | k |'), 'got:\n' + md);
+    const o = L('| a | b |', '|---|---|', '| t</span>wo | k |');
+    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</span>'), 'woZ'), td({}, 'k'))]), o);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</span>woZ | k |'), 'got:\n' + md);
   });
   f1Row('v31710 guard (green since v3.17.9 R6): stray end tag, other cell edited', () => {
-    const o = L('| a | b |', '|---|---|', '| t</b>wo | k |');
-    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</b>'), 'wo'), td({}, 'kZ'))]), o);
-    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</b>wo | kZ |'), 'got:\n' + md);
+    const o = L('| a | b |', '|---|---|', '| t</span>wo | k |');
+    const { md } = serializeTable(table(head(), [tr(td({}, 't', raw('</span>'), 'wo'), td({}, 'kZ'))]), o);
+    assert.strictEqual(md, L('| a | b |', '|---|---|', '| t</span>wo | kZ |'), 'got:\n' + md);
   });
 }
 

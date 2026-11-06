@@ -857,7 +857,7 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(s('a ', raw('<!DOCTYPE x>'), ' b'), 'a <!DOCTYPE x> b', 'v31710 R3: declaration written back');
   assert.strictEqual(s('a ', raw('<![CDATA[ x ]]>'), ' b'), 'a <![CDATA[ x ]]> b', 'v31710 R3: CDATA written back');
   // a placeholder whose payload is anything else stays the comment it is
-  for (const bad of ['<script>alert(1)</script>', '<span>', '</span><b>', 'x']) {
+  for (const bad of ['<script>alert(1)</script>', '<span>', '</span><b>', 'x', '</br>', '</p>', '</li>', '</b>', '</strong>']) {
     const d = 'md2doc-raw:' + encodeURIComponent(bad);
     assert.strictEqual(s('a', cm(d)), 'a<!--' + d + '-->', 'v31710 R3: forged payload ' + JSON.stringify(bad) + ' is not injected');
   }
@@ -890,6 +890,28 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
     assert.strictEqual(escapeBlockStarts(input), want, 'v31710 R5: ' + JSON.stringify(input));
     const toks = marked.lexer(want).filter((t) => t.type !== 'space');
     assert.deepStrictEqual(toks.map((t) => t.type), ['paragraph'], 'v31710 R5: one paragraph for ' + JSON.stringify(want));
+  }
+  // final review #1 / #3: text between two comments is not invisible, and a
+  // run followed only by a hard break must not stay first on its line
+  const more = [
+    ['<!-- c --> x <!-- d -->\nb', 'x <!-- d --> <!-- c -->\nb'],
+    ['a\\\n<!-- c --> x <!-- d -->\nb', 'a\\\nx <!-- d --> <!-- c -->\nb'],
+    ['<!-- c -->\\\nb', '\\\nb<!-- c -->'],
+    ['<!-- c --> \\\nb', '\\\nb<!-- c -->'],
+    ['a\n<!-- c -->\\\nb', 'a<!-- c -->\n\\\nb'],
+  ];
+  for (const [input, want] of more) {
+    assert.strictEqual(escapeBlockStarts(input), want, 'v31710 review: ' + JSON.stringify(input));
+    const toks = marked.lexer(want).filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type), ['paragraph'], 'v31710 review: one paragraph for ' + JSON.stringify(want));
+  }
+  // final review #2: linear, not exponential, in the number of comments
+  {
+    const line = '<!-- -->'.repeat(3000) + ' x';
+    const t0 = Date.now();
+    const got = escapeBlockStarts(line);
+    assert.ok(Date.now() - t0 < 500, 'v31710 review #2: 3000 comments took ' + (Date.now() - t0) + 'ms');
+    assert.strictEqual(got, 'x ' + '<!-- -->'.repeat(3000), 'v31710 review #2: moved');
   }
   // not a block start: left alone
   for (const same of ['a </span>', '</span> x', 'a <!-- c --> b', '<!-- c -->', '\\<!-- c --> x', '&lt;!-- c --> x']) {
