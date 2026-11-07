@@ -380,6 +380,12 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     await one('<b>one\n\n| h |\n|---|\n| x </b> |\n\ntwo </b> three\n\nfour', '</b>', 0, 'v31711 R2d: a cell does not close the leaked b');
     await one('<b>one\n\npara <object>x </b></object> y\n\ntwo </b> three\n\nfour', '</b>', 0, 'v31711 R2d: nor does an object');
     await one('| h |\n|---|\n| <b>x |\n\ntwo </b> three', '</b>', 1, 'v31711 R2d: a b left open in a cell ends with the cell');
+    // re-review Minor 1 / 2: an object left open in its paragraph stays open
+    // (the paragraph cannot close it), and so does one opened by an html
+    // block; an end tag inside never closes a b opened before it.
+    await one('x <object>y <b>bold\n\nz </b> w\n\nend', '</b>', 0, 'v31711 R2d: a b opened after an unclosed object');
+    await one('<b>one\n\n<object>\n\nin </b> obj\n\n</object>\n\ntwo </b> three\n\nfour', '</b>', 0, 'v31711 R2d: an object from an html block');
+    await one('<b>one\n\npara <object>x</object> y\n\ntwo </b> three\n\nfive </b> six', '</b>', 1, 'v31711 R2d: a closed object ends its scope');
     // (a) parser-special names stay off
     for (const raw of ['</p>', '</div>', '</li>', '</br>', '</h2>', '</td>', '</table>', '</pre>']) {
       await one('Alpha x' + raw + ' beta.', raw, 0, 'v31711 R2a: special ' + raw);
