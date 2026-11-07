@@ -12266,7 +12266,7 @@ check('v31711: a stray end tag marks nothing the reader does not', DESKTOP, asyn
 // the caret in `Next.` and the next key landed there (`WNext.`).
 const V31711_EMPTY_MD = '# Doc\n\nPrev.\n\nAlpha <!-- keep -->\n\nNext.\n';
 async function emptyAlpha(page) { await emptySurfaceOf(page, 'Alpha '); }
-async function emptySurfaceOf(page, text) {
+async function emptySurfaceOf(page, text, kept) {
   await focusSurface(page, text, 0);
   // Delete until no text is left (the engine may take the lone space with the
   // `a`): one press more would be a Delete in an EMPTY paragraph, which pulls
@@ -12277,7 +12277,8 @@ async function emptySurfaceOf(page, text) {
   }
   await wait(150);
   const html = await page.evaluate(() => document.activeElement.innerHTML);
-  assert.ok(html.indexOf('<!-- keep -->') !== -1 && html.replace(/<!--[\s\S]*?-->|<br>/g, '') === '', 'emptied, the comment still in the surface: ' + html);
+  assert.ok((kept || ['<!-- keep -->']).every((k) => html.indexOf(k) !== -1) && html.replace(/<!--[\s\S]*?-->|<br>/g, '') === '',
+    'emptied, the comment still in the surface: ' + html);
 }
 check('v31711: an emptied paragraph keeps its comment when left', DESKTOP, async (page, boot) => {
   await emptyAlpha(page);
@@ -12315,6 +12316,35 @@ check('v31711: an emptied heading keeps its comment on Backspace', DESKTOP, asyn
   await page.keyboard.press('Backspace'); await page.keyboard.type('W'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nW\n\n<!-- keep -->\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\nPrev.\n\n## Head <!-- keep -->\n\nNext.\n' });
+// final review I1 (R5a): a stray end tag left alone on the emptied
+// paragraph's line was a type-7 html block, which runs to the next blank line:
+// `Alpha </span>` + `# Next` right below wrote `</span>\n# Next`, the heading
+// shown as text. It goes with the paragraph; a comment beside it stays.
+for (const [label, body, surface, want, kept] of [
+  ['an end tag alone', 'Alpha </span>\n# Next\n\nEnd.\n', 'Alpha ', ['heading', 'paragraph', 'heading', 'paragraph'], ['md2doc-raw:%3C%2Fspan%3E']],
+  ['an end tag and a comment', 'Alpha <!-- k --></b>\n> quote\n', 'Alpha ', ['heading', 'paragraph', 'html', 'blockquote'], ['<!-- k -->', 'md2doc-raw:%3C%2Fb%3E']],
+]) {
+  check('v31711: an emptied paragraph with ' + label + ' leaves the next block alone', DESKTOP, async (page, boot) => {
+    await emptySurfaceOf(page, surface, kept);
+    const disk = await saveAndRead(page, boot);
+    const toks = marked.lexer(disk).filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type), want, 'got ' + JSON.stringify(disk));
+    assert.ok(!/<\/(?:span|b)>/.test(disk), 'the end tag went with the paragraph: ' + JSON.stringify(disk));
+  }, { md: '# Doc\n\nPrev.\n\n' + body });
+}
+// final review I2 (R2d): a `</b>` in a table cell closes nothing outside the
+// cell (the cell's marker), so the later `two </b>` still closes the leaked b
+// in the edit page, as in the reader.
+check('v31711: a </b> in a cell does not let the leaked bold run on', DESKTOP, async (page) => {
+  const got = await page.evaluate(() => {
+    // by block: the leaked b (as in the reader) also wraps chrome around the
+    // armed element, so read the bold text of the whole .ed-block
+    const surf = (t) => [...document.querySelectorAll('.ed-block')].find((e) => e.textContent.trim().indexOf(t) === 0);
+    const bold = (el) => [...el.querySelectorAll('b')].map((b) => b.textContent.trim()).filter(Boolean).join(',') + (el.closest('b') ? '+inside' : '');
+    return bold(surf('two')) + '|' + bold(surf('four'));
+  });
+  assert.strictEqual(got, 'two|', 'bold in `two three` | `four`, got ' + JSON.stringify(got));
+}, { md: '# Doc\n\n<b>one\n\n| h |\n|---|\n| x </b> |\n\ntwo </b> three\n\nfour\n' });
 
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);

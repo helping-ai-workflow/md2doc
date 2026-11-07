@@ -954,7 +954,20 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   for (const n of ['span', 'del', 'content', 'sub']) assert.strictEqual(im.isFormattingName(n), false, 'v31711 R2: ' + n);
   // R5: the comments an emptied surface still holds
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}), cm(' keep '))), '<!-- keep -->', 'v31711 R5: one comment');
-  assert.strictEqual(im.keptCommentsMd(el('p', {}, cm(' a '), el('br', {}), raw('</span>'), cm(' '))), '<!-- a --> </span>', 'v31711 R5: comments and placeholders, guard dropped');
+  // final review I1 (R5a): each kept piece is its own html block, and a stray
+  // end tag is not kept: alone on a line it is a type-7 html block, which runs
+  // to the next blank line and swallowed the heading below it.
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, cm(' a '), el('br', {}), raw('</span>'), cm(' '))), '<!-- a -->', 'v31711 R5a: end-tag placeholder and guard dropped');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, raw('</span>'), raw('</b>'))), '', 'v31711 R5a: only end tags: nothing kept');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, cm(' a '), raw('<?pi x?>'), cm('m\nl'))), '<!-- a -->\n\n<?pi x?>\n\n<!--m\nl-->', 'v31711 R5a: one block each');
+  for (const kept of ['<!-- a -->', '<!-- a -->\n\n<?pi x?>\n\n<!--m\nl-->', '<![CDATA[ c ]]>', '<!DOCTYPE z>']) {
+    for (const next of ['# Next', '- item', '> quote', 'para']) {
+      const types = marked.lexer(kept + '\n' + next + '\n').filter((t) => t.type !== 'space').map((t) => t.type);
+      assert.strictEqual(types[types.length - 1], { '#': 'heading', '-': 'list', '>': 'blockquote', p: 'paragraph' }[next[0]],
+        'v31711 R5a: ' + JSON.stringify(kept) + ' leaves ' + JSON.stringify(next) + ' its own block, got ' + types);
+      assert.ok(types.slice(0, -1).every((t) => t === 'html'), 'v31711 R5a: kept lines are html blocks, got ' + types);
+    }
+  }
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}), cm(' '))), '', 'v31711 R5: a guard is nothing');
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}))), '', 'v31711 R5: nothing');
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('span', SRC, cm(' deep ')))), '<!-- deep -->', 'v31711 R5: nested');

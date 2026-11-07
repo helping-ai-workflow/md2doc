@@ -373,6 +373,13 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     await one('<div>\n<b>x</b>\n</div>\n\np </b> q', '</b>', 0, 'v31711 R2c: an html block naming <b>');
     await one('<span>one\n\ntwo</span>', '</span>', 1, 'v31711 R2c: a non-formatting name is per container');
     await one('<b>x</b> and y</b>', '</b>', 1, 'v31711 R2c: matched in its own container first');
+    // final review I2 (R2d): a table cell (and inline content after a raw
+    // object / applet / marquee / template) has a marker on the active-
+    // formatting list, so its `</b>` closes nothing outside; it must not use
+    // up the count, or `two </b>`, which does close the leaked b, gets one.
+    await one('<b>one\n\n| h |\n|---|\n| x </b> |\n\ntwo </b> three\n\nfour', '</b>', 0, 'v31711 R2d: a cell does not close the leaked b');
+    await one('<b>one\n\npara <object>x </b></object> y\n\ntwo </b> three\n\nfour', '</b>', 0, 'v31711 R2d: nor does an object');
+    await one('| h |\n|---|\n| <b>x |\n\ntwo </b> three', '</b>', 1, 'v31711 R2d: a b left open in a cell ends with the cell');
     // (a) parser-special names stay off
     for (const raw of ['</p>', '</div>', '</li>', '</br>', '</h2>', '</td>', '</table>', '</pre>']) {
       await one('Alpha x' + raw + ' beta.', raw, 0, 'v31711 R2a: special ' + raw);
