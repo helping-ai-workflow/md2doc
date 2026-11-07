@@ -329,12 +329,68 @@ const { buildBlockMap } = require('../lib/editor/blockmap.js');
     }
     assert.strictEqual(ed.split(ph('</kbd>')).length - 1, 2, 'v31710 R3: the stray </kbd> in the paragraph and the one in the cell');
     assert.strictEqual(ed.split(ph('</span>')).length - 1, 1, 'v31710 review #5: the </span> after <span/> is not stray');
-    assert.ok(ed.indexOf(ph('</span>')) !== -1 && /<span>s<\/span>/.test(ed) && /<span>k<\/span>/.test(ed),
+    // v3.17.11 R4 migrated: a source `<span>…</span>` pair now opens as
+    // `<span data-md2doc-span="">` in edit mode.
+    assert.ok(ed.indexOf(ph('</span>')) !== -1 && /<span data-md2doc-span="">s<\/span>/.test(ed) && /<span data-md2doc-span="">k<\/span>/.test(ed),
       'v31710 R4: a matched end tag stays a tag');
-    for (const raw of ['</strong>', '</a>', '</div>', '</p>', '</content>', '</b>', '</i>']) {
+    // v3.17.11 R2 migrated: only parser-special names stay off the list, and
+    // `</b>` after the unclosed `<b>one` (an earlier block) still does.
+    for (const raw of ['</div>', '</p>', '</b>']) {
       assert.ok(ed.indexOf(ph(raw)) === -1, 'v31710 R4: ' + raw + ' is not on the allow-list');
     }
+    for (const raw of ['</strong>', '</a>', '</content>', '</i>']) {
+      assert.ok(ed.indexOf(ph(raw)) !== -1, 'v31711 R2: ' + raw + ' now carries a placeholder');
+    }
     assert.ok(ed.indexOf('keep <!-- c --> it') !== -1, 'v31710 R2: an ordinary comment is rendered as itself');
+  }
+
+  // v3.17.11 R2: a stray end tag of any non-special name gets the
+  // placeholder, unless a markdown mark of that name encloses it, or (a
+  // formatting name) a raw start tag of it is still open earlier in the
+  // document, where the browser's active-formatting list would let it close
+  // one. R4: a source `<span>…</span>` pair is marked so the walk keeps it.
+  {
+    const ph = (raw) => '<!--md2doc-raw:' + encodeURIComponent(raw) + '-->';
+    const count = (h, raw) => h.split(ph(raw)).length - 1;
+    const ed = async (src) => (await renderMarkdown(src, fake, { editMode: true })).bodyHtml;
+    const one = async (src, raw, n, msg) => assert.strictEqual(count(await ed('# T\n\n' + src + '\n'), raw), n, msg + ': ' + JSON.stringify(src));
+    for (const raw of ['</strong>', '</em>', '</a>', '</code>', '</b>', '</i>', '</u>', '</s>', '</del>', '</sub>', '</sup>', '</content>']) {
+      await one('Alpha x' + raw + ' beta.', raw, 1, 'v31711 R2: stray ' + raw);
+    }
+    await one('| a | b |\n|---|---|\n| one x</strong> | two |', '</strong>', 1, 'v31711 R2: in a cell');
+    await one('## H x</em> y', '</em>', 1, 'v31711 R2: in a heading');
+    await one('- li x</a> y', '</a>', 1, 'v31711 R2: in a list item');
+    // (b) a markdown mark of that name encloses it: the reader closes the mark there
+    await one('**a </strong> b**', '</strong>', 0, 'v31711 R2b: inside **');
+    await one('*a </em> b*', '</em>', 0, 'v31711 R2b: inside *');
+    await one('[a </a> b](https://x.test)', '</a>', 0, 'v31711 R2b: inside a link');
+    await one('~~a </del> b~~', '</del>', 0, 'v31711 R2b: inside ~~');
+    await one('**a </em> b**', '</em>', 1, 'v31711 R2b: another mark encloses it');
+    // (c) a formatting name with a raw start tag still open earlier in the document
+    await one('<b>one\n\ntwo</b>', '</b>', 0, 'v31711 R2c: <b> open in an earlier block');
+    await one('<b>one\n\ntwo</b>\n\nthree</b>', '</b>', 1, 'v31711 R2c: closed by two, so three is stray');
+    await one('<strong>one\n\n| a |\n|---|\n| x</strong> |', '</strong>', 0, 'v31711 R2c: into a table cell');
+    await one('<div>\n<b>x</b>\n</div>\n\np </b> q', '</b>', 0, 'v31711 R2c: an html block naming <b>');
+    await one('<span>one\n\ntwo</span>', '</span>', 1, 'v31711 R2c: a non-formatting name is per container');
+    await one('<b>x</b> and y</b>', '</b>', 1, 'v31711 R2c: matched in its own container first');
+    // (a) parser-special names stay off
+    for (const raw of ['</p>', '</div>', '</li>', '</br>', '</h2>', '</td>', '</table>', '</pre>']) {
+      await one('Alpha x' + raw + ' beta.', raw, 0, 'v31711 R2a: special ' + raw);
+    }
+    // R4: span pairs
+    const sp = '<span data-md2doc-span="">';
+    const span = async (src) => (await ed('# T\n\n' + src + '\n')).split(sp).length - 1;
+    assert.strictEqual(await span('Alpha <span>keep</span> beta.'), 1, 'v31711 R4: a pair');
+    assert.strictEqual(await span('a <span>x <span>y</span></span> b'), 2, 'v31711 R4: nested pairs');
+    assert.strictEqual(await span('| a |\n|---|\n| one <span>keep</span> |'), 1, 'v31711 R4: in a cell');
+    assert.strictEqual(await span('## H <span>k</span>'), 1, 'v31711 R4: in a heading');
+    assert.strictEqual(await span('- i <span>k</span>'), 1, 'v31711 R4: in a list item');
+    assert.strictEqual(await span('<span>a **b</span> c**'), 0, 'v31711 R4: a pair split by a mark');
+    assert.strictEqual(await span('a <span class="x">k</span>'), 0, 'v31711 R4: attributes');
+    assert.strictEqual(await span('a <SPAN>k</SPAN> <span >k</span>'), 0, 'v31711 R4: other spellings');
+    assert.strictEqual(await span('a <span>k'), 0, 'v31711 R4: unpaired');
+    const reader = (await renderMarkdown('# T\n\nAlpha <span>keep</span> x</strong>.\n', fake, {})).bodyHtml;
+    assert.ok(reader.indexOf('data-md2doc-span') === -1 && reader.indexOf('md2doc-raw') === -1, 'v31711: the reader is unchanged');
   }
 
   console.log('editmode-render.test.js OK');

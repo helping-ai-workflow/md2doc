@@ -857,7 +857,9 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(s('a ', raw('<!DOCTYPE x>'), ' b'), 'a <!DOCTYPE x> b', 'v31710 R3: declaration written back');
   assert.strictEqual(s('a ', raw('<![CDATA[ x ]]>'), ' b'), 'a <![CDATA[ x ]]> b', 'v31710 R3: CDATA written back');
   // a placeholder whose payload is anything else stays the comment it is
-  for (const bad of ['<script>alert(1)</script>', '<span>', '</span><b>', 'x', '</br>', '</p>', '</li>', '</b>', '</strong>']) {
+  // v3.17.11 R3 migrated this list: `</b>` and `</strong>` are now placeholder
+  // names (any non-special element, lib/md2doc.js decides when it is safe).
+  for (const bad of ['<script>alert(1)</script>', '<span>', '</span><b>', 'x', '</br>', '</p>', '</li>', '</div>', '</td>', '</h2>']) {
     const d = 'md2doc-raw:' + encodeURIComponent(bad);
     assert.strictEqual(s('a', cm(d)), 'a<!--' + d + '-->', 'v31710 R3: forged payload ' + JSON.stringify(bad) + ' is not injected');
   }
@@ -917,6 +919,45 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   for (const same of ['a </span>', '</span> x', 'a <!-- c --> b', '<!-- c -->', '\\<!-- c --> x', '&lt;!-- c --> x']) {
     assert.strictEqual(escapeBlockStarts(same), same, 'v31710 R5: unchanged ' + JSON.stringify(same));
   }
+}
+
+// v3.17.11: M-span, M-a2, M-empty. Measured on 635b8ea in the real editor:
+// `Alpha <span>keep</span> beta.` + Z -> `Alpha keep beta.Z` (the walk unwrapped
+// the source's span as a contenteditable leftover); `Alpha x</strong> beta.`
+// + Z -> `Alpha x beta.Z`; a paragraph emptied down to `<br><!-- keep -->`
+// was removed with its comment.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const raw = (r) => cm('md2doc-raw:' + encodeURIComponent(r));
+  const s = (...kids) => serializeInline(el('p', {}, ...kids)).md;
+  const SRC = { 'data-md2doc-span': '' };
+  // R4: a span the source wrote (edit mode marks it) is written back
+  assert.strictEqual(s('Alpha ', el('span', SRC, 'keep'), ' beta.'), 'Alpha <span>keep</span> beta.', 'v31711 R4: source span kept');
+  assert.strictEqual(s('a ', el('span', SRC, el('strong', {}, 'b'), ' c')), 'a <span>**b** c</span>', 'v31711 R4: marks inside it');
+  assert.strictEqual(s(el('strong', {}, 'a'), el('span', SRC, 'k'), el('strong', {}, 'b')), '**a**<span>k</span>**b**', 'v31711 R4: it separates two marks');
+  assert.deepStrictEqual(serializeInline(el('p', {}, el('span', SRC, 'k'))).unsupported, [], 'v31711 R4: supported');
+  assert.deepStrictEqual(serializeInline(el('p', {}, el('span', { 'data-md2doc-span': '', style: 'color:red' }, 'k'))).unsupported, ['SPAN'],
+    'v31711 R4: a styled span is still unsupported');
+  assert.strictEqual(s('a ', el('span', {}, 'k')), 'a k', 'v31711 R4: an unmarked bare span is still a leftover');
+  // R3: any non-special end tag name round-trips through a placeholder
+  for (const r of ['</strong>', '</em>', '</a>', '</code>', '</b>', '</i>', '</u>', '</s>', '</del>', '</sub>', '</content>', '</Strong >']) {
+    assert.strictEqual(s('x', raw(r), ' y'), 'x' + r + ' y', 'v31711 R3: ' + r + ' written back');
+  }
+  const im = require('../lib/editor/inline-md.js');
+  for (const n of ['strong', 'b', 'content', 'span', 'my-tag', 'del']) assert.strictEqual(im.isDomAbsentEndName(n), true, 'v31711 R2: ' + n);
+  for (const n of ['p', 'br', 'div', 'li', 'td', 'tr', 'h2', 'table', 'template', 'body', 'pre', 'ul', '1x', '']) {
+    assert.strictEqual(im.isDomAbsentEndName(n), false, 'v31711 R2: ' + JSON.stringify(n) + ' is special / invalid');
+  }
+  for (const n of ['a', 'b', 'big', 'code', 'em', 'font', 'i', 'nobr', 's', 'small', 'strike', 'strong', 'tt', 'u']) {
+    assert.strictEqual(im.isFormattingName(n), true, 'v31711 R2: ' + n + ' is a formatting element');
+  }
+  for (const n of ['span', 'del', 'content', 'sub']) assert.strictEqual(im.isFormattingName(n), false, 'v31711 R2: ' + n);
+  // R5: the comments an emptied surface still holds
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}), cm(' keep '))), '<!-- keep -->', 'v31711 R5: one comment');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, cm(' a '), el('br', {}), raw('</span>'), cm(' '))), '<!-- a --> </span>', 'v31711 R5: comments and placeholders, guard dropped');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}), cm(' '))), '', 'v31711 R5: a guard is nothing');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}))), '', 'v31711 R5: nothing');
+  assert.strictEqual(im.keptCommentsMd(el('p', {}, el('span', SRC, cm(' deep ')))), '<!-- deep -->', 'v31711 R5: nested');
 }
 
 console.log('inline-md.test.js OK');

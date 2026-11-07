@@ -12226,6 +12226,96 @@ check('v31710: a <b> closed in a later block bolds nothing after it', DESKTOP, a
   assert.strictEqual(inB, 0, 'blocks inside a <b>');
 }, { md: '# Doc\n\n<b>one\n\ntwo</b>\n\nthree four\n' });
 
+// ── v3.17.11: M-span, M-a2, M-empty. Measured on 635b8ea in this page (the
+// ledger's probe): every V31711_ROWS row lost its tag — `Alpha <span>keep</span>
+// beta.` + Z wrote `Alpha keep beta.Z`, even a span in the cell NOT edited;
+// `Alpha x</strong> beta.` + Z wrote `Alpha x beta.Z`.
+const V31711_ROWS = [
+  ['M-span in a paragraph', 'Alpha <span>keep</span> beta.\n', 'Alpha keep beta.', 'ZAlpha <span>keep</span> beta.\n'],
+  ['M-span in a heading', '## Head <span>keep</span> x\n\ntext\n', 'Head keep x', '## ZHead <span>keep</span> x\n\ntext\n'],
+  ['M-span in a list item', '- item <span>keep</span> x\n- two\n', 'item keep x', '- Zitem <span>keep</span> x\n- two\n'],
+  ['M-span in the edited cell', '| a | b |\n|---|---|\n| one <span>keep</span> | two |\n', 'one keep', '| a | b |\n|---|---|\n| Zone <span>keep</span> | two |\n'],
+  ['M-span in the other cell', '| a | b |\n|---|---|\n| one <span>keep</span> | two |\n', 'two', '| a | b |\n|---|---|\n| one <span>keep</span> | Ztwo |\n'],
+  ['M-span with a mark inside', 'a <span>**b** c</span> d\n', 'a b c d', 'Za <span>**b** c</span> d\n'],
+  ['M-a2 </strong> in a paragraph', 'Alpha x</strong> beta.\n', 'Alpha x beta.', 'ZAlpha x</strong> beta.\n'],
+  ['M-a2 </em> in a paragraph', 'Alpha x</em> beta.\n', 'Alpha x beta.', 'ZAlpha x</em> beta.\n'],
+  ['M-a2 </a> in a list item', '- Alpha x</a> beta.\n- two\n', 'Alpha x beta.', '- ZAlpha x</a> beta.\n- two\n'],
+  ['M-a2 </b> in a heading', '## Alpha x</b> beta\n\ntext\n', 'Alpha x beta', '## ZAlpha x</b> beta\n\ntext\n'],
+  ['M-a2 </content> in a paragraph', 'Alpha x</content> beta.\n', 'Alpha x beta.', 'ZAlpha x</content> beta.\n'],
+  ['M-a2 </strong> in the edited cell', '| a | b |\n|---|---|\n| one x</strong> | two |\n', 'one x', '| a | b |\n|---|---|\n| Zone x</strong> | two |\n'],
+];
+for (const [label, body, surface, want] of V31711_ROWS) {
+  check('v31711: ' + label + ' is kept by an edit', DESKTOP, async (page, boot) => {
+    await focusSurface(page, surface, 0);
+    await page.keyboard.type('Z'); await wait(200);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// R2 (a guard, green before the fix as well): the edit page shows the marks the reader shows (the placeholder never
+// lets a mark run on where the reader's stray end tag would have closed it).
+check('v31711: a stray end tag marks nothing the reader does not', DESKTOP, async (page) => {
+  const marks = await page.evaluate(() => [...document.querySelectorAll('.ed-block')].map((b) =>
+    [...b.querySelectorAll('strong, b, em, i, a')].map((m) => m.nodeName + ':' + m.textContent).join(',')).join('|'));
+  assert.strictEqual(marks, '||A:one|STRONG:two|B:three|STRONG:four x|B:six,B:\n|B:,B:seven', 'marks per block, got ' + JSON.stringify(marks));
+}, { md: '# Doc\n\nx</strong> y</em> z</a>\n\n[one](https://x.test) x</a> y\n\n**two** x</strong> y\n\n<b>three</b> x</b> y\n\n' +
+  '**four x</strong> five**\n\n<b>six\n\nseven</b> eight\n' });
+
+// R5 (M-empty): `Alpha <!-- keep -->` emptied with Delete from its start leaves
+// `<br><!-- keep -->` in the surface. Measured on 635b8ea: click away / Ctrl+S
+// removed it with the paragraph; Backspace joined `Prev.` without it; Enter put
+// the caret in `Next.` and the next key landed there (`WNext.`).
+const V31711_EMPTY_MD = '# Doc\n\nPrev.\n\nAlpha <!-- keep -->\n\nNext.\n';
+async function emptyAlpha(page) { await emptySurfaceOf(page, 'Alpha '); }
+async function emptySurfaceOf(page, text) {
+  await focusSurface(page, text, 0);
+  // Delete until no text is left (the engine may take the lone space with the
+  // `a`): one press more would be a Delete in an EMPTY paragraph, which pulls
+  // `Next.` up — a different gesture, its own row below.
+  for (let i = 0; i < 8; i++) {
+    if (await page.evaluate(() => document.activeElement.textContent === '')) break;
+    await page.keyboard.press('Delete'); await wait(40);
+  }
+  await wait(150);
+  const html = await page.evaluate(() => document.activeElement.innerHTML);
+  assert.ok(html.indexOf('<!-- keep -->') !== -1 && html.replace(/<!--[\s\S]*?-->|<br>/g, '') === '', 'emptied, the comment still in the surface: ' + html);
+}
+check('v31711: an emptied paragraph keeps its comment when left', DESKTOP, async (page, boot) => {
+  await emptyAlpha(page);
+  // leaving the emptied paragraph renders, which replaces the surface the
+  // click went to: wait for it, then put the caret at the end of `Next.`
+  await page.locator('.ed-wys-armed', { hasText: 'Next.' }).click(); await renderIdle(page);
+  await focusSurface(page, 'Next.', 5); await page.keyboard.type('Z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n<!-- keep -->\n\nNext.Z\n', 'the bytes on disk');
+}, { md: V31711_EMPTY_MD });
+check('v31711: an emptied paragraph keeps its comment on Ctrl+S', DESKTOP, async (page, boot) => {
+  await emptyAlpha(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n<!-- keep -->\n\nNext.\n', 'the bytes on disk');
+}, { md: V31711_EMPTY_MD });
+check('v31711: Enter in an emptied paragraph keeps its comment and the caret', DESKTOP, async (page, boot) => {
+  await emptyAlpha(page);
+  await page.keyboard.press('Enter'); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nW\n\n<!-- keep -->\n\nNext.\n', 'the bytes on disk');
+}, { md: V31711_EMPTY_MD });
+check('v31711: Backspace in an emptied paragraph carries its comment up', DESKTOP, async (page, boot) => {
+  await emptyAlpha(page);
+  await page.keyboard.press('Backspace'); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.W<!-- keep -->\n\nNext.\n', 'the bytes on disk');
+}, { md: V31711_EMPTY_MD });
+check('v31711: Delete in an emptied paragraph keeps its comment, no hard break', DESKTOP, async (page, boot) => {
+  await emptyAlpha(page);
+  await page.keyboard.press('Delete'); await renderIdle(page);
+  const disk = await saveAndRead(page, boot);
+  const toks = marked.lexer(disk).filter((t) => t.type !== 'space');
+  assert.deepStrictEqual(toks.map((t) => t.type), ['heading', 'paragraph', 'paragraph'], 'got ' + JSON.stringify(disk));
+  assert.strictEqual(toks[2].raw.replace(/\s*<!-- keep -->\s*/, '').trim(), 'Next.', 'one line, no break: ' + JSON.stringify(disk));
+  assert.ok(toks[2].raw.indexOf('<!-- keep -->') !== -1, 'comment kept: ' + JSON.stringify(disk));
+}, { md: V31711_EMPTY_MD });
+check('v31711: an emptied heading keeps its comment on Backspace', DESKTOP, async (page, boot) => {
+  await emptySurfaceOf(page, 'Head ');
+  await page.keyboard.press('Backspace'); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nW\n\n<!-- keep -->\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nPrev.\n\n## Head <!-- keep -->\n\nNext.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
