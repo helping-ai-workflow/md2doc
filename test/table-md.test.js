@@ -788,4 +788,15 @@ if (f1Failures.length) {
   throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
 }
 
+// v3.17.12 (M-empty-br): a cell emptied by the keyboard holds Chromium's
+// placeholder <br>; measured on 171d432 it was written `| <br> |`, with a
+// comment `| <br><!-- k --> |`.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const t1 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t1).md, ['| H | I |', '|---|---|', '|  | two |'].join('\n'), 'v31712: an emptied cell');
+  const t2 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {}), cm(' k ')), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t2).md, ['| H | I |', '|---|---|', '| <!-- k --> | two |'].join('\n'), 'v31712: its comment stays');
+}
+
 console.log('table-md.test.js OK');

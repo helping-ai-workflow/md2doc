@@ -202,7 +202,9 @@ assert.strictEqual(marked.parseInline(escapeText('a~~b~~c')), 'a~~b~~c');
   // the Shift+Enter round-trip contract (a browser-inserted <br> carries no
   // marker), the hand-written-'<br>'-in-source contract, and the Chromium
   // placeholder <br> left behind when a surface's last character is deleted —
-  // all three are the same code path and none of them may move.
+  // all three are the same code path and none of them may move while the
+  // surface has text. An EMPTIED surface writes only its comments since
+  // v3.17.12 (R2, the v31712 block below).
   assert.strictEqual(serializeInline(el('p', {}, 'a', el('br', {}), 'b')).md, 'a<br>b');
   // an explicit "not a hard break" attribute value is not a hard break either
   assert.strictEqual(
@@ -971,6 +973,42 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}), cm(' '))), '', 'v31711 R5: a guard is nothing');
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('br', {}))), '', 'v31711 R5: nothing');
   assert.strictEqual(im.keptCommentsMd(el('p', {}, el('span', SRC, cm(' deep ')))), '<!-- deep -->', 'v31711 R5: nested');
+}
+
+// v3.17.12: M-empty-br. Measured on 171d432 in the real editor: a list item,
+// heading or table cell emptied by the keyboard holds Chromium's placeholder
+// <br>, and leaving it wrote `- <br>`, `## <br>`, `| <br> |` — with or without
+// a comment beside it (`- <br><!-- k -->`). R2: a surface with no text but
+// whitespace (NBSP included) and nothing unsupported is EMPTIED and writes
+// only its kept pieces, on one line.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const raw = (r) => cm('md2doc-raw:' + encodeURIComponent(r));
+  const im = require('../lib/editor/inline-md.js');
+  const s = (...kids) => serializeInline(el('p', {}, ...kids)).md;
+  assert.strictEqual(s(el('br', {})), '', 'v31712 R2: a placeholder <br> alone writes nothing');
+  assert.strictEqual(s(el('br', {}), el('br', {})), '', 'v31712 R2: two of them');
+  assert.strictEqual(s(el('br', {}), cm(' k ')), '<!-- k -->', 'v31712 R2: the comment stays, the <br> goes');
+  assert.strictEqual(s(el('br', {}), cm(' k '), ' ', cm(' j ')), '<!-- k --> <!-- j -->', 'v31712 R2: two comments, one line');
+  assert.strictEqual(s(el('br', {}), raw('</span>'), ' ', cm(' k ')), '<!-- k -->', 'v31712 R2: a stray end tag goes with the text (R5a)');
+  assert.strictEqual(s(el('br', {}), cm(' ')), '', 'v31712 R2: a whitespace guard is nothing');
+  assert.strictEqual(s(' '), '', 'v31712 R2: a lone NBSP');
+  assert.strictEqual(s(' ', el('br', {}), ' '), '', 'v31712 R2: whitespace text');
+  assert.strictEqual(s(el('strong', {}), el('br', {})), '', 'v31712 R2: an empty mark');
+  assert.strictEqual(s(el('br', { 'data-hard-break': '1' })), '', 'v31712 R2: a hard break with nothing to break');
+  assert.strictEqual(s(el('span', { 'data-md2doc-span': '' }, cm(' deep '))), '<!-- deep -->', 'v31712 R2: nested comment');
+  // not emptied: text (an ideographic space is text), a link, a code span
+  assert.strictEqual(s('　', el('br', {})), '　<br>', 'v31712 R2: U+3000 is text');
+  assert.strictEqual(s('a', el('br', {})), 'a<br>', 'v31712 R2: text keeps the <br> contract');
+  assert.strictEqual(s(el('a', { href: 'https://x.test' })), '[](https://x.test)', 'v31712 R2: a textless link keeps its bytes');
+  assert.strictEqual(s(el('code', {}, ' ')), '` `', 'v31712 R2: a code span of a space is content');
+  // unsupported content is never emptied away
+  assert.deepStrictEqual(serializeInline(el('p', {}, el('video', {}))).unsupported, ['VIDEO'], 'v31712 R2: unsupported still reported');
+  // the predicate the paragraph rule (R3) shares
+  assert.strictEqual(im.surfaceIsEmptied(el('p', {}, el('br', {}), raw('</span>'), ' ', cm(' k '))), true, 'v31712 R3: whitespace-only paragraph');
+  assert.strictEqual(im.surfaceIsEmptied(el('p', {}, 'x')), false, 'v31712 R3: text');
+  assert.strictEqual(im.surfaceIsEmptied(el('p', {}, el('img', { src: 'x.png' }))), false, 'v31712 R3: an image');
+  assert.strictEqual(im.surfaceIsEmptied(el('p', {}, el('a', { href: 'x' }))), false, 'v31712 R3: a link');
 }
 
 console.log('inline-md.test.js OK');

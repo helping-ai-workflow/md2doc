@@ -12346,6 +12346,117 @@ check('v31711: a </b> in a cell does not let the leaked bold run on', DESKTOP, a
   assert.strictEqual(got, 'two|', 'bold in `two three` | `four`, got ' + JSON.stringify(got));
 }, { md: '# Doc\n\n<b>one\n\n| h |\n|---|\n| x </b> |\n\ntwo </b> three\n\nfour\n' });
 
+// ── v3.17.12: M-empty-br, M-empty-li. Measured on 171d432 in this page (the
+// ledger's probe): a list item, heading or cell emptied by the keyboard keeps
+// the engine's placeholder <br>, and Ctrl+S / leaving wrote `- <br>`,
+// `## <br>`, `| <br> |` — with or without a comment (`- <br><!-- k -->`). A
+// top-level item emptied and turned into a paragraph by Enter / Backspace lost
+// its comment; a nested one outdented by Enter lost it too.
+// Delete from the start until the surface holds no text but whitespace; `n`
+// presses at most (one more would be a Delete in an EMPTY block, another
+// gesture). `kept` must still be in the surface.
+async function emptySurfaceV31712(page, text, kept) {
+  await focusSurface(page, text, 0);
+  for (let i = 0; i < text.length + 2; i++) {
+    if (await page.evaluate(() => /^[ \t\n\r ]*$/.test(document.activeElement.textContent))) break;
+    await page.keyboard.press('Delete'); await wait(40);
+  }
+  await wait(150);
+  const html = await page.evaluate(() => document.activeElement.innerHTML);
+  assert.ok((kept || []).every((k) => html.indexOf(k) !== -1) &&
+    /^(?:\s|&nbsp;)*$/.test(html.replace(/<!--[\s\S]*?-->|<br>/g, '')), 'emptied, the comments still in the surface: ' + html);
+}
+const V31712_BR_ROWS = [
+  // label, body, surface, kept, bytes after Ctrl+S
+  ['a list item', '- one\n- Alpha\n- three\n\nNext.\n', 'Alpha', [], '- one\n-\n- three\n\nNext.\n'],
+  ['a list item with a comment', '- one\n- Alpha <!-- k -->\n- three\n\nNext.\n', 'Alpha ', ['<!-- k -->'], '- one\n- <!-- k -->\n- three\n\nNext.\n'],
+  ['an ordered item with a comment', '1. one\n2. Alpha <!-- k -->\n\nNext.\n', 'Alpha ', ['<!-- k -->'], '1. one\n2. <!-- k -->\n\nNext.\n'],
+  ['a nested item with a comment', '- one\n  - Alpha <!-- k -->\n\nNext.\n', 'Alpha ', ['<!-- k -->'], '- one\n  - <!-- k -->\n\nNext.\n'],
+  ['a task item with a comment', '- [ ] one\n- [ ] Alpha <!-- k -->\n\nNext.\n', 'Alpha ', ['<!-- k -->'], '- [ ] one\n- [ ] <!-- k -->\n\nNext.\n'],
+  ['a heading', '## Head\n\nNext.\n', 'Head', [], '##\n\nNext.\n'],
+  ['a heading with a comment', '## Head <!-- k -->\n\nNext.\n', 'Head ', ['<!-- k -->'], '## <!-- k -->\n\nNext.\n'],
+  ['a cell', '| a | b |\n|---|---|\n| Alpha | two |\n\nNext.\n', 'Alpha', [], '| a | b |\n|---|---|\n|  | two |\n\nNext.\n'],
+  ['a cell with a comment', '| a | b |\n|---|---|\n| Alpha <!-- k --> | two |\n\nNext.\n', 'Alpha ', ['<!-- k -->'], '| a | b |\n|---|---|\n| <!-- k --> | two |\n\nNext.\n'],
+  // R3: the source space between the two is a text node, so the paragraph rule
+  // missed it. Chromium keeps `<br><!--…%2Fspan…--> <!-- k -->` (the shape the
+  // rule is for); WebKit's Delete also takes the placeholder it passes, which
+  // leaves `<br><!-- k -->` — so only the comment is required here.
+  ['a paragraph with an end tag, a space and a comment', 'Prev.\n\nAlpha </span> <!-- k -->\n\nNext.\n', 'Alpha  ',
+    ['<!-- k -->'], 'Prev.\n\n<!-- k -->\n\nNext.\n'],
+  // R5: a bare `-` under a paragraph is a setext underline (Text becomes an H2)
+  ['the first item under a paragraph', 'Text\n- Alpha\n- b\n\nNext.\n', 'Alpha', [], 'Text\n- ​\n- b\n\nNext.\n'],
+  ['the first ordered item under a paragraph', 'Text\n1. Alpha\n2. b\n\nNext.\n', 'Alpha', [], 'Text\n1. ​\n2. b\n\nNext.\n'],
+];
+for (const [label, body, surface, kept, want] of V31712_BR_ROWS) {
+  check('v31712: ' + label + ', emptied, saves no <br>', DESKTOP, async (page, boot) => {
+    await emptySurfaceV31712(page, surface, kept);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// the same when the block is left by a click (its own resolution path)
+for (const [label, body, surface, kept, want] of V31712_BR_ROWS.filter((r) => /^a (list item|heading|cell) with/.test(r[0]))) {
+  check('v31712: ' + label + ', emptied and left, saves no <br>', DESKTOP, async (page, boot) => {
+    await emptySurfaceV31712(page, surface, kept);
+    await page.locator('.ed-wys-armed', { hasText: 'Next.' }).click(); await renderIdle(page);
+    await focusSurface(page, 'Next.', 5); await page.keyboard.type('Z'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want.replace('Next.\n', 'Next.Z\n'), 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// R5: the paragraph above keeps being a paragraph (Enter at the start of the
+// first item opens an empty one above it; pre-existing on 171d432)
+for (const [type, body, want] of [
+  ['bulleted', 'Text\n- a\n- b\n\nNext.\n', 'Text\n- ​\n- a\n- b\n\nNext.\n'],
+  ['ordered', 'Text\n1. a\n2. b\n\nNext.\n', 'Text\n1. ​\n2. a\n3. b\n\nNext.\n'],
+]) {
+  check('v31712: Enter at the start of the first ' + type + ' item under a paragraph keeps the paragraph', DESKTOP, async (page, boot) => {
+    await focusSurface(page, 'a', 0);
+    await page.keyboard.press('Enter'); await renderIdle(page);
+    const disk = await saveAndRead(page, boot);
+    assert.strictEqual(disk, '# Doc\n\n' + want, 'the bytes on disk');
+    const toks = marked.lexer(disk).filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type + (t.type === 'list' ? ':' + t.items.length : '')), ['heading', 'paragraph', 'list:3', 'paragraph'], 'got ' + JSON.stringify(disk));
+  }, { md: '# Doc\n\n' + body });
+}
+// R4 (M-empty-li): an emptied item turned into a paragraph keeps its comment as
+// its own line where the item was; the new paragraph opens above it. W is
+// typed after the render: a key typed during it is lost on 171d432 too (the
+// v3.11.0 follow-up "keys typed right after Enter in a list item"), not this row's subject.
+const V31712_LI_ROWS = [
+  ['a middle item', '- one\n- Alpha <!-- k -->\n- three\n\nNext.\n', '- one\n\nW\n\n<!-- k -->\n\n- three\n\nNext.\n'],
+  ['the only item', 'Prev.\n\n- Alpha <!-- k -->\n\nNext.\n', 'Prev.\n\nW\n\n<!-- k -->\n\nNext.\n'],
+  ['the first item', 'Prev.\n\n- Alpha <!-- k -->\n- three\n\nNext.\n', 'Prev.\n\nW\n\n<!-- k -->\n\n- three\n\nNext.\n'],
+  ['the last item', '- one\n- Alpha <!-- k -->\n\nNext.\n', '- one\n\nW\n\n<!-- k -->\n\nNext.\n'],
+  ['an ordered item', '1. one\n2. Alpha <!-- k -->\n3. three\n\nNext.\n', '1. one\n\nW\n\n<!-- k -->\n\n2. three\n\nNext.\n'],
+  ['a task item', '- [ ] one\n- [ ] Alpha <!-- k -->\n- [ ] three\n\nNext.\n', '- [ ] one\n\nW\n\n<!-- k -->\n\n- [ ] three\n\nNext.\n'],
+];
+for (const key of ['Enter', 'Backspace']) {
+  for (const [label, body, want] of V31712_LI_ROWS) {
+    check('v31712: ' + key + ' in ' + label + ' emptied keeps its comment', DESKTOP, async (page, boot) => {
+      await emptySurfaceV31712(page, 'Alpha ', ['<!-- k -->']);
+      await page.keyboard.press(key); await renderIdle(page); await page.keyboard.type('W'); await renderIdle(page);
+      assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+    }, { md: '# Doc\n\n' + body });
+  }
+}
+check('v31712: Enter in an emptied nested item outdents it with its comment', DESKTOP, async (page, boot) => {
+  await emptySurfaceV31712(page, 'Alpha ', ['<!-- k -->']);
+  await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n- W<!-- k -->\n- three\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n  - Alpha <!-- k -->\n- three\n\nNext.\n' });
+// a guard (green before the fix too): no comment, no extra line
+check('v31712: Enter in an emptied item without a comment writes no extra line', DESKTOP, async (page, boot) => {
+  await emptySurfaceV31712(page, 'Alpha', []);
+  await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n\nW\n\n- three\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n- Alpha\n- three\n\nNext.\n' });
+// R1 (caretPlace): whitespace text after the trailing <br> hid it, so Enter
+// read the emptied paragraph as 'start' and W was typed into it
+check('v31712: Enter in an emptied paragraph holding a space and a comment opens a new one', DESKTOP, async (page, boot) => {
+  await emptySurfaceV31712(page, 'Alpha  ', ['<!-- k -->']);
+  await page.keyboard.press('Enter'); await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nW\n\n<!-- k -->\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nPrev.\n\nAlpha </span> <!-- k -->\n\nNext.\n' });
+
 (async () => {
   const engines = (process.env.MD2DOC_ENGINES || 'chromium,webkit').split(',').map((s) => s.trim()).filter(Boolean);
   const only = process.argv[2];
