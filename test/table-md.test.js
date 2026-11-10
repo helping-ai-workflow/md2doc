@@ -797,6 +797,18 @@ if (f1Failures.length) {
   assert.strictEqual(serializeTable(t1).md, ['| H | I |', '|---|---|', '|  | two |'].join('\n'), 'v31712: an emptied cell');
   const t2 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {}), cm(' k ')), td({}, 'two'))]);
   assert.strictEqual(serializeTable(t2).md, ['| H | I |', '|---|---|', '| <!-- k --> | two |'].join('\n'), 'v31712: its comment stays');
+  // R6 (final review I1): a source `<br>` cell in a row the user did not touch
+  // is the same element as an emptied cell; matched with what it serialized as
+  // before R2, it keeps its bytes and its row (measured before the fix:
+  // `| a<br>b | <br> |` -> `| a<br>b |  |`).
+  const orig = '| H | I |\n|---|---|\n| one | two |\n| a<br>b | <br> |';
+  const t3 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, 'one'), td({}, 'twoZ')),
+    tr(td({}, 'a', el('br', {}), 'b'), td({}, el('br', {})))]);
+  assert.strictEqual(serializeTable(t3, orig).md, '| H | I |\n|---|---|\n| one | twoZ |\n| a<br>b | <br> |', 'v31712 R6: untouched <br> row kept');
+  // …while a cell the user emptied (source `Alpha`) is still written empty
+  const orig4 = '| H | I |\n|---|---|\n| Alpha | two |';
+  const t4 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t4, orig4).md, '| H | I |\n|---|---|\n|  | two |', 'v31712 R6: an emptied cell still writes nothing');
 }
 
 console.log('table-md.test.js OK');

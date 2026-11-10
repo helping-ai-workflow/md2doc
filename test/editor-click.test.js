@@ -12449,6 +12449,20 @@ check('v31712: Enter in an emptied item without a comment writes no extra line',
   await page.keyboard.press('Enter'); await renderIdle(page); await page.keyboard.type('W'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n\nW\n\n- three\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\n- one\n- Alpha\n- three\n\nNext.\n' });
+// final review I1 (R6): a source `<br>` cell in a row nobody touched is the
+// same element as an emptied cell; it keeps its bytes when another row is
+// edited (before the fix: `| y | <br> |` was rewritten `| y |  |`).
+check('v31712: an untouched <br> cell keeps its row when another row is edited', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 3); await page.keyboard.type('Z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n| a | b |\n|---|---|\n| one | twoZ |\n| y | <br> |\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n| a | b |\n|---|---|\n| one | two |\n| y | <br> |\n\nNext.\n' });
+// final review M1 (R7): under an ATX heading a bare `-` is no setext underline,
+// so no U+200B is written there
+check('v31712: Enter at the start of the first item under a heading writes no escape', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'a', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n## H\n-\n- a\n- b\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n## H\n- a\n- b\n\nNext.\n' });
 // R1 (caretPlace): whitespace text after the trailing <br> hid it, so Enter
 // read the emptied paragraph as 'start' and W was typed into it
 check('v31712: Enter in an emptied paragraph holding a space and a comment opens a new one', DESKTOP, async (page, boot) => {

@@ -992,7 +992,9 @@ assert.strictEqual(isPastedUrl('https://x.y a'), false);
   assert.strictEqual(s(el('br', {}), cm(' k '), ' ', cm(' j ')), '<!-- k --> <!-- j -->', 'v31712 R2: two comments, one line');
   assert.strictEqual(s(el('br', {}), raw('</span>'), ' ', cm(' k ')), '<!-- k -->', 'v31712 R2: a stray end tag goes with the text (R5a)');
   assert.strictEqual(s(el('br', {}), cm(' ')), '', 'v31712 R2: a whitespace guard is nothing');
-  assert.strictEqual(s(' '), '', 'v31712 R2: a lone NBSP');
+  // R6b (final review I1): an NBSP is text — a source `&nbsp;` or a typed space — so it is not emptied away
+  assert.strictEqual(s('\u00a0'), '\u00a0', 'v31712 R6b: a lone NBSP is content');
+  assert.strictEqual(im.surfaceIsEmptied(el('p', {}, '\u00a0', el('br', {}))), false, 'v31712 R6b: NBSP + <br> is not emptied');
   assert.strictEqual(s(' ', el('br', {}), ' '), '', 'v31712 R2: whitespace text');
   assert.strictEqual(s(el('strong', {}), el('br', {})), '', 'v31712 R2: an empty mark');
   assert.strictEqual(s(el('br', { 'data-hard-break': '1' })), '', 'v31712 R2: a hard break with nothing to break');
