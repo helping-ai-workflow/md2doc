@@ -809,6 +809,13 @@ if (f1Failures.length) {
   const orig4 = '| H | I |\n|---|---|\n| Alpha | two |';
   const t4 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'two'))]);
   assert.strictEqual(serializeTable(t4, orig4).md, '| H | I |\n|---|---|\n|  | two |', 'v31712 R6: an emptied cell still writes nothing');
+  // re-review N1: two rows with the same DOM, one emptied by the user (source
+  // `Alpha`), one a source `<br>` row. Paired by `cmp` they swapped lines
+  // (`| <br> | x |` then `|  | x |`); paired by what they are written as,
+  // each keeps its own.
+  const orig5 = '| H | I |\n|---|---|\n| Alpha | x |\n| <br> | x |';
+  const t5 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'x')), tr(td({}, el('br', {})), td({}, 'x'))]);
+  assert.strictEqual(serializeTable(t5, orig5).md, '| H | I |\n|---|---|\n|  | x |\n| <br> | x |', 'v31712 N1: no swap');
 }
 
 console.log('table-md.test.js OK');
