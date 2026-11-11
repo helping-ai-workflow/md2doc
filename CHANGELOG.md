@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.17.12 — 2026-11-10
+## v3.17.12 — 2026-11-11
 
 ### Fixed — 編輯器
 
