@@ -1353,5 +1353,37 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   assert.strictEqual(wl[0].start, 10);
 }
 
+// ── v3.17.12: M-empty-br + R5 ──────────────────────────────────────────────
+// Measured on 171d432: an item emptied by the keyboard (Chromium's placeholder
+// <br>) was written `- <br>`, with a comment `- <br><!-- k -->`. R2: it writes
+// a bare marker, or its comments. R5: the first item of the call, emptied,
+// under a line that is not blank (opts.textAbove) — `Text\n-` is a setext H2
+// underline, and an empty `1.` cannot interrupt a paragraph — gets U+200B.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const br = () => el('br', {});
+  const ser = (blocks, opts) => serializeBlocks(blocks, opts).md;
+  assert.strictEqual(ser([liBlock({ id: '0' }, 'one'), liBlock({ id: '1' }, br()), liBlock({ id: '2' }, 'three')]),
+    '- one\n-\n- three', 'v31712 R2: an emptied item is a bare marker');
+  assert.strictEqual(ser([liBlock({ id: '0' }, 'one'), liBlock({ id: '1' }, br(), cm(' k ')), liBlock({ id: '2' }, 'three')]),
+    '- one\n- <!-- k -->\n- three', 'v31712 R2: its comment stays');
+  assert.strictEqual(ser([liBlock({ id: '0', type: 'ol' }, 'one'), liBlock({ id: '1', type: 'ol' }, br())]),
+    '1. one\n2.', 'v31712 R2: ordered');
+  assert.strictEqual(ser([liBlock({ id: '0', task: true }, br(), cm(' k '))]), '- [ ] <!-- k -->', 'v31712 R2: task');
+  for (const [type, want] of [['ul', '- ​\n- b'], ['ol', '1. ​\n2. b']]) {
+    const md = ser([liBlock({ id: '0', type }, br()), liBlock({ id: '1', type }, 'b')], { textAbove: true });
+    assert.strictEqual(md, want, 'v31712 R5: ' + type + ' first item escaped under text');
+    const toks = marked.lexer('Text\n' + md + '\n').filter((t) => t.type !== 'space');
+    assert.deepStrictEqual(toks.map((t) => t.type), ['paragraph', 'list'], 'v31712 R5: ' + type + ' stays a list under the paragraph');
+    assert.strictEqual(toks[0].text, 'Text', 'v31712 R5: the paragraph is untouched');
+    assert.strictEqual(toks[1].items.length, 2, 'v31712 R5: both items');
+  }
+  assert.strictEqual(ser([liBlock({ id: '0' }, br()), liBlock({ id: '1' }, 'b')]), '-\n- b', 'v31712 R5: no text above, no escape');
+  assert.strictEqual(ser([liBlock({ id: '0' }, 'a'), liBlock({ id: '1' }, br())], { textAbove: true }), '- a\n-',
+    'v31712 R5: only the first item');
+  assert.strictEqual(ser([liBlock({ id: '0' }, br(), cm(' k '))], { textAbove: true }), '- <!-- k -->',
+    'v31712 R5: a comment is content (the item may interrupt the paragraph)');
+  assert.strictEqual(ser([liBlock({ id: '0', task: true }, br())], { textAbove: true }), '- [ ] ', 'v31712 R5: a task item needs none (its existing empty form, flushPending)');
+}
 
 console.log('list-md.test.js OK');
