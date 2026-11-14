@@ -12636,3 +12636,142 @@ check('v3178 D2: a cell range over a code-only column, selection-toolbar B -> **
   assert.strictEqual(await commitAndRead(page, boot),
     '# T\n\n| Signal | Note |\n|---|---|\n| **`sig_a`** | x |\n| **`sig_b`** | y |\n');
 }, { md: V3178_SIG });
+
+// ── v3.17.13: keys typed right after Enter / Ctrl+S (K1, K2, K3). Measured on
+// 89b8019 (the ledger's probe/mx.js, /api/render held 300 ms):
+//  K1 — Enter in an emptied top-level list item turned it into a paragraph,
+//       but the item was taken out of the page before the render and the new
+//       paragraph only drawn after it, so a key typed meanwhile landed on BODY
+//       and was lost (`- one\n- three`).
+//  K2 — Ctrl+S after an edit committed the block and its render dropped the
+//       caret on BODY: the next keys went nowhere (`Alphax`, W lost).
+//  K3 — `abc` Shift+Enter, then Enter at the end of `abc`: the half after the
+//       caret held only the line break, the split wrote an empty paragraph
+//       line, no block was there to take the caret, and W was lost. At the
+//       start (a leading line break) a heading was written as an empty `##`.
+// The caret at a text offset in the focused surface (text nodes only).
+async function caretInActiveV31713(page, offset) {
+  assert.ok(await page.evaluate((off) => {
+    const s = document.activeElement;
+    const w = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    let left = off;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if (left <= n.data.length) { getSelection().collapse(n, left); return true; }
+      left -= n.data.length;
+    }
+    return false;
+  }, offset), 'caret placed at ' + offset);
+  await wait(100);
+}
+const V31713_K1_ROWS = [
+  ['a bulleted item', '- one\n- Alpha\n- three\n\nNext.\n', '- one\n\nW\n\n- three\n\nNext.\n'],
+  ['an ordered item', '1. one\n2. Alpha\n3. three\n\nNext.\n', '1. one\n\nW\n\n2. three\n\nNext.\n'],
+  ['a task item', '- [ ] one\n- [ ] Alpha\n- [ ] three\n\nNext.\n', '- [ ] one\n\nW\n\n- [ ] three\n\nNext.\n'],
+  ['the only item', 'Prev.\n\n- Alpha\n\nNext.\n', 'Prev.\n\nW\n\nNext.\n'],
+  ['the first item of the document', '- Alpha\n- three\n\nNext.\n', 'W\n\n- three\n\nNext.\n', ''],
+  ['an item with a comment', '- one\n- Alpha <!-- k -->\n- three\n\nNext.\n', '- one\n\nW\n\n<!-- k -->\n\n- three\n\nNext.\n'],
+];
+for (const key of ['Enter', 'Backspace']) {
+  for (const [label, body, want, head] of V31713_K1_ROWS) {
+    const top = head === undefined ? '# Doc\n\n' : head;
+    check('v31713 K1: ' + key + ' in ' + label + ' emptied, W typed during the render, is kept', DESKTOP, async (page, boot) => {
+      await emptySurfaceV31712(page, /comment/.test(label) ? 'Alpha ' : 'Alpha', /comment/.test(label) ? ['<!-- k -->'] : []);
+      await delayRender(page, 300);
+      const before = renderTotal(page);
+      await page.keyboard.press(key); await page.keyboard.type('W');
+      assert.ok(renderTotal(page) > before, 'W was typed while the render was out');
+      await renderIdle(page);
+      assert.strictEqual(await saveAndRead(page, boot), top + want, 'the bytes on disk');
+    }, { md: top + body });
+  }
+}
+const V31713_K2_ROWS = [
+  // label, body, surface, offset, bytes after `x` Ctrl+S `W`
+  ['a paragraph', 'Prev.\n\nAlpha\n\nNext.\n', 'Alpha', 5, 'Prev.\n\nAlphaxW\n\nNext.\n'],
+  ['a paragraph, mid-text', 'Prev.\n\nAlpha\n\nNext.\n', 'Alpha', 2, 'Prev.\n\nAlxWpha\n\nNext.\n'],
+  ['a heading', 'Prev.\n\n## Alpha\n\nNext.\n', 'Alpha', 5, 'Prev.\n\n## AlphaxW\n\nNext.\n'],
+  ['a list item', '- one\n- Alpha\n- three\n\nNext.\n', 'Alpha', 5, '- one\n- AlphaxW\n- three\n\nNext.\n'],
+  ['a list item, mid-text', '- one\n- Alpha\n- three\n\nNext.\n', 'Alpha', 2, '- one\n- AlxWpha\n- three\n\nNext.\n'],
+  ['a task item', '- [ ] one\n- [ ] Alpha\n\nNext.\n', 'Alpha', 5, '- [ ] one\n- [ ] AlphaxW\n\nNext.\n'],
+  ['a nested item', '- one\n  - Alpha\n\nNext.\n', 'Alpha', 5, '- one\n  - AlphaxW\n\nNext.\n'],
+  ['a cell', '| a | b |\n|---|---|\n| Alpha | two |\n\nNext.\n', 'Alpha', 5, '| a | b |\n|---|---|\n| AlphaxW | two |\n\nNext.\n'],
+];
+for (const [label, body, surface, offset, want] of V31713_K2_ROWS) {
+  // after the save has landed
+  check('v31713 K2: Ctrl+S after an edit in ' + label + ' keeps the caret there', DESKTOP, async (page, boot) => {
+    await focusSurface(page, surface, offset);
+    await page.keyboard.type('x'); await wait(100);
+    await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+    await page.keyboard.type('W'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+for (const [label, body, surface, offset, want] of V31713_K2_ROWS.filter((r) => /^a (paragraph|list item)$/.test(r[0]))) {
+  // while the save is still out: the render has landed, the reply has not
+  check('v31713 K2: Ctrl+S after an edit in ' + label + ', W typed while the save is out, is kept', DESKTOP, async (page, boot) => {
+    await focusSurface(page, surface, offset);
+    await page.keyboard.type('x'); await wait(100);
+    let held = 0;
+    await page.route('**/api/save', async (route) => { held++; await wait(600); await route.continue(); });
+    await page.keyboard.press('Control+s'); await renderIdle(page);
+    await page.keyboard.type('W'); await wait(900); await renderIdle(page);
+    assert.strictEqual(held, 1, 'one save, held while W was typed');
+    await page.unroute('**/api/save');
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// a guard (green before the fix): W typed while the commit render is out
+// replays where it was typed
+check('v31713 K2: Ctrl+S after an edit, W typed during the commit render, is kept', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha', 5);
+  await page.keyboard.type('x'); await wait(100);
+  await delayRender(page, 300);
+  await page.keyboard.press('Control+s'); await page.keyboard.type('W'); await renderIdle(page); await wait(600);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n- AlphaxW\n- three\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n- Alpha\n- three\n\nNext.\n' });
+// a paragraph Enter just opened (a transient): its Ctrl+S makes it a real
+// paragraph, and the caret stays at the end of its text
+check('v31713 K2: Ctrl+S in a new paragraph keeps the caret in it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha', 5);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('new'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await page.keyboard.type('W'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nAlpha\n\nnewW\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nAlpha\n\nNext.\n' });
+// the toolbar's 存檔 keeps the caret too, before its reply lands
+check('v31713 K2: the toolbar save keeps the caret, W typed while the save is out, is kept', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha', 5);
+  await page.keyboard.type('x'); await wait(100);
+  await page.route('**/api/save', async (route) => { await wait(600); await route.continue(); });
+  await page.locator('[data-ed-tb="save"]').click(); await renderIdle(page);
+  await page.keyboard.type('W'); await wait(900); await renderIdle(page);
+  await page.unroute('**/api/save');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n- AlphaxW\n- three\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n- Alpha\n- three\n\nNext.\n' });
+const V31713_K3_ROWS = [
+  // label, body, after Shift+Enter type, caret: 'end' (end of abc) | 'start', bytes after Enter + W
+  ['a paragraph, a line break after the caret', 'Prev.\n\nabc\n\nNext.\n', '', 'end', 'Prev.\n\nabc\n\nW\n\nNext.\n'],
+  ['a paragraph, a line break and a space after the caret', 'Prev.\n\nabc\n\nNext.\n', ' ', 'end', 'Prev.\n\nabc\n\nW\n\nNext.\n'],
+  ['a heading, a line break after the caret', 'Prev.\n\n## abc\n\nNext.\n', '', 'end', 'Prev.\n\n## abc\n\nW\n\nNext.\n'],
+  ['a paragraph, a line break before the caret', 'Prev.\n\nabc\n\nNext.\n', null, 'start', 'Prev.\n\nWabc\n\nNext.\n'],
+  ['a heading, a line break before the caret', 'Prev.\n\n## abc\n\nNext.\n', null, 'start', 'Prev.\n\n## Wabc\n\nNext.\n'],
+  // a guard (green before the fix): text after the line break still splits
+  ['a paragraph, a line break and text after the caret', 'Prev.\n\nabc\n\nNext.\n', 'x', 'end', 'Prev.\n\nabc\n\nWx\n\nNext.\n'],
+];
+for (const [label, body, typed, at, want] of V31713_K3_ROWS) {
+  check('v31713 K3: Enter in ' + label + ' opens a paragraph that takes the next key', DESKTOP, async (page, boot) => {
+    if (at === 'end') {
+      await focusSurface(page, 'abc', 3);
+      await page.keyboard.press('Shift+Enter'); await wait(100);
+      if (typed) { await page.keyboard.type(typed); await wait(100); }
+      await caretInActiveV31713(page, 3);
+    } else {
+      await focusSurface(page, 'abc', 0);
+      await page.keyboard.press('Shift+Enter'); await wait(150);
+    }
+    await page.keyboard.press('Enter'); await renderIdle(page);
+    await page.keyboard.type('W'); await renderIdle(page);
+    assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
