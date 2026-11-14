@@ -788,4 +788,34 @@ if (f1Failures.length) {
   throw new Error('v3.17.8 F1 rows failed (' + f1Failures.length + '):\n  ' + f1Failures.join('\n  '));
 }
 
+// v3.17.12 (M-empty-br): a cell emptied by the keyboard holds Chromium's
+// placeholder <br>; measured on 171d432 it was written `| <br> |`, with a
+// comment `| <br><!-- k --> |`.
+{
+  const cm = (d) => ({ nodeType: 8, nodeName: '#comment', textContent: d });
+  const t1 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t1).md, ['| H | I |', '|---|---|', '|  | two |'].join('\n'), 'v31712: an emptied cell');
+  const t2 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {}), cm(' k ')), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t2).md, ['| H | I |', '|---|---|', '| <!-- k --> | two |'].join('\n'), 'v31712: its comment stays');
+  // R6 (final review I1): a source `<br>` cell in a row the user did not touch
+  // is the same element as an emptied cell; matched with what it serialized as
+  // before R2, it keeps its bytes and its row (measured before the fix:
+  // `| a<br>b | <br> |` -> `| a<br>b |  |`).
+  const orig = '| H | I |\n|---|---|\n| one | two |\n| a<br>b | <br> |';
+  const t3 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, 'one'), td({}, 'twoZ')),
+    tr(td({}, 'a', el('br', {}), 'b'), td({}, el('br', {})))]);
+  assert.strictEqual(serializeTable(t3, orig).md, '| H | I |\n|---|---|\n| one | twoZ |\n| a<br>b | <br> |', 'v31712 R6: untouched <br> row kept');
+  // …while a cell the user emptied (source `Alpha`) is still written empty
+  const orig4 = '| H | I |\n|---|---|\n| Alpha | two |';
+  const t4 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'two'))]);
+  assert.strictEqual(serializeTable(t4, orig4).md, '| H | I |\n|---|---|\n|  | two |', 'v31712 R6: an emptied cell still writes nothing');
+  // re-review N1: two rows with the same DOM, one emptied by the user (source
+  // `Alpha`), one a source `<br>` row. Paired by `cmp` they swapped lines
+  // (`| <br> | x |` then `|  | x |`); paired by what they are written as,
+  // each keeps its own.
+  const orig5 = '| H | I |\n|---|---|\n| Alpha | x |\n| <br> | x |';
+  const t5 = table(tr(th({}, 'H'), th({}, 'I')), [tr(td({}, el('br', {})), td({}, 'x')), tr(td({}, el('br', {})), td({}, 'x'))]);
+  assert.strictEqual(serializeTable(t5, orig5).md, '| H | I |\n|---|---|\n|  | x |\n| <br> | x |', 'v31712 N1: no swap');
+}
+
 console.log('table-md.test.js OK');
