@@ -12679,7 +12679,7 @@ for (const key of ['Enter', 'Backspace']) {
       await delayRender(page, 300);
       const before = renderTotal(page);
       await page.keyboard.press(key); await page.keyboard.type('W');
-      assert.ok(renderTotal(page) > before, 'W was typed while the render was out');
+      assert.ok(renderTotal(page) > before && renderCounters.get(page).n > 0, 'W was typed while the render was out');
       await renderIdle(page);
       assert.strictEqual(await saveAndRead(page, boot), top + want, 'the bytes on disk');
     }, { md: top + body });
@@ -12690,6 +12690,10 @@ const V31713_K2_ROWS = [
   ['a paragraph', 'Prev.\n\nAlpha\n\nNext.\n', 'Alpha', 5, 'Prev.\n\nAlphaxW\n\nNext.\n'],
   ['a paragraph, mid-text', 'Prev.\n\nAlpha\n\nNext.\n', 'Alpha', 2, 'Prev.\n\nAlxWpha\n\nNext.\n'],
   ['a heading', 'Prev.\n\n## Alpha\n\nNext.\n', 'Alpha', 5, 'Prev.\n\n## AlphaxW\n\nNext.\n'],
+  ['a heading, mid-text', 'Prev.\n\n## Alpha\n\nNext.\n', 'Alpha', 2, 'Prev.\n\n## AlxWpha\n\nNext.\n'],
+  ['a task item, mid-text', '- [ ] one\n- [ ] Alpha\n\nNext.\n', 'Alpha', 2, '- [ ] one\n- [ ] AlxWpha\n\nNext.\n'],
+  ['a nested item, mid-text', '- one\n  - Alpha\n\nNext.\n', 'Alpha', 2, '- one\n  - AlxWpha\n\nNext.\n'],
+  ['a cell, mid-text', '| a | b |\n|---|---|\n| Alpha | two |\n\nNext.\n', 'Alpha', 2, '| a | b |\n|---|---|\n| AlxWpha | two |\n\nNext.\n'],
   ['a list item', '- one\n- Alpha\n- three\n\nNext.\n', 'Alpha', 5, '- one\n- AlphaxW\n- three\n\nNext.\n'],
   ['a list item, mid-text', '- one\n- Alpha\n- three\n\nNext.\n', 'Alpha', 2, '- one\n- AlxWpha\n- three\n\nNext.\n'],
   ['a task item', '- [ ] one\n- [ ] Alpha\n\nNext.\n', 'Alpha', 5, '- [ ] one\n- [ ] AlphaxW\n\nNext.\n'],
@@ -12711,11 +12715,13 @@ for (const [label, body, surface, offset, want] of V31713_K2_ROWS.filter((r) => 
   check('v31713 K2: Ctrl+S after an edit in ' + label + ', W typed while the save is out, is kept', DESKTOP, async (page, boot) => {
     await focusSurface(page, surface, offset);
     await page.keyboard.type('x'); await wait(100);
-    let held = 0;
-    await page.route('**/api/save', async (route) => { held++; await wait(600); await route.continue(); });
+    let held = 0; let out = false;
+    await page.route('**/api/save', async (route) => { held++; out = true; await wait(600); out = false; await route.continue(); });
     await page.keyboard.press('Control+s'); await renderIdle(page);
-    await page.keyboard.type('W'); await wait(900); await renderIdle(page);
-    assert.strictEqual(held, 1, 'one save, held while W was typed');
+    await page.keyboard.type('W');
+    assert.ok(out, 'W was typed while the save was out');
+    await wait(900); await renderIdle(page);
+    assert.strictEqual(held, 1, 'one save');
     await page.unroute('**/api/save');
     assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
   }, { md: '# Doc\n\n' + body });
@@ -12743,9 +12749,12 @@ check('v31713 K2: Ctrl+S in a new paragraph keeps the caret in it', DESKTOP, asy
 check('v31713 K2: the toolbar save keeps the caret, W typed while the save is out, is kept', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha', 5);
   await page.keyboard.type('x'); await wait(100);
-  await page.route('**/api/save', async (route) => { await wait(600); await route.continue(); });
+  let out = false;
+  await page.route('**/api/save', async (route) => { out = true; await wait(600); out = false; await route.continue(); });
   await page.locator('[data-ed-tb="save"]').click(); await renderIdle(page);
-  await page.keyboard.type('W'); await wait(900); await renderIdle(page);
+  await page.keyboard.type('W');
+  assert.ok(out, 'W was typed while the save was out');
+  await wait(900); await renderIdle(page);
   await page.unroute('**/api/save');
   assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- one\n- AlphaxW\n- three\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\n- one\n- Alpha\n- three\n\nNext.\n' });
@@ -12773,5 +12782,27 @@ for (const [label, body, typed, at, want] of V31713_K3_ROWS) {
     await page.keyboard.press('Enter'); await renderIdle(page);
     await page.keyboard.type('W'); await renderIdle(page);
     assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n' + want, 'the bytes on disk');
+  }, { md: '# Doc\n\n' + body });
+}
+// final review C1 (R4): the K1 render FAILS once. The early transient stays on
+// screen between the run's items; the retry the next resolution runs must still
+// write the whole run (before R4 it stopped the run at the transient and wrote
+// `- one` over the three lines: `- three` gone).
+for (const [label, body, want] of [
+  ['a middle item', '- one\n- Alpha\n- three\n- four\n\nNext.\n', '- one\n\nW\n\n- three\n- four\n\nNext.\n'],
+  ['an ordered middle item', '1. one\n2. Alpha\n3. three\n\nNext.\n', '1. one\n\nW\n\n2. three\n\nNext.\n'],
+]) {
+  check('v31713 K1: Enter in ' + label + ' emptied, the render fails once, W and Ctrl+S keep every item', DESKTOP, async (page, boot) => {
+    await emptySurfaceV31712(page, 'Alpha', []);
+    let failed = 0;
+    await page.route('**/api/render', async (route) => {
+      if (!failed) { failed++; await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+      await route.continue();
+    });
+    await page.keyboard.press('Enter'); await renderIdle(page); await wait(200);
+    assert.strictEqual(failed, 1, 'the first render failed');
+    await page.keyboard.type('W'); await renderIdle(page);
+    await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+    assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n' + want, 'the bytes on disk');
   }, { md: '# Doc\n\n' + body });
 }
