@@ -97,15 +97,19 @@ function renderTotal(page) { return renderCounters.get(page).total; }
 // the `/api/asset` reply's body before that render starts, so waiting for the
 // reply alone and then renderIdle() could find no render out yet and return
 // before it (v3.17.13 gate: image-drop's Ctrl+S saved the old path). Waits for
-// the reply, then for a new `/api/render` to be sent, then for it to land.
-async function uploadThenRender(page, action) {
-  const before = renderTotal(page);
-  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'), action()]);
-  const deadline = Date.now() + 10000;
-  while (renderTotal(page) === before) {
-    if (Date.now() > deadline) throw new Error('uploadThenRender: no /api/render sent within 10s of the /api/asset reply');
-    await wait(25);
-  }
+// the reply and for the `/api/render` whose document names the uploaded
+// file (`assets/<stem>`), then for it to land. Review M8: by its content, not
+// by a render count taken before the action, which a render the gesture
+// started first (a drag's commit) could satisfy.
+async function uploadThenRender(page, stem, action) {
+  const isLanding = (r) => {
+    try { return new URL(r.url()).pathname === '/api/render' && (r.postData() || '').indexOf('assets/' + stem) !== -1; } catch (e) { return false; }
+  };
+  await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
+    page.waitForRequest(isLanding, { timeout: 15000 }),
+    action(),
+  ]);
   await renderIdle(page);
 }
 // Holds every `/api/render` for `ms` before letting it through: the window in
@@ -5089,7 +5093,7 @@ check('paste-transient: an image replaces it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   // MIGRATED by v3.15.0 T10 (R41): the paste is also waited out through its
   // /api/asset upload, which renderIdle alone does not count.
-  await uploadThenRender(page, () => page.evaluate((b64) => {
+  await uploadThenRender(page, 'dot', () => page.evaluate((b64) => {
       const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
       const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
       document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
@@ -5862,7 +5866,7 @@ async function plusClick(page, text, opts) {
 // Answers a file chooser with the 1px PNG and waits for its upload and the
 // render that follows (R41: renderIdle alone does not wait for /api/asset).
 async function pickImage(page, chooser, base64) {
-  await uploadThenRender(page, () => chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }));
+  await uploadThenRender(page, 'dot', () => chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }));
 }
 check('plus: ＋ opens an empty paragraph below with the menu on it', DESKTOP, async (page) => {
   await plusClick(page, 'Alpha.');
@@ -9648,14 +9652,14 @@ const dropPngOn = (page, selector, b64) => page.evaluate(({ sel, b64 }) => {
 }, { sel: selector, b64 });
 check('image-drop: a PNG dropped on an image replaces its path', DESKTOP, async (page, boot) => {
   const before = await blockList(page);
-  await uploadThenRender(page, () => dropPngOn(page, IMG_SEL, PNG_160));
+  await uploadThenRender(page, 'dot', () => dropPngOn(page, IMG_SEL, PNG_160));
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
   assert.strictEqual((await blockList(page)).length, before.length, 'block count unchanged');
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
 }, IMG_OPTS);
 check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP, async (page, boot) => {
-  await uploadThenRender(page, () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
+  await uploadThenRender(page, 'dot', () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\n!\[chip top\]\(assets\/a\.png "T"\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
 }, IMG_OPTS);
@@ -9664,7 +9668,7 @@ check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP
 check('image-drop: a .drawio dropped on an image still inserts below it', DESKTOP, async (page, boot) => {
   const MX = '<mxfile host="app.diagrams.net"><diagram name="Page-1"><mxGraphModel dx="1" dy="1"><root>' +
     '<mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>';
-  await uploadThenRender(page, () => page.evaluate(({ sel, text }) => {
+  await uploadThenRender(page, 'flow', () => page.evaluate(({ sel, text }) => {
       const dt = new DataTransfer(); dt.items.add(new File([text], 'flow.drawio', { type: '' }));
       document.querySelector(sel).dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
     }, { sel: IMG_SEL, text: MX }));
@@ -10909,7 +10913,7 @@ check('v3173 B2: a text drop from outside the editor is left to the browser', DE
 check('v3173 B2: after a whole bold word moves, a PNG file dropped on a paragraph is still inserted', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
   await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7);
-  await uploadThenRender(page, () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
+  await uploadThenRender(page, 'dot', () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
   assert.strictEqual(await shownNotice(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\n![](assets/dot.png)\n\nOmega d**bravo**elta.\n');
 }, { md: 'Alpha **bravo** charlie.\n\nOmega delta.\n' });
@@ -12873,9 +12877,17 @@ check('v31714 K4: two Ctrl+S in a quote box while its render is out save both ro
   await openQuoteBoxV31714(page, 'end');
   await page.keyboard.type('x'); await wait(100);
   await delayRender(page, 300);
+  // review M7: both rounds' saves, waited for by their replies
+  let saves = 0;
+  page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/save') saves++; });
   await page.keyboard.press('Control+s'); await page.keyboard.type('W');
   await page.keyboard.press('Control+s'); await page.keyboard.type('Y');
-  await renderIdle(page); await wait(1200); await renderIdle(page);
+  const deadline = Date.now() + 15000;
+  while (saves < 2) {
+    if (Date.now() > deadline) throw new Error('two Ctrl+S: ' + saves + ' save(s) answered after 15s');
+    await wait(25);
+  }
+  await renderIdle(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the second round saved');
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> AlphaxWY', caret: 10, focused: true });
   assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlphaxWY\n\nNext.\n', 'the bytes on disk');
@@ -12977,3 +12989,31 @@ check('v31714 K6: ⠿ 刪除 on a middle item below an empty transient writes th
   await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n- one\n- four\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\n- one\n- three\n- four\n\nNext.\n' });
+// final review I-1 (R4): a press on ANOTHER block while the Ctrl+S render is
+// out ends the re-entry. A press on a quote places no caret, so the keys after
+// it stayed held: the box opened again on the first quote with W in it, and
+// the second quote's own open then committed that box (`> AlphaxW`) — the
+// wrong block, silently. The code edit's Ctrl+S had the same hole.
+for (const [label, md, open, want] of [
+  ['a quote box', '# Doc\n\n> Alpha\n\n> Beta\n', 'quote', '> Alphax'],
+  ['the code edit', '# Doc\n\n```\nAlpha\n```\n\n> Beta\n', 'code', '```\nAlphax\n```'],
+]) {
+  check('v31714 I-1: Ctrl+S in ' + label + ', a click on another quote during the render, W never lands in the first block', DESKTOP, async (page, boot) => {
+    if (open === 'quote') await openQuoteBoxV31714(page, 'end');
+    else { await page.locator('.content pre').first().click(); await wait(300); await page.keyboard.press('End'); }
+    await page.keyboard.type('x'); await wait(100);
+    await delayRender(page, 300);
+    await page.keyboard.press('Control+s');
+    const b = await page.locator('.content blockquote').last().boundingBox();
+    await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    await page.keyboard.type('W');
+    await renderIdle(page); await wait(1200); await renderIdle(page);
+    await page.unroute('**/api/render');
+    // the box the re-entry opened commits its replayed keys only when it is
+    // left, after its own save went out — so save once more, then read
+    const box = await rawStateV31714(page);
+    const disk = await saveLandedV31714(page, boot);
+    assert.ok(disk.indexOf(want + '\n\n> Beta') !== -1 || disk.indexOf(want + '\n\n> BetaW') !== -1 || disk.indexOf(want + '\n\n> WBeta') !== -1,
+      'the first block holds only x: ' + JSON.stringify(disk) + ' box ' + JSON.stringify(box));
+  }, { md });
+}
