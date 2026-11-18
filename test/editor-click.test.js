@@ -93,6 +93,21 @@ async function renderIdle(page) {
 }
 // Every `/api/render` request the page has made so far (never decremented).
 function renderTotal(page) { return renderCounters.get(page).total; }
+// An upload (`action`) and the render that lands its result. The page reads
+// the `/api/asset` reply's body before that render starts, so waiting for the
+// reply alone and then renderIdle() could find no render out yet and return
+// before it (v3.17.13 gate: image-drop's Ctrl+S saved the old path). Waits for
+// the reply, then for a new `/api/render` to be sent, then for it to land.
+async function uploadThenRender(page, action) {
+  const before = renderTotal(page);
+  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'), action()]);
+  const deadline = Date.now() + 10000;
+  while (renderTotal(page) === before) {
+    if (Date.now() > deadline) throw new Error('uploadThenRender: no /api/render sent within 10s of the /api/asset reply');
+    await wait(25);
+  }
+  await renderIdle(page);
+}
 // Holds every `/api/render` for `ms` before letting it through: the window in
 // which a commit is in flight, made wide enough that no keystroke can miss it.
 async function delayRender(page, ms) {
@@ -5074,15 +5089,11 @@ check('paste-transient: an image replaces it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
   // MIGRATED by v3.15.0 T10 (R41): the paste is also waited out through its
   // /api/asset upload, which renderIdle alone does not count.
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    page.evaluate((b64) => {
+  await uploadThenRender(page, () => page.evaluate((b64) => {
       const bin = atob(b64); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
       const dt = new DataTransfer(); dt.items.add(new File([u], 'dot.png', { type: 'image/png' }));
       document.activeElement.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-    }, PNG_1PX),
-  ]);
-  await renderIdle(page);
+    }, PNG_1PX));
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
 }, { md: BASE_MD });
@@ -5851,11 +5862,7 @@ async function plusClick(page, text, opts) {
 // Answers a file chooser with the 1px PNG and waits for its upload and the
 // render that follows (R41: renderIdle alone does not wait for /api/asset).
 async function pickImage(page, chooser, base64) {
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }),
-  ]);
-  await renderIdle(page);
+  await uploadThenRender(page, () => chooser.setFiles({ name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(base64 || PNG_1PX, 'base64') }));
 }
 check('plus: ＋ opens an empty paragraph below with the menu on it', DESKTOP, async (page) => {
   await plusClick(page, 'Alpha.');
@@ -9641,22 +9648,14 @@ const dropPngOn = (page, selector, b64) => page.evaluate(({ sel, b64 }) => {
 }, { sel: selector, b64 });
 check('image-drop: a PNG dropped on an image replaces its path', DESKTOP, async (page, boot) => {
   const before = await blockList(page);
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    dropPngOn(page, IMG_SEL, PNG_160),
-  ]);
-  await renderIdle(page);
+  await uploadThenRender(page, () => dropPngOn(page, IMG_SEL, PNG_160));
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/dot.png "T")\n\nOmega.\n');
   assert.strictEqual((await blockList(page)).length, before.length, 'block count unchanged');
   await page.keyboard.press('Control+z'); await renderIdle(page);
   assert.strictEqual(await saveAndRead(page, boot), IMG_MD, 'one Ctrl+Z restores the path');
 }, IMG_OPTS);
 check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP, async (page, boot) => {
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160),
-  ]);
-  await renderIdle(page);
+  await uploadThenRender(page, () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
   const disk = await saveAndRead(page, boot);
   assert.ok(/^# D\n\nAlpha\.\n\n!\[\]\(assets\/dot(-\d+)?\.png\)\n\n!\[chip top\]\(assets\/a\.png "T"\)\n\nOmega\.\n$/.test(disk), 'file: ' + JSON.stringify(disk));
 }, IMG_OPTS);
@@ -9665,14 +9664,10 @@ check('image-drop: a PNG dropped on a paragraph still inserts below it', DESKTOP
 check('image-drop: a .drawio dropped on an image still inserts below it', DESKTOP, async (page, boot) => {
   const MX = '<mxfile host="app.diagrams.net"><diagram name="Page-1"><mxGraphModel dx="1" dy="1"><root>' +
     '<mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>';
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    page.evaluate(({ sel, text }) => {
+  await uploadThenRender(page, () => page.evaluate(({ sel, text }) => {
       const dt = new DataTransfer(); dt.items.add(new File([text], 'flow.drawio', { type: '' }));
       document.querySelector(sel).dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
-    }, { sel: IMG_SEL, text: MX }),
-  ]);
-  await renderIdle(page);
+    }, { sel: IMG_SEL, text: MX }));
   assert.strictEqual(await noticeText(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), '# D\n\nAlpha.\n\n![chip top](assets/a.png "T")\n\n![](assets/flow.drawio)\n\nOmega.\n');
 }, IMG_OPTS);
@@ -10914,11 +10909,7 @@ check('v3173 B2: a text drop from outside the editor is left to the browser', DE
 check('v3173 B2: after a whole bold word moves, a PNG file dropped on a paragraph is still inserted', DESKTOP, async (page, boot) => {
   await selectInSurface(page, 'Alpha bravo charlie.', 6, 11);
   await dragSelectionTo(page, SURFACE_SEL, 'Omega delta.', 7);
-  await Promise.all([
-    page.waitForResponse((r) => new URL(r.url()).pathname === '/api/asset'),
-    dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160),
-  ]);
-  await renderIdle(page);
+  await uploadThenRender(page, () => dropPngOn(page, '.content .ed-block[data-block-type="paragraph"]', PNG_160));
   assert.strictEqual(await shownNotice(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), 'Alpha  charlie.\n\n![](assets/dot.png)\n\nOmega d**bravo**elta.\n');
 }, { md: 'Alpha **bravo** charlie.\n\nOmega delta.\n' });
