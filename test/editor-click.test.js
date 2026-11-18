@@ -12791,6 +12791,8 @@ for (const [label, body, typed, at, want] of V31713_K3_ROWS) {
 for (const [label, body, want] of [
   ['a middle item', '- one\n- Alpha\n- three\n- four\n\nNext.\n', '- one\n\nW\n\n- three\n- four\n\nNext.\n'],
   ['an ordered middle item', '1. one\n2. Alpha\n3. three\n\nNext.\n', '1. one\n\nW\n\n2. three\n\nNext.\n'],
+  ['a middle item with a nested item below', '- one\n- Alpha\n- three\n  - sub\n\nNext.\n', '- one\n\nW\n\n- three\n  - sub\n\nNext.\n'],
+  ['the last item', '- one\n- two\n- Alpha\n\nNext.\n', '- one\n- two\n\nW\n\nNext.\n'],
 ]) {
   check('v31713 K1: Enter in ' + label + ' emptied, the render fails once, W and Ctrl+S keep every item', DESKTOP, async (page, boot) => {
     await emptySurfaceV31712(page, 'Alpha', []);
