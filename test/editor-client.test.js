@@ -512,8 +512,8 @@ for (const needle of ['ed-bar', 'openTableEditor', 'runTableStructureOp',
 
   // fix 2 / R2 — `switchAwayFrom()` answers false when it could NOT resolve what
   // was open (a commit whose render failed), and an editor then stays live
-  // BEHIND the overlay. The session's own Ctrl+S runs
-  // `switchAwayFrom().then(ok => ok && save())`, which commits it and pushes a
+  // BEHIND the overlay. The session's own Ctrl+S runs commitThenSave()
+  // (`switchAwayFrom()`, then `save()` when it answered true), which commits it and pushes a
   // NON-wave op inside the session — whose line delta settleWaveBlocks() would
   // attribute to the wave block, i.e. F2's failure shape through a door F2 did
   // not close. waveDiscardIsSafe()'s depth question catches the discard half of
@@ -1049,7 +1049,11 @@ const shortcutOrderChecks = [
   // call now, hence the `[\s\S]*?` — the invariant this check pins is
   // still "preventDefault() is the very FIRST statement in the branch,
   // nothing awaited ahead of it", not "save() is the very next token").
-  [/key === 's'\)\s*\{\s*e\.preventDefault\(\);[\s\S]*?switchAwayFrom\(\)\.then\(\(ok\) => \{ if \(ok\) save\(\); \}\);/,
+  // v3.17.13 R2 (K2): the call is commitThenSave() now (it keeps the caret
+  // in the block across the resolution's render); its own order — capture,
+  // resolve, restore, then save only when the resolution held — is pinned
+  // right after this list.
+  [/key === 's'\)\s*\{\s*e\.preventDefault\(\);[\s\S]*?commitThenSave\(\)\.catch\(showUnexpectedFailure\);/,
     'Ctrl+S must preventDefault() before resolving the open burst and saving'],
   [/key === 'z'\)\s*\{\s*e\.preventDefault\(\);\s*undo\(\);/, 'Ctrl+Z must preventDefault() before undo()'],
   [/\(e\.key === 'y' \|\| \(e\.shiftKey && e\.key === 'Z'\)\)\)\s*\{\s*e\.preventDefault\(\);\s*redo\(\);/,
@@ -1071,6 +1075,11 @@ const shortcutOrderChecks = [
 for (const [re, msg] of shortcutOrderChecks) {
   assert.ok(re.test(src), msg);
 }
+// v3.17.13 R2 (K2): commitThenSave() resolves first and saves second (Finding
+// 1), and puts the caret back between the two — before the save is sent, so a
+// key typed during the round trip lands in the block.
+assert.ok(/async function commitThenSave\(\) \{\s*markBurstForSave\(\);\s*const caret = captureCaretForSave\(\);\s*const ok = await switchAwayFrom\(\);\s*restoreCaretForSave\(caret\);\s*if \(ok\) return save\(\);\s*\}/.test(src),
+  'commitThenSave() must capture the caret, resolve, restore the caret, then save only when the resolution held');
 // v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
 // that resolved (true) hands the caret on, and a throw is reported
 // (fix round 1, M1).

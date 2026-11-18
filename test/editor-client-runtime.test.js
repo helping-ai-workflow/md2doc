@@ -176,10 +176,10 @@ async function newPage(browser) {
     // `save()` only in that promise's `.then`, so between the keypress and the
     // request ever being sent there is a
     // window in which nothing is in flight and every quiescence-based wait
-    // releases. (That branch is `switchAwayFrom().then((ok) => { if (ok) save(); })`
-    // spelled inline — deliberately NOT `commitThenSave()`, which is the toolbar
-    // button's path; a source-shape check in test/editor-client.test.js pins the
-    // inline spelling.) Measured by deferring only the DISPATCH of /api/save by
+    // releases. (That branch is `commitThenSave()` since v3.17.13 — before, the
+    // same `switchAwayFrom().then((ok) => { if (ok) save(); })` spelled inline;
+    // a source-shape check in test/editor-client.test.js pins the order.)
+    // Measured by deferring only the DISPATCH of /api/save by
     // 300 ms:
     // the S2 T8 cell `li(ol, sole run member) → ul` reported the file as
     // byte-identical with no banner — a dropped gesture — while the DOM said
@@ -1445,8 +1445,8 @@ async function dragRow(page, tableSel, fromIndex, toIndex) {
  * Every Ctrl+S in this file goes through here. Waiting for a quiet page instead
  * is what produced this repo's intermittent "the gesture did nothing" reds: the
  * client's Ctrl+S branch does not issue the save directly — it is
- * `switchAwayFrom().then((ok) => { if (ok) save(); })` spelled inline (NOT
- * `commitThenSave()`, which is the toolbar button's path), and `save()`'s own
+ * `commitThenSave()` (since v3.17.13; the same `switchAwayFrom()` then `save()`
+ * spelled inline before), and `save()`'s own
  * `fetch` is its first statement — so between the keypress and the request
  * being sent there is a window in which nothing is in flight and every
  * quiescence-based wait releases. Measured by deferring only the DISPATCH of
@@ -1457,8 +1457,8 @@ async function dragRow(page, tableSel, fromIndex, toIndex) {
  * thing I asked for is done".
  *
  * Never passes silently on a timeout: the ONE documented path where Ctrl+S
- * issues no save is a commit that failed (`switchAwayFrom()` answering false —
- * again the inline spelling, not `commitThenSave()`),
+ * issues no save is a commit that failed (`switchAwayFrom()` answering false
+ * inside `commitThenSave()`),
  * and that path has already put a banner on screen. Anything else is a real
  * defect, and returning past it would turn it into "the gesture did nothing",
  * which is the misdiagnosis this exists to stop.
