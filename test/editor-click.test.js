@@ -12821,30 +12821,42 @@ async function openQuoteBoxV31714(page, caret) {
     return true;
   }, caret), 'the quote opened its box, focused');
 }
+// Ctrl+S in the box and the save it sends, landed (its reply, then the
+// render settled): the re-entry commits, renders and opens the box again
+// before it saves, a longer path than a fixed wait covers under load.
+async function ctrlSLandedV31714(page) {
+  await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/save', { timeout: 15000 }),
+    page.keyboard.press('Control+s')]);
+  await renderIdle(page);
+}
+async function saveLandedV31714(page, boot) {
+  await ctrlSLandedV31714(page);
+  return fs.readFileSync(boot.mdPath, 'utf8');
+}
 const V31714_Q = '# Doc\n\nPrev.\n\n> Alpha\n\nNext.\n';
 check('v31714 K4: Ctrl+S after an edit in a quote box keeps the box open at the caret', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
   await page.keyboard.type('x'); await wait(100);
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'saved');
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alphax', caret: 8, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 check('v31714 K4: Ctrl+S after an edit mid-text in a two-line quote box keeps the caret there', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 4);
   await page.keyboard.type('x'); await wait(100);
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alxpha\n> beta', caret: 5, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlxWpha\n> beta\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlxWpha\n> beta\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\nPrev.\n\n> Alpha\n> beta\n\nNext.\n' });
 check('v31714 K4: Ctrl+S with no edit in a quote box keeps the box open', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alpha', caret: 7, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaW\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlphaW\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 check('v31714 K4: Ctrl+S in a quote box, W typed during the commit render, is kept', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
@@ -12855,7 +12867,7 @@ check('v31714 K4: Ctrl+S in a quote box, W typed during the commit render, is ke
   assert.ok(renderTotal(page) > before && renderCounters.get(page).n > 0, 'W was typed while the render was out');
   await renderIdle(page); await wait(900);
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> AlphaxW', caret: 9, focused: true });
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 check('v31714 K4: two Ctrl+S in a quote box while its render is out save both rounds, the box stays open', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
@@ -12866,12 +12878,12 @@ check('v31714 K4: two Ctrl+S in a quote box while its render is out save both ro
   await renderIdle(page); await wait(1200); await renderIdle(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the second round saved');
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> AlphaxWY', caret: 10, focused: true });
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxWY\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> AlphaxWY\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 check('v31714 K4: Esc after Ctrl+S in a quote box closes it, nothing lost', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
   await page.keyboard.type('x'); await wait(100);
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   await page.keyboard.press('Escape'); await renderIdle(page); await wait(200);
   assert.strictEqual(await rawStateV31714(page), null, 'the box closed');
   assert.strictEqual(await noticeText(page), null, 'no notice');
@@ -12880,20 +12892,20 @@ check('v31714 K4: Esc after Ctrl+S in a quote box closes it, nothing lost', DESK
 check('v31714 K4: Ctrl+S in a quote box after typing a blank line keeps the box open over both blocks', DESKTOP, async (page, boot) => {
   await openQuoteBoxV31714(page, 'end');
   await page.keyboard.press('Enter'); await page.keyboard.press('Enter'); await page.keyboard.type('New'); await wait(100);
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> Alpha\n\nNew\n\nNext.\n', 'saved');
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alpha\n\nNew', caret: 12, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> Alpha\n\nNewW\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> Alpha\n\nNewW\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 check('v31714 K4: Ctrl+S in a paragraph\'s MD 原始碼 box keeps the box open at the caret', DESKTOP, async (page, boot) => {
   await gutterMenu(page, await blockByText(page, 'Alpha'), 'MD 原始碼');
   await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
   await page.keyboard.type('x'); await wait(100);
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.deepStrictEqual(await rawStateV31714(page), { value: 'Alphax', caret: 6, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nAlphaxW\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\nAlphaxW\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\nPrev.\n\nAlpha\n\nNext.\n' });
 // R2: the box the `> ` shortcut opened, saved before anything was typed, opens
 // again as it was (`> `, caret after the space); it opened again on the `>`
@@ -12903,8 +12915,65 @@ check('v31714 K4: Ctrl+S in the untouched box the "> " shortcut opened keeps it 
   await page.keyboard.press('Enter'); await renderIdle(page);
   await page.keyboard.type('> '); await renderIdle(page); await wait(300);
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> ', caret: 2, focused: true }, 'the shortcut opened its box');
-  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await ctrlSLandedV31714(page);
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> ', caret: 2, focused: true });
   await page.keyboard.type('W'); await wait(100);
-  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> W\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> W\n\nNext.\n', 'the bytes on disk');
 }, { md: '# Doc\n\nPrev.\n\nNext.\n' });
+// v3.17.13 re-review I1 (R4b), the shape that had no click row: an empty
+// transient between `- one` and `- three` (＋ on `one`), a ⠿ structure op on
+// `- three` alone whose render fails, then Ctrl+S. With the transient skipped
+// by the retry's walk, the run reached `- one`, outside the range the retry
+// writes over, and `- one` was written into `- three`'s line.
+for (const op of ['建立副本', '刪除']) {
+  check('v31714 I1: ⠿ ' + op + ' on an item below an empty transient, the render fails once, Ctrl+S writes only that item', DESKTOP, async (page, boot) => {
+    await plusClick(page, 'one');
+    await page.keyboard.press('Escape'); await wait(200);
+    assert.strictEqual(await page.evaluate(() => {
+      const t = document.querySelector('.ed-block[data-ed-transient]');
+      const li = [...document.querySelectorAll('.ed-block')].map((b) => b.textContent.trim());
+      return !!t && t.textContent === '' && li.indexOf('one') !== -1 && li.indexOf('one') < li.indexOf('') && li.indexOf('') < li.indexOf('three');
+    }), true, 'an empty transient between the two items');
+    let failed = 0;
+    await page.route('**/api/render', async (route) => {
+      if (!failed) { failed++; await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+      await route.continue();
+    });
+    await gutterMenu(page, await blockByText(page, 'three'), op); await renderIdle(page); await wait(200);
+    assert.strictEqual(failed, 1, 'the structure op\'s render failed');
+    assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-block[data-ed-transient]')), true, 'the transient still stood when the render failed');
+    await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+    assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'),
+      op === '刪除' ? '# Doc\n\n- one\n\nNext.\n' : '# Doc\n\n- one\n- three\n- three\n\nNext.\n', 'the bytes on disk');
+  }, { md: '# Doc\n\n- one\n- three\n\nNext.\n' });
+}
+// v3.17.14 R3 (K6): ⠿ 刪除 on the last item below an empty transient wrote
+// `- one\nNext.` (the run ended at the transient, so `- three` was removed as a
+// whole list and the blank after it went too). The first and last rows are
+// guards, green before the fix.
+check('v31714 K6: ⠿ 刪除 on the last item, no transient, the render fails once, keeps the blank line', DESKTOP, async (page, boot) => {
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await gutterMenu(page, await blockByText(page, 'three'), '刪除'); await renderIdle(page); await wait(200);
+  assert.strictEqual(failed, 1);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n- one\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n- three\n\nNext.\n' });
+check('v31714 K6: ⠿ 刪除 on the last item below an empty transient keeps the blank line before the paragraph', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'one');
+  await page.keyboard.press('Escape'); await wait(200);
+  await gutterMenu(page, await blockByText(page, 'three'), '刪除'); await renderIdle(page); await wait(200);
+  const mid = fs.readFileSync(boot.mdPath, 'utf8');
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n- one\n\nNext.\n', 'the bytes on disk (before save: ' + JSON.stringify(mid) + ')');
+}, { md: '# Doc\n\n- one\n- three\n\nNext.\n' });
+check('v31714 K6: ⠿ 刪除 on a middle item below an empty transient writes the rest of the list', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'one');
+  await page.keyboard.press('Escape'); await wait(200);
+  await gutterMenu(page, await blockByText(page, 'three'), '刪除'); await renderIdle(page); await wait(200);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n- one\n- four\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- one\n- three\n- four\n\nNext.\n' });
