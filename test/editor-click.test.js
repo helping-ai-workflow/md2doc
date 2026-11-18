@@ -12808,3 +12808,112 @@ for (const [label, body, want] of [
     assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\n' + want, 'the bytes on disk');
   }, { md: '# Doc\n\n' + body });
 }
+
+// ── v3.17.14: Ctrl+S in a raw box (K4). Measured on 60f4417 (the ledger's
+// probe/q.js, /api/render held 300 ms): Ctrl+S in the box a quote opens closed
+// the box — committed, or cancelled when nothing changed — and the caret fell
+// on BODY: a quote has no text surface to take it back, so the next keys went
+// nowhere (`> Alphax`, W lost; with no edit at all, W lost too). R1: the box
+// commits, opens again on the block at the same caret, and keys typed while
+// its render was out replay into it.
+const rawStateV31714 = (page) => page.evaluate(() => {
+  const t = document.querySelector('textarea.ed-raw');
+  return t ? { value: t.value, caret: t.selectionStart, focused: document.activeElement === t } : null;
+});
+async function openQuoteBoxV31714(page, caret) {
+  await page.locator('.content blockquote').first().click(); await renderIdle(page); await wait(200);
+  assert.ok(await page.evaluate((c) => {
+    const t = document.querySelector('textarea.ed-raw');
+    if (!t || document.activeElement !== t) return false;
+    const at = c === 'end' ? t.value.length : c;
+    t.setSelectionRange(at, at);
+    return true;
+  }, caret), 'the quote opened its box, focused');
+}
+const V31714_Q = '# Doc\n\nPrev.\n\n> Alpha\n\nNext.\n';
+check('v31714 K4: Ctrl+S after an edit in a quote box keeps the box open at the caret', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'saved');
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alphax', caret: 8, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: Ctrl+S after an edit mid-text in a two-line quote box keeps the caret there', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 4);
+  await page.keyboard.type('x'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alxpha\n> beta', caret: 5, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlxWpha\n> beta\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nPrev.\n\n> Alpha\n> beta\n\nNext.\n' });
+check('v31714 K4: Ctrl+S with no edit in a quote box keeps the box open', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alpha', caret: 7, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaW\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: Ctrl+S in a quote box, W typed during the commit render, is kept', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await delayRender(page, 300);
+  const before = renderTotal(page);
+  await page.keyboard.press('Control+s'); await page.keyboard.type('W');
+  assert.ok(renderTotal(page) > before && renderCounters.get(page).n > 0, 'W was typed while the render was out');
+  await renderIdle(page); await wait(900);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> AlphaxW', caret: 9, focused: true });
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: two Ctrl+S in a quote box while its render is out save both rounds, the box stays open', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await delayRender(page, 300);
+  await page.keyboard.press('Control+s'); await page.keyboard.type('W');
+  await page.keyboard.press('Control+s'); await page.keyboard.type('Y');
+  await renderIdle(page); await wait(1200); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> AlphaxW\n\nNext.\n', 'the second round saved');
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> AlphaxWY', caret: 10, focused: true });
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> AlphaxWY\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: Esc after Ctrl+S in a quote box closes it, nothing lost', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  await page.keyboard.press('Escape'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await rawStateV31714(page), null, 'the box closed');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: Ctrl+S in a quote box after typing a blank line keeps the box open over both blocks', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.press('Enter'); await page.keyboard.press('Enter'); await page.keyboard.type('New'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# Doc\n\nPrev.\n\n> Alpha\n\nNew\n\nNext.\n', 'saved');
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alpha\n\nNew', caret: 12, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> Alpha\n\nNewW\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+check('v31714 K4: Ctrl+S in a paragraph\'s MD 原始碼 box keeps the box open at the caret', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'Alpha'), 'MD 原始碼');
+  await page.focus('textarea.ed-raw'); await page.keyboard.press('End');
+  await page.keyboard.type('x'); await wait(100);
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: 'Alphax', caret: 6, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\nAlphaxW\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nPrev.\n\nAlpha\n\nNext.\n' });
+// R2: the box the `> ` shortcut opened, saved before anything was typed, opens
+// again as it was (`> `, caret after the space); it opened again on the `>`
+// line as `>` and W was written as `>W`.
+check('v31714 K4: Ctrl+S in the untouched box the "> " shortcut opened keeps it as it was', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Prev.', 5);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('> '); await renderIdle(page); await wait(300);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> ', caret: 2, focused: true }, 'the shortcut opened its box');
+  await page.keyboard.press('Control+s'); await wait(900); await renderIdle(page);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> ', caret: 2, focused: true });
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\nPrev.\n\n> W\n\nNext.\n', 'the bytes on disk');
+}, { md: '# Doc\n\nPrev.\n\nNext.\n' });

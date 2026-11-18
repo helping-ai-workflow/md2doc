@@ -1082,8 +1082,9 @@ assert.ok(/async function commitThenSave\(\) \{\s*markBurstForSave\(\);\s*const 
   'commitThenSave() must capture the caret, resolve, restore the caret, then save only when the resolution held');
 // v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
 // that resolved (true) hands the caret on, and a throw is reported
-// (fix round 1, M1).
-assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
+// (fix round 1, M1). v3.17.14 R1: it also answers whether the leave landed
+// (`return ok;`), for a Ctrl+S the raw box's re-entry held after a held Esc.
+assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); return ok; \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
   'the raw box leave keys must run commit() / cancelAndMaybeDiscard(), hand the caret on only when it resolved, and report a throw');
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
