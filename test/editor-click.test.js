@@ -12994,26 +12994,61 @@ check('v31714 K6: ⠿ 刪除 on a middle item below an empty transient writes th
 // it stayed held: the box opened again on the first quote with W in it, and
 // the second quote's own open then committed that box (`> AlphaxW`) — the
 // wrong block, silently. The code edit's Ctrl+S had the same hole.
-for (const [label, md, open, want] of [
-  ['a quote box', '# Doc\n\n> Alpha\n\n> Beta\n', 'quote', '> Alphax'],
-  ['the code edit', '# Doc\n\n```\nAlpha\n```\n\n> Beta\n', 'code', '```\nAlphax\n```'],
-]) {
-  check('v31714 I-1: Ctrl+S in ' + label + ', a click on another quote during the render, W never lands in the first block', DESKTOP, async (page, boot) => {
+// Re-review I-1: the chips, the diagram / wave edit buttons and the image
+// toolbar sit on document.body, outside every block; a press on another
+// block's chip (here a code block's language chip) has to end it too.
+// Each row asserts the press landed while the Ctrl+S render was still out
+// (a press after it proves nothing about the hold).
+const V31714_I1_ROWS = [
+  // label, md, what is open, press, the first block as it must stay
+  ['a quote box', '# Doc\n\n> Alpha\n\n> Beta\n', 'quote', 'quote', '> Alphax'],
+  ['the code edit', '# Doc\n\n```\nAlpha\n```\n\n> Beta\n', 'code', 'quote', '```\nAlphax\n```'],
+  ['a quote box', '# Doc\n\n> Alpha\n\n```\nBeta\n```\n', 'quote', 'lang chip', '> Alphax'],
+];
+for (const [label, md, open, press, want] of V31714_I1_ROWS) {
+  check('v31714 I-1: Ctrl+S in ' + label + ', a press on another block\'s ' + press + ' during the render, W never lands in the first block', DESKTOP, async (page, boot) => {
     if (open === 'quote') await openQuoteBoxV31714(page, 'end');
     else { await page.locator('.content pre').first().click(); await wait(300); await page.keyboard.press('End'); }
     await page.keyboard.type('x'); await wait(100);
-    await delayRender(page, 300);
+    let sent = 0; let answered = 0;
+    page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/save') sent++; });
+    page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/save') answered++; });
+    if (press === 'lang chip') { await page.locator('.content pre').last().hover(); await wait(250); }
+    await delayRender(page, 600);
     await page.keyboard.press('Control+s');
-    const b = await page.locator('.content blockquote').last().boundingBox();
-    await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    if (press === 'quote') {
+      const b = await page.locator('.content blockquote').last().boundingBox();
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    } else {
+      const b = await page.locator('.ed-code-chips .ed-code-lang').boundingBox();
+      assert.ok(b, 'the language chip of the second block is showing');
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    }
+    assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
     await page.keyboard.type('W');
-    await renderIdle(page); await wait(1200); await renderIdle(page);
+    await renderIdle(page);
+    const deadline = Date.now() + 15000;
+    while (sent === 0 || answered < sent) {
+      if (Date.now() > deadline) throw new Error('saves sent ' + sent + ', answered ' + answered + ' after 15s');
+      await wait(25);
+    }
+    await renderIdle(page);
     await page.unroute('**/api/render');
-    // the box the re-entry opened commits its replayed keys only when it is
-    // left, after its own save went out — so save once more, then read
+    // a box left open (the re-entry's, or one the press opened) commits what
+    // it holds only when it is left, after its own save went out: leave it by
+    // committing (Ctrl+Enter; Esc would discard a W replayed into it, which is
+    // how the chip row first read green), then save once more and read
     const box = await rawStateV31714(page);
-    const disk = await saveLandedV31714(page, boot);
-    assert.ok(disk.indexOf(want + '\n\n> Beta') !== -1 || disk.indexOf(want + '\n\n> BetaW') !== -1 || disk.indexOf(want + '\n\n> WBeta') !== -1,
+    await page.keyboard.press(box && box.focused ? 'Control+Enter' : 'Escape'); await renderIdle(page);
+    await page.locator('.content h1').click(); await renderIdle(page);
+    const before = sent;
+    await page.keyboard.press('Control+s');
+    while (sent === before || answered < sent) {
+      if (Date.now() > deadline + 15000) throw new Error('final save not answered');
+      await wait(25);
+    }
+    const disk = fs.readFileSync(boot.mdPath, 'utf8');
+    assert.ok(disk.indexOf('# Doc\n\n' + want + '\n\n') === 0,
       'the first block holds only x: ' + JSON.stringify(disk) + ' box ' + JSON.stringify(box));
   }, { md });
 }
