@@ -13004,6 +13004,10 @@ const V31714_I1_ROWS = [
   ['a quote box', '# Doc\n\n> Alpha\n\n> Beta\n', 'quote', 'quote', '> Alphax'],
   ['the code edit', '# Doc\n\n```\nAlpha\n```\n\n> Beta\n', 'code', 'quote', '```\nAlphax\n```'],
   ['a quote box', '# Doc\n\n> Alpha\n\n```\nBeta\n```\n', 'quote', 'lang chip', '> Alphax'],
+  // re-review 2: the table's add bars (also on document.body). A guard: green
+  // before R4c too — the add bar's own focus move took the reopening box down
+  // first, so W was dropped with the notice rather than written into the quote.
+  ['a quote box', '# Doc\n\n> Alpha\n\n| a | b |\n|---|---|\n| one | two |\n', 'quote', 'table add-row bar', '> Alphax'],
 ];
 for (const [label, md, open, press, want] of V31714_I1_ROWS) {
   check('v31714 I-1: Ctrl+S in ' + label + ', a press on another block\'s ' + press + ' during the render, W never lands in the first block', DESKTOP, async (page, boot) => {
@@ -13014,11 +13018,14 @@ for (const [label, md, open, press, want] of V31714_I1_ROWS) {
     page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/save') sent++; });
     page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/save') answered++; });
     if (press === 'lang chip') { await page.locator('.content pre').last().hover(); await wait(250); }
+    if (press === 'table add-row bar') await hoverFirstBodyCell(page);
     await delayRender(page, 600);
     await page.keyboard.press('Control+s');
     if (press === 'quote') {
       const b = await page.locator('.content blockquote').last().boundingBox();
       await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    } else if (press === 'table add-row bar') {
+      await clickAddBar(page, 'row'); // asserts the bar answers its own centre
     } else {
       const b = await page.locator('.ed-code-chips .ed-code-lang').boundingBox();
       assert.ok(b, 'the language chip of the second block is showing');
