@@ -322,6 +322,19 @@ async function pressSaveAndLand(ctx) {
   // helper is still event-driven overall (it leaves as soon as the save lands
   // plus this, instead of always sleeping 400 ms).
   await new Promise((r) => setTimeout(r, 250));
+  // v3.17.14 (K4, R1): Ctrl+S in a raw box now keeps the box open (it commits,
+  // opens again at the caret and saves). Every row here was written when it
+  // closed the box and left focus on BODY, and later steps (a ⠿ on that block,
+  // a click elsewhere) read that state. A box the save left focused is blurred,
+  // which resolves it unchanged — the old post-save state. The new behaviour is
+  // pinned in test/editor-click.test.js (the v31714 rows).
+  const leftBox = await ctx.page.evaluate(() => {
+    const a = document.activeElement;
+    if (!a || !a.matches || !a.matches('textarea.ed-raw')) return false;
+    a.blur();
+    return true;
+  });
+  if (leftBox) await new Promise((r) => setTimeout(r, 250));
 }
 
 async function saveAndRead(ctx) {

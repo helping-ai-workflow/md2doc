@@ -13059,3 +13059,28 @@ for (const [label, md, open, press, want] of V31714_I1_ROWS) {
       'the first block holds only x: ' + JSON.stringify(disk) + ' box ' + JSON.stringify(box));
   }, { md });
 }
+// v3.17.14 R5: the box a Ctrl+S opened again had no history of its own, so a
+// Ctrl+Z in it did nothing (gate on 1ddd07c: 轉換成 引用, save, Ctrl+Z — the quote
+// stayed). Until something is typed in it, Ctrl+Z / Ctrl+Y step the document.
+check('v31714 R5: Ctrl+Z right after Ctrl+S in a quote box takes the edit back, Ctrl+Y puts it again', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await ctrlSLandedV31714(page);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alphax', caret: 8, focused: true }, 'the box opened again');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await page.evaluate(() => { const q = document.querySelector('.content blockquote'); const t = document.querySelector('textarea.ed-raw'); return q ? q.textContent.trim() : 'box: ' + (t ? t.value : null); }), 'Alpha', 'undone on screen');
+  await page.keyboard.press('Control+y'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await page.evaluate(() => { const q = document.querySelector('.content blockquote'); const t = document.querySelector('textarea.ed-raw'); return q ? q.textContent.trim() : 'box: ' + (t ? t.value : null); }), 'Alphax', 'redone on screen');
+  await page.locator('.content h1').click(); await renderIdle(page);
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+// a guard: once something is typed in the reopened box, Ctrl+Z is the box's own
+check('v31714 R5: after typing in the reopened box, Ctrl+Z takes back only that typing', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  await ctrlSLandedV31714(page);
+  await page.keyboard.type('W'); await wait(100);
+  await page.keyboard.press('Control+z'); await wait(300);
+  assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alphax', caret: 8, focused: true }, 'the box took back W only');
+  assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
