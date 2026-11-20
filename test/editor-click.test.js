@@ -13265,6 +13265,41 @@ check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its
   assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
 
+// ── v3.17.16 K5: Ctrl+S on an untouched block a "/" item just inserted, then W.
+// The save used to discard the block (R19) and restoreCaretForSave() put the
+// caret back by block id, which by then named the paragraph below: W was
+// written into Omega. (measured on 7dda8e4: 標題 1 → `WOmega.`, 表格 →
+// `Omega.W`). A save is not leaving (v3.17.3 A8, now for every block): the
+// block stays, the caret stays in it, and W goes there.
+for (const [item, want] of [['標題 1', '# W'], ['表格', '| A | B | C |\n|---|---|---|\n| W |  |  |\n|  |  |  |']]) {
+  for (const slow of [false, true]) {
+    check('v31716 K5: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with the render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
+      await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+      await page.keyboard.type('/');
+      await slashPick(page, item);
+      await wait(200);
+      const c = saveCounterV31715(page);
+      if (slow) await delayRender(page, 600);
+      await page.keyboard.press('Control+s');
+      await page.keyboard.type('W');
+      await savesAnsweredV31715(page, c, 'the Ctrl+S');
+      await wait(300); await renderIdle(page);
+      const notice = await noticeText(page);
+      if (slow) await page.unroute('**/api/render');
+      await focusSurface(page, 'Alpha.', 6); await renderIdle(page);
+      const before = c.sent;
+      await page.keyboard.press('Control+s');
+      const deadline = Date.now() + 15000;
+      while (c.sent === before || c.answered < c.sent) {
+        if (Date.now() > deadline) throw new Error('final save not answered');
+        await wait(25);
+      }
+      assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.\n\n' + want + '\n\nOmega.\n', 'the bytes on disk');
+      assert.strictEqual(notice, null, 'the notice');
+    }, { md: BASE_MD });
+  }
+}
+
 // ── v3.17.16 I2: the diagram panel's re-entry hold (it had no `owner`, so no
 // press could claim it). Ctrl+S in the panel, then during the render a press
 // that starts a paragraph (below the last block, 在上方／在下方插入), then W:
