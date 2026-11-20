@@ -81,6 +81,36 @@ assert.strictEqual(st2.op, null, 'identical text → no op pushed');
   assert.deepStrictEqual(eofStack.undo(r3.lines).lines, eofLines, 'undo restores the EOF-list file exactly');
 }
 
+// -- v3.17.14 R3 (K6): a range glued to the line above (no blank between) ---
+// keeps the blank after it. The edit page's run for `- three` ends at an
+// empty transient standing between it and `- one`, so ⠿ 刪除 removed it as a
+// whole list; absorbing the blank after wrote `- one\nNext.`, and `Next.`
+// became the item's lazy continuation line. Measured on 60f4417.
+{
+  const gLines = ['# Doc', '', '- one', '- three', '', 'Next.'];
+  const gBlocks = [
+    { id: 0, type: 'heading',   startLine: 1, endLine: 1 },
+    { id: 1, type: 'list',      startLine: 3, endLine: 4 },
+    { id: 2, type: 'paragraph', startLine: 6, endLine: 6 },
+  ];
+  const gStack = new UndoStack();
+  const g1 = commitRangeRemoval({ lines: gLines, blocks: gBlocks, stack: gStack }, 4, 4);
+  assert.strictEqual(g1.lines.join('\n'), '# Doc\n\n- one\n\nNext.',
+    'a range glued to the line above keeps the blank after it');
+  assert.strictEqual(g1.blocks.find((b) => b.id === 2).startLine, 5, 'the paragraph shifts up by the one removed line');
+  assert.deepStrictEqual(gStack.undo(g1.lines).lines, gLines, 'undo restores the exact original bytes');
+  // a list that interrupts a paragraph: removing the list must not make the
+  // next paragraph a continuation of the first
+  const pLines = ['Para', '- a', '', 'Next'];
+  const pBlocks = [
+    { id: 0, type: 'paragraph', startLine: 1, endLine: 1 },
+    { id: 1, type: 'list',      startLine: 2, endLine: 2 },
+    { id: 2, type: 'paragraph', startLine: 4, endLine: 4 },
+  ];
+  const p1 = commitRangeRemoval({ lines: pLines, blocks: pBlocks, stack: new UndoStack() }, 2, 2);
+  assert.strictEqual(p1.lines.join('\n'), 'Para\n\nNext', 'a list glued under a paragraph keeps the blank after it');
+}
+
 // -- §10-gap fix: commitBlockInsertion() line math ---------------------------
 // Mirrors commitListBlockRemoval()'s own three-case coverage above, in
 // reverse: mid-doc (reuse the existing trailing blank as the separator to
@@ -1082,8 +1112,9 @@ assert.ok(/async function commitThenSave\(\) \{\s*markBurstForSave\(\);\s*const 
   'commitThenSave() must capture the caret, resolve, restore the caret, then save only when the resolution held');
 // v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
 // that resolved (true) hands the caret on, and a throw is reported
-// (fix round 1, M1).
-assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
+// (fix round 1, M1). v3.17.14 R1: it also answers whether the leave landed
+// (`return ok;`), for a Ctrl+S the raw box's re-entry held after a held Esc.
+assert.ok(/function leaveByKey\(leave\) \{\s*const tail = lines\.length - endLine;\s*return leave\(\)\.then\(\(ok\) => \{ if \(ok\) handCaretOnBelow\(tail\); return ok; \}\)\.catch\(showUnexpectedFailure\);\s*\}/.test(src),
   'the raw box leave keys must run commit() / cancelAndMaybeDiscard(), hand the caret on only when it resolved, and report a throw');
 
 // -- structural guard: these sources get inlined into a `<script>...</script>`
