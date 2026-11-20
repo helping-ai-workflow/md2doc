@@ -13273,7 +13273,9 @@ check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its
 // block stays, the caret stays in it, and W goes there.
 for (const [item, want] of [['標題 1', '# W'], ['表格', '| A | B | C |\n|---|---|---|\n| W |  |  |\n|  |  |  |']]) {
   for (const slow of [false, true]) {
-    check('v31716 K5: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with the render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
+    // `slow` holds /api/render: before the fix the save's discard rendered and
+    // the restore ran after it; now nothing renders, so both rows read alike.
+    check('v31716 K5: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with /api/render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
       await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
       await page.keyboard.type('/');
       await slashPick(page, item);
