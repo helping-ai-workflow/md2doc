@@ -13215,3 +13215,48 @@ check('v31715 K8: Ctrl+S in a quote box superseded by an Enter elsewhere, every 
   const { disk, box } = await settleAndReadV31715(page, boot, c);
   assert.strictEqual(disk, '# Doc\n\nPrev.ab\n\ncdZ\n\n> Alphax\n\nNext.\n', 'the bytes on disk (box left: ' + JSON.stringify(box) + ')');
 }, { md: V31714_Q });
+// final review I1: a press on another paragraph AFTER the claim ends it
+// again. W (held after the claim) was replayed behind that press's own
+// positioned Z, at the selection Z restored: `PrZWev.`, silently. Now W goes
+// with the notice and Z stays where it was typed.
+check('v31715 K7: claimed by a press below, then a press in another paragraph, keys after it land there only', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  await page.keyboard.type('W');
+  await focusSurface(page, 'Prev.', 2);
+  assert.ok(renderCounters.get(page).n > 0, 'both presses landed while the Ctrl+S render was out');
+  await page.keyboard.type('Z');
+  await savesAnsweredV31715(page, c, 'the Ctrl+S');
+  await wait(300); await renderIdle(page);
+  const notice = await noticeText(page);
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrZev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(notice, '重新整理期間打的字沒有地方放，已略過', 'W went with the notice');
+}, { md: V31714_Q });
+// review M2: the Ctrl+S render fails under a claim. The box stays open on its
+// text (commit()'s rule); no paragraph opens, and W is written nowhere.
+check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its text and W is written nowhere', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await wait(600); await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(failed, 1, 'the Ctrl+S render failed');
+  const box = await rawStateV31714(page);
+  assert.ok(box && box.value === '> Alphax', 'the box kept its text: ' + JSON.stringify(box));
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-block[data-ed-transient]')), false, 'no paragraph opened');
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
