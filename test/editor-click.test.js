@@ -13084,3 +13084,183 @@ check('v31714 R5: after typing in the reopened box, Ctrl+Z takes back only that 
   assert.deepStrictEqual(await rawStateV31714(page), { value: '> Alphax', caret: 8, focused: true }, 'the box took back W only');
   assert.strictEqual(await saveLandedV31714(page, boot), '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
+
+// ── v3.17.15: what the re-entry does with a press that starts a paragraph
+// (K7) and with a render that was superseded (K8). Each row asserts its
+// press landed while the Ctrl+S render was still out.
+// Counts /api/save requests and replies from here on.
+function saveCounterV31715(page) {
+  const c = { sent: 0, answered: 0 };
+  page.on('request', (r) => { if (new URL(r.url()).pathname === '/api/save') c.sent++; });
+  page.on('response', (r) => { if (new URL(r.url()).pathname === '/api/save') c.answered++; });
+  return c;
+}
+async function savesAnsweredV31715(page, c, what) {
+  const deadline = Date.now() + 15000;
+  while (c.sent === 0 || c.answered < c.sent) {
+    if (Date.now() > deadline) throw new Error(what + ': saves sent ' + c.sent + ', answered ' + c.answered + ' after 15s');
+    await wait(25);
+  }
+  await renderIdle(page);
+}
+// Whatever is left open commits (a box by Ctrl+Enter, a paragraph by the press
+// on the heading), then one more save, and the bytes on disk.
+async function settleAndReadV31715(page, boot, c) {
+  await page.unroute('**/api/render');
+  const box = await rawStateV31714(page);
+  if (box && box.focused) { await page.keyboard.press('Control+Enter'); await renderIdle(page); }
+  await page.locator('.content h1').click(); await renderIdle(page);
+  const before = c.sent;
+  await page.keyboard.press('Control+s');
+  const deadline = Date.now() + 15000;
+  while (c.sent === before || c.answered < c.sent) {
+    if (Date.now() > deadline) throw new Error('final save not answered');
+    await wait(25);
+  }
+  return { disk: fs.readFileSync(boot.mdPath, 'utf8'), box };
+}
+// K7: a press below the last block starts a paragraph there
+// (clickBelowOnMousedown), and the toolbar's 在上方／在下方插入 open one beside
+// the box's block, but the re-entry read those presses as neutral chrome: it
+// kept the keys held and opened the box again with them in it (`> AlphaxW`),
+// or the new paragraph's focus then took the reopened box down and W went
+// with it. Measured on 68162d7 (quote box): below → W lost, 在下方插入 →
+// `> AlphaxW`. `early` types a key between Ctrl+S and the press: it belonged
+// to the box the re-entry no longer opens, so it goes with the notice.
+const V31715_CODE = '# Doc\n\nPrev.\n\n```\nAlpha\n```\n\nNext.\n';
+async function pressStartingParagraphV31715(page, press) {
+  if (press !== 'below the last block') { await page.click('[data-ed-tb="' + (press === '在上方插入' ? 'insert-before' : 'insert-after') + '"]'); return; }
+  const p = await page.evaluate(() => {
+    const all = document.querySelectorAll('.content .ed-block');
+    const r = all[all.length - 1].getBoundingClientRect();
+    return { x: r.left + 40, y: r.bottom + 60 };
+  });
+  assert.ok(p.y < 880, 'room below the last block: ' + p.y);
+  await page.mouse.click(p.x, p.y);
+}
+async function openForV31715(page, open) {
+  if (open === 'quote') { await openQuoteBoxV31714(page, 'end'); return; }
+  await page.locator('.content pre').first().click(); await wait(300); await page.keyboard.press('End');
+}
+function wantV31715(open, press) {
+  const first = open === 'quote' ? '> Alphax' : '```\nAlphax\n```';
+  if (press === '在上方插入') return '# Doc\n\nPrev.\n\nW\n\n' + first + '\n\nNext.\n';
+  if (press === '在下方插入') return '# Doc\n\nPrev.\n\n' + first + '\n\nW\n\nNext.\n';
+  return '# Doc\n\nPrev.\n\n' + first + '\n\nNext.\n\nW\n';
+}
+const V31715_K7_ROWS = [];
+for (const open of ['quote', 'code']) {
+  for (const press of ['below the last block', '在下方插入', '在上方插入']) V31715_K7_ROWS.push([open, press, false]);
+}
+V31715_K7_ROWS.push(['quote', 'below the last block', true], ['code', '在下方插入', true]);
+for (const [open, press, early] of V31715_K7_ROWS) {
+  check('v31715 K7: Ctrl+S in the ' + (open === 'quote' ? 'quote box' : 'code edit') + ', ' + press + ' during the render' +
+      (early ? ' (a key typed before it)' : '') + ', W goes into the new paragraph', DESKTOP, async (page, boot) => {
+    await openForV31715(page, open);
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    await delayRender(page, 600);
+    await page.keyboard.press('Control+s');
+    if (early) await page.keyboard.type('q');
+    await pressStartingParagraphV31715(page, press);
+    assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+    await page.keyboard.type('W');
+    await savesAnsweredV31715(page, c, 'the Ctrl+S');
+    await wait(300); await renderIdle(page);
+    const seen = { notice: await noticeText(page), blocks: await blockList(page), caret: await caretNow(page) };
+    const { disk, box } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31715(open, press),
+      'the bytes on disk (box left open: ' + JSON.stringify(box) + ', after the save: ' + JSON.stringify(seen) + ')');
+    assert.strictEqual(seen.notice, early ? '重新整理期間打的字沒有地方放，已略過' : null, 'the notice');
+  }, { md: open === 'quote' ? V31714_Q : V31715_CODE });
+}
+// A guard for the rows above, green before the fix: the same presses with no
+// render out.
+for (const press of ['below the last block', '在下方插入']) {
+  check('v31715 K7 guard: in a quote box, ' + press + ' with no render out, W goes into the new paragraph', DESKTOP, async (page, boot) => {
+    await openQuoteBoxV31714(page, 'end');
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    if (press === '在下方插入') await page.click('[data-ed-tb="insert-after"]');
+    else {
+      const p = await page.evaluate(() => {
+        const all = document.querySelectorAll('.content .ed-block');
+        const r = all[all.length - 1].getBoundingClientRect();
+        return { x: r.left + 40, y: r.bottom + 60 };
+      });
+      await page.mouse.click(p.x, p.y);
+    }
+    await renderIdle(page); await wait(200);
+    await page.keyboard.type('W'); await wait(100);
+    const { disk } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, press === '在下方插入' ? '# Doc\n\nPrev.\n\n> Alphax\n\nW\n\nNext.\n' : '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n\nW\n', 'the bytes on disk');
+  }, { md: V31714_Q });
+}
+// K8: the Ctrl+S render superseded by a newer one (a press on the paragraph
+// above ends the re-entry; Enter there commits a split while the first render
+// is still out). Whatever the box still holds must not be written again, and
+// what is typed afterwards lands where the caret is.
+check('v31715 K8: Ctrl+S in a quote box superseded by an Enter elsewhere, every key lands once where it was typed', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await focusSurface(page, 'Prev.', 5);
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('ab'); await page.keyboard.press('Enter'); await page.keyboard.type('cd');
+  await savesAnsweredV31715(page, c, 'the Ctrl+S');
+  await wait(300); await renderIdle(page);
+  await page.keyboard.type('Z'); await wait(100);
+  const { disk, box } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrev.ab\n\ncdZ\n\n> Alphax\n\nNext.\n', 'the bytes on disk (box left: ' + JSON.stringify(box) + ')');
+}, { md: V31714_Q });
+// final review I1: a press on another paragraph AFTER the claim ends it
+// again. W (held after the claim) was replayed behind that press's own
+// positioned Z, at the selection Z restored: `PrZWev.`, silently. Now W goes
+// with the notice and Z stays where it was typed.
+check('v31715 K7: claimed by a press below, then a press in another paragraph, keys after it land there only', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  await delayRender(page, 800);
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  await page.keyboard.type('W');
+  await focusSurface(page, 'Prev.', 2);
+  assert.ok(renderCounters.get(page).n > 0, 'both presses landed while the Ctrl+S render was out');
+  await page.keyboard.type('Z');
+  await savesAnsweredV31715(page, c, 'the Ctrl+S');
+  await wait(300); await renderIdle(page);
+  const notice = await noticeText(page);
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrZev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+  assert.strictEqual(notice, '重新整理期間打的字沒有地方放，已略過', 'W went with the notice');
+}, { md: V31714_Q });
+// review M2: the Ctrl+S render fails under a claim. The box stays open on its
+// text (commit()'s rule); no paragraph opens, and W is written nowhere.
+check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its text and W is written nowhere', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await wait(600); await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(failed, 1, 'the Ctrl+S render failed');
+  const box = await rawStateV31714(page);
+  assert.ok(box && box.value === '> Alphax', 'the box kept its text: ' + JSON.stringify(box));
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-block[data-ed-transient]')), false, 'no paragraph opened');
+  // re-review m3: W went with the notice, not silently (the failed render's
+  // red card may stand in front of it, so either one says so)
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-conflict')].some((el) => el.textContent.indexOf('重新整理期間打的字沒有地方放') !== -1)) ||
+    await noticeText(page) === '重新整理期間打的字沒有地方放，已略過', 'W went with the notice: ' + JSON.stringify(await noticeText(page)));
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
