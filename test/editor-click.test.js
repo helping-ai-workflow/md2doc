@@ -13257,6 +13257,10 @@ check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its
   const box = await rawStateV31714(page);
   assert.ok(box && box.value === '> Alphax', 'the box kept its text: ' + JSON.stringify(box));
   assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-block[data-ed-transient]')), false, 'no paragraph opened');
+  // re-review m3: W went with the notice, not silently (the failed render's
+  // red card may stand in front of it, so either one says so)
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-conflict')].some((el) => el.textContent.indexOf('重新整理期間打的字沒有地方放') !== -1)) ||
+    await noticeText(page) === '重新整理期間打的字沒有地方放，已略過', 'W went with the notice: ' + JSON.stringify(await noticeText(page)));
   const { disk } = await settleAndReadV31715(page, boot, c);
   assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
