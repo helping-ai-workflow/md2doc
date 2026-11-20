@@ -13414,6 +13414,32 @@ for (const [open, tb, early] of V31716_K9_ROWS) {
     assert.strictEqual(notice, early ? '重新整理期間打的字沒有地方放，已略過' : null, 'the notice');
   }, { md: open === 'quote' ? V31714_Q : V31715_CODE });
 }
+// The Ctrl+S render fails after 分隔線: no rule is inserted (the claim has no
+// landed block), the box keeps its text, and W goes with the notice — never
+// into the box the failed render left open and focused (measured on ff667cc,
+// the release's raw-box replay took that box: `> AlphaxW`).
+check('v31716 K9: the Ctrl+S render fails after 分隔線, the box keeps its text and W is written nowhere', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await wait(600); await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await page.keyboard.press('Control+s');
+  await page.click('[data-ed-tb="line"]');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(failed, 1, 'the Ctrl+S render failed');
+  const box = await rawStateV31714(page);
+  assert.ok(box && box.value === '> Alphax', 'the box kept its text: ' + JSON.stringify(box));
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-conflict')].some((el) => el.textContent.indexOf('重新整理期間打的字沒有地方放') !== -1)) ||
+    await noticeText(page) === '重新整理期間打的字沒有地方放，已略過', 'W went with the notice: ' + JSON.stringify(await noticeText(page)));
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
 for (const tb of ['line', 'table']) {
   check('v31716 K9 guard: in a quote box, ' + (tb === 'line' ? '分隔線' : '表格') + ' with no render out, W goes into the new block', DESKTOP, async (page, boot) => {
     await openQuoteBoxV31714(page, 'end');
