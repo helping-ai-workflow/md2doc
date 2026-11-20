@@ -13345,3 +13345,49 @@ check('v31716 I2: the panel\'s Ctrl+S render fails after a press below, the pane
   const { disk } = await settleAndReadV31715(page, boot, c);
   assert.strictEqual(disk, V31716_DOT_C, 'the bytes on disk');
 }, { md: DIAG_MD });
+
+// ── v3.17.16 K9: the toolbar's 分隔線 and 表格 during a Ctrl+S re-entry. Each
+// focuses its new block (分隔線 the rule's own raw box, 表格 its first cell),
+// so the keys typed after the press are that block's, as with no render out
+// (the guard rows). Measured on 668d80e (quote box): 分隔線 → `> AlphaxW` and
+// the rule, 表格 → `> AlphaxW` and no table, no notice.
+const V31716_TABLE = '| A | B | C |\n|---|---|---|\n| W |  |  |\n|  |  |  |';
+function wantV31716K9(open, tb) {
+  const first = open === 'quote' ? '> Alphax' : '```\nAlphax\n```';
+  return '# Doc\n\nPrev.\n\n' + first + '\n\n' + (tb === 'line' ? '---W' : V31716_TABLE) + '\n\nNext.\n';
+}
+const V31716_K9_ROWS = [];
+for (const open of ['quote', 'code']) for (const tb of ['line', 'table']) V31716_K9_ROWS.push([open, tb, false]);
+V31716_K9_ROWS.push(['quote', 'table', true]);
+for (const [open, tb, early] of V31716_K9_ROWS) {
+  check('v31716 K9: Ctrl+S in the ' + (open === 'quote' ? 'quote box' : 'code edit') + ', ' + (tb === 'line' ? '分隔線' : '表格') +
+      ' during the render' + (early ? ' (a key typed before it)' : '') + ', W goes into the new block', DESKTOP, async (page, boot) => {
+    await openForV31715(page, open);
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    await delayRender(page, 600);
+    await page.keyboard.press('Control+s');
+    if (early) await page.keyboard.type('q');
+    await page.click('[data-ed-tb="' + tb + '"]');
+    assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+    await page.keyboard.type('W');
+    await savesAnsweredV31715(page, c, 'the Ctrl+S');
+    await wait(300); await renderIdle(page);
+    const notice = await noticeText(page);
+    const { disk, box } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31716K9(open, tb), 'the bytes on disk (box left open: ' + JSON.stringify(box) + ')');
+    assert.strictEqual(notice, early ? '重新整理期間打的字沒有地方放，已略過' : null, 'the notice');
+  }, { md: open === 'quote' ? V31714_Q : V31715_CODE });
+}
+for (const tb of ['line', 'table']) {
+  check('v31716 K9 guard: in a quote box, ' + (tb === 'line' ? '分隔線' : '表格') + ' with no render out, W goes into the new block', DESKTOP, async (page, boot) => {
+    await openQuoteBoxV31714(page, 'end');
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    await page.click('[data-ed-tb="' + tb + '"]');
+    await renderIdle(page); await wait(300);
+    await page.keyboard.type('W'); await wait(100);
+    const { disk } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31716K9('quote', tb), 'the bytes on disk');
+  }, { md: V31714_Q });
+}
