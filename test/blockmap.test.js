@@ -699,6 +699,16 @@ assert.deepStrictEqual(
     ['- a\n\n  ```\n  x\n  ```\n\n  - b\n', [['li', 0, 1, 6], ['li', 1, 7, 7]]],
     ['- a\n\n  > q\n\n  P\n', [['li', 0, 1, 5]]],
     ['-\n  a\n\n  P\n', [['li', 0, 1, 4]]],
+    // T1 review I1: a definition anywhere else in a split item (after the last
+    // paragraph, before a child list, after the last child list, the footnote
+    // form) leaves a non-blank line no segment owns, so no split: these are
+    // the e74eeae shapes. (After the last child list, line 7 is owned by no
+    // block on e74eeae too; unchanged.)
+    ['- a\n\n  P\n\n  [r]: http://u\n', [['li', 0, 1, 5]]],
+    ['- a\n\n  P\n\n  [r]: http://u\n\n  - b\n', [['li', 0, 1, 6], ['li', 1, 7, 7]]],
+    ['- a\n\n  P\n\n  - b\n\n  [r]: http://u\n', [['li', 0, 1, 4], ['li', 1, 5, 5]]],
+    ['- a\n\n  P\n\n  [^1]: note\n', [['li', 0, 1, 5]]],
+    ['- a\n\n  P\n\n  [r]: http://u\n- c\n', [['li', 0, 1, 5], ['li', 0, 6, 6]]],
   ];
   for (const [md, want] of unchanged) {
     assert.deepStrictEqual(shape(md), want, 'v3180 continuation (unchanged): ' + JSON.stringify(md));

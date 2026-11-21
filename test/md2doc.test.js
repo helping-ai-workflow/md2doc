@@ -962,14 +962,26 @@ console.log('md2doc dot WASM test passed');
     assert.deepStrictEqual(tags.map((t) => t.type), ['li'], 'v3180 continuation: an item with a fence is not split');
     assert.ok(tags[0].part.includes('<p>P</p>'), 'v3180 continuation: its paragraph stays in the item');
   }
-  // The reader is untouched (and byte-identical to an edit-free render).
-  for (const md of [B12, A10]) {
+  // The reader is untouched: its body is byte-identical to e74eeae's (the
+  // literals were captured from a git archive of e74eeae).
+  const READER_BASE = [
+    [B12, '<ul>\n<li><p>one</p>\n<p>P</p>\n<ul>\n<li>two</li>\n<li>three</li>\n</ul>\n</li>\n<li><p>four</p>\n</li>\n</ul>\n'],
+    [A10, '<ul>\n<li><p>parent</p>\n<ul>\n<li>c1</li>\n</ul>\n<p>P</p>\n<ul>\n<li>c2</li>\n</ul>\n</li>\n<li><p>after</p>\n</li>\n</ul>\n'],
+  ];
+  for (const [md, want] of READER_BASE) {
     const { bodyHtml } = await renderMarkdown(md, fake, {});
-    assert.match(bodyHtml, md === B12 ? /<li><p>one<\/p>\n<p>P<\/p>\n<ul>/ : /<li><p>parent<\/p>\n<ul>\n<li>c1<\/li>\n<\/ul>\n<p>P<\/p>\n<ul>/,
-      'v3180 continuation: reader HTML unchanged for ' + JSON.stringify(md) + ': ' + bodyHtml);
-    const { marked } = require('marked');
-    assert.ok(!/data-list-para|ed-block/.test(bodyHtml), 'v3180 continuation: no edit markup in the reader');
-    assert.ok(typeof marked.parse === 'function');
+    assert.strictEqual(bodyHtml, want, 'v3180 continuation: reader body byte-identical to e74eeae for ' + JSON.stringify(md));
+  }
+  // PR-4 as revised by R14 (T1 review I2): only the blank lines INSIDE an
+  // item (before a continuation, and between it and more of the same item)
+  // are ignored. The blank line between an item's last content (a
+  // continuation included) and the next item is a separator and counts, as on
+  // e74eeae and in the reader.
+  for (const md of ['- a\n\n  P\n\n- b\n', '- a\n  - b\n\n  P\n\n- c\n', '- a\n\n  P\n\n- b\n\n  Q\n\n- c\n']) {
+    const { tags } = await edit(md);
+    const stamps = tags.filter((t) => t.type === 'li' && t.indent === '0').map((t) => t.loose);
+    assert.ok(stamps.every((v) => v === '1'), 'v3180 continuation (R14): a blank line after a continuation, before the next item, keeps the stamp in ' +
+      JSON.stringify(md) + ': ' + JSON.stringify(stamps));
   }
   // PR-4 stamp: a real blank line between items keeps it.
   {
