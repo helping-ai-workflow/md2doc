@@ -13264,3 +13264,193 @@ check('v31715 K7: the Ctrl+S render fails after a press below, the box keeps its
   const { disk } = await settleAndReadV31715(page, boot, c);
   assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
 }, { md: V31714_Q });
+
+// ── v3.17.16 K5: Ctrl+S on an untouched block a "/" item just inserted, then W.
+// The save used to discard the block (R19) and restoreCaretForSave() put the
+// caret back by block id, which by then named the paragraph below: W was
+// written into Omega. (measured on 7dda8e4: 標題 1 → `WOmega.`, 表格 →
+// `Omega.W`). A save is not leaving (v3.17.3 A8, now for every block): the
+// block stays, the caret stays in it, and W goes there.
+for (const [item, want] of [['標題 1', '# W'], ['表格', '| A | B | C |\n|---|---|---|\n| W |  |  |\n|  |  |  |']]) {
+  for (const slow of [false, true]) {
+    // `slow` holds /api/render: before the fix the save's discard rendered and
+    // the restore ran after it; now nothing renders, so both rows read alike.
+    check('v31716 K5: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with /api/render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
+      await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+      await page.keyboard.type('/');
+      await slashPick(page, item);
+      await wait(200);
+      const c = saveCounterV31715(page);
+      if (slow) await delayRender(page, 600);
+      await page.keyboard.press('Control+s');
+      await page.keyboard.type('W');
+      await savesAnsweredV31715(page, c, 'the Ctrl+S');
+      await wait(300); await renderIdle(page);
+      const notice = await noticeText(page);
+      if (slow) await page.unroute('**/api/render');
+      await focusSurface(page, 'Alpha.', 6); await renderIdle(page);
+      const before = c.sent;
+      await page.keyboard.press('Control+s');
+      const deadline = Date.now() + 15000;
+      while (c.sent === before || c.answered < c.sent) {
+        if (Date.now() > deadline) throw new Error('final save not answered');
+        await wait(25);
+      }
+      assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.\n\n' + want + '\n\nOmega.\n', 'the bytes on disk');
+      assert.strictEqual(notice, null, 'the notice');
+    }, { md: BASE_MD });
+  }
+}
+
+// ── v3.17.16 I2: the diagram panel's re-entry hold (it had no `owner`, so no
+// press could claim it). Ctrl+S in the panel, then during the render a press
+// that starts a paragraph (below the last block, 在上方／在下方插入), then W:
+// W belongs to the new paragraph, as for the raw box and the code edit
+// (v3.17.15 R1). `early` types q into the panel between Ctrl+S and the press:
+// the panel the re-entry no longer opens took it, so it goes with the notice.
+const V31716_DOT_C = DIAG_MD.replace('a -> b', 'a -> c');
+function wantV31716(press) {
+  const dot = '```dot\ndigraph { a -> c }\n```';
+  if (press === '在上方插入') return V31716_DOT_C.replace(dot, 'W\n\n' + dot);
+  if (press === '在下方插入') return V31716_DOT_C.replace(dot, dot + '\n\nW');
+  return V31716_DOT_C + '\nW\n';
+}
+const V31716_I2_ROWS = [];
+for (const press of ['below the last block', '在下方插入', '在上方插入']) V31716_I2_ROWS.push([press, false]);
+V31716_I2_ROWS.push(['below the last block', true]);
+for (const [press, early] of V31716_I2_ROWS) {
+  check('v31716 I2: Ctrl+S in the Graphviz panel, ' + press + ' during the render' + (early ? ' (a key typed before it)' : '') +
+      ', W goes into the new paragraph', DESKTOP, async (page, boot) => {
+    await openDiagPanel(page, '.graphviz svg');
+    await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('c'); await wait(100);
+    const c = saveCounterV31715(page);
+    await delayRender(page, 600);
+    await page.keyboard.press('Control+s');
+    if (early) await page.keyboard.type('q');
+    await pressStartingParagraphV31715(page, press);
+    assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+    await page.keyboard.type('W');
+    await savesAnsweredV31715(page, c, 'the Ctrl+S');
+    await wait(300); await renderIdle(page);
+    const seen = { notice: await noticeText(page), panel: await diagPanel(page) };
+    const { disk } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31716(press), 'the bytes on disk (after the save: ' + JSON.stringify(seen) + ')');
+    assert.strictEqual(seen.panel, null, 'the panel did not open again');
+    assert.strictEqual(seen.notice, early ? '重新整理期間打的字沒有地方放，已略過' : null, 'the notice');
+  }, { md: DIAG_MD });
+}
+// The Mermaid panel runs the same re-entry.
+check('v31716 I2: Ctrl+S in the Mermaid panel, below the last block during the render, W goes into the new paragraph', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.mermaid svg');
+  const src = 'graph TD\n  A --> B';
+  await diagSelect(page, src.length - 1, src.length); await page.keyboard.type('C'); await wait(100);
+  const c = saveCounterV31715(page);
+  await delayRender(page, 600);
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await savesAnsweredV31715(page, c, 'the Ctrl+S');
+  await wait(300); await renderIdle(page);
+  const seen = { notice: await noticeText(page), panel: await diagPanel(page) };
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, DIAG_MD.replace('A --> B', 'A --> C') + '\nW\n', 'the bytes on disk (after the save: ' + JSON.stringify(seen) + ')');
+  assert.deepStrictEqual(seen, { notice: null, panel: null }, 'no notice, the panel did not open again');
+}, { md: DIAG_MD });
+// The panel's Ctrl+S render fails under a claim: the panel stays open on its
+// text (R27 (3)), no paragraph opens, and W is written nowhere (the notice).
+check('v31716 I2: the panel\'s Ctrl+S render fails after a press below, the panel keeps its text and W is written nowhere', DESKTOP, async (page, boot) => {
+  await openDiagPanel(page, '.graphviz svg');
+  await diagSelect(page, DOT_B, DOT_B + 1); await page.keyboard.type('c'); await wait(100);
+  const c = saveCounterV31715(page);
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await wait(600); await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await page.keyboard.press('Control+s');
+  await pressStartingParagraphV31715(page, 'below the last block');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(failed, 1, 'the Ctrl+S render failed');
+  const s = await diagPanel(page);
+  assert.ok(s && s.value === 'digraph { a -> c }', 'the panel kept its text: ' + JSON.stringify(s));
+  assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-block[data-ed-transient]')), false, 'no paragraph opened');
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-conflict')].some((el) => el.textContent.indexOf('重新整理期間打的字沒有地方放') !== -1)) ||
+    await noticeText(page) === '重新整理期間打的字沒有地方放，已略過', 'W went with the notice: ' + JSON.stringify(await noticeText(page)));
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, V31716_DOT_C, 'the bytes on disk');
+}, { md: DIAG_MD });
+
+// ── v3.17.16 K9: the toolbar's 分隔線 and 表格 during a Ctrl+S re-entry. Each
+// focuses its new block (分隔線 the rule's own raw box, 表格 its first cell),
+// so the keys typed after the press are that block's, as with no render out
+// (the guard rows). Measured on 668d80e (quote box): 分隔線 → `> AlphaxW` and
+// the rule, 表格 → `> AlphaxW` and no table, no notice.
+const V31716_TABLE = '| A | B | C |\n|---|---|---|\n| W |  |  |\n|  |  |  |';
+function wantV31716K9(open, tb) {
+  const first = open === 'quote' ? '> Alphax' : '```\nAlphax\n```';
+  return '# Doc\n\nPrev.\n\n' + first + '\n\n' + (tb === 'line' ? '---W' : V31716_TABLE) + '\n\nNext.\n';
+}
+const V31716_K9_ROWS = [];
+for (const open of ['quote', 'code']) for (const tb of ['line', 'table']) V31716_K9_ROWS.push([open, tb, false]);
+V31716_K9_ROWS.push(['quote', 'table', true]);
+for (const [open, tb, early] of V31716_K9_ROWS) {
+  check('v31716 K9: Ctrl+S in the ' + (open === 'quote' ? 'quote box' : 'code edit') + ', ' + (tb === 'line' ? '分隔線' : '表格') +
+      ' during the render' + (early ? ' (a key typed before it)' : '') + ', W goes into the new block', DESKTOP, async (page, boot) => {
+    await openForV31715(page, open);
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    await delayRender(page, 600);
+    await page.keyboard.press('Control+s');
+    if (early) await page.keyboard.type('q');
+    await page.click('[data-ed-tb="' + tb + '"]');
+    assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+    await page.keyboard.type('W');
+    await savesAnsweredV31715(page, c, 'the Ctrl+S');
+    await wait(300); await renderIdle(page);
+    const notice = await noticeText(page);
+    const { disk, box } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31716K9(open, tb), 'the bytes on disk (box left open: ' + JSON.stringify(box) + ')');
+    assert.strictEqual(notice, early ? '重新整理期間打的字沒有地方放，已略過' : null, 'the notice');
+  }, { md: open === 'quote' ? V31714_Q : V31715_CODE });
+}
+// The Ctrl+S render fails after 分隔線: no rule is inserted (the claim has no
+// landed block), the box keeps its text, and W goes with the notice — never
+// into the box the failed render left open and focused (measured on ff667cc,
+// the release's raw-box replay took that box: `> AlphaxW`).
+check('v31716 K9: the Ctrl+S render fails after 分隔線, the box keeps its text and W is written nowhere', DESKTOP, async (page, boot) => {
+  await openQuoteBoxV31714(page, 'end');
+  await page.keyboard.type('x'); await wait(100);
+  const c = saveCounterV31715(page);
+  let failed = 0;
+  await page.route('**/api/render', async (route) => {
+    if (!failed) { failed++; await wait(600); await route.fulfill({ status: 500, contentType: 'text/plain', body: 'boom' }); return; }
+    await route.continue();
+  });
+  await page.keyboard.press('Control+s');
+  await page.click('[data-ed-tb="line"]');
+  assert.ok(renderCounters.get(page).n > 0, 'the press landed while the Ctrl+S render was out');
+  await page.keyboard.type('W');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual(failed, 1, 'the Ctrl+S render failed');
+  const box = await rawStateV31714(page);
+  assert.ok(box && box.value === '> Alphax', 'the box kept its text: ' + JSON.stringify(box));
+  assert.ok(await page.evaluate(() => [...document.querySelectorAll('.ed-conflict')].some((el) => el.textContent.indexOf('重新整理期間打的字沒有地方放') !== -1)) ||
+    await noticeText(page) === '重新整理期間打的字沒有地方放，已略過', 'W went with the notice: ' + JSON.stringify(await noticeText(page)));
+  const { disk } = await settleAndReadV31715(page, boot, c);
+  assert.strictEqual(disk, '# Doc\n\nPrev.\n\n> Alphax\n\nNext.\n', 'the bytes on disk');
+}, { md: V31714_Q });
+for (const tb of ['line', 'table']) {
+  check('v31716 K9 guard: in a quote box, ' + (tb === 'line' ? '分隔線' : '表格') + ' with no render out, W goes into the new block', DESKTOP, async (page, boot) => {
+    await openQuoteBoxV31714(page, 'end');
+    await page.keyboard.type('x'); await wait(100);
+    const c = saveCounterV31715(page);
+    await page.click('[data-ed-tb="' + tb + '"]');
+    await renderIdle(page); await wait(300);
+    await page.keyboard.type('W'); await wait(100);
+    const { disk } = await settleAndReadV31715(page, boot, c);
+    assert.strictEqual(disk, wantV31716K9('quote', tb), 'the bytes on disk');
+  }, { md: V31714_Q });
+}
