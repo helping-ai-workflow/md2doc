@@ -816,11 +816,18 @@ console.log('md2doc dot WASM test passed');
   const r = await renderMarkdown('# T\n\n## See [[ref-1, §2]] here\n\nA [[a & b]] z.\n', fake, {});
   assert.ok(r.bodyHtml.includes('<h2 id="see-ref-1-2-here"'), 'D8 heading id unchanged: ' + r.bodyHtml);
   assert.ok(r.html.includes('"title":"See [ref-1, §2] here","searchText":"See [ref-1, §2] here A [a & b] z."'), 'D8 section index text unchanged');
-  // a citation column keeps its v3.17.8 width class (measured on main ba94128:
-  // narrow, prose) — the old pre-pass made classifyColumns() measure the
-  // anchor's markup, and a patch release does not re-lay-out such tables.
+  // v3.18.0 Q9 (user): a citation column is measured by its visible text,
+  // `[body]`, as a link is. v3.17.9 kept the old pre-pass's anchor markup
+  // here (narrow, prose) so a patch release did not re-lay-out tables; the
+  // markup made every citation column read as prose, which only matters at
+  // ≤1080px (the 15em prose floor). Same class as the plain-text column with
+  // the same visible text.
   h = await body('| id | src |\n|---|---|\n| R-1 | [[upstream-spec §3.1#verify]] |\n| R-2 | [[upstream-spec §2.3]] |\n');
-  assert.ok(h.includes('<colgroup><col class="col-narrow"><col class="col-prose"></colgroup>'), 'D8 citation column class unchanged: ' + h);
+  assert.ok(h.includes('<colgroup><col class="col-narrow"><col></colgroup>'), 'Q9 citation column measured by its visible text: ' + h);
+  const plain = await body('| id | src |\n|---|---|\n| R-1 | \\[upstream-spec §3.1#verify\\] |\n| R-2 | \\[upstream-spec §2.3\\] |\n');
+  assert.strictEqual(/<colgroup>.*?<\/colgroup>/.exec(h)[0], /<colgroup>.*?<\/colgroup>/.exec(plain)[0], 'Q9 same classes as the same visible text');
+  h = await body('| id | src |\n|---|---|\n| R-1 | [[ieee-802-3-2022, Cl.4.2.3.3]]、[[rfc-2819-mib, Cl.2]] |\n| R-2 | [[ieee-802-3-2022, Cl.30.3.1.1.25]] |\n| R-3 | [[rfc-2819-mib, Cl.2]] |\n');
+  assert.ok(h.includes('<colgroup><col class="col-narrow"><col></colgroup>'), 'Q9 a column of short citations is not prose: ' + h);
   // a citation inside a link label or an image alt (final review #2): marked's
   // label allows one nested bracket level and `[[...]]` is two, so without
   // the link tokenizer's masking the whole link fell apart into text. The
