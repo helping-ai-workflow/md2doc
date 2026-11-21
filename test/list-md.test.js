@@ -1406,13 +1406,19 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
   }
   const olBlock = (o, ...inner) => liBlock(Object.assign({ type: 'ol' }, o), ...inner);
   const flat = (html) => html.replace(/\n/g, '');
+  // M1 (T2 review): every output the caller would write (nothing
+  // unsupported) is re-lexed; the group's last row checks none was missed.
+  const unrelexed = new Map();
+  const ZW = '\u200b';
   function ser(blocks, opts, label) {
     const r = serializeBlocks(blocks, opts);
     assert.strictEqual(r.lineMeta.length, r.md === '' ? 0 : r.md.split('\n').length, label + ': lineMeta parallel to lines');
+    if (r.unsupported.length === 0) unrelexed.set(r.md, label);
     return r;
   }
   function relex(md, wantHtml, label) {
     assert.strictEqual(flat(marked.parse(md + '\n')), wantHtml, label + ': marked re-lex\nmd:\n' + md);
+    unrelexed.delete(md);
   }
 
   // (1) B12 after the insert, nothing carried.
@@ -1465,15 +1471,19 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
       blankBefore: (cur, prev) => !!prev && prev.getAttribute('data-list-para') === '1',
     }, L + 'carried odd lead');
     assert.strictEqual(r.md, src.join('\n'), L + 'carried: byte-identical, odd lead kept');
-    const a10 = ['- parent', '  - c1', '', '  P', '  lazy', '', '  - c2', '- after'];
+    relex(r.md, '<ul><li><p>one</p><p> P</p><ul><li>two</li><li>three</li></ul></li><li><p>four</p></li></ul>', L + 'carried odd lead');
+    // A two-line continuation (its second line at the column, an ordinary line).
+    const a10 = ['- parent', '  - c1', '', '  P', '  P2', '', '  - c2', '- after'];
     const r2 = ser([
-      liBlock({ id: '0' }, 'parent'), liBlock({ id: '1', indent: 1 }, 'c1'), paraBlock({ id: '2' }, 'P\nlazy'),
+      liBlock({ id: '0' }, 'parent'), liBlock({ id: '1', indent: 1 }, 'c1'), paraBlock({ id: '2' }, 'P\nP2'),
       liBlock({ id: '3', indent: 1 }, 'c2'), liBlock({ id: '4' }, 'after'),
     ], {
       carryOver: { 0: [a10[0]], 1: [a10[1]], 2: [a10[3], a10[4]], 3: [a10[6]], 4: [a10[7]] },
       blankBefore: (cur, prev) => !!prev && prev.getAttribute('data-list-para') === '1',
     }, L + 'carried A10');
     assert.strictEqual(r2.md, a10.join('\n'), L + 'carried A10: byte-identical');
+    relex(r2.md, '<ul><li><p>parent</p><ul><li>c1</li></ul><p>PP2</p><ul><li>c2</li></ul></li><li><p>after</p></li></ul>',
+      L + 'carried A10');
   }
 
   // (5) The parent moves one level deeper (Tab-like): its replay shifts by +2
@@ -1482,17 +1492,35 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     const r = ser([
       liBlock({ id: '0' }, 'zero'), liBlock({ id: '1', indent: 1 }, 'one'), paraBlock({ id: '2', indent: 2 }, 'P'),
       liBlock({ id: '3', indent: 2 }, 'two'),
-    ], { carryOver: { 0: ['- zero'], 1: ['- one'], 2: ['  P', 'lazy'], 3: ['  - two'] } }, L + 'parent +1');
-    assert.strictEqual(r.md, '- zero\n  - one\n\n    P\n  lazy\n\n    - two', L + 'parent +1: P shifts by +2');
+    ], { carryOver: { 0: ['- zero'], 1: ['- one'], 2: ['  P', '  P2'], 3: ['  - two'] } }, L + 'parent +1');
+    assert.strictEqual(r.md, '- zero\n  - one\n\n    P\n    P2\n\n    - two', L + 'parent +1: P shifts by +2');
+    relex(r.md, '<ul><li>zero<ul><li><p>one</p><p>PP2</p><ul><li>two</li></ul></li></ul></li></ul>', L + 'parent +1');
     // A carried column the new parent cannot hold (P was under `- x`, its
     // parent is now `1. x`, content column 3): written at the parent's column.
     const r2 = ser([olBlock({ id: '0' }, 'x'), paraBlock({ id: '1' }, 'P')],
       { carryOver: { 0: ['1. x'], 1: ['  P'] } }, L + 'window');
     assert.strictEqual(r2.md, '1. x\n\n   P', L + 'window: P moved to the parent\'s content column');
-    // A tab in the carried lead declines the replay (re-serialized instead).
-    const r3 = ser([liBlock({ id: '0' }, 'x'), paraBlock({ id: '1' }, 'P')],
-      { carryOver: { 0: ['- x'], 1: ['\tP'] } }, L + 'tab');
-    assert.strictEqual(r3.md, '- x\n\n  P', L + 'tab: re-serialized');
+    relex(r2.md, '<ol><li><p>x</p><p>P</p></li></ol>', L + 'window');
+    // M2: a tab in the carried lead replays byte-identical when the parent did
+    // not move (delta 0); when the column must be stated (the parent was
+    // re-serialized) it declines and P is re-serialized.
+    const r3 = ser([liBlock({ id: '0' }, 'x'), paraBlock({ id: '1' }, 'P~')],
+      { carryOver: { 0: ['- x'], 1: ['\tP~'] } }, L + 'tab kept');
+    assert.strictEqual(r3.md, '- x\n\n\tP~', L + 'tab: replayed at delta 0');
+    relex(r3.md, '<ul><li><p>x</p><p>  P~</p></li></ul>', L + 'tab kept');
+    const r4 = ser([liBlock({ id: '0' }, 'x!'), paraBlock({ id: '1' }, 'P')],
+      { carryOver: { 1: ['\tP'] } }, L + 'tab declined');
+    assert.strictEqual(r4.md, '- x!\n\n  P', L + 'tab: re-serialized when the parent was');
+    relex(r4.md, '<ul><li><p>x!</p><p>P</p></li></ul>', L + 'tab declined');
+    // I2: the fallback never puts a line below the content column (marked has
+    // no lazy line for a continuation paragraph: it would leave the item). The
+    // parent was re-serialized and P was carried at an odd lead 3 then 2;
+    // shifting both by -1 would put line 2 at column 1, so P is re-serialized
+    // at the column instead (text kept, layout canonical).
+    const r5 = ser([liBlock({ id: '0' }, 'one!'), paraBlock({ id: '1' }, 'P line1\nP line2'), liBlock({ id: '2' }, 'four')],
+      { carryOver: { 1: ['   P line1', '  P line2'], 2: ['- four'] } }, L + 'fallback floor');
+    assert.strictEqual(r5.md, '- one!\n\n  P line1\n  P line2\n\n- four', L + 'fallback: no line below the column');
+    relex(r5.md, '<ul><li><p>one!</p><p>P line1P line2</p></li><li><p>four</p></li></ul>', L + 'fallback floor');
   }
 
   // (6) A two-line continuation (hard-wrapped) is written at the column on
@@ -1521,11 +1549,22 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
     const br = () => el('br', {});
     const blocks = () => [liBlock({ id: '0' }, 'one'), paraBlock({ id: '1' }, 'P'), liBlock({ id: '2', indent: 1 }, br())];
     const r = ser(blocks(), { blankBefore: () => false }, L + 'setext');
-    assert.strictEqual(r.md, '- one\n\n  P\n  - ​', L + 'setext: escaped');
-    assert.ok(!/<h2>/.test(marked.parse(r.md + '\n')), L + 'setext: P is not a heading');
-    assert.strictEqual(ser(blocks(), undefined, L + 'setext blank').md, '- one\n\n  P\n\n  -', L + 'setext: a blank line needs none');
-    assert.strictEqual(ser([liBlock({ id: '0' }, 'one'), paraBlock({ id: '1' }, 'P'), liBlock({ id: '2' }, br())],
-      { blankBefore: () => false }, L + 'setext shallower').md, '- one\n\n  P\n-', L + 'setext: a shallower item needs none');
+    assert.strictEqual(r.md, '- one\n\n  P\n  - ' + ZW, L + 'setext: escaped');
+    relex(r.md, '<ul><li><p>one</p><p>P</p><ul><li>' + ZW + '</li></ul></li></ul>', L + 'setext');
+    const b = ser(blocks(), undefined, L + 'setext blank').md;
+    assert.strictEqual(b, '- one\n\n  P\n\n  -', L + 'setext: a blank line needs none');
+    relex(b, '<ul><li><p>one</p><p>P</p><ul><li></li></ul></li></ul>', L + 'setext blank');
+    const sh = ser([liBlock({ id: '0' }, 'one'), paraBlock({ id: '1' }, 'P'), liBlock({ id: '2' }, br())],
+      { blankBefore: () => false }, L + 'setext shallower').md;
+    assert.strictEqual(sh, '- one\n\n  P\n-', L + 'setext: a shallower item needs none');
+    relex(sh, '<ul><li><p>one</p><p>P</p></li><li></li></ul>', L + 'setext shallower');
+    // An empty `1.` there too: marked lets it interrupt `  P` on its own, but
+    // not when a `-` at column 0 follows (`  P\n  1.\n- b` makes `1.` P's
+    // text, measured), and CommonMark never does. Escaped like the bullet.
+    const oe = ser([liBlock({ id: '0' }, 'a'), paraBlock({ id: '1' }, 'P'), olBlock({ id: '2', indent: 1 }, br()),
+      liBlock({ id: '3' }, 'b')], { blankBefore: () => false }, L + 'setext ordered');
+    assert.strictEqual(oe.md, '- a\n\n  P\n  1. ' + ZW + '\n- b', L + 'setext: an empty ordered item is escaped too');
+    relex(oe.md, '<ul><li><p>a</p><p>P</p><ol><li>' + ZW + '</li></ol></li><li><p>b</p></li></ul>', L + 'setext ordered');
   }
 
   // (9) No parent in the span: LIST-PARA (the caller refuses).
@@ -1540,6 +1579,20 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
       { carryOver: { 1: ['  P'], 2: ['  - two'] } }, L + 'orphan 0');
     assert.deepStrictEqual(r2.unsupported, [], L + 'orphan 0: supported');
     assert.strictEqual(r2.md, 'P\n\n- two', L + 'orphan 0: column 0');
+    relex(r2.md, '<p>P</p><ul><li>two</li></ul>', L + 'orphan 0');
+    // M4: that orphan ended the list above it, so the list after it starts at
+    // 1 (PR-5's restart), not at opts.firstOrdinal.
+    const r3 = ser([paraBlock({ id: '1', indent: 0 }, 'P'), olBlock({ id: '2' }, 'x')], { firstOrdinal: 3 }, L + 'orphan ordinal');
+    assert.strictEqual(r3.md, 'P\n\n1. x', L + 'orphan 0: the list after it starts at 1');
+    relex(r3.md, '<p>P</p><ol><li>x</li></ol>', L + 'orphan ordinal');
+    // M5: a continuation closes the depths below it, so a block right after it
+    // that is deeper has no parent: LIST-PARA, never a silent re-parent.
+    const r4 = ser([liBlock({ id: '0' }, 'a'), liBlock({ id: '1', indent: 1 }, 'b'), paraBlock({ id: '2' }, 'Pa'),
+      paraBlock({ id: '3', indent: 2 }, 'Pb')], undefined, L + 'P under P');
+    assert.ok(r4.unsupported.indexOf('LIST-PARA') !== -1, L + 'a deeper P right after a P: LIST-PARA');
+    const r5 = ser([liBlock({ id: '0' }, 'one'), paraBlock({ id: '1' }, 'P'), liBlock({ id: '2', indent: 2 }, 'deep')],
+      undefined, L + 'li under P');
+    assert.ok(r5.unsupported.indexOf('LIST-PARA') !== -1, L + 'a deeper li right after a P: LIST-PARA');
   }
 
   // (10) planRuns: P at depth 1 splits the c1 / c2 runs; `four` continues
@@ -1574,12 +1627,66 @@ function assertTaskChildNests(listName, pliChecked, expectedMd, label) {
       undefined, L + 'empty');
     assert.deepStrictEqual(e.unsupported, [], L + 'empty: supported');
     assert.strictEqual(e.md, '- one\n- two', L + 'empty: writes nothing');
-    const z = ser([liBlock({ id: '0' }, 'one'), paraBlock({}, '​')], undefined, L + 'zwsp');
+    relex(e.md, '<ul><li>one</li><li>two</li></ul>', L + 'empty');
+    const z = ser([liBlock({ id: '0' }, 'one'), paraBlock({}, ZW)], undefined, L + 'zwsp');
     assert.strictEqual(z.md, '- one', L + 'a U+200B-only skeleton is empty');
+    relex(z.md, '<ul><li>one</li></ul>', L + 'zwsp');
+    // M3: a ghost does not flush an open task prefix either (`- [ ] - b` as
+    // without it).
+    const emptyP = () => paraBlock({}, el('p', { class: 'ed-wys-armed' }, el('br', {})));
+    const g = ser([liBlock({ id: '0', task: true }, el('br', {})), emptyP(), liBlock({ id: '2', indent: 1 }, 'b')],
+      undefined, L + 'ghost pending');
+    assert.strictEqual(g.md, '- [ ] - b', L + 'ghost: the task prefix still joins its child');
+    relex(g.md, '<ul><li><input disabled="" type="checkbox"> <ul><li>b</li></ul></li></ul>', L + 'ghost pending');
     const a = ser([liBlock({ id: '0' }, 'one'), paraBlock({ id: '1' }, el('ul', {}, el('li', {}, 'x')))],
       undefined, L + 'alien');
     assert.ok(a.unsupported.indexOf('UL') !== -1, L + 'alien child flagged');
   }
+
+  // (13) I1 (T2 review): an EMPTY parent whose next block is its own
+  // continuation. A bare `-` / `1.` starts the item with a blank line, so the
+  // item ends at the blank before P and P leaves the list (marked: <li></li>
+  // then <p>P</p>). The parent is written `- ` + U+200B instead; the item
+  // serializer takes it back off. Not needed when a child list comes first
+  // (`-\n  - c\n\n  P` stays inside).
+  {
+    const br = () => el('br', {});
+    const r = ser([liBlock({ id: '0' }, br()), paraBlock({ id: '1' }, 'P'), liBlock({ id: '2', indent: 1 }, 'two'),
+      liBlock({ id: '3', indent: 1 }, 'three'), liBlock({ id: '4' }, 'four')], undefined, L + 'empty parent');
+    assert.strictEqual(r.md, '- ' + ZW + '\n\n  P\n\n  - two\n  - three\n- four', L + 'empty parent: escaped');
+    relex(r.md, '<ul><li><p>' + ZW + '</p><p>P</p><ul><li>two</li><li>three</li></ul></li><li><p>four</p></li></ul>',
+      L + 'empty parent');
+    const o = ser([olBlock({ id: '0' }, br()), paraBlock({ id: '1' }, 'P'), olBlock({ id: '2', indent: 1 }, 'two')],
+      undefined, L + 'empty ordered parent');
+    assert.strictEqual(o.md, '1. ' + ZW + '\n\n   P\n\n   1. two', L + 'empty ordered parent: escaped');
+    relex(o.md, '<ol><li><p>' + ZW + '</p><p>P</p><ol><li>two</li></ol></li></ol>', L + 'empty ordered parent');
+    const c = ser([liBlock({ id: '0' }, br()), liBlock({ id: '1', indent: 1 }, 'c'), paraBlock({ id: '2' }, 'P')],
+      undefined, L + 'empty parent, child first');
+    assert.strictEqual(c.md, '-\n  - c\n\n  P', L + 'empty parent with a child list first: unchanged');
+    relex(c.md, '<ul><li><ul><li>c</li></ul><p>P</p></li></ul>', L + 'empty parent, child first');
+    // An empty TASK parent: `- [ ] \n\n  x` renders inside, but marked's item
+    // then has no head token (its tokens start with the blank), so the next
+    // load cannot split it (design §2.1: the head must start on the marker
+    // line). `- [ ] ` + U+200B keeps a head; ordered task too.
+    const t = ser([liBlock({ id: '0', task: true }, br()), paraBlock({ id: '1' }, 'x')], undefined, L + 'empty task parent');
+    assert.strictEqual(t.md, '- [ ] ' + ZW + '\n\n  x', L + 'empty task parent: escaped');
+    relex(t.md, '<ul><li><p><input disabled="" type="checkbox"> ' + ZW + '</p><p>x</p></li></ul>', L + 'empty task parent');
+    assert.deepStrictEqual(marked.lexer(t.md + '\n')[0].items[0].tokens.map((tk) => tk.type), ['text', 'space', 'text'],
+      L + 'empty task parent: marked sees a head, then P');
+    const ot = ser([olBlock({ id: '0', task: true, checked: true }, br()), paraBlock({ id: '1' }, 'x')], undefined,
+      L + 'empty ordered task parent');
+    assert.strictEqual(ot.md, '1. [x] ' + ZW + '\n\n   x', L + 'empty ordered task parent: escaped');
+    relex(ot.md, '<ol><li><p><input checked="" disabled="" type="checkbox"> ' + ZW + '</p><p>x</p></li></ol>',
+      L + 'empty ordered task parent');
+    // A ghost between the empty parent and its P does not hide P.
+    const gp = ser([liBlock({ id: '0' }, br()), paraBlock({}, el('p', {}, br())), paraBlock({ id: '2' }, 'P')],
+      undefined, L + 'empty parent, ghost between');
+    assert.strictEqual(gp.md, '- ' + ZW + '\n\n  P', L + 'empty parent: a ghost in between is skipped');
+    relex(gp.md, '<ul><li><p>' + ZW + '</p><p>P</p></li></ul>', L + 'empty parent, ghost between');
+  }
+
+  // M1: no supported output in this group went un-re-lexed.
+  assert.deepStrictEqual(Array.from(unrelexed.values()), [], L + 'every supported output is re-lexed');
 
   // (12) A plain paragraph block (no data-list-para) is still rule (c).
   {
