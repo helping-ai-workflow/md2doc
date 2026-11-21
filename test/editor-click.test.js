@@ -10035,20 +10035,22 @@ check('code-edit (v3.17.2 B4): Ctrl+Z inside the edit after Ctrl+S steps back ov
   await page.keyboard.press('Control+Shift+z'); await wait(100);
   assert.strictEqual((await codeEdit(page) || {}).text, 'module m;\nendmoduleq', 'redo brings it back');
 }, { md: CODE_MD });
-// B5 (final review M2): Ctrl+S on an untouched "/" 程式碼 insert discards it
-// (R19) and saves. Before: the edit then reopened on whatever block took the
-// insert's start line, here the code block below, and the next keys went
-// into it.
+// B5 (final review M2): Ctrl+S on an untouched "/" 程式碼 insert. Before:
+// the edit then reopened on whatever block took the insert's start line, here
+// the code block below, and the next keys went into it. v3.18.0 K10 (R4 for
+// every kind): the save keeps the insert (its empty fence is written), the
+// edit opens on the insert again, and z goes there, never into the block below.
 check('code-edit (v3.17.2 B5): Ctrl+S on an untouched "/" 程式碼 insert does not open the code block below (M2)', DESKTOP, async (page, boot) => {
   await newParaBelowAlpha(page);
   await page.keyboard.type('/code'); await page.keyboard.press('Enter'); await renderIdle(page);
   assert.deepStrictEqual(await codeEdit(page), { text: '', caret: 0, focused: true }, 'guard: the insert opened the edit');
   await page.keyboard.press('Control+s'); await renderIdle(page); await wait(400); await renderIdle(page);
-  assert.strictEqual(await diskUntil(boot, CODE_MD), CODE_MD, 'the file is unchanged');
+  const kept = CODE_MD.replace('Alpha.\n\n', 'Alpha.\n\n```\n\n```\n\n');
+  assert.strictEqual(await diskUntil(boot, kept), kept, 'the insert is saved as an empty fence (K10)');
   assert.deepStrictEqual({ edit: await codeEdit(page), code: await page.evaluate(() => document.querySelectorAll('.content .ed-block[data-block-type="code"]').length) },
-    { edit: null, code: 1 }, 'the insert is gone and nothing else opened');
+    { edit: { text: '', caret: 0, focused: true }, code: 2 }, 'the edit opened on the insert again, not on the block below');
   await page.keyboard.type('z'); await wait(300);
-  assert.strictEqual(await saveAndRead(page, boot), CODE_MD, 'the keys went into no code block');
+  assert.strictEqual(await saveAndRead(page, boot), CODE_MD.replace('Alpha.\n\n', 'Alpha.\n\n```\nz\n```\n\n'), 'z went into the insert, not the block below');
 }, { md: CODE_MD });
 // A3 (R65 / v3.15.0 N5): emptying the paragraph between two lists of the
 // same kind joins them TIGHT, as Notion does. Before: the blank line between
@@ -13276,6 +13278,40 @@ for (const [item, want] of [['標題 1', '# W'], ['表格', '| A | B | C |\n|---
     // `slow` holds /api/render: before the fix the save's discard rendered and
     // the restore ran after it; now nothing renders, so both rows read alike.
     check('v31716 K5: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with /api/render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
+      await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
+      await page.keyboard.type('/');
+      await slashPick(page, item);
+      await wait(200);
+      const c = saveCounterV31715(page);
+      if (slow) await delayRender(page, 600);
+      await page.keyboard.press('Control+s');
+      await page.keyboard.type('W');
+      await savesAnsweredV31715(page, c, 'the Ctrl+S');
+      await wait(300); await renderIdle(page);
+      const notice = await noticeText(page);
+      if (slow) await page.unroute('**/api/render');
+      await focusSurface(page, 'Alpha.', 6); await renderIdle(page);
+      const before = c.sent;
+      await page.keyboard.press('Control+s');
+      const deadline = Date.now() + 15000;
+      while (c.sent === before || c.answered < c.sent) {
+        if (Date.now() > deadline) throw new Error('final save not answered');
+        await wait(25);
+      }
+      assert.strictEqual(fs.readFileSync(boot.mdPath, 'utf8'), '# D\n\nAlpha.\n\n' + want + '\n\nOmega.\n', 'the bytes on disk');
+      assert.strictEqual(notice, null, 'the notice');
+    }, { md: BASE_MD });
+  }
+}
+
+// ── v3.18.0 K10: v3.17.16 R4 for the two "/" items that open a raw box or a
+// code edit (引用, 程式碼). Ctrl+S on the untouched insert used to discard it
+// (the box's / edit's `discarding`), and W went with the notice
+// 「重新整理期間打的字沒有地方放，已略過」 (measured on aeea12b). A save is not
+// leaving: the skeleton stays, the box / edit opens on it again, W goes there.
+for (const [item, want] of [['引用', '> W'], ['程式碼', '```\nW\n```']]) {
+  for (const slow of [false, true]) {
+    check('v3180 K10: an untouched "/" ' + item + ', Ctrl+S' + (slow ? ' with /api/render held' : '') + ', W goes into it', DESKTOP, async (page, boot) => {
       await focusSurface(page, 'Alpha.', 6); await page.keyboard.press('Enter'); await renderIdle(page);
       await page.keyboard.type('/');
       await slashPick(page, item);
