@@ -236,15 +236,17 @@ assert.deepStrictEqual(
   });
 }
 
-// I3's own outcome is unchanged: own content that resumes AFTER a child stays
-// unaddressable — a {startLine, endLine} pair cannot express a discontiguous
-// range, so it is left out rather than mis-covered.
+// I3's outcome, migrated by v3.18.0 T1: own content that resumes AFTER a child
+// used to be owned by no block (a {startLine, endLine} pair cannot express a
+// discontiguous range). It is now a continuation paragraph, a block of its own
+// at the parent's depth + 1, so the item keeps its contiguous marker line and
+// the paragraph owns line 4. Old: [[1,1,0],[2,2,1],[5,5,0]].
 {
   const { blocks } = buildBlockMap('- a\n  - b\n\n  more text\n- c\n');
-  assert.deepStrictEqual(blocks.map((b) => [b.startLine, b.endLine, b.indent]),
-    [[1, 1, 0], [2, 2, 1], [5, 5, 0]],
+  assert.deepStrictEqual(blocks.map((b) => [b.type, b.startLine, b.endLine, b.indent]),
+    [['li', 1, 1, 0], ['li', 2, 2, 1], ['paragraph', 4, 4, 1], ['li', 5, 5, 0]],
     "an item whose own content resumes AFTER its sublist keeps only its own " +
-    "contiguous marker line; the trailing own-content line belongs to no block");
+    "contiguous marker line; the trailing paragraph is a continuation block");
 }
 
 // SAME-LINE nesting yields an EMPTY own-range for the outer item, at every
@@ -624,6 +626,121 @@ assert.deepStrictEqual(
   assert.deepStrictEqual(at('[r]: http://u\n   \n[s]: http://v\n\n- x\n- y\n'), [[4, 2], null]);
   assert.deepStrictEqual(at('A.\n\n[r]: http://u\n'), [null], 'a definition after the last block is given to nobody');
   assert.deepStrictEqual(at('- a\n\n  [r]: http://u\n\n  b\n'), [null], 'one inside an item is the item\'s own line');
+}
+
+// ── v3180 continuation: an item's continuation paragraph is a block ───────
+//
+// v3.18.0 T1 (design §2.1 / §3): a `text` / `paragraph` own token after an
+// item's first paragraph becomes its own block, type 'paragraph' with
+// listPara: true and indent = the item's depth + 1. The head item shrinks to
+// its first paragraph. Blank lines stay unowned. continuationPlan() decides,
+// and returns null (today's shape) for anything outside its allow-list.
+{
+  const { continuationPlan } = require('../lib/editor/blockmap.js');
+  assert.strictEqual(typeof continuationPlan, 'function', 'v3180 continuation: continuationPlan is exported');
+  const shape = (md) => buildBlockMap(md).blocks.map((b) =>
+    [b.type + (b.listPara ? '(listPara)' : ''), b.indent === undefined ? null : b.indent, b.startLine, b.endLine]);
+  const rows = [
+    // R18 B12
+    ['- one\n\n  P\n\n  - two\n  - three\n- four\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 3], ['li', 1, 5, 5], ['li', 1, 6, 6], ['li', 0, 7, 7]]],
+    // R18 A10
+    ['- parent\n  - c1\n\n  P\n\n  - c2\n- after\n',
+      [['li', 0, 1, 1], ['li', 1, 2, 2], ['paragraph(listPara)', 1, 4, 4], ['li', 1, 6, 6], ['li', 0, 7, 7]]],
+    // an ordered parent: P sits at column 3
+    ['1. one\n\n   P\n\n   - two\n2. four\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 3], ['li', 1, 5, 5], ['li', 0, 6, 6]]],
+    // a two-line continuation (marked synthesises the text token's raw)
+    ['- one\n\n  P line1\n  P line2\n\n  - two\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 4], ['li', 1, 6, 6]]],
+    // no blank line after P
+    ['- one\n\n  P\n  - two\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 3], ['li', 1, 4, 4]]],
+    // the discontiguous case (old: `more text` owned by no block)
+    ['- a\n  - b\n\n  more text\n- c\n',
+      [['li', 0, 1, 1], ['li', 1, 2, 2], ['paragraph(listPara)', 1, 4, 4], ['li', 0, 5, 5]]],
+    // depth 2 (design §5.2)
+    ['- parent\n  - c1\n\n    P\n\n    - c1a\n  - c2\n- after\n',
+      [['li', 0, 1, 1], ['li', 1, 2, 2], ['paragraph(listPara)', 2, 4, 4], ['li', 2, 6, 6], ['li', 1, 7, 7], ['li', 0, 8, 8]]],
+    // a task item
+    ['- [ ] a\n\n  P\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 3]]],
+    // two continuations, and one after the last child
+    ['- a\n\n  P1\n\n  P2\n\n  - b\n\n  P3\n- c\n',
+      [['li', 0, 1, 1], ['paragraph(listPara)', 1, 3, 3], ['paragraph(listPara)', 1, 5, 5], ['li', 1, 7, 7],
+        ['paragraph(listPara)', 1, 9, 9], ['li', 0, 10, 10]]],
+    // a continuation inside a nested item, no child list after it
+    ['- a\n  - b\n\n    Q\n- c\n',
+      [['li', 0, 1, 1], ['li', 1, 2, 2], ['paragraph(listPara)', 2, 4, 4], ['li', 0, 5, 5]]],
+  ];
+  for (const [md, want] of rows) {
+    assert.deepStrictEqual(shape(md), want, 'v3180 continuation: ' + JSON.stringify(md));
+    const blocks = buildBlockMap(md).blocks;
+    blocks.forEach((b, i) => assert.strictEqual(b.id, i, 'v3180 continuation: ids stay 0..n-1 in ' + JSON.stringify(md)));
+    // Every content line is owned by exactly one block; blank lines by none.
+    const lines = md.replace(/\n$/, '').split('\n');
+    lines.forEach((l, k) => {
+      const owners = blocks.filter((b) => b.startLine <= k + 1 && k + 1 <= b.endLine).length;
+      assert.strictEqual(owners, l.trim() === '' ? 0 : 1,
+        'v3180 continuation: line ' + (k + 1) + ' ' + JSON.stringify(l) + ' has ' + owners + ' owners in ' + JSON.stringify(md));
+    });
+    // A continuation's first line is its own text.
+    blocks.filter((b) => b.listPara).forEach((b) => {
+      assert.ok(/^\s+\S/.test(lines[b.startLine - 1]) && !/^\s*(?:[-*+]|\d+[.)])\s/.test(lines[b.startLine - 1]),
+        'v3180 continuation: block ' + b.id + ' names ' + JSON.stringify(lines[b.startLine - 1]));
+    });
+  }
+  // Unchanged (no split): the link-definition rows (N2 / N2b above), an item
+  // holding a fence (allow-list), an indented code block, a head that does not
+  // start on the marker line, same-line nesting.
+  const unchanged = [
+    ['- a\n\n  [r]: http://u\n\n  b\n- c\n\nP.\n', [['li', 0, 1, 5], ['li', 0, 6, 6], ['paragraph', null, 8, 8]]],
+    ['- a\n\n  [r]: http://u\n\n  b\n', [['li', 0, 1, 5]]],
+    ['- a\n\n  ```\n  x\n  ```\n\n  - b\n', [['li', 0, 1, 6], ['li', 1, 7, 7]]],
+    ['- a\n\n  > q\n\n  P\n', [['li', 0, 1, 5]]],
+    ['-\n  a\n\n  P\n', [['li', 0, 1, 4]]],
+  ];
+  for (const [md, want] of unchanged) {
+    assert.deepStrictEqual(shape(md), want, 'v3180 continuation (unchanged): ' + JSON.stringify(md));
+  }
+  // continuationPlan() itself: null for each unchanged row's items; the B12
+  // plan's head span and segment order.
+  const { marked } = require('marked');
+  const itemsOf = (md) => {
+    const out = [];
+    const walk = (list) => list.items.forEach((it) => { out.push(it); it.tokens.filter((t) => t.type === 'list').forEach(walk); });
+    marked.lexer(md).filter((t) => t.type === 'list').forEach(walk);
+    return out;
+  };
+  for (const [md] of unchanged) {
+    itemsOf(md).forEach((it) => assert.strictEqual(continuationPlan(it), null,
+      'v3180 continuation: no plan for ' + JSON.stringify(it.raw) + ' in ' + JSON.stringify(md)));
+  }
+  const plan = continuationPlan(itemsOf('- one\n\n  P\n\n  - two\n  - three\n- four\n')[0]);
+  assert.strictEqual(plan.headSpan, 1, 'v3180 continuation: B12 head span');
+  assert.deepStrictEqual(plan.segs.map((s) => [s.kind, s.offset, s.span === undefined ? null : s.span]),
+    [['para', 2, 1], ['list', 4, null]], 'v3180 continuation: B12 segments');
+  const a10 = continuationPlan(itemsOf('- parent\n  - c1\n\n  P\n\n  - c2\n- after\n')[0]);
+  assert.deepStrictEqual(a10.segs.map((s) => [s.kind, s.offset]), [['list', 1], ['para', 3], ['list', 5]],
+    'v3180 continuation: A10 segments in source order');
+
+  // Every TIGHT list in this file's own fixtures gets no plan: the loop reads
+  // every single-quoted string literal in the file that lexes to a list.
+  const src = require('fs').readFileSync(__filename, 'utf8');
+  const lits = src.match(/'(?:[^'\\\n]|\\.)*'/g) || [];
+  let tight = 0;
+  for (const lit of lits) {
+    let md;
+    try { md = Function('"use strict"; return ' + lit)(); } catch (e) { continue; }
+    if (typeof md !== 'string' || md.indexOf('\n') < 0) continue;
+    const walk = (list) => {
+      if (!list.loose) list.items.forEach((it) => { tight++; assert.strictEqual(continuationPlan(it), null, 'v3180 continuation: tight item ' + JSON.stringify(it.raw) + ' in ' + JSON.stringify(md)); });
+      list.items.forEach((it) => it.tokens.filter((t) => t.type === 'list').forEach(walk));
+    };
+    marked.lexer(md).filter((t) => t.type === 'list').forEach(walk);
+  }
+  assert.ok(tight > 50, 'v3180 continuation: the fixture loop reached the file\'s tight lists (' + tight + ' items)');
+  console.log('v3180 continuation: ' + rows.length + ' split rows, ' + unchanged.length + ' unchanged rows, ' + tight + ' tight items OK');
 }
 
 console.log('blockmap.test.js OK');

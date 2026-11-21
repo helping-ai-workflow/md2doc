@@ -13490,3 +13490,45 @@ for (const tb of ['line', 'table']) {
     assert.strictEqual(disk, wantV31716K9('quote', tb), 'the bytes on disk');
   }, { md: V31714_Q });
 }
+
+// ── v3.18.0 T1 (B12 / A10, design §2): an item's continuation paragraph is a
+// block of its own in the edit view: data-block-type="paragraph"
+// data-list-para="1" at the item's depth + 1, drawn in source order between
+// the child lists, on the parent item's text column. The item keeps only its
+// first paragraph, so it arms. Measured on ff4bbe4 (spike-probe.log): li:one
+// was not armed (surface <p>one</p> <p>P</p>) and A10's P was drawn above c1.
+const V3180_B12 = '- one\n\n  P\n\n  - two\n  - three\n- four\n';
+const V3180_A10 = '- parent\n  - c1\n\n  P\n\n  - c2\n- after\n';
+check('v3180 render: the B12 bytes load with one and P armed, in source order', DESKTOP, async (page) => {
+  assert.deepStrictEqual(await blockList(page), ['li:one', 'paragraph:P', 'li:two', 'li:three', 'li:four'], 'the block list');
+  const armed = await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) =>
+    (b.getAttribute('data-block-type') === 'li' ? b.querySelector(':scope > .ed-li-text') : b.firstElementChild).classList.contains('ed-wys-armed')));
+  assert.deepStrictEqual(armed, [true, true, true, true, true], 'every surface is armed');
+  const para = await page.evaluate(() => {
+    const b = document.querySelector('.content .ed-block[data-list-para="1"]');
+    return b && [b.getAttribute('data-indent'), b.firstElementChild.nodeName, b.firstElementChild.textContent];
+  });
+  assert.deepStrictEqual(para, ['1', 'P', 'P'], 'the continuation block');
+}, { md: V3180_B12 });
+check('v3180 render: the B12 continuation starts on its parent item\'s text column', DESKTOP, async (page) => {
+  const x = await page.evaluate(() => {
+    const one = [...document.querySelectorAll('.content .ed-block[data-block-type="li"]')].find((b) => b.textContent.trim().startsWith('one'));
+    const p = document.querySelector('.content .ed-block[data-list-para="1"] > p');
+    const two = [...document.querySelectorAll('.content .ed-block[data-block-type="li"]')].find((b) => b.textContent.trim().startsWith('two'));
+    return { one: one.querySelector('.ed-li-text').getBoundingClientRect().left, p: p.getBoundingClientRect().left,
+      twoMarker: two.querySelector('.ed-li-marker').getBoundingClientRect().left };
+  });
+  assert.ok(Math.abs(x.p - x.one) <= 1, 'P left ' + x.p + ' vs one\'s text left ' + x.one);
+  assert.ok(Math.abs(x.p - x.twoMarker) <= 1, 'P left ' + x.p + ' vs the depth-1 marker left ' + x.twoMarker);
+}, { md: V3180_B12 });
+check('v3180 render: the A10 continuation is drawn between c1 and c2, on parent\'s text column', DESKTOP, async (page) => {
+  assert.deepStrictEqual(await blockList(page), ['li:parent', 'li:c1', 'paragraph:P', 'li:c2', 'li:after'], 'the block list');
+  const g = await page.evaluate(() => {
+    const li = (t) => [...document.querySelectorAll('.content .ed-block[data-block-type="li"]')].find((b) => b.querySelector('.ed-li-text').textContent === t);
+    const p = document.querySelector('.content .ed-block[data-list-para="1"] > p').getBoundingClientRect();
+    return { c1: li('c1').getBoundingClientRect().bottom, c2: li('c2').getBoundingClientRect().top, top: p.top, bottom: p.bottom,
+      left: p.left, parent: li('parent').querySelector('.ed-li-text').getBoundingClientRect().left };
+  });
+  assert.ok(g.top >= g.c1 && g.bottom <= g.c2, 'P [' + g.top + ', ' + g.bottom + '] lies between c1 (bottom ' + g.c1 + ') and c2 (top ' + g.c2 + ')');
+  assert.ok(Math.abs(g.left - g.parent) <= 1, 'P left ' + g.left + ' vs parent\'s text left ' + g.parent);
+}, { md: V3180_A10 });

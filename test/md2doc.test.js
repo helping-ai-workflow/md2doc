@@ -670,7 +670,11 @@ console.log('md2doc dot WASM test passed');
   assert.doesNotMatch(await editBody('<svg width="20" height="10">\n<text>x</text>\n</svg>\n'), /inline-svg/, 'still no inline-svg wrapper in edit mode');
   // v3.17.3 C10: an svg in a list item's own text is marked too (tight, loose, svg-only).
   assert.match(await editBody('- item <svg width="20" height="10"><text>x</text></svg>\n- two\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'tight list item with an svg is marked');
-  assert.match(await editBody('- a\n\n  <svg width="20" height="10"><text>x</text></svg>\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'loose list item with an svg is marked');
+  // v3.18.0 T1, migrated: the svg line after a loose item's first paragraph is
+  // a continuation block now, so the plate is on that block (old: on the li).
+  assert.match(await editBody('- a\n\n  <svg width="20" height="10"><text>x</text></svg>\n'), /data-block-type="paragraph" data-list-para="1"[^>]*data-svg-plate="1"/, 'an svg in a loose item\'s continuation paragraph is marked on the continuation block');
+  assert.doesNotMatch(await editBody('- a\n\n  <svg width="20" height="10"><text>x</text></svg>\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'the item above an svg continuation is not marked');
+  assert.match(await editBody('- a <svg width="20" height="10"><text>x</text></svg>\n\n- b\n'), /data-block-type="li"[^>]*data-svg-plate="1"/, 'loose list item with an svg in its own text is marked');
   assert.doesNotMatch(await editBody('- item\n- two\n'), /data-svg-plate/, 'a list without an svg is not marked');
   assert.doesNotMatch(await body('<svg width="20" height="10"><text>x</text></svg>\n\n<svg width="20">\n<text>y</text>\n</svg>\n', { editMode: true }),
     /inline-svg/, 'edit mode emits no inline-svg wrapper');
@@ -739,8 +743,13 @@ console.log('md2doc dot WASM test passed');
     ['T loose one loose two', 'T loose one loose two'], 'loose list');
   assert.deepStrictEqual(await both('## T\n\n- [ ] task a\n- [x] **task** b\n\n1. ord\n   ```\n   code x\n   ```\n   after\n'),
     ['T task a task b ord code x after', 'T task a task b ord code x after'], 'task items and an item with a code block');
+  // v3.18.0 T1, migrated (old edit order 'T lead tailpara sub'): the paragraph
+  // after the nested list is a continuation block of its own, drawn in source
+  // order, so the edit page indexes it in the reader's order.
   assert.deepStrictEqual(await both('## T\n\n- lead\n\n  - sub\n\n  tailpara\n'),
-    ['T lead sub tailpara', 'T lead tailpara sub'], 'a paragraph after a nested list (edit draws the nested list after the item)');
+    ['T lead sub tailpara', 'T lead sub tailpara'], 'a paragraph after a nested list (a continuation block, in source order)');
+  assert.deepStrictEqual(await both('## T\n\n- one\n\n  P\n\n  - two\n  - three\n- four\n'),
+    ['T one P two three four', 'T one P two three four'], 'v3180: the B12 bytes are indexed once each, in source order');
   console.log('md2doc section index test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
 
@@ -875,4 +884,104 @@ console.log('md2doc dot WASM test passed');
   assert.deepStrictEqual(e.blocks.map((b) => [b.startLine, b.endLine]), [[1, 1], [3, 3]], 'D8 edit-mode lines');
   assert.ok(e.parts[0].includes('<code>[[c]]</code>'), 'D8 edit-mode code literal: ' + e.parts[0]);
   console.log('md2doc v3179 D8 citation-in-code test passed');
+})().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
+
+// v3.18.0 T1 (v3180 continuation): an item's continuation paragraph is a block
+// of its own in edit mode — data-block-type="paragraph" data-list-para="1"
+// data-indent = the item's depth + 1 — drawn in source order between the child
+// lists. The item's own block keeps only its first paragraph. The reader is
+// untouched. data-list-loose ignores a continuation's own blank lines (PR-4).
+(async () => {
+  const { renderMarkdown } = require('../lib/md2doc.js');
+  const fake = path.join(tmpDir, 'v3180-cont.md');
+  const B12 = '- one\n\n  P\n\n  - two\n  - three\n- four\n';
+  const A10 = '- parent\n  - c1\n\n  P\n\n  - c2\n- after\n';
+  const openTags = (parts) => parts.map((p) => {
+    const tag = p.match(/^<div class="ed-block"[^>]*>/)[0];
+    const attr = (n) => { const m = tag.match(new RegExp(' ' + n + '="([^"]*)"')); return m ? m[1] : null; };
+    const text = p.replace(/<[^>]+>/g, '').trim();
+    return { type: attr('data-block-type'), para: attr('data-list-para'), indent: attr('data-indent'),
+      loose: attr('data-list-loose'), start: attr('data-list-start'), run: attr('data-run-start'), text, part: p };
+  });
+  const edit = async (md) => {
+    const r = await renderMarkdown(md, fake, { editMode: true });
+    return { tags: openTags(r.parts), r };
+  };
+  // B12: block order, the continuation's attributes, and one's surface.
+  {
+    const { tags } = await edit(B12);
+    assert.deepStrictEqual(tags.map((t) => [t.type, t.para, t.indent, t.text]), [
+      ['li', null, '0', 'one'],
+      ['paragraph', '1', '1', 'P'],
+      ['li', null, '1', 'two'],
+      ['li', null, '1', 'three'],
+      ['li', null, '0', 'four'],
+    ], 'v3180 continuation: B12 block order');
+    assert.ok(tags[0].part.includes('<div class="ed-li-text"><p>one</p></div>'), 'v3180 continuation: one\'s surface is exactly <p>one</p>: ' + tags[0].part);
+    assert.match(tags[1].part, /^<div class="ed-block" data-block-id="1" data-block-type="paragraph" data-list-para="1" data-indent="1" style="--ed-indent:1"><p>P<\/p>/,
+      'v3180 continuation: the continuation block markup: ' + tags[1].part);
+    assert.strictEqual(tags[2].start, '1', 'v3180 continuation: the child list below P starts a list');
+    assert.strictEqual(tags[2].run, '1', 'v3180 continuation: the child list below P starts a run');
+    assert.strictEqual(tags[4].run, null, 'v3180 continuation: four continues the outer run');
+    // PR-4: the list's only blank lines are P's own, so the stamp is gone.
+    assert.deepStrictEqual(tags.filter((t) => t.type === 'li').map((t) => t.loose), [null, null, null, null],
+      'v3180 continuation: B12 carries no data-list-loose');
+  }
+  // A10: P after c1, before c2; c2 starts a new list.
+  {
+    const { tags } = await edit(A10);
+    assert.deepStrictEqual(tags.map((t) => [t.type, t.para, t.indent, t.text]), [
+      ['li', null, '0', 'parent'],
+      ['li', null, '1', 'c1'],
+      ['paragraph', '1', '1', 'P'],
+      ['li', null, '1', 'c2'],
+      ['li', null, '0', 'after'],
+    ], 'v3180 continuation: A10 block order (P after c1, before c2)');
+    assert.strictEqual(tags[3].start, '1', 'v3180 continuation: c2 starts a list');
+    assert.strictEqual(tags[4].loose, null, 'v3180 continuation: A10 after carries no data-list-loose');
+  }
+  // Depth 2, an ordered parent, a two-line continuation, several continuations.
+  {
+    const d2 = (await edit('- parent\n  - c1\n\n    P\n\n    - c1a\n  - c2\n- after\n')).tags;
+    assert.deepStrictEqual(d2.map((t) => [t.type, t.indent, t.text]), [
+      ['li', '0', 'parent'], ['li', '1', 'c1'], ['paragraph', '2', 'P'], ['li', '2', 'c1a'], ['li', '1', 'c2'], ['li', '0', 'after'],
+    ], 'v3180 continuation: depth 2');
+    assert.strictEqual(d2[4].run, null, 'v3180 continuation: c2 continues the depth-1 run past the depth-2 continuation');
+    const ol = (await edit('1. one\n\n   P\n\n   - two\n2. four\n')).tags;
+    assert.deepStrictEqual(ol.map((t) => [t.type, t.indent, t.text]), [['li', '0', 'one'], ['paragraph', '1', 'P'], ['li', '1', 'two'], ['li', '0', 'four']],
+      'v3180 continuation: ordered parent');
+    const two = (await edit('- one\n\n  P line1\n  P line2\n\n  - two\n')).tags;
+    assert.ok(two[1].part.includes('<p>P line1\nP line2</p>'), 'v3180 continuation: a two-line continuation is one <p>: ' + two[1].part);
+    const many = (await edit('- a\n\n  P1\n\n  P2\n\n  - b\n\n  P3\n- c\n')).tags;
+    assert.deepStrictEqual(many.map((t) => [t.type, t.text]), [['li', 'a'], ['paragraph', 'P1'], ['paragraph', 'P2'], ['li', 'b'], ['paragraph', 'P3'], ['li', 'c']],
+      'v3180 continuation: several continuations in source order');
+  }
+  // The allow-list: an item holding a fence keeps today's shape.
+  {
+    const { tags } = await edit('- a\n\n  ```\n  x\n  ```\n\n  P\n');
+    assert.deepStrictEqual(tags.map((t) => t.type), ['li'], 'v3180 continuation: an item with a fence is not split');
+    assert.ok(tags[0].part.includes('<p>P</p>'), 'v3180 continuation: its paragraph stays in the item');
+  }
+  // The reader is untouched (and byte-identical to an edit-free render).
+  for (const md of [B12, A10]) {
+    const { bodyHtml } = await renderMarkdown(md, fake, {});
+    assert.match(bodyHtml, md === B12 ? /<li><p>one<\/p>\n<p>P<\/p>\n<ul>/ : /<li><p>parent<\/p>\n<ul>\n<li>c1<\/li>\n<\/ul>\n<p>P<\/p>\n<ul>/,
+      'v3180 continuation: reader HTML unchanged for ' + JSON.stringify(md) + ': ' + bodyHtml);
+    const { marked } = require('marked');
+    assert.ok(!/data-list-para|ed-block/.test(bodyHtml), 'v3180 continuation: no edit markup in the reader');
+    assert.ok(typeof marked.parse === 'function');
+  }
+  // PR-4 stamp: a real blank line between items keeps it.
+  {
+    const { tags } = await edit('- x\n\n- a\n\n  P\n\n- c\n');
+    assert.deepStrictEqual(tags.filter((t) => t.type === 'li').map((t) => [t.text, t.loose]), [['x', '1'], ['a', '1'], ['c', '1']],
+      'v3180 continuation: a list with a blank line between x and a stays loose');
+    const lead = (await edit('- a\n\n  - b\n\n  P\n- c\n')).tags;
+    assert.deepStrictEqual(lead.filter((t) => t.indent === '0' && t.type === 'li').map((t) => t.loose), ['1', '1'],
+      'v3180 continuation: a blank between a head and its child list (not a continuation\'s) keeps the stamp');
+    // A list token with no planned item keeps marked's own answer.
+    const plain = (await edit('- x\n\n- y\n')).tags;
+    assert.deepStrictEqual(plain.map((t) => t.loose), ['1', '1'], 'v3180 continuation: an unplanned loose list keeps its stamp');
+  }
+  console.log('md2doc v3180 continuation edit-render test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });
