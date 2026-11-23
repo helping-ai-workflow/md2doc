@@ -14155,3 +14155,113 @@ check('v3180 slash: ＋ on a nested item with a child, 文字, para: alpha\'s co
   assert.strictEqual(await noticeText(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n    - grand\n\n  para\n', 'the bytes on disk');
 }, { md: '# Doc\n\n- alpha\n  - child\n    - grand\n' });
+
+// ── v3.18.0 final review I1 (R22 for the shortcut and the toolbar): the depth
+// paragraph ＋ / 在下方插入 makes on a nested item takes the list items through
+// every entry point, not the "/" menu alone. A list marker typed in it while it
+// is still empty (`- `, `* `, `1. `, `[] `) and the toolbar's 清單 / 編號 / 待辦
+// make a sibling item at that depth through continueListAtTransient(), the run
+// kept tight — the bytes the "/" rows above pin, which are v3.17.16's (R46: "a
+// shortcut and the "/" menu decide alike"). Measured on a958857: the shortcut
+// showed 「清單內的段落目前只能放文字」 and left the marker as text, and the three
+// toolbar buttons were off. Every other kind stays refused (PR-8), a marker
+// typed before text stays refused, and a depth paragraph made from a
+// continuation P keeps text only.
+for (const [label, keys, md, at, want] of [
+  ['"- "', '- ', V3180_B12_SRC, 'two', '- one\n  - two\n  - W\n  - three\n- four\n'],
+  ['"* "', '* ', V3180_B12_SRC, 'two', '- one\n  - two\n  - W\n  - three\n- four\n'],
+  ['"1. "', '1. ', V3180_NEST, 'child', '# Doc\n\n- alpha\n  - child\n  1. W\n'],
+  ['"[] "', '[] ', V3180_NEST, 'child', '# Doc\n\n- alpha\n  - child\n  - [ ] W\n'],
+]) {
+  check('v3180 shortcut: ＋ on a nested item, ' + label + ', W, writes a tight sibling at its depth (final review I1)', DESKTOP, async (page, boot) => {
+    await plusClick(page, at);
+    await page.keyboard.type(keys); await renderIdle(page); await wait(200);
+    assert.strictEqual(await noticeText(page), null, 'no notice');
+    await page.keyboard.type('W'); await wait(100);
+    assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  }, { md });
+}
+const tbOn = (page, ids) => page.evaluate((xs) => xs.map((id) => !document.querySelector('[data-ed-tb="' + id + '"]').disabled), ids);
+// The toolbar reaches that block through 在下方插入 / 在上方插入 (the caret's
+// block). After ＋ the bar still reports the item ＋ was pressed on (the ＋ click
+// lands on the item, wireToolbarTracking()), as in v3.17.16.
+for (const [id, md, at, want] of [
+  ['list', V3180_B12_SRC, 'two', '- one\n  - two\n  - W\n  - three\n- four\n'],
+  ['ordered-list', V3180_NEST, 'child', '# Doc\n\n- alpha\n  - child\n  1. W\n'],
+  ['check', V3180_NEST, 'child', '# Doc\n\n- alpha\n  - child\n  - [ ] W\n'],
+]) {
+  check('v3180 toolbar: 在下方插入 on a nested item, toolbar ' + id + ', W, writes a tight sibling at its depth (final review I1)', DESKTOP, async (page, boot) => {
+    await focusSurface(page, at, 1);
+    await tb(page, 'insert-after'); await wait(150);
+    assert.deepStrictEqual(await tbOn(page, ['list', 'ordered-list', 'check']), [true, true, true], 'the three list buttons are on');
+    await tb(page, id); await wait(200);
+    assert.strictEqual(await noticeText(page), null, 'no notice');
+    await page.keyboard.type('W'); await wait(100);
+    assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  }, { md });
+}
+check('v3180 toolbar: 在上方插入 on a nested item below its sibling, toolbar 清單, W, writes the sibling right above it (final review I1)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'three', 5);
+  await tb(page, 'insert-before'); await wait(150);
+  await tb(page, 'list'); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n  - two\n  - W\n  - three\n- four\n', 'the bytes on disk');
+}, { md: V3180_B12_SRC });
+check('v3180 shortcut: in that block every other kind stays refused (PR-8)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 1);
+  await tb(page, 'insert-after'); await wait(150);
+  assert.deepStrictEqual(await tbOn(page, ['headings', 'quote', 'code', 'table', 'line', 'image']),
+    [false, false, false, false, false, false], 'the other block buttons stay off');
+  await page.keyboard.type('## '); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the notice for "## "');
+  assert.deepStrictEqual(await tbOn(page, ['list', 'ordered-list', 'check']), [false, false, false], 'with text in it, the list buttons are off');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n  - two\n\n  \\##\n\n  - three\n- four\n', 'the bytes on disk: "## " kept as text');
+}, { md: V3180_B12_SRC });
+check('v3180 shortcut: "- " typed before text in that block is refused, the text kept', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'two');
+  await page.keyboard.type('x'); await wait(150);
+  await page.keyboard.press('Home'); await wait(100);
+  await page.keyboard.type('- '); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n  - two\n\n  \\- x\n\n  - three\n- four\n', 'the bytes on disk');
+}, { md: V3180_B12_SRC });
+check('v3180 shortcut: a depth paragraph below a continuation P refuses "- " and keeps the list buttons off', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await tb(page, 'insert-after'); await wait(150);
+  assert.deepStrictEqual(await tbOn(page, ['list', 'ordered-list', 'check']), [false, false, false], 'the list buttons are off');
+  await page.keyboard.press('Escape'); await wait(100);
+  await page.keyboard.type('- '); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the notice');
+}, { md: V3180_B12 });
+// Final review M2 (a Known limitations line, pinned so the line stays true): a
+// rich paste whose markdown is not inline-safe (`foo_bar` from a web page) goes
+// to the block-insert path, which PR-8 refuses in P; Ctrl+Shift+V (the plain
+// flavour, handleArmedPaste()'s plainOnly) lands it in P as text. The plain
+// paste goes first: a paste into a paragraph re-clicked after a Ctrl+S that
+// committed nothing is not written (measured on a top-level paragraph too,
+// outside this row — reported, not fixed here).
+check('v3180 para: a rich paste with markdown characters in P is refused, Ctrl+Shift+V pastes it as text (final review M2)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.evaluate(() => document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, bubbles: true })));
+  await clipboardEvent(page, 'paste', 'foo_bar', '<span>foo_bar</span>');
+  await wait(300);
+  assert.strictEqual(await noticeText(page), null, 'no notice for the plain paste');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  Pfoo_bar\n\n  - two\n  - three\n- four\n', 'the plain paste lands in P');
+  await focusSurface(page, 'Pfoo_bar', 8);
+  await clipboardEvent(page, 'paste', 'x_y', '<span>x_y</span>');
+  await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the rich paste is refused with the notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  Pfoo_bar\n\n  - two\n  - three\n- four\n', 'the bytes on disk, unchanged');
+}, { md: V3180_B12 });
+// Final review M1 / ruling R24 (a CHANGELOG line, pinned so it stays true): ＋ on
+// the last nested item offers 文字 and the list items only (the R22 row above);
+// a heading after the list is made from ＋ on the top-level item.
+check('v3180 slash: ＋ on the top-level item of a list ending in a nested item, 標題 2, H, writes the heading after the list (final review M1)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'alpha');
+  assert.strictEqual((await slashMenu(page)).labels.length, 16, 'the whole menu');
+  await slashPick(page, '標題 2'); await renderIdle(page); await wait(200);
+  await page.keyboard.type('H'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n\n## H\n', 'the bytes on disk');
+}, { md: V3180_NEST });
