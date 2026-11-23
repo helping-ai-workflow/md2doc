@@ -2865,7 +2865,9 @@ async function gutterGeometry(page, sel) {
       // This fixture is exactly that shape, and it is a real one. v3.11: a
       // LOOSE item is editable now (batch-2 §6), so the degradation is a
       // MULTI-PARAGRAPH item instead — c1 owns a second paragraph, still out
-      // of scope, still unsupported 'P'. The operated block (alpha) sits in a
+      // of scope, still unsupported 'P'. v3.18.0 T5: a second paragraph is a
+      // continuation block of its own now and the run is editable, so c1
+      // holds a fenced code block instead (raw-only, design §7). The operated block (alpha) sits in a
       // perfectly clean indent-0 run; the degradation lives one level down.
       //
       // The refusal below is the evidence: listRunOf(alpha) DOES reach the
@@ -2882,7 +2884,7 @@ async function gutterGeometry(page, sel) {
       // listRunOf() holds nothing unsupported — the gate is per-run, so that
       // one has to go through.
       const { srv: s3gSrv, url: s3gUrl, mdPath: s3gMdPath } =
-        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '    c1 more', '', '  - c2', '- bravo', '',
+        await setupTableDoc(['# Doc', '', '- alpha', '  - c1', '', '    ```', '    c1 more', '    ```', '', '  - c2', '- bravo', '',
           '## Tail', '', '1. healthy', '']);
       try {
         const page = await newPage(browser);
@@ -2909,7 +2911,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(await bannerNow(), null,
           'a HEALTHY run elsewhere in the document still converts — the gate is per-run');
         assert.strictEqual(await saveAndRead(page, s3gMdPath),
-          '# Doc\n\n- alpha\n  - c1\n\n    c1 more\n\n  - c2\n- bravo\n\n## Tail\n\nhealthy\n',
+          '# Doc\n\n- alpha\n  - c1\n\n    ```\n    c1 more\n    ```\n\n  - c2\n- bravo\n\n## Tail\n\nhealthy\n',
           'and the control gesture actually landed');
 
         await page.close();
@@ -3482,13 +3484,15 @@ async function gutterGeometry(page, sel) {
       // ── §4.3 rule 2's second half: the gate must hold for BOTH runs before
       //    merging. v3.11: a loose list is editable now, so the degraded run
       //    is one whose item `a` holds a SECOND paragraph — serializeBlocks()
-      //    reports P for it (multi-paragraph items stay out of scope). Merging
+      //    reports P for it (multi-paragraph items stay out of scope). v3.18.0
+      //    T5: a second paragraph is a continuation block now (editable), so
+      //    `a` holds a fenced code block instead (still raw-only). Merging
       //    the healthy '1. c' into that would freeze c as well — and NOT
       //    merging is no escape either, because the marker types match and
       //    markdown merges them whether or not the separator survives. The
       //    only correct answer is to refuse the whole gesture.
       const { srv: s5hSrv, url: s5hUrl, mdPath: s5hMdPath } =
-        await setupTableDoc(['# Doc', '', '- a', '', '  a more', '', '- b', '', '1. c', '']);
+        await setupTableDoc(['# Doc', '', '- a', '', '  ```', '  a more', '  ```', '', '- b', '', '1. c', '']);
       try {
         const page = await newPage(browser);
         await page.goto(s5hUrl, { waitUntil: 'networkidle2' });
@@ -3502,7 +3506,7 @@ async function gutterGeometry(page, sel) {
         // FIXTURE SANITY, asked of the serializer rather than assumed from
         // the bytes (the 2026-08-30 test-integrity review's last residue of
         // this pattern): the a/b run has to REALLY be degraded, i.e.
-        // serializeBlocks() has to report a 'P' for the two-paragraph item,
+        // serializeBlocks() has to report a 'P' for the item holding a fence,
         // or the refusal below is green for the wrong reason — a refusal of a
         // healthy run would look identical from here.
         assert.ok(
@@ -3526,7 +3530,7 @@ async function gutterGeometry(page, sel) {
         assert.strictEqual(await bannerNow(), null, 'banner cleared before the control gesture');
         await convertVia(page, await liBlockSelByText(page, 'c'), '文字');
         assert.strictEqual(await bannerNow(), null, 'a NON-merging target still works');
-        assert.strictEqual(await saveAndRead(page, s5hMdPath), '# Doc\n\n- a\n\n  a more\n\n- b\n\nc\n',
+        assert.strictEqual(await saveAndRead(page, s5hMdPath), '# Doc\n\n- a\n\n  ```\n  a more\n  ```\n\n- b\n\nc\n',
           'and that one landed');
 
         await page.close();
@@ -4227,10 +4231,15 @@ async function gutterGeometry(page, sel) {
             'the 4-column grandchild must not end up after a paragraph — that is an ' +
             'INDENTED CODE BLOCK and the item\'s content is lost. Got ' +
             JSON.stringify(lexTypes(out)) + ' for ' + JSON.stringify(out));
-          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n    - grand\n\npara\n',
+          // v3.18.0 (design §5.2), MIGRATED from '…    - grand\n\npara\n' and
+          // [false, false, false]: ＋ on a NESTED item makes a continuation
+          // paragraph of its parent, written at the parent's text column after
+          // the subtree. marked reads `alpha` as a loose item now (it holds a
+          // paragraph), so the outer list is loose; both nested lists stay tight.
+          assert.strictEqual(out, '# Doc\n\n- alpha\n  - child\n    - grand\n\n  para\n',
             'the paragraph lands after the anchor\'s whole subtree, so nothing is orphaned');
-          assert.deepStrictEqual(lexLooseDeep(out), [false, false, false],
-            'and the list it was inserted after is untouched and still tight');
+          assert.deepStrictEqual(lexLooseDeep(out), [true, false, false],
+            'and the lists below it are untouched and still tight (alpha holds a paragraph now)');
           await page.close();
           console.log('S2 Task 7: ＋ 段落 under a li orphans no descendant — OK');
         } finally { t7fSrv.close(); }
@@ -4239,10 +4248,11 @@ async function gutterGeometry(page, sel) {
       // §4.3's run-wide gate, on the ＋ path. The fixture is PROVEN degraded
       // first: item `a` holds a SECOND paragraph (v3.11: a merely loose list
       // is editable now), so serializeBlocks() reports P for it and every
-      // structural op on that run must refuse.
+      // structural op on that run must refuse. v3.18.0 T5: a second paragraph
+      // is a continuation block now (editable); `a` holds a fenced code block.
       {
         const { srv: t7gSrv, url: t7gUrl, mdPath: t7gMd } =
-          await setupTableDoc(['# Doc', '', '- a', '', '  a more', '', '- b', '']);
+          await setupTableDoc(['# Doc', '', '- a', '', '  ```', '  a more', '  ```', '', '- b', '']);
         try {
           const page = await newPage(browser);
           await page.goto(t7gUrl, { waitUntil: 'networkidle2' });
@@ -4713,8 +4723,10 @@ async function gutterGeometry(page, sel) {
         // fixture is PROVEN degraded first: item `a` holds a SECOND paragraph
         // (v3.11: a merely loose list is editable now), so serializeBlocks()
         // reports P and §4.3's run-wide gate has to turn every target away.
+        // v3.18.0 T5: a second paragraph is a continuation block now
+        // (editable), so `a` holds a fenced code block instead.
         {
-          const DEG = ['# Doc', '', '- a', '', '  a more', '', '- b', ''].join('\n');
+          const DEG = ['# Doc', '', '- a', '', '  ```', '  a more', '  ```', '', '- b', ''].join('\n');
           const degDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md2doc-s2-sweep-deg-'));
           const degMd = path.join(degDir, 'doc.md');
           fs.writeFileSync(degMd, DEG, 'utf8');
@@ -15789,9 +15801,10 @@ async function gutterGeometry(page, sel) {
           target: 'hard one',
           expect: '# L\n\n- other\n' },
         // v3.11: the bystander is a TWO-PARAGRAPH item — a merely loose one is
-        // supported now.
+        // supported now. v3.18.0 T5: so is a two-paragraph one (a continuation
+        // block); the bystander holds a fenced code block instead.
         { name: '(f) an unsupported bystander refuses RUN-WIDE (RULING F-R)',
-          rows: ['# L', '', '- a', '', '- b', '', '  b more', '', 'tail', ''],
+          rows: ['# L', '', '- a', '', '- b', '', '  ```', '  b more', '  ```', '', 'tail', ''],
           target: 'a',
           refuse: true },
       ];
@@ -18555,7 +18568,7 @@ async function gutterGeometry(page, sel) {
       // degradation is asserted through the serializer itself, not assumed
       // from the fixture's shape.
       await s3Scenario('a batch over a degraded run refuses, byte-identical',
-        '# Doc\n\n- alpha\n\n  alpha more\n\n- bravo\n\n- charlie\n', async (page, mdPath) => {
+        '# Doc\n\n- alpha\n\n  ```\n  alpha more\n  ```\n\n- bravo\n\n- charlie\n', async (page, mdPath) => {
           const original = fs.readFileSync(mdPath, 'utf8');
           const degraded = await page.evaluate(() => {
             const lis = [].slice.call(
@@ -18563,14 +18576,16 @@ async function gutterGeometry(page, sel) {
             return window.md2docListMd.serializeBlocks(lis).unsupported;
           });
           assert.ok(degraded.length > 0 && degraded.indexOf('P') !== -1,
-            'precondition: alpha holds a SECOND paragraph, which serializeBlocks() reports '
-            + 'unsupported (v3.11: a merely loose list is editable now) — that is what makes '
+            'precondition: alpha holds a fenced code block (v3.18.0: a second paragraph is a '
+            + 'continuation block now), which serializeBlocks() reports unsupported — that is what makes '
             + 'the run structurally un-editable. Got unsupported = ' +
             JSON.stringify(degraded));
 
-          await t6Sel3(page, 3, 7);
+          // v3.18.0 T5: alpha holds a fenced code block (lines 3–7), not a
+          // second paragraph (a continuation block of its own now).
+          await t6Sel3(page, 3, 9);
           const before = await t6Sel(page);
-          assert.deepStrictEqual(before.memberLines, [[3, 5], [7, 7]],
+          assert.deepStrictEqual(before.memberLines, [[3, 7], [9, 9]],
             'precondition: a real two-member selection stands over the degraded run. Got ' +
             JSON.stringify(before));
 
@@ -19306,7 +19321,9 @@ async function gutterGeometry(page, sel) {
       const T8_MIX = '# Doc\n\nalpha\n\n- bravo\n- charlie\n';
       // v3.11: a merely LOOSE list is editable now (batch-2 §6), so the
       // degraded run is one whose first item holds a SECOND paragraph.
-      const T8_DEG = '# Doc\n\n- a\n\n  a more\n\n- b\n';
+      // v3.18.0 T5: a second paragraph is a continuation block now (editable),
+      // so the first item holds a fenced code block instead.
+      const T8_DEG = '# Doc\n\n- a\n\n  ```\n  a more\n  ```\n\n- b\n';
       const T8_TBL = '# Doc\n\nalpha\n\n| A | B |\n|---|---|\n| 1 | 2 |\n';
       const T8_HR = '# Doc\n\nalpha\n\n---\n\nbravo\n';
       const T8_HTML = '# Doc\n\nalpha\n\n<div>x</div>\n\nbravo\n';
@@ -19446,12 +19463,18 @@ async function gutterGeometry(page, sel) {
             'shift-tab': noop('the paragraph has no Tab rule, and bravo is already at '
               + 'indent 0'),
           } },
-        // §4.3's run-wide gate. The fixture's first item holds a second
-        // paragraph, so serializeBlocks() reports 'P' for it and the gate
+        // §4.3's run-wide gate. The fixture's first item holds a fenced code
+        // block (v3.18.0 T5; a second paragraph is a continuation block now),
+        // so serializeBlocks() reports 'P' for it and the gate
         // refuses ahead of the columnOnly bail — which is why Tab refuses here
         // too. (v3.11: it used to be a merely LOOSE list, editable now.)
-        { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 7,
-          members: [[3, 5], [7, 7]], degraded: true,
+        { id: 'degraded run', md: T8_DEG, anchor: 3, focus: 9,
+          members: [[3, 7], [9, 9]], degraded: true,
+          // v3.18.0 T5: the fence inside `a` IS the degradation (a second
+          // paragraph is an editable continuation block now), so this is the
+          // one fixture that holds a code token at baseline; the code-token
+          // scan below counts only what goes beyond it.
+          baseCodes: ['\x60\x60\x60\na more\n\x60\x60\x60\n'],
           // NOT `append`: this set ends the document, so append is the li
           // path's SECOND HOME POSITION — answered ABOVE the §4.3 gate, on
           // purpose (a put-it-back gesture must not raise a banner), and the
@@ -20091,19 +20114,28 @@ async function gutterGeometry(page, sel) {
                 + JSON.stringify(loose) + ' against a baseline of '
                 + JSON.stringify(baseLoose) + ', from\n' + JSON.stringify(after));
             }
-            // No fixture holds a code token and no operation in this matrix
-            // targets 程式碼, so ANY code token in the output is §3.4's
-            // corruption: an indent of >= 4 columns left behind with no list
-            // to anchor it, which marked lexes as an INDENTED code block and
-            // `t.type` cannot tell apart from a deliberate fence.
-            assert.deepStrictEqual(lexCodeRaws(shape.md), [],
+            // No fixture holds a code token beyond the ones its row names
+            // (`baseCodes`: only the degraded run, whose item's own fence is
+            // its degradation since v3.18.0 T5) and no operation in this
+            // matrix targets 程式碼, so ANY OTHER code token in the output is
+            // §3.4's corruption: an indent of >= 4 columns left behind with no
+            // list to anchor it, which marked lexes as an INDENTED code block
+            // and `t.type` cannot tell apart from a deliberate fence. Each
+            // baseline token is taken out of the output's list ONCE, by its
+            // exact raw, so a second copy of it, or a changed one, still counts.
+            const baseCodes = shape.baseCodes || [];
+            assert.deepStrictEqual(lexCodeRaws(shape.md), baseCodes,
               'FIXTURE SANITY ' + cell + ': the fixture must hold no code token at '
-              + 'baseline, or "a token became a code block" is not what the next '
-              + 'assertion measures');
+              + 'baseline beyond the ones its row names, or "a token became a code block" '
+              + 'is not what the next assertion measures');
             const codes = lexCodeRaws(after);
+            baseCodes.forEach((raw) => {
+              const at = codes.indexOf(raw);
+              if (at !== -1) codes.splice(at, 1);
+            });
             if (codes.length) {
-              t8Defects.push(cell + ': ' + codes.length + ' code token(s) appeared where the '
-                + 'baseline had none — ' + JSON.stringify(codes) + ' (fenced: '
+              t8Defects.push(cell + ': ' + codes.length + ' code token(s) appeared beyond the '
+                + 'baseline\'s ' + JSON.stringify(baseCodes) + ' — ' + JSON.stringify(codes) + ' (fenced: '
                 + JSON.stringify(codes.map(isFencedCode)) + ') from\n' + JSON.stringify(after));
             }
 
@@ -21787,7 +21819,9 @@ async function gutterGeometry(page, sel) {
     const T4_TASK = '# Doc\n\n- [ ] alpha\n- [x] bravo\n- [ ] charlie\n\ntail\n';
     // v3.11: a merely LOOSE list is editable now (batch-2 §6), so the degraded
     // run's first item holds a SECOND paragraph instead — still unsupported.
-    const T4_LOOSE = '# Doc\n\n- alpha\n\n  alpha more\n\n- bravo\n\n- charlie\n\ntail\n';
+    // v3.18.0 T5: a second paragraph is a continuation block now (editable),
+    // so the first item holds a fenced code block instead.
+    const T4_LOOSE = '# Doc\n\n- alpha\n\n  ```\n  alpha more\n  ```\n\n- bravo\n\n- charlie\n\ntail\n';
     const T4_ORPHAN = '# Doc\n\n- alpha\n  - a1\n- bravo\n\ntail\n';
 
     // The li fixtures' own sanity check, folded into one call so no scenario
@@ -22081,7 +22115,7 @@ async function gutterGeometry(page, sel) {
       assert.ok((await page.evaluate(() => window.md2docListMd.serializeBlocks(
         Array.from(document.querySelectorAll('.ed-block[data-block-type="li"]')))
         .unsupported)).indexOf('P') !== -1,
-        'FIXTURE SANITY: this run really is DEGRADED (a two-paragraph item) — the whole '
+        'FIXTURE SANITY: this run really is DEGRADED (an item holding a fenced code block) — the whole '
         + 'point of the gate');
       const texts0 = await s4BlockTexts(page);
       await s4ArmedOn(page, g[3], 'charlie');

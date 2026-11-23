@@ -10641,7 +10641,10 @@ check('v3173 B9: Delete before a code block keeps today\'s behaviour', DESKTOP, 
 // refusal notice. Measured before: the notice, and nothing selected.
 for (const [label, md, selected] of [
   ['a hard-wrapped item', 'P.\n\n- a\n  wrapped\n- b\n', 'li:a\nwrapped'],
-  ['an item with a continuation paragraph', 'P.\n\n- a\n\n  more\n- b\n', 'li:a\nmore'],
+  // v3.18.0 T5 (PR-9), MIGRATED from 'li:a\nmore': `more` is a block of its
+  // own now (a continuation paragraph), so the item it follows is `a` alone;
+  // it still counts as a child, so the item is still selected, not pulled up.
+  ['an item with a continuation paragraph', 'P.\n\n- a\n\n  more\n- b\n', 'li:a'],
 ]) {
   check('v3173 B9: Delete at a paragraph\'s end before ' + label + ' selects it', DESKTOP, async (page, boot) => {
     await focusSurface(page, 'P.', 2);
@@ -13877,3 +13880,278 @@ for (const [label, md, want] of [
     }), '1,P', 'P is a continuation block of its own after a reload');
   }, { md });
 }
+
+// ── v3.18.0 T5 (design §5.3, PR-9): Backspace at the start of a non-empty
+// continuation paragraph merges it into the block above — the parent's text,
+// a deeper item, or a previous continuation — and Delete at the end of that
+// block above does the same. Merged into an item, the item's list is
+// re-serialized in ONE op and P's blank lines go with it (PR-3 / PR-4: B12
+// and A10 come back tight, `- oneP\n  - two`); merged into a continuation it
+// is one range op at that continuation's column. Delete at P's own end merges
+// only a following continuation; before anything else it writes nothing and
+// selects that block. An emptied P under Backspace / Delete goes the way its
+// insert came (commitListParaRemoval()). Each merge is one Ctrl+Z, read back
+// from the disk.
+const V3180_P12 = '- one\n\n  P1\n\n  P2\n\n  - two\n  - three\n- four\n';
+async function v3180Merge(page, boot, text, key, md, want, caret) {
+  await focusSurface(page, text, key === 'Backspace' ? 0 : text.length);
+  await page.keyboard.press(key); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  if (caret) assert.deepStrictEqual(await caretNow(page), caret, 'the caret');
+  assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), md, 'one Ctrl+Z gives back the source');
+}
+check('v3180 merge: Backspace at the start of P merges it into one (B12)', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'P', 'Backspace', V3180_B12, '- oneP\n  - two\n  - three\n- four\n',
+    { text: 'oneP', offset: 3, transient: false });
+}, { md: V3180_B12 });
+check('v3180 merge: Backspace at the start of P merges it into c1, and c1 and c2 are one list again (A10)', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'P', 'Backspace', V3180_A10, '- parent\n  - c1P\n  - c2\n- after\n',
+    { text: 'c1P', offset: 2, transient: false });
+}, { md: V3180_A10 });
+check('v3180 merge: Backspace at the start of P2 merges it into P1 at P1\'s column', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'P2', 'Backspace', V3180_P12, '- one\n\n  P1P2\n\n  - two\n  - three\n- four\n',
+    { text: 'P1P2', offset: 2, transient: false });
+}, { md: V3180_P12 });
+check('v3180 merge: Backspace at the start of P after a deeper item merges it into that item', DESKTOP, async (page, boot) => {
+  const md = '- parent\n  - c1\n    - c1a\n\n  P\n\n  - c2\n- after\n';
+  await v3180Merge(page, boot, 'P', 'Backspace', md, '- parent\n  - c1\n    - c1aP\n  - c2\n- after\n',
+    { text: 'c1aP', offset: 3, transient: false });
+}, { md: '- parent\n  - c1\n    - c1a\n\n  P\n\n  - c2\n- after\n' });
+check('v3180 merge: in a loose list, Backspace at the start of a continuation keeps the item separator', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'more', 'Backspace', '- x\n\n- a\n\n  more\n\n- c\n', '- x\n\n- amore\n\n- c\n',
+    { text: 'amore', offset: 1, transient: false });
+}, { md: '- x\n\n- a\n\n  more\n\n- c\n' });
+check('v3180 merge: Delete at the end of one pulls P up into it (B12)', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'one', 'Delete', V3180_B12, '- oneP\n  - two\n  - three\n- four\n',
+    { text: 'oneP', offset: 3, transient: false });
+}, { md: V3180_B12 });
+check('v3180 merge: Delete at the end of c1 pulls P up into it (A10)', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'c1', 'Delete', V3180_A10, '- parent\n  - c1P\n  - c2\n- after\n',
+    { text: 'c1P', offset: 2, transient: false });
+}, { md: V3180_A10 });
+check('v3180 merge: Delete at the end of P1 pulls P2 up into it', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'P1', 'Delete', V3180_P12, '- one\n\n  P1P2\n\n  - two\n  - three\n- four\n',
+    { text: 'P1P2', offset: 2, transient: false });
+}, { md: V3180_P12 });
+// T5 review M4: P1 merged into one while P2 stays in the span, so the list
+// re-serialized by the merge holds a continuation (serializeListEls() over a
+// span with P2 in it). Green at once (t5-fix-probe-m4.log): measured bytes
+// pinned; marked reads them `<li><p>oneP1</p><p>P2</p><ul>…`, P2 still one's.
+for (const [label, text, key] of [['Backspace at the start of P1', 'P1', 'Backspace'], ['Delete at the end of one', 'one', 'Delete']]) {
+  check('v3180 merge: ' + label + ' merges P1 into one, P2 stays one\'s', DESKTOP, async (page, boot) => {
+    await v3180Merge(page, boot, text, key, V3180_P12, '- oneP1\n\n  P2\n\n  - two\n  - three\n- four\n',
+      { text: 'oneP1', offset: 3, transient: false });
+  }, { md: V3180_P12 });
+}
+check('v3180 merge: typing in P, then Backspace at its start: the typing, then the merge, one Ctrl+Z each', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.type('Z'); await wait(100);
+  await page.keyboard.press('Home'); await wait(100);
+  await page.keyboard.press('Backspace'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- onePZ\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  PZ\n\n  - two\n  - three\n- four\n', 'the first Ctrl+Z takes back the merge');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the second the typing');
+}, { md: V3180_B12 });
+check('v3180 merge: Backspace at the start of a paragraph after the list merges it into P at P\'s column', DESKTOP, async (page, boot) => {
+  await v3180Merge(page, boot, 'End.', 'Backspace', '- one\n\n  P\n\nEnd.\n', '- one\n\n  PEnd.\n',
+    { text: 'PEnd.', offset: 1, transient: false });
+}, { md: '- one\n\n  P\n\nEnd.\n' });
+check('v3180 merge: Delete at the end of P before two writes nothing and selects two', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), notice: await noticeText(page) },
+    { selected: ['li:two'], notice: null }, 'two is selected, no notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the bytes on disk');
+}, { md: V3180_B12 });
+check('v3180 merge: Delete at the end of P before a paragraph after the list writes nothing and selects it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  assert.deepStrictEqual({ selected: await selectedBlocks(page), notice: await noticeText(page) },
+    { selected: ['paragraph:End.'], notice: null }, 'End. is selected, no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n\nEnd.\n', 'the bytes on disk');
+}, { md: '- one\n\n  P\n\nEnd.\n' });
+check('v3180 merge: Backspace in an emptied P removes it, the caret at the end of one', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Backspace'); await wait(100);
+  await page.keyboard.press('Backspace'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.deepStrictEqual(await caretNow(page), { text: 'one', offset: 3, transient: false }, 'the caret');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12_SRC, 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'one Ctrl+Z gives back the source');
+}, { md: V3180_B12 });
+check('v3180 merge: Delete in an emptied P removes it, the caret at the start of two', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Backspace'); await wait(100);
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.deepStrictEqual(await caretNow(page), { text: 'two', offset: 0, transient: false }, 'the caret');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12_SRC, 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'one Ctrl+Z gives back the source');
+}, { md: V3180_B12 });
+const V3180_FENCED_P = '- parent\n  - c1\n\n  P\n\n  - c2\n- x\n\n  ```\n  code\n  ```\n';
+check('v3180 merge: Backspace at the start of P in a list with a fenced item is refused, the disk unchanged', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await page.evaluate(() => {
+    const p = document.querySelector('.content .ed-block[data-list-para="1"]');
+    return p && p.textContent.trim();
+  }), 'P', 'guard: P is a continuation block');
+  await focusSurface(page, 'P', 0);
+  await page.keyboard.press('Backspace'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '此清單含不支援的格式，無法調整結構', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_FENCED_P, 'the bytes on disk');
+}, { md: V3180_FENCED_P });
+check('v3180 merge: Delete at the end of a typed paragraph above P pulls P up into it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page); await wait(150);
+  await page.click('[data-ed-transient] .ed-wys-armed'); await wait(150);
+  await page.keyboard.type('Q'); await wait(100);
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  QP\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'one Ctrl+Z gives back the source');
+}, { md: V3180_B12 });
+
+// ── v3.18.0 T5 (T4 review M2): the rows T4's own gestures were missing.
+check('v3180 para: a committed continuation has no ⠿ and no ＋ (PR-10)', DESKTOP, async (page) => {
+  const g = await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) =>
+    [b.getAttribute('data-block-type'), !!b.querySelector(':scope > .ed-handle'), !!b.querySelector(':scope > .ed-insert')].join(',')));
+  assert.deepStrictEqual(g, ['li,true,true', 'paragraph,false,false', 'li,true,true', 'li,true,true', 'li,true,true'], 'the gutter per block');
+}, { md: V3180_B12 });
+check('v3180 para: Delete over a block selection of P alone is refused, the disk unchanged', DESKTOP, async (page, boot) => {
+  await page.evaluate(() => window.__edTestSetSelection(3, 3));
+  await wait(200);
+  assert.deepStrictEqual(await selectedBlocks(page), ['paragraph:P'], 'guard: P alone is selected');
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  // Pinned as it stands (T4 review M3): a selection of P alone takes the
+  // batch refusal's wording (R18), the same as a set holding P.
+  assert.strictEqual(await noticeText(page), '選取範圍含清單內的段落，目前無法整批操作', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the bytes on disk');
+}, { md: V3180_B12 });
+check('v3180 para: Enter at the very start of P opens a continuation above it, the caret stays in P', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 0);
+  await page.keyboard.press('Enter'); await renderIdle(page); await wait(150);
+  assert.strictEqual(await page.evaluate(() => {
+    const t = document.querySelector('.ed-block[data-ed-transient]');
+    const next = t && t.nextElementSibling;
+    const prev = t && t.previousElementSibling;
+    return t && [t.getAttribute('data-list-para'), t.getAttribute('data-indent'),
+      prev && prev.textContent.indexOf('one') !== -1, next && next.getAttribute('data-list-para'), next && next.textContent.trim()].join(',');
+  }), '1,1,true,1,P', 'a depth-1 paragraph between one and P');
+  assert.deepStrictEqual(await caretNow(page), { text: 'P', offset: 0, transient: false }, 'the caret stays at P\'s start');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'nothing written while it is empty');
+  await page.click('[data-ed-transient] .ed-wys-armed'); await wait(150);
+  await page.keyboard.type('Q'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  Q\n\n  P\n\n  - two\n  - three\n- four\n', 'Q lands above P');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: V3180_B12 });
+check('v3180 para: Enter in the middle of a typed depth paragraph splits it into two continuations', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 3);
+  await tb(page, 'insert-before');
+  await slashPick(page, '文字');
+  await page.keyboard.type('PQ'); await wait(100);
+  await page.keyboard.press('ArrowLeft'); await wait(100);
+  await page.keyboard.press('Enter'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n\n  Q\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+}, { md: V3180_B12_SRC });
+// listLinePlanAfter() returns null for an EMPTY `-` / `1.` after a subtree
+// that ends in P (T4): with no blank line it could not interrupt P (lazy text,
+// or a setext underline), so the line goes to the ordinary insert. Pinned as
+// measured; both re-lex with P still one's (marked: `<li><p>one</p><p>P</p>`).
+for (const [label, item, want] of [
+  ['項目符號列表', 'bulleted', '- one\n\n  P\n- W\n- four\n'],
+  ['編號列表', 'ordered', '- one\n\n  P\n\n1. W\n\n- four\n'],
+]) {
+  check('v3180 para: ＋ on one, ' + label + ' (an empty ' + item + ' marker after P), W', DESKTOP, async (page, boot) => {
+    await plusClick(page, 'one');
+    await slashPick(page, label);
+    await page.keyboard.type('W'); await wait(100);
+    assert.strictEqual(await noticeText(page), null, 'no notice');
+    assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  }, { md: '- one\n\n  P\n- four\n' });
+}
+
+// ── v3.18.0 T5 fix round 2, ruling R22 (narrows PR-8): a depth paragraph made
+// FROM a nested item (＋ / 在下方插入 on it, or 在上方插入 on it when an item of
+// its own depth is right above it) still offers the list items, and picking
+// one makes a sibling item at that depth through the pre-T4 li path
+// (continueListAtTransient()), the run kept tight. 文字 or typing makes the
+// continuation P (T4). Every other kind stays refused (PR-8), and a depth
+// paragraph made from a continuation offers 文字 only. Measured on 4c947f3
+// (ER S2 Task 7b, t5-er.log): ＋ on a nested item offered 文字 only, so the
+// "/" pick 項目符號列表 was not there.
+const V3180_NEST = '# Doc\n\n- alpha\n  - child\n';
+check('v3180 slash: ＋ on a nested item, 項目符號列表, writes a tight sibling at its depth (ER S2 Task 7b)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await slashPick(page, '項目符號列表'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n  -\n', 'the bytes on disk, the empty item');
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n  - W\n', 'W goes into the new item');
+}, { md: V3180_NEST });
+// 編號列表 / 待辦清單 under a nested BULLET item take the other pre-T4 paths
+// (insertListLineAfter(): a line at the item's own columns, no blank line).
+// Measured (t5-fix2-g1-slash.log) and pinned; both are the pre-T4 bytes.
+for (const [label, want] of [['編號列表', '# Doc\n\n- alpha\n  - child\n  1. W\n'], ['待辦清單', '# Doc\n\n- alpha\n  - child\n  - [ ] W\n']]) {
+  check('v3180 slash: ＋ on a nested item, ' + label + ', W, writes it at that depth, tight', DESKTOP, async (page, boot) => {
+    await plusClick(page, 'child');
+    await slashPick(page, label); await renderIdle(page); await wait(200);
+    await page.keyboard.type('W'); await wait(100);
+    assert.strictEqual(await noticeText(page), null, 'no notice');
+    assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  }, { md: V3180_NEST });
+}
+check('v3180 slash: 在上方插入 on a nested item below its sibling, 項目符號列表, W, writes the sibling right above it', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'three', 5);
+  await tb(page, 'insert-before');
+  await slashPick(page, '項目符號列表'); await renderIdle(page); await wait(200);
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n  - two\n  - W\n  - three\n- four\n', 'the bytes on disk');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12_SRC, 'two Ctrl+Z (the typing, the item) give back the source');
+}, { md: V3180_B12_SRC });
+check('v3180 slash: ＋ on a nested item, 文字, still makes the continuation P', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字', '項目符號列表', '編號列表', '待辦清單'], 'the menu offers 文字 and the list items');
+  await slashPick(page, '文字');
+  await page.keyboard.type('P'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n\n  P\n', 'the bytes on disk');
+}, { md: V3180_NEST });
+check('v3180 slash: 在上方插入 on a first child offers 文字 only (no item of its depth above it)', DESKTOP, async (page) => {
+  await focusSurface(page, 'two', 3);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字'], 'the menu');
+}, { md: V3180_B12_SRC });
+check('v3180 slash: a depth paragraph below a continuation P offers 文字 only', DESKTOP, async (page) => {
+  await focusSurface(page, 'P', 1);
+  await tb(page, 'insert-after');
+  assert.strictEqual(await page.evaluate(() => {
+    const t = document.querySelector('.ed-block[data-ed-transient]');
+    return t && [t.getAttribute('data-list-para'), t.getAttribute('data-indent')].join(',');
+  }), '1,1', 'guard: a depth-1 paragraph');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字'], 'the menu');
+}, { md: V3180_B12 });
+// The sweep's predictions for ER S2 Task 7d / 7f, measured here first.
+check('v3180 slash: ＋ on a nested item under an ordered parent, 項目符號列表, writes it at column 3 (ER S2 Task 7d)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await slashPick(page, '項目符號列表'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n1. alpha\n   - child\n   -\n', 'the bytes on disk');
+}, { md: '# Doc\n\n1. alpha\n   - child\n' });
+check('v3180 slash: ＋ on a nested item with a child, 文字, para: alpha\'s continuation after the subtree (ER S2 Task 7f, T4 §5.2)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'child');
+  await slashPick(page, '文字');
+  await page.keyboard.type('para'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '# Doc\n\n- alpha\n  - child\n    - grand\n\n  para\n', 'the bytes on disk');
+}, { md: '# Doc\n\n- alpha\n  - child\n    - grand\n' });

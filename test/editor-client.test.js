@@ -3100,6 +3100,38 @@ function countInCode(source, needle) {
       console.error = orig;
     }
   }
+  // v3.18.0 T5 (controller addition 3): a range write that STARTS at a
+  // continuation (every merge into one: Backspace / Delete joins, a typed
+  // transient pulled up) is under the same guard — commitRangeEdit() itself
+  // asks it, so a merge path that loses the column writes nothing. A range
+  // that starts at an item (a list span re-serialized by list-md.js) is not
+  // a write to the continuation's own text and is not asked.
+  {
+    const src = '- one\n\n  P1\n\n  P2\n\n  - two\n';
+    const errs = [];
+    const orig = console.error;
+    console.error = (m) => errs.push(String(m));
+    try {
+      const st = mk(src);
+      const p1 = para(st, 'P1');
+      const p2 = para(st, 'P2');
+      const bad = commitRangeEdit(st, p1.startLine, p2.endLine, 'P1P2');
+      assert.deepStrictEqual([bad.op, bad.refused, bad.lines.join('\n')], [null, 'list-para-indent', src],
+        'v3180 T5: commitRangeEdit refuses a merge into a continuation that loses its column');
+      assert.strictEqual(errs.length, 1, 'v3180 T5: the refusal is reported on the console');
+      assert.ok(/commitRangeEdit/.test(errs[0]), 'v3180 T5: the report names commitRangeEdit');
+      assert.strictEqual(st.stack.top(), null, 'v3180 T5: nothing was pushed');
+      const good = commitRangeEdit(mk(src), p1.startLine, p2.endLine, '  P1P2');
+      assert.strictEqual(out(good), '- one\n\n  P1P2\n\n  - two\n', 'v3180 T5: a merge at the column goes through');
+      const span = commitRangeEdit(mk(src), 1, 7, '- oneP1\n\n  P2\n\n  - two');
+      assert.strictEqual(out(span), '- oneP1\n\n  P2\n\n  - two\n', 'v3180 T5: a list span from its first item is not asked');
+      const line = commitRangeEdit(mk(src), p2.startLine, p2.startLine, '  P2\n- [ ] ');
+      assert.strictEqual(out(line), '- one\n\n  P1\n\n  P2\n- [ ] \n\n  - two\n',
+        'v3180 T5: only the first line is asked — P kept verbatim with an item line under it goes through (insertListLineAfter())');
+    } finally {
+      console.error = orig;
+    }
+  }
   // The census: a paragraph burst's text goes through burstCommitText(), the
   // one place that writes a continuation's column; no other call hands
   // surfaceCommitText() the burst's own block type.
