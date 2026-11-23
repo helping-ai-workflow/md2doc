@@ -134,6 +134,64 @@ const withIds = (arr) => arr.map((b, i) => Object.assign({}, b, { id: i }));
     'a legal shape is unchanged — the clamp is a safety net, not a rewriter');
 }
 
+// ── v3.18.0 T3 (design §5.1): a continuation paragraph (`type: 'cont'`) ──
+// A continuation at depth k is the text of the item at depth k − 1 above it.
+// It anchors like that item (the bound for the block after it is k, so an
+// item can sit beside it but never under it), it stays inside rule 2's
+// scope, rule 4 clamps it like an item, and it is reported back so its
+// data-indent is written too. An orphan (nothing above it any more) clamps
+// to 0, which list-md.js writes at column 0, a top-level paragraph (PR-7).
+const cont = (indent) => ({ type: 'cont', indent });
+// 13. an item right after a continuation at k has bound k, not k + 1
+{
+  //  - one / (2sp)P / (2sp)- two , the caller wrote two's indent to 2
+  const blocks = withIds([li(0), cont(1), li(2)]);
+  const out = clampIndents(blocks, 2, 1, {});
+  assert.deepStrictEqual(out.map((b) => [b.blockId, b.indent]), [[0, 0], [1, 1], [2, 1]],
+    'an item after a continuation at depth 1 is bounded at 1: a continuation never parents an item');
+}
+// 14. a continuation after a continuation at k anchors at k too
+{
+  const blocks = withIds([li(0), cont(1), cont(3), li(1)]);
+  const out = clampIndents(blocks, 2, 1, {});
+  assert.deepStrictEqual(out.map((b) => b.indent), [0, 1, 1, 1],
+    'P2 after P at 1 is clamped to 1 (rule 1 treats an operated continuation like an item)');
+}
+// 15. ⠿ delete of the parent (B12): P, two and three are one segment, shift
+//     to 0 together; P is an orphan at 0 and two after it has bound 0
+{
+  //  - one / (2sp)P / (2sp)- two / (2sp)- three / - four , delete one
+  const blocks = withIds([li(0), cont(1), li(1), li(1), li(0)]);
+  const out = clampIndents(blocks, 0, 0, { removed: true });
+  assert.deepStrictEqual(out.map((b) => [b.blockId, b.indent]), [[1, 0], [2, 0], [3, 0], [4, 0]],
+    'the orphan continuation clamps to 0 and is reported; the items below it follow');
+}
+// 16. rule 2's scope includes a continuation: it does not stop the walk, so
+//     the siblings after it are still re-anchored
+{
+  //  - a / (2sp)- b / (4sp)P / (4sp)- c , delete b (old indent 1)
+  const blocks = withIds([li(0), li(1), cont(2), li(2)]);
+  const out = clampIndents(blocks, 1, 1, { removed: true });
+  assert.deepStrictEqual(out.map((b) => [b.blockId, b.indent]), [[0, 0], [2, 1], [3, 1]],
+    'P and c (past the continuation) both rise to 1: the scope ran through P');
+}
+// 17. a continuation in a legal span is a fixed point (A10 after Shift+Tab on c1)
+{
+  //  - parent / - c1 / (2sp)P / (2sp)- c2 / - after , c1 was at 1
+  const blocks = withIds([li(0), li(0), cont(1), li(1), li(0)]);
+  const out = clampIndents(blocks, 1, 1, {});
+  assert.deepStrictEqual(out.map((b) => b.indent), [0, 0, 1, 1, 0],
+    'P stays at 1 under c1 and c2 stays at 1 beside it');
+}
+// 18. a non-list, non-continuation block still ends the scope and still
+//     anchors nothing
+{
+  const blocks = withIds([li(0), cont(1), other(), li(2)]);
+  const out = clampIndents(blocks, 0, 0, { removed: true });
+  assert.deepStrictEqual(out.map((b) => [b.blockId, b.indent]), [[1, 0], [3, 2]],
+    'the paragraph ends the scope; the li after it keeps its indent');
+}
+
 // ── T8 item 5: what this module's coverage IS, and what it is NOT ────────
 //
 // PARTLY INSURANCE, PARTLY COVERAGE — and the line between the two moved on

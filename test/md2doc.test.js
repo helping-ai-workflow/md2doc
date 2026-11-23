@@ -995,5 +995,18 @@ console.log('md2doc dot WASM test passed');
     const plain = (await edit('- x\n\n- y\n')).tags;
     assert.deepStrictEqual(plain.map((t) => t.loose), ['1', '1'], 'v3180 continuation: an unplanned loose list keeps its stamp');
   }
+  // v3.18.0 T3: list-md.js writes an empty item followed by its own
+  // continuation as `- ` + U+200B (T2 ruling R15). The receiving half: the
+  // head renders as `<p>U+200B</p>` (the item is loose), and the surface must
+  // render EMPTY as for a tight item, or the next keystroke lands beside the
+  // invisible character and writes it back out (measured in T3: Enter at the
+  // end of `one` in B12, then X, wrote `- X` + U+200B).
+  for (const md of ['- one\n- ​\n\n  P\n\n  - two\n', '1. ​\n\n   P\n', '- [ ] ​\n\n  P\n']) {
+    const { tags } = await edit(md);
+    const head = tags.find((t) => t.type === 'li' && t.text.indexOf('one') === -1);
+    assert.ok(head && head.part.includes('<div class="ed-li-text"></div>'),
+      'v3180 continuation (T3): an escaped empty head renders an empty surface in ' + JSON.stringify(md) + ': ' + (head && head.part));
+    assert.ok(tags.some((t) => t.para === '1' && t.text === 'P'), 'v3180 continuation (T3): and its continuation is still a block of its own');
+  }
   console.log('md2doc v3180 continuation edit-render test passed');
 })().catch((err) => { console.error((err && err.stack) || err); process.exit(1); });

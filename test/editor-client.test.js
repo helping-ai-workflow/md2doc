@@ -2087,6 +2087,17 @@ function countInCode(source, needle) {
     'and the partner — the same shape at a legal indent is anchored, so the assertion '
     + 'above is about the INDENT and not about the paragraph');
   assert.strictEqual(spanIndentsAreAnchored([]), true, 'an empty span is vacuously anchored');
+  // v3.18.0 T3: a continuation paragraph ({type:'cont'}) anchors like the item
+  // at k − 1 that owns it, the same answer indent-clamp.js's boundAt() gives.
+  const cont = (indent) => ({ type: 'cont', indent });
+  assert.strictEqual(spanIndentsAreAnchored([li(0), li(0), cont(1), li(1), li(1)]), true,
+    'v3180: B12 after a drag of four above one — P at 1 under one, two at 1 beside P');
+  assert.strictEqual(spanIndentsAreAnchored([li(0), cont(1), li(2)]), false,
+    'v3180: an item one level under a continuation has no parent (a continuation parents nothing)');
+  assert.strictEqual(spanIndentsAreAnchored([cont(1), li(1)]), false,
+    'v3180: a span opening with a continuation at 1 has no item for it');
+  assert.strictEqual(spanIndentsAreAnchored([cont(0), li(0), li(1)]), true,
+    'v3180: an orphan continuation at 0 (a top-level paragraph) and a list after it');
 }
 
 // -- S4 Task 7: THE SWEEP the clamp decision rests on -------------------------

@@ -13532,3 +13532,111 @@ check('v3180 render: the A10 continuation is drawn between c1 and c2, on parent\
   assert.ok(g.top >= g.c1 && g.bottom <= g.c2, 'P [' + g.top + ', ' + g.bottom + '] lies between c1 (bottom ' + g.c1 + ') and c2 (top ' + g.c2 + ')');
   assert.ok(Math.abs(g.left - g.parent) <= 1, 'P left ' + g.left + ' vs parent\'s text left ' + g.parent);
 }, { md: V3180_A10 });
+
+// ── v3.18.0 T3 (design §5.4): the items around a continuation paragraph stay
+// editable. The continuation is an li-family block that is not an item
+// (liAttrs() cont): transparent inside its parent's subtree, a run boundary at
+// its own depth, and never a parent (an item after it sits at its depth at
+// most). Fixtures are the R18 bytes (V3180_B12 / V3180_A10 above). Each row
+// reads the disk after Ctrl+S, the notice line, and what the toolbar's undo
+// gives back. Measured before T3 (t3-red-click-around.log): Tab on three or
+// four committed the nested span [two, three] alone and de-nested two, and ⠿
+// on one left P and the items at their old columns. Guards, green before T3
+// because the shorter span happened to write the same bytes (the run stopped
+// at P, and P's lines were outside it): Tab on two / c2, Shift+Tab on c1 /
+// two / three (a carried bystander keeps its column), Enter on four, typing
+// in one. Enter on one was red only on its undo step (a bare `-` above P,
+// see there); Enter on two is red before T3 on the same walk as Tab.
+async function v3180Around(page, boot, key, text, md, want, undos) {
+  await focusSurface(page, text, text.length);
+  await page.keyboard.press(key); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  for (let i = 0; i < (undos === undefined ? 1 : undos); i++) await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), md, 'undo gives back the source');
+}
+check('v3180 around: Tab on three nests it under two', DESKTOP, async (page, boot) => {
+  await v3180Around(page, boot, 'Tab', 'three', V3180_B12, '- one\n\n  P\n\n  - two\n    - three\n- four\n');
+}, { md: V3180_B12 });
+check('v3180 around: Tab on two does nothing (its previous block is P, across a blank line)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 3);
+  await page.keyboard.press('Tab'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) => b.getAttribute('data-indent'))),
+    ['0', '1', '1', '1', '0'], 'no indent moved');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the bytes on disk');
+}, { md: V3180_B12 });
+check('v3180 around: Tab on c2 does nothing (its previous block is P, across a blank line)', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'c2', 2);
+  await page.keyboard.press('Tab'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.deepStrictEqual(await page.evaluate(() => [...document.querySelectorAll('.content .ed-block')].map((b) => b.getAttribute('data-indent'))),
+    ['0', '1', '1', '1', '0'], 'no indent moved');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_A10, 'the bytes on disk');
+}, { md: V3180_A10 });
+check('v3180 around: Shift+Tab on c1 lifts it; P and c2 become c1\'s', DESKTOP, async (page, boot) => {
+  await v3180Around(page, boot, 'Shift+Tab', 'c1', V3180_A10, '- parent\n- c1\n\n  P\n\n  - c2\n- after\n');
+}, { md: V3180_A10 });
+check('v3180 around: Shift+Tab on two lifts it beside one; P stays one\'s', DESKTOP, async (page, boot) => {
+  await v3180Around(page, boot, 'Shift+Tab', 'two', V3180_B12, '- one\n\n  P\n\n- two\n  - three\n- four\n');
+}, { md: V3180_B12 });
+check('v3180 around: Shift+Tab on three lifts it beside one; two stays nested', DESKTOP, async (page, boot) => {
+  await v3180Around(page, boot, 'Shift+Tab', 'three', V3180_B12, '- one\n\n  P\n\n  - two\n- three\n- four\n');
+}, { md: V3180_B12 });
+check('v3180 around: Enter at the end of two makes a nested item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X'); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n\n  - two\n  - X\n  - three\n- four\n', 'the bytes on disk');
+  await tb(page, 'undo'); await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'two undos give back the source');
+}, { md: V3180_B12 });
+check('v3180 around: Tab on four nests it after three', DESKTOP, async (page, boot) => {
+  await v3180Around(page, boot, 'Tab', 'four', V3180_B12, '- one\n\n  P\n\n  - two\n  - three\n  - four\n');
+}, { md: V3180_B12 });
+check('v3180 around: Enter at the end of one makes X, which takes P and the children', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'one', 3);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X'); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n- X\n\n  P\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  await tb(page, 'undo');
+  // An empty item followed by its own continuation is written `- ` + U+200B
+  // (T2 ruling R15): a bare `-` would end the item at the blank line and put
+  // P out of the list. Before T3 this read `-` (the span stopped at P).
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n- \u200b\n\n  P\n\n  - two\n  - three\n- four\n', 'undo takes back the typing');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'and then the Enter');
+}, { md: V3180_B12 });
+check('v3180 around: Enter on four makes a tight item', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'four', 4);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('X'); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n\n  - two\n  - three\n- four\n- X\n', 'the bytes on disk');
+  await tb(page, 'undo'); await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'two undos give back the source');
+}, { md: V3180_B12 });
+check('v3180 around: typing in one changes only its line', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'one', 3);
+  await page.keyboard.type('Z'); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- oneZ\n\n  P\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
+}, { md: V3180_B12 });
+check('v3180 around: ⠿ drag of one below four leaves P and the children; P becomes a paragraph', DESKTOP, async (page, boot) => {
+  await dragBlock(page, 'one', null);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'P\n\n- two\n- three\n- four\n- one\n', 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
+}, { md: V3180_B12 });
+check('v3180 around: ⠿ 刪除 of one leaves P as a paragraph above the children', DESKTOP, async (page, boot) => {
+  await gutterMenu(page, await blockByText(page, 'one'), '刪除');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), 'P\n\n- two\n- three\n- four\n', 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
+}, { md: V3180_B12 });
