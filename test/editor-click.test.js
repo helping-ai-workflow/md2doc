@@ -13838,3 +13838,42 @@ check('v3180 para: ＋ on one, 待辦清單, writes the to-do after one\'s P (R1
   assert.strictEqual(await noticeText(page), null, 'no notice');
   assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n- [ ] W\n- four\n', 'the bytes on disk');
 }, { md: '- one\n\n  P\n- four\n' });
+
+// ── v3.18.0 T4 review I1: a list that cannot take a structural edit (an item
+// holds a fence: raw-only, design §7) refuses the depth paragraph up front,
+// as Enter does there. Measured on 34c0ef1: ＋ under c1 opened a depth
+// paragraph that took typing, and every commit of it was then refused — no
+// save, no way out but erasing the text.
+const V3180_FENCED = '- parent\n  - c1\n  - c2\n- x\n\n  ```\n  code\n  ```\n';
+for (const how of ['plus', 'insert-after', 'insert-before']) {
+  check('v3180 para: ' + (how === 'plus' ? '＋ under' : how === 'insert-after' ? '在下方插入 on' : '在上方插入 on') +
+      ' c1 in a list with a fenced item is refused up front, the disk unchanged', DESKTOP, async (page, boot) => {
+    if (how === 'plus') await plusClick(page, 'c1');
+    else { await focusSurface(page, 'c1', 2); await tb(page, how); }
+    await wait(150);
+    assert.strictEqual(await noticeText(page), '此清單含不支援的格式，無法調整結構', 'the notice');
+    assert.strictEqual(await transientCount(page), 0, 'no paragraph opened');
+    assert.strictEqual(await saveAndRead(page, boot), V3180_FENCED, 'the bytes on disk');
+  }, { md: V3180_FENCED });
+}
+
+// ── v3.18.0 T4 review I2 (ruling R16): an EMPTY parent followed by its new
+// continuation is written with U+200B, or marked folds P into it (li 1–4,
+// measured on 34c0ef1 for the to-do: its carried line was replayed as
+// `- [ ] `). The empty bullet and ordered parents take the same path.
+for (const [label, md, want] of [
+  ['an empty to-do parent', '- [ ] \n  - two\n  - three\n- four\n', '- [ ] ​\n\n  P\n\n  - two\n  - three\n- four\n'],
+  ['an empty bullet parent', '-\n  - two\n  - three\n- four\n', '- ​\n\n  P\n\n  - two\n  - three\n- four\n'],
+  ['an empty ordered parent', '1.\n   1. two\n   2. three\n2. four\n', '1. ​\n\n   P\n\n   1. two\n   2. three\n2. four\n'],
+]) {
+  check('v3180 B12: ' + label + ', 在上方插入 on two, P stays its own block on reload', DESKTOP, async (page, boot) => {
+    await v3180Insert(page, boot, 'insert-before', 'two', md, want);
+    await tb(page, 'redo');
+    assert.strictEqual(await saveAndRead(page, boot), want, 'redo writes it again');
+    await page.reload({ waitUntil: 'load' }); await page.waitForSelector('.ed-toolbar'); await wait(400);
+    assert.strictEqual(await page.evaluate(() => {
+      const p = document.querySelector('.content .ed-block[data-list-para="1"]');
+      return p && [p.getAttribute('data-indent'), p.firstElementChild.textContent].join(',');
+    }), '1,P', 'P is a continuation block of its own after a reload');
+  }, { md });
+}
