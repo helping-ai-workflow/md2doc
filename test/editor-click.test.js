@@ -13640,3 +13640,17 @@ check('v3180 around: ⠿ 刪除 of one leaves P as a paragraph above the childre
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
 }, { md: V3180_B12 });
+// T3 review Important #1 (ruling R17): a continuation behaves like its
+// sibling child items in every path. A ⠿ drop out of the item's list carries
+// the item's subtree (v3.11, as in Notion), so P goes with it, re-based, in
+// the same list, and two / three keep their depth under one. Measured on
+// d7eb9a3: `- one\n\n  P\n\n- two\n  - three\n` (two lifted to 0, three
+// re-parented under it); on 505e8cd P and the children stayed behind.
+check('v3180 around: ⠿ drag of one out of its list carries P and the children', DESKTOP, async (page, boot) => {
+  const md = V3180_B12 + '\nEnd.\n';
+  await dragBlock(page, 'one', null);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- four\n\nEnd.\n\n- one\n\n  P\n\n  - two\n  - three\n', 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), md, 'undo gives back the source');
+}, { md: V3180_B12 + '\nEnd.\n' });

@@ -1001,7 +1001,7 @@ console.log('md2doc dot WASM test passed');
   // render EMPTY as for a tight item, or the next keystroke lands beside the
   // invisible character and writes it back out (measured in T3: Enter at the
   // end of `one` in B12, then X, wrote `- X` + U+200B).
-  for (const md of ['- one\n- ​\n\n  P\n\n  - two\n', '1. ​\n\n   P\n', '- [ ] ​\n\n  P\n']) {
+  for (const md of ['- one\n- \u200b\n\n  P\n\n  - two\n', '1. \u200b\n\n   P\n', '- [ ] \u200b\n\n  P\n']) {
     const { tags } = await edit(md);
     const head = tags.find((t) => t.type === 'li' && t.text.indexOf('one') === -1);
     assert.ok(head && head.part.includes('<div class="ed-li-text"></div>'),
