@@ -71,4 +71,13 @@ assert.deepStrictEqual(cat.shortcutLines({ kind: 'quote' }, []), ['>']);
 assert.deepStrictEqual(cat.shortcutLines({ kind: 'quote' }, ['a', 'b']), ['> a', '> b']);
 assert.deepStrictEqual(cat.shortcutLines({ kind: 'code' }, []), ['\x60\x60\x60', '', '\x60\x60\x60']);
 assert.deepStrictEqual(cat.shortcutLines({ kind: 'divider' }, []), ['---']);
+// v3.18.0 T4 (design §5.2, PR-8): in a list item's continuation paragraph
+// (a committed one or a depth transient) the menu offers 文字 only, whatever the
+// query; with no context, or a false flag, the filter is unchanged.
+assert.deepStrictEqual(cat.filterSlashItems('', { listPara: true }).map((i) => i.id), ['text']);
+assert.deepStrictEqual(cat.filterSlashItems('p', { listPara: true }).map((i) => i.id), ['text']);
+assert.deepStrictEqual(cat.filterSlashItems('表', { listPara: true }).map((i) => i.id), []);
+assert.deepStrictEqual(cat.filterSlashItems('h', { listPara: true }).map((i) => i.id), []);
+assert.strictEqual(cat.filterSlashItems('', { listPara: false }).length, 16);
+assert.deepStrictEqual(cat.filterSlashItems('表', {}).map((i) => i.id), ['table']);
 console.log('block-catalog.test.js OK');

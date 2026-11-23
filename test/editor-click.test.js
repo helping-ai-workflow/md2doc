@@ -13654,3 +13654,187 @@ check('v3180 around: ⠿ drag of one out of its list carries P and the children'
   await tb(page, 'undo');
   assert.strictEqual(await saveAndRead(page, boot), md, 'undo gives back the source');
 }, { md: V3180_B12 + '\nEnd.\n' });
+
+// ── v3.18.0 T4 (B12 / A10 proper, design §5.2): an empty paragraph made
+// relative to a NESTED item (在上方插入, 在下方插入, ＋) is a depth transient —
+// a continuation of the item above it at that item's depth, drawn and placed
+// where it will land. Its commit re-serializes the list span, so it writes
+// v3.17.3 R18's bytes; R14: placed as an item's LAST content (a sibling item
+// next), the blank line after it is written only when the list is already
+// loose. Measured on 8fe150d (t4-red-click-*.log): every row wrote a
+// top-level paragraph, splitting the list.
+const V3180_B12_SRC = '- one\n  - two\n  - three\n- four\n';
+const V3180_A10_SRC = '- parent\n  - c1\n  - c2\n- after\n';
+async function v3180Insert(page, boot, how, text, md, want) {
+  if (how === 'plus') await plusClick(page, text);
+  else { await focusSurface(page, text, text.length); await tb(page, how); }
+  // ＋ / 在上方／在下方插入 open the "/" menu with no "/" typed; 文字 closes it.
+  await slashPick(page, '文字');
+  await page.keyboard.type('P'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), md, 'one undo gives back the source');
+}
+check('v3180 B12: 在上方插入 on two, 文字, P, writes P as one\'s continuation', DESKTOP, async (page, boot) => {
+  await v3180Insert(page, boot, 'insert-before', 'two', V3180_B12_SRC, '- one\n\n  P\n\n  - two\n  - three\n- four\n');
+}, { md: V3180_B12_SRC });
+check('v3180 A10: ＋ under c1, 文字, P, writes P between c1 and c2', DESKTOP, async (page, boot) => {
+  await v3180Insert(page, boot, 'plus', 'c1', V3180_A10_SRC, '- parent\n  - c1\n\n  P\n\n  - c2\n- after\n');
+}, { md: V3180_A10_SRC });
+check('v3180 A10: 在下方插入 on c1, 文字, P, writes P between c1 and c2', DESKTOP, async (page, boot) => {
+  await v3180Insert(page, boot, 'insert-after', 'c1', V3180_A10_SRC, '- parent\n  - c1\n\n  P\n\n  - c2\n- after\n');
+}, { md: V3180_A10_SRC });
+check('v3180 B12: ordered, 在上方插入 on two writes P at the parent\'s column 3', DESKTOP, async (page, boot) => {
+  const md = '1. one\n   1. two\n   2. three\n2. four\n';
+  await v3180Insert(page, boot, 'insert-before', 'two', md, '1. one\n\n   P\n\n   1. two\n   2. three\n2. four\n');
+}, { md: '1. one\n   1. two\n   2. three\n2. four\n' });
+check('v3180 A10: ordered, ＋ under c1 restarts the list below P at 1', DESKTOP, async (page, boot) => {
+  const md = '- parent\n  1. c1\n  2. c2\n- after\n';
+  await v3180Insert(page, boot, 'plus', 'c1', md, '- parent\n  1. c1\n\n  P\n\n  1. c2\n- after\n');
+}, { md: '- parent\n  1. c1\n  2. c2\n- after\n' });
+check('v3180 A10: ＋ under the last child writes P as parent\'s last content, tight before after (R14)', DESKTOP, async (page, boot) => {
+  await v3180Insert(page, boot, 'plus', 'c2', V3180_A10_SRC, '- parent\n  - c1\n  - c2\n\n  P\n- after\n');
+}, { md: V3180_A10_SRC });
+check('v3180 A10: ＋ under the last child of a loose list keeps the blank before after (R14)', DESKTOP, async (page, boot) => {
+  const md = '- parent\n  - c1\n  - c2\n\n- after\n';
+  await v3180Insert(page, boot, 'plus', 'c2', md, '- parent\n  - c1\n  - c2\n\n  P\n\n- after\n');
+}, { md: '- parent\n  - c1\n  - c2\n\n- after\n' });
+check('v3180 A10: depth 2, 在上方插入 on c1a writes P as c1\'s continuation', DESKTOP, async (page, boot) => {
+  const md = '- parent\n  - c1\n    - c1a\n  - c2\n- after\n';
+  await v3180Insert(page, boot, 'insert-before', 'c1a', md, '- parent\n  - c1\n\n    P\n\n    - c1a\n  - c2\n- after\n');
+}, { md: '- parent\n  - c1\n    - c1a\n  - c2\n- after\n' });
+
+// ── v3.18.0 T4 (design §5.3): a committed continuation keeps its column.
+// Its text edit, its Enter split and its removal once emptied are per-block
+// range ops written at the file's own column; everything that would write
+// anything but text there is refused with a notice (PR-8, R18). Measured on
+// 8fe150d: typing in P wrote it at column 0 (`- one\n\nPZ\n\n  - two`), which
+// moved P and the items after it out of the list.
+check('v3180 para: typing in P changes only P\'s line', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.type('Z'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  PZ\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
+}, { md: V3180_B12 });
+check('v3180 para: Enter in the middle of P splits it into two continuations', DESKTOP, async (page, boot) => {
+  const md = '- one\n\n  P1P2\n\n  - two\n  - three\n- four\n';
+  await focusSurface(page, 'P1P2', 2);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P1\n\n  P2\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), md, 'undo gives back the source');
+}, { md: '- one\n\n  P1P2\n\n  - two\n  - three\n- four\n' });
+check('v3180 para: Enter at the end of P, then Q, writes Q as the next continuation', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  await page.keyboard.type('Q'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n\n  Q\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'undo gives back the source');
+}, { md: V3180_B12 });
+async function v3180EmptyAndLeave(page, boot, text, leaveTo, md, want) {
+  await focusSurface(page, text, text.length);
+  for (let i = 0; i < text.length; i++) await page.keyboard.press('Backspace');
+  await wait(100);
+  // Leave with a plain click (the removal re-renders, so no caret placing
+  // on the element the click hit).
+  await page.click((await blockByText(page, leaveTo)) + ' .ed-wys-armed'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), want, 'the bytes on disk');
+  await tb(page, 'undo');
+  assert.strictEqual(await saveAndRead(page, boot), md, 'undo gives back the source');
+}
+// The next four are guards, green before T4 (t4-red2-click-emptied.log): the
+// old removal (commitTightRemoval() between two tight lists of one kind,
+// commitRangeRemoval() otherwise) happens to write the same bytes there. The
+// two rows after them are where it did not: a P between an item and its child
+// in a loose list, and Enter in an emptied P.
+check('v3180 para: P emptied and left gives back B12\'s tight list', DESKTOP, async (page, boot) => {
+  await v3180EmptyAndLeave(page, boot, 'P', 'four', V3180_B12, V3180_B12_SRC);
+}, { md: V3180_B12 });
+check('v3180 para: P emptied and left joins A10\'s c1 and c2 again', DESKTOP, async (page, boot) => {
+  await v3180EmptyAndLeave(page, boot, 'P', 'after', V3180_A10, V3180_A10_SRC);
+}, { md: V3180_A10 });
+check('v3180 para: a trailing continuation emptied and left goes with its blank line', DESKTOP, async (page, boot) => {
+  await v3180EmptyAndLeave(page, boot, 'more', 'c', '- a\n  - b\n\n  more\n- c\n', '- a\n  - b\n- c\n');
+}, { md: '- a\n  - b\n\n  more\n- c\n' });
+check('v3180 para: in a loose list, an emptied continuation leaves the item separator', DESKTOP, async (page, boot) => {
+  await v3180EmptyAndLeave(page, boot, 'more', 'c', '- x\n\n- a\n\n  more\n\n- c\n', '- x\n\n- a\n\n- c\n');
+}, { md: '- x\n\n- a\n\n  more\n\n- c\n' });
+check('v3180 para: in a loose list, P emptied between an item and its child takes both blank lines', DESKTOP, async (page, boot) => {
+  await v3180EmptyAndLeave(page, boot, 'P', 'x', '- x\n\n- one\n\n  P\n\n  - two\n', '- x\n\n- one\n  - two\n');
+}, { md: '- x\n\n- one\n\n  P\n\n  - two\n' });
+check('v3180 para: Enter in an emptied P opens a continuation where P was', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.press('Backspace'); await wait(100);
+  await page.keyboard.press('Enter'); await renderIdle(page);
+  assert.strictEqual(await page.evaluate(() => {
+    const t = document.querySelector('.ed-block[data-ed-transient]');
+    const prev = t && t.previousElementSibling;
+    return t && [t.getAttribute('data-list-para'), t.getAttribute('data-indent'), prev && prev.textContent.indexOf('one') !== -1].join(',');
+  }), '1,1,true', 'a depth-1 paragraph right after one');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12_SRC, 'the bytes on disk with it empty');
+  await page.keyboard.type('Q'); await wait(100);
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  Q\n\n  - two\n  - three\n- four\n', 'Q takes P\'s place');
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+}, { md: V3180_B12 });
+check('v3180 para: Escape in an empty depth paragraph writes nothing', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'two', 3);
+  await tb(page, 'insert-before');
+  assert.strictEqual(await page.evaluate(() => {
+    const t = document.querySelector('.ed-block[data-ed-transient]');
+    return t && [t.getAttribute('data-list-para'), t.getAttribute('data-indent')].join(',');
+  }), '1,1', 'the new paragraph is a continuation at depth 1');
+  await page.keyboard.press('Escape'); await wait(100);
+  await page.keyboard.press('Escape'); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12_SRC, 'the bytes on disk');
+}, { md: V3180_B12_SRC });
+check('v3180 para: the "/" menu at depth offers 文字 only', DESKTOP, async (page) => {
+  await focusSurface(page, 'two', 3);
+  await tb(page, 'insert-before');
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字'], 'the menu on the depth paragraph');
+  await page.keyboard.press('Escape'); await wait(100);
+  await focusSurface(page, 'P', 1);
+  await page.keyboard.type(' /'); await wait(150);
+  assert.deepStrictEqual((await slashMenu(page)).labels, ['文字'], 'the menu "/" opens in a committed continuation');
+}, { md: V3180_B12 });
+check('v3180 para: toolbar 表格 in P is off, and a press anyway is refused with the disk unchanged', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 1); await wait(150);
+  const off = await page.evaluate(() => ['table', 'line', 'image', 'quote', 'code', 'list', 'ordered-list', 'check', 'headings']
+    .map((id) => document.querySelector('[data-ed-tb="' + id + '"]').disabled));
+  assert.deepStrictEqual(off, [true, true, true, true, true, true, true, true, true], 'the buttons are off');
+  await page.evaluate(() => { const b = document.querySelector('[data-ed-tb="table"]'); b.disabled = false; b.click(); });
+  await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the bytes on disk');
+}, { md: V3180_B12 });
+check('v3180 para: a Markdown shortcut in P is refused and its text is kept, escaped', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'P', 0);
+  await page.keyboard.type('- '); await wait(200); await renderIdle(page);
+  assert.strictEqual(await noticeText(page), '清單內的段落目前只能放文字', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  \\- P\n\n  - two\n  - three\n- four\n', 'the bytes on disk');
+}, { md: V3180_B12 });
+check('v3180 para: Delete over a block selection holding P is refused, the disk unchanged (R18)', DESKTOP, async (page, boot) => {
+  assert.strictEqual(await selectBlocks(page, 'one', 'two'), 3, 'guard: one, P and two selected');
+  await page.keyboard.press('Delete'); await renderIdle(page); await wait(200);
+  assert.strictEqual(await noticeText(page), '選取範圍含清單內的段落，目前無法整批操作', 'the notice');
+  assert.strictEqual(await saveAndRead(page, boot), V3180_B12, 'the bytes on disk');
+}, { md: V3180_B12 });
+// T4 audit (R17), a guard (T3's walkers already put the line after P): listLinePlanAfter() reads subtreeBlocksAfter(), which
+// includes a continuation since T3. A to-do chosen under ＋ on an item whose
+// content ends in P goes after P, as after a child item, with no blank line
+// (`- [ ] ` interrupts the paragraph; the empty markers are left to the
+// ordinary insert, see the function).
+check('v3180 para: ＋ on one, 待辦清單, writes the to-do after one\'s P (R17)', DESKTOP, async (page, boot) => {
+  await plusClick(page, 'one');
+  await slashPick(page, '待辦清單');
+  await page.keyboard.type('W'); await wait(100);
+  assert.strictEqual(await noticeText(page), null, 'no notice');
+  assert.strictEqual(await saveAndRead(page, boot), '- one\n\n  P\n- [ ] W\n- four\n', 'the bytes on disk');
+}, { md: '- one\n\n  P\n- four\n' });

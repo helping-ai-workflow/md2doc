@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds } = require('../lib/editor/client.js');
+const { transientCommitMd, pasteIsAllListLines, LIST_LINE_RE, extractBlockSource, commitEdit, commitListBlockRemoval, commitBlockInsertion, commitInsertionAt, commitSplit, commitShortcut, growOverBlanks, commitTightInsert, planBlockMove, commitBlockMove, reorderSpanRange, spanMoveRange, spanIndentsAreAnchored, blockMoveSeamRefusal, withHeadingDepth, commitRangeEdit, commitRangeRemoval, rollbackFailedRender, shiftBlocksAfterBodyEdit, waveDiscardIsSafe, waveOfferHolds, waveRedoHolds, commitListParaRemoval } = require('../lib/editor/client.js');
 const { UndoStack } = require('../lib/editor/lineops.js');
 const { marked } = require('marked');
 
@@ -1827,8 +1827,12 @@ function countInCode(source, needle) {
   // moved out of commitCodeEditBody() into commitFencedRangeAndRender(), the
   // commit-and-render helper the in-place code edit and the diagram panel
   // (commitDiagramPanelBody()) now share. The panel adds no line of its own.
-  assert.strictEqual(helperCalls, 32,
-    'the helper must be DECLARED once and used on all thirty-one ' +
+  // MIGRATED by v3.18.0 T4 (32 -> 33). ONE genuinely new commit-then-render
+  // site: commitTransientAsListPara() — a depth transient (a continuation
+  // paragraph) commits by one commitRangeEdit() over its item's list span and
+  // owns its rollback (+1). 1 declaration + 32 call lines = 33.
+  assert.strictEqual(helperCalls, 33,
+    'the helper must be DECLARED once and used on all thirty-two ' +
     'commit-then-render call lines; found ' + helperCalls + ' code lines mentioning it');
 }
 
@@ -3030,6 +3034,85 @@ function countInCode(source, needle) {
   assert.deepStrictEqual(replayed, { moveSpanAcrossLists: 1 },
     'v3174 D5: the callers allowed to name the lines they replay (a new one needs its reason and a row here)');
   assert.strictEqual(src.split('opts && opts.replayedLines').length - 1, 1, 'v3174 D5: commitRangeEdit() hands the set to keepDefinitionLines() once');
+}
+
+// v3.18.0 T4 (design §5.3, PR-3): a list item's continuation paragraph is
+// written with its own column, and the pure core refuses any write that would
+// lose it. commitListParaRemoval() removes an emptied one: its lines and the
+// blank run above, plus the blank run below only when it stood between an
+// item and that item's deeper child (the exact inverse of the insert).
+{
+  const { buildBlockMap } = require('../lib/editor/blockmap.js');
+  const mk = (src) => ({ lines: src.split('\n'), blocks: buildBlockMap(src).blocks, stack: new UndoStack() });
+  const out = (r) => (r.op === null ? null : r.lines.join('\n'));
+  const para = (st, text) => st.blocks.find((b) => b.listPara && st.lines[b.startLine - 1].trim() === text);
+  const remove = (src, text) => {
+    const st = mk(src);
+    const rec = para(st, text);
+    const i = st.blocks.indexOf(rec);
+    return out(commitListParaRemoval(st, rec, st.blocks[i - 1] || null, st.blocks[i + 1] || null));
+  };
+  assert.strictEqual(remove('- one\n\n  P\n\n  - two\n  - three\n- four\n', 'P'), '- one\n  - two\n  - three\n- four\n',
+    'v3180 T4: removing B12\'s P gives back the tight list it was inserted into');
+  assert.strictEqual(remove('- parent\n  - c1\n\n  P\n\n  - c2\n- after\n', 'P'), '- parent\n  - c1\n  - c2\n- after\n',
+    'v3180 T4: removing A10\'s P joins c1 and c2 into one list again');
+  assert.strictEqual(remove('- a\n  - b\n\n  more\n- c\n', 'more'), '- a\n  - b\n- c\n',
+    'v3180 T4: a trailing continuation goes with the blank line above it');
+  assert.strictEqual(remove('- x\n\n- a\n\n  more\n\n- c\n', 'more'), '- x\n\n- a\n\n- c\n',
+    'v3180 T4: in a loose list the item separator below stays');
+  assert.strictEqual(remove('- one\n\n  P1\n\n  P2\n\n  - two\n', 'P2'), '- one\n\n  P1\n\n  - two\n',
+    'v3180 T4: after another continuation, the blank run above goes and the one below stays');
+  assert.strictEqual(remove('- one\n\n  P\n', 'P'), '- one\n', 'v3180 T4: at the end of the file');
+  {
+    const st = mk('- one\n\n  P\n\n  - two\n- four\n');
+    const rec = para(st, 'P');
+    const r = commitListParaRemoval(st, rec, st.blocks[0], st.blocks[2]);
+    assert.deepStrictEqual([r.op.startLine, r.op.endLine, r.op.after], [2, 4, []], 'v3180 T4: one op over the blank lines and P');
+    assert.deepStrictEqual(r.blocks.map((b) => [b.id, b.startLine]), [[0, 1], [1, 3], [2, 2], [3, 3]],
+      'v3180 T4: the blocks after P move up by the lines removed');
+    assert.strictEqual(st.stack.top(), r.op, 'v3180 T4: the op is on the stack');
+  }
+  // The write-layer guard (design §5.3): a write to a continuation whose
+  // non-blank lines do not all start with its column writes nothing.
+  {
+    const src = '- one\n\n  P\n\n  - two\n';
+    const errs = [];
+    const orig = console.error;
+    console.error = (m) => errs.push(String(m));
+    try {
+      const st = mk(src);
+      const rec = para(st, 'P');
+      const bad = commitEdit(st, rec.id, 'PZ');
+      assert.deepStrictEqual([bad.op, bad.refused, bad.lines.join('\n')], [null, 'list-para-indent', src],
+        'v3180 T4: commitEdit refuses an unindented write to a continuation');
+      const split = commitSplit(st, rec.id, '  P1', 'P2');
+      assert.deepStrictEqual([split.op, split.refused], [null, 'list-para-indent'], 'v3180 T4: commitSplit refuses a half without the column');
+      assert.strictEqual(errs.length, 2, 'v3180 T4: each refusal is reported on the console');
+      assert.strictEqual(st.stack.top(), null, 'v3180 T4: nothing was pushed');
+      const good = commitEdit(st, rec.id, '  PZ');
+      assert.strictEqual(out(good), '- one\n\n  PZ\n\n  - two\n', 'v3180 T4: a write at the column goes through');
+      const two = commitSplit(mk(src), rec.id, '  P1', '  P2');
+      assert.strictEqual(out(two), '- one\n\n  P1\n\n  P2\n\n  - two\n', 'v3180 T4: a split at the column goes through');
+      // A top-level paragraph is not affected.
+      const top = mk('A.\n\nB.\n');
+      assert.strictEqual(out(commitEdit(top, 1, 'B2.')), 'A.\n\nB2.\n', 'v3180 T4: a plain paragraph has no column to keep');
+    } finally {
+      console.error = orig;
+    }
+  }
+  // The census: a paragraph burst's text goes through burstCommitText(), the
+  // one place that writes a continuation's column; no other call hands
+  // surfaceCommitText() the burst's own block type.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'editor', 'client.js'), 'utf8');
+  const sites = {};
+  for (const hit of src.matchAll(/surfaceCommitText\([^)\n]*burst\.blockType/g)) {
+    const head = src.slice(0, hit.index);
+    const m = [...head.matchAll(/\n {2}(?:async )?function ([A-Za-z0-9_]+)\(/g)].pop();
+    const fn = m ? m[1] : '?';
+    sites[fn] = (sites[fn] || 0) + 1;
+  }
+  assert.deepStrictEqual(sites, { burstCommitText: 1 },
+    'v3180 T4: only burstCommitText() hands surfaceCommitText() a burst\'s block type');
 }
 
 console.log('editor-client.test.js OK');

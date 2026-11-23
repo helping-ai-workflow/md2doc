@@ -390,4 +390,20 @@ function baseCtx(overrides) {
   eq(['quote', 'ordered-list', 'check'].map((id) => t[id].disabled), [false, false, false], 'a transient with text disables nothing extra');
 }
 
+// --- v3.18.0 T4 (design §6, PR-8): a list item's continuation paragraph ------------
+// (a committed one or a depth transient) takes text only: the block group, 表格,
+// 分隔線 and 圖片 are off; inline marks, 在上方／在下方插入, undo / save stay as they were.
+{
+  const base = { blockType: 'paragraph', indent: 1, inList: false, hasSelection: true, dirty: true };
+  const s = tm.deriveState(Object.assign({ inListPara: true }, base));
+  eq(['headings', 'quote', 'code', 'list', 'ordered-list', 'check', 'table', 'line', 'image'].map((id) => s[id].disabled),
+    [true, true, true, true, true, true, true, true, true], 'inListPara disables the block group, table, line and image');
+  eq(['bold', 'italic', 'strike', 'inline-code', 'link', 'insert-before', 'insert-after', 'undo', 'redo', 'save', 'outline'].map((id) => s[id].disabled),
+    [false, false, false, false, false, false, false, false, false, false, false], 'inListPara keeps the inline marks, the inserts and the rest');
+  const t = tm.deriveState(Object.assign({ inListPara: true, transient: 'empty' }, base));
+  eq(['table', 'quote', 'insert-after'].map((id) => t[id].disabled), [true, true, false], 'an empty depth transient: the same');
+  const plain = tm.deriveState(Object.assign({ inListPara: false }, base));
+  eq(['table', 'quote', 'line', 'image'].map((id) => plain[id].disabled), [false, false, false, false], 'a plain paragraph is unchanged');
+}
+
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');
