@@ -390,4 +390,31 @@ function baseCtx(overrides) {
   eq(['quote', 'ordered-list', 'check'].map((id) => t[id].disabled), [false, false, false], 'a transient with text disables nothing extra');
 }
 
+// --- v3.18.0 T4 (design §6, PR-8): a list item's continuation paragraph ------------
+// (a committed one or a depth transient) takes text only: the block group, 表格,
+// 分隔線 and 圖片 are off; inline marks, 在上方／在下方插入, undo / save stay as they were.
+{
+  const base = { blockType: 'paragraph', indent: 1, inList: false, hasSelection: true, dirty: true };
+  const s = tm.deriveState(Object.assign({ inListPara: true }, base));
+  eq(['headings', 'quote', 'code', 'list', 'ordered-list', 'check', 'table', 'line', 'image'].map((id) => s[id].disabled),
+    [true, true, true, true, true, true, true, true, true], 'inListPara disables the block group, table, line and image');
+  eq(['bold', 'italic', 'strike', 'inline-code', 'link', 'insert-before', 'insert-after', 'undo', 'redo', 'save', 'outline'].map((id) => s[id].disabled),
+    [false, false, false, false, false, false, false, false, false, false, false], 'inListPara keeps the inline marks, the inserts and the rest');
+  const t = tm.deriveState(Object.assign({ inListPara: true, transient: 'empty' }, base));
+  eq(['table', 'quote', 'insert-after'].map((id) => t[id].disabled), [true, true, false], 'an empty depth transient: the same');
+  const plain = tm.deriveState(Object.assign({ inListPara: false }, base));
+  eq(['table', 'quote', 'line', 'image'].map((id) => plain[id].disabled), [false, false, false, false], 'a plain paragraph is unchanged');
+  // v3.18.0 final review I1 (R22): an empty depth transient made from a nested
+  // item makes a sibling item with 清單 / 編號 / 待辦 — the client names the ids
+  // that would (ctx.listParaItems); the rest of the block group stays off.
+  const li = tm.deriveState(Object.assign({ inListPara: true, transient: 'empty', listParaItems: ['list', 'ordered-list', 'check'] }, base));
+  eq(['list', 'ordered-list', 'check'].map((id) => li[id].disabled), [false, false, false], 'listParaItems turns the named list buttons on');
+  eq(['headings', 'quote', 'code', 'table', 'line', 'image'].map((id) => li[id].disabled),
+    [true, true, true, true, true, true], 'listParaItems leaves the other block buttons off');
+  const one = tm.deriveState(Object.assign({ inListPara: true, transient: 'empty', listParaItems: ['check'] }, base));
+  eq(['list', 'ordered-list', 'check'].map((id) => one[id].disabled), [true, true, false], 'only the named ids');
+  const foreign = tm.deriveState(Object.assign({ inListPara: true, listParaItems: ['table', 'quote'] }, base));
+  eq(['table', 'quote'].map((id) => foreign[id].disabled), [true, true], 'an id outside the three list buttons is ignored');
+}
+
 console.log('toolbar-model.test.js OK (' + checks + ' checks)');

@@ -2792,11 +2792,13 @@ async function main() {
   //
   // 三個 wrapper 各測一條：轉換成（convertBlockViaMenu）、建立副本
   // （duplicateBlockViaMenu）、刪除（deleteBlockViaGutter）。v3.11 起硬換行的
-  // li 這三者都照做了，所以拒絕條件改成 §4.3 的整串閘門：bravo 有第二個段落
-  // （仍不支援），alpha 本身是單一 <p> 的鬆散項目、可就地編輯 —— 對 alpha 的
+  // li 這三者都照做了，所以拒絕條件改成 §4.3 的整串閘門：bravo 含一個圍欄程式碼區塊
+  // （仍不支援；v3.18.0 起第二個段落是獨立的接續段落、可編輯），alpha 本身是單一 <p> 的鬆散項目、可就地編輯 —— 對 alpha 的
   // 這三個操作都會被拒絕，同一個 fixture 仍能同時打到三條路。
   {
-    const HARD_WRAPPED = '# H\n\n- alpha item\n- bravo item\n\n  second para\n\nTail para two.\n';
+    // v3.18.0 T5: bravo's second paragraph is a continuation block of its
+    // own now (editable), so bravo holds a fenced code block instead (raw-only).
+    const HARD_WRAPPED = '# H\n\n- alpha item\n- bravo item\n\n  ```\n  second para\n  ```\n\nTail para two.\n';
     const ROWS = [
       ['轉換成 → 引用', '引用', true],
       ['建立副本',      '建立副本', false],
@@ -2915,7 +2917,7 @@ async function main() {
       const disk = await saveAndRead(ctx);
       // 拒絕之後磁碟與原檔的唯一差別，必須是剛剛打進去的那些 X（primed 時再加上
       // 那次無關提交寫的 ' PRIMED'）—— 兩者都拿掉之後必須逐位元組相同。這比
-      // 「行數沒變」強：它連 bravo 的第二個段落、清單標記、項目數都一起釘住了。
+      // 「行數沒變」強：它連 bravo 的圍欄程式碼區塊、清單標記、項目數都一起釘住了。
       assert.strictEqual(disk.replace(/X/g, '').replace(/ PRIMED/g, ''), before0,
         'V2h(' + name + ')：拒絕不得改動結構，去掉剛打的 X / PRIMED 之後必須與原檔相同，got:\n' + disk);
       assert.strictEqual(ctx.errs.length, 0,
@@ -2951,10 +2953,11 @@ async function main() {
   // mutant 都是 activeElement 掉回 BODY、磁碟逐位元組不變（實測按「在下方插入
   // 區塊」與按「引用」各一次），所以那條路上沒有可鑑別的效果可以量。
   {
-    // v3.11: the refusal grows on B's RUN (bravo holds a second paragraph,
-    // still unsupported) — a hard-wrapped B converts now.
+    // v3.11: the refusal grows on B's RUN (bravo holds a fenced code block,
+    // still unsupported) — a hard-wrapped B converts now. v3.18.0 T5: a
+    // second paragraph is a continuation block now; bravo holds a fence instead.
     const NF3_MD = '# H\n\nAlpha paragraph.\n\n- alpha item\n' +
-      '- bravo item\n\n  second para\n\nTail para two.\n';
+      '- bravo item\n\n  ```\n  second para\n  ```\n\nTail para two.\n';
     const ctx = await newPage(NF3_MD);
     await setViewportSettled(ctx.page, { width: 1000, height: 700 });
     await primeOneCommit(ctx);

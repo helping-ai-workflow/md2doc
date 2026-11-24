@@ -23,6 +23,19 @@ in the commit that adds this sentence, a 6242-line file.
 | Bake helpers | `bakeGraphviz` / `bakeDrawio` / `bakeDiagrams` / `launchBrowser` / `makeLazyBrowserRef` — the async post-passes that resolve the deferred-diagram placeholders | 5935–6171 — `async function bakeGraphviz(` (5974) |
 | Output dispatch / CLI | `.html` write or puppeteer-driven `.pdf` export | 6173–6242 (end) — `// ── CLI` (6173), `const [,, src, dst] = process.argv;` (6175) |
 
+**Edit-mode list renderer (v3.18.0).** `renderEditModeList(` (above `renderMarkdown`, so outside
+the table's regions) walks a list token in lockstep with `lib/editor/blockmap.js`'s
+`pushListItemBlocks()`; both ask the same `continuationPlan(item)` whether an item splits. A split
+item's continuation paragraph (a second or later paragraph of the item, before, between or after its
+child lists) is a block of its own, written by `renderContinuationBlock(`:
+`data-block-type="paragraph"` **`data-list-para="1"`** `data-indent="k"` `style="--ed-indent:k"`, k
+being the parent item's depth + 1, drawn on the parent's text column by the
+`.ed-block[data-list-para="1"] > p` rule. The list's `data-list-loose` comes from
+`listLooseIgnoringContinuations(` (blockmap.js): a continuation's own blank lines do not make the list
+loose, the blank line between an item's last content and its next sibling does. In `client.js` such a
+block is an li-family block that is not an item (`liAttrs()` → `cont: true`, `isListParaEl()`), and
+its record carries `listPara: true`. The reader view is untouched.
+
 Helpers outside `lib/md2doc.js` (the first two since v3.10.0, the next two since v3.13.0, the next one since v3.15.0, the next one since v3.17.0, the last one since v3.17.3):
 
 | File | Purpose | Anchor |
@@ -469,6 +482,12 @@ template): **406** every backtick byte, **4** `` \` `` escapes (one line), **402
 7268-line file. Counted with node over the file's characters, a backslash
 directly before the backtick counting as an escape.
 
+**Measured at v3.18.0** (`lib/md2doc.js` as last changed in `d7eb9a3`; T1 added the continuation
+block's renderer and its CSS rule, whose markup is template literals outside the HTML template, and
+comment prose): **436** every backtick byte, **4** `` \` `` escapes (one line), **432** structural, in a
+7486-line file. Counted with node over the file's characters, a backslash directly before the
+backtick counting as an escape.
+
 Both totals are even, which is the property the check is really after; an odd one either
 way means a literal is unbalanced. Quote the number AND its definition, or the next reader
 re-litigates it.
@@ -576,6 +595,8 @@ create a real worktree with `git worktree add`.
 Markdown cannot hold an empty block: a blank line is a separator, so an empty paragraph has no bytes to live in. The editor therefore keeps an empty paragraph as a **transient**: a DOM-only `.ed-block` marked `data-ed-transient` with **no `data-block-id`**, which owns no line until it has text. Every render drops it (`applyFullRender` clears the state), and it is discarded when left empty.
 
 Gestures that create one — every caller of `createTransient(` in `lib/editor/client.js`, which is the list to trust over this sentence: Enter at the end or start of a block, Enter in an emptied paragraph or heading, Enter on an empty list item, Backspace on an empty top-level item or an empty heading, ＋ (Alt+＋ above) and the toolbar's 在上方／在下方插入 — which since v3.15.0 also open the "/" menu on the new transient (`openInsertMenuAt`) —, a "/" item picked in a paragraph that has other text (the paragraph commits and the item goes into a transient below it), 分隔線 on a transient, a divider or a diagram (Mermaid / Graphviz / WaveDrom / math) landed by "/", or a divider by the `---` shortcut (a focused transient below it), a real paragraph emptied and committed while focus stays inside it, e.g. Ctrl+S (`removeEmptiedParagraph`), a click below the last block, and a blank file or the deletion of the last block (`ensureEmptyDocTransient` after every render; the only block there, never removed).
+
+Since v3.18.0 a transient can have a **depth** (`createTransient(after, { depth })`, `setTransientDepth`): made relative to a nested item or to a continuation paragraph, it carries `data-list-para="1"` and `data-indent` and commits as that item's continuation (`commitTransientAsListPara`, which re-serializes the list span). The callers that pass a depth: `insertTransientBelow` (＋, 在下方插入 and `insertBlockBelow('paragraph')`), `insertTransientAbove` (Alt+＋ and 在上方插入; a depth transient goes directly before the item), `openEdgeParagraph` (Enter at the start or end of a continuation), `insertSlashItem` (any "/" item picked in a continuation that has other text: the continuation commits and the depth transient goes below it; a non-text item then reaches `insertAtTransient`, which refuses it with the PR-8 notice), `replaceEmptiedBlockWithTransient` and `removeEmptiedParagraph` (the follow-up paragraph of an emptied continuation, where it was). The first four are creation gestures and ask `depthTransientRefused` first, so a list that cannot take the commit refuses up front with 「此清單含不支援的格式，無法調整結構」 and nothing is created. The two emptied-paragraph follow-ups do NOT ask it and never refuse: they make a depth transient only where `listParaSpanOf(listParaParentFrom(anchor, depth))` finds a span that can take the commit, and otherwise the pre-v3.18.0 depth-0 paragraph after the subtree (the removal has already been written; the user's next text is kept either way). A depth transient's "/" menu offers 文字 only, plus 項目符號列表 / 編號列表 / 待辦清單 when it was made from a nested item (＋ / 在下方插入 on it, or 在上方插入 with an item of its depth right above it; `depthTransientListAnchor`): those make a sibling item at that depth through `continueListAtTransient`, as before v3.18.0. Everything else still makes a depth-0 transient.
 
 Walker rule: any new code that walks `.ed-block` must decide to skip or include a transient, and any reader of `data-block-id` must survive `null` (`Number(null) === 0` silently binds to block 0, which is how a failed split render could once overwrite line 1).
 
