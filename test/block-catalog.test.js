@@ -81,8 +81,11 @@ assert.deepStrictEqual(cat.filterSlashItems('h', { listPara: true }).map((i) => 
 assert.strictEqual(cat.filterSlashItems('', { listPara: false }).length, 16);
 // v3.18.0 T5 ruling R22: a depth paragraph made from a nested item also
 // offers the three list items, nothing else.
-assert.deepStrictEqual(cat.filterSlashItems('', { listPara: true, listItems: true }).map((i) => i.id), ['text', 'ul', 'ol', 'task']);
-assert.deepStrictEqual(cat.filterSlashItems('表', { listPara: true, listItems: true }).map((i) => i.id), []);
-assert.deepStrictEqual(cat.filterSlashItems('', { listPara: false, listItems: true }).length, 16);
+assert.deepStrictEqual(cat.filterSlashItems('', { listPara: true, listItems: ['ul', 'ol', 'task'] }).map((i) => i.id), ['text', 'ul', 'ol', 'task']);
+// v3.18.1 K12: only the kinds the caller names, in menu order.
+assert.deepStrictEqual(cat.filterSlashItems('', { listPara: true, listItems: ['task', 'ol'] }).map((i) => i.id), ['text', 'ol', 'task']);
+assert.deepStrictEqual(cat.filterSlashItems('', { listPara: true, listItems: [] }).map((i) => i.id), ['text']);
+assert.deepStrictEqual(cat.filterSlashItems('表', { listPara: true, listItems: ['ul', 'ol', 'task'] }).map((i) => i.id), []);
+assert.deepStrictEqual(cat.filterSlashItems('', { listPara: false, listItems: ['ul'] }).length, 16);
 assert.deepStrictEqual(cat.filterSlashItems('表', {}).map((i) => i.id), ['table']);
 console.log('block-catalog.test.js OK');
