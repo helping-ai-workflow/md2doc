@@ -14961,6 +14961,13 @@ for (const [text, kind, from, to] of [['Sub', 'a heading', '## Sub\n', '## **Su*
     assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace(from, to), 'the bytes on disk');
   }, { md: V3181_MD });
 }
+check('v3182 K27: typing, then 圖片 with no file chosen, leaves the toolbar working on the block', DESKTOP, async (page) => {
+  await v3182Prime(page);
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type('x');
+  await v3182ImageCancelled(page); await wait(300);
+  assert.deepStrictEqual(await tbOn(page, ['table', 'insert-after']), [true, true], 'the block buttons are on');
+}, { md: V3181_MD });
 // Final review M2: a new paragraph has no block id until it is written.
 for (const [what, act, to] of [
   ['new, a space', async (p) => { await p.keyboard.type('new '); }, 'new foo\n'],
