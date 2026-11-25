@@ -14761,10 +14761,10 @@ check('v3182 K19: a space and Shift+Enter write no U+00A0', DESKTOP, async (page
 // Guards: an NBSP that is not the typed space at the caret stays; a paste that
 // starts with a space of its own does not collapse the typed one.
 check('v3182 K19 guard: a source U+00A0 away from the caret is kept', DESKTOP, async (page, boot) => {
-  await focusSurface(page, 'a b', 3);
+  await focusSurface(page, 'a\u00a0b', 3);
   await clipboardEvent(page, 'paste', 'foo', null);
-  assert.strictEqual(await commitAndRead(page, boot), '# Doc\n\na bfoo\n');
-}, { md: '# Doc\n\na b\n' });
+  assert.strictEqual(await commitAndRead(page, boot), '# Doc\n\na\u00a0bfoo\n');
+}, { md: '# Doc\n\na\u00a0b\n' });
 check('v3182 K19: one Ctrl+Z takes a paste after a space back, the space stays', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Alpha.', 6);
   await page.keyboard.type('x '); await wait(500);
@@ -14935,7 +14935,7 @@ check('v3182 K21: the toolbar undo of a typed space leaves no space on screen', 
   await page.evaluate(() => document.activeElement.blur()); await renderIdle(page); await wait(150);
   await page.evaluate(() => { const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => /^Alpha\./.test(e.textContent)); s.focus(); getSelection().selectAllChildren(s); getSelection().collapseToEnd(); });
   await wait(150);
-  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), 'Alpha. ', 'guard: the typed space is in the file and on screen');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), 'Alpha.\u00a0', 'guard: the typed space is in the file and on screen');
   await tb(page, 'undo'); await wait(250);
   assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].find((e) => /^Alpha\./.test(e.textContent)).textContent), 'Alpha.');
 }, { md: V3181_MD });
