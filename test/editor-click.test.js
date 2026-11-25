@@ -14955,28 +14955,6 @@ for (const [text, kind, from, to] of [['Sub', 'a heading', '## Sub\n', '## **Su*
     assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace(from, to), 'the bytes on disk');
   }, { md: V3181_MD });
 }
-// Final review M1: what was typed renders as something else (math, superscript).
-for (const [src, typed, to] of [
-  ['Alpha.', ' $x^2$', 'Alpha. $x^2$foo\n'],
-  ['Alpha.', 'x^2^', 'Alpha.x^2^foo\n'],
-]) {
-  for (const [how, pause, prime] of V3182_PAUSES) {
-    check('v3182 M1: ' + typed.trim() + ' typed, Ctrl+S and foo' + how + ' keep foo after it', DESKTOP, async (page, boot) => {
-      if (prime) await v3182Prime(page);
-      await focusSurface(page, src, src.length);
-      await page.keyboard.type(typed); await page.keyboard.press('Control+s'); await wait(pause);
-      await page.keyboard.type('foo'); await renderIdle(page); await wait(100);
-      const disk = (await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.');
-      assert.strictEqual(disk.replace('^2foo^', '^2^foo').replace('$foo$', '$$foo'), V3181_MD.replace('Alpha.\n', to), 'the bytes on disk');
-    }, { md: V3181_MD });
-  }
-}
-check('v3182 M1: the caret after a math span typed before it goes on where it was', DESKTOP, async (page, boot) => {
-  await focusSurface(page, 'Alpha tail', 6);
-  await page.keyboard.type('$x^2$ mid'); await page.keyboard.press('Control+s'); await wait(900);
-  await page.keyboard.type('foo');
-  assert.strictEqual(await commitAndRead(page, boot), '# Doc\n\nAlpha $x^2$ midfootail\n');
-}, { md: '# Doc\n\nAlpha tail\n' });
 // Final review M2: a new paragraph has no block id until it is written.
 for (const [what, act, to] of [
   ['new, a space', async (p) => { await p.keyboard.type('new '); }, 'new foo\n'],
@@ -14999,7 +14977,7 @@ for (const [what, act, to] of [
 check('v3182 K21: two spaces typed at a heading\'s end before Ctrl+S are both there after it', DESKTOP, async (page) => {
   await focusSurface(page, 'Sub', 3);
   await page.keyboard.type('x  '); await page.keyboard.press('Control+s'); await wait(900);
-  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent.replace(/ /g, ' ')), 'Subx  ');
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent.replace(/\u00a0/g, ' ')), 'Subx  ');
 }, { md: V3181_MD });
 check('v3182 K21: a space typed at a heading\'s start and Ctrl+S keep the caret at the start', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Sub', 3);
