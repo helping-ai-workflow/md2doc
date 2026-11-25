@@ -14416,7 +14416,8 @@ for (const [how, run] of V3181_K15) {
   for (const [what, act, add] of [
     ['a paste', (p) => clipboardEvent(p, 'paste', 'foo', null), 'foo'],
     ['Shift+Enter and typing', async (p) => { await p.keyboard.press('Shift+Enter'); await p.keyboard.type('Z'); }, '<br>Z'],
-    // Guard (green before): native typing goes into the <p> by itself.
+    // Its bytes were right before (native typing goes into the <p> by itself);
+    // the caret assertion below is what this row adds.
     ['typing', (p) => p.keyboard.type('T'), 'T'],
   ]) {
     check('v3181 K15: ' + what + ' after ' + how + ' in a loose list item is written', DESKTOP, async (page, boot) => {

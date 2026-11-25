@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v3.18.1 — 2026-11-24
+## v3.18.1 — 2026-11-25
 
 ### Fixed — 編輯器
 
@@ -19,13 +19,14 @@ All notable changes to this project will be documented here. This project adhere
 - **在「最後一塊是段落」的巢狀項目上按 ＋、從選單選不同種類的清單，會在外層寫出一個空項目。** 例如
   `- parent\n  1. c1\n\n     P\n- after` 在 `c1` 按 ＋ 選「項目符號列表」，`- after` 前多一個最上層的 `-`。那裡寫不出
   同一層的項目，現在選單不再列出它；打 `- ` 或按工具列本來就會拒絕。
-- **沒打字就按 Ctrl+S（或 Esc、沒東西可復原的 Ctrl+Z）之後，在區塊邊緣按 ↑／↓ 不會走到上一塊或下一塊**，接著打的字
-  寫進原本那一塊。現在照常走過去。
+- **沒打字就按 Ctrl+S（或按 Esc 放棄修改、按了沒東西可復原的 Ctrl+Z）之後，在區塊邊緣按 ↑／↓ 不會走到上一塊或下一塊**，
+  接著打的字寫進原本那一塊。現在照常走過去。
 - **全選刪掉一塊的內容後馬上貼上，貼上的字後面多寫一個 `<br>`**（段落、標題、清單項目、儲存格都會）。現在只寫貼上的字。
 
 ### Known limitations
 
-- 沒打字就按 Ctrl+S（或 Esc、沒東西可復原的 Ctrl+Z）之後，到下一次輸入之前：選取文字時工具列的粗體等按鈕與選取泡泡
+- 按 Esc 放棄的修改，留在原處可以用 Ctrl+Z 救回；按 ↑／↓ 走到別塊之後就不行了（跟點別處一樣）。
+- 沒打字就按 Ctrl+S（或按 Esc 放棄修改、按了沒東西可復原的 Ctrl+Z）之後，到下一次輸入之前：選取文字時工具列的粗體等按鈕與選取泡泡
   不會亮（快捷鍵 Ctrl+B／I／U／K 可以用），Tab 不會調整標題或清單的層級。
 
 ## v3.18.0 — 2026-11-23
