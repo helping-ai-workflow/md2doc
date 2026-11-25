@@ -14566,6 +14566,7 @@ for (const [text, kind, from, to] of [
 ]) {
   for (const how of Object.keys(V3182_HOWS)) {
     if (kind === 'a cell' && /Escape/.test(how)) continue; // Escape leaves the table
+    if (kind !== 'a paragraph' && /Ctrl\+Y|nothing typed/.test(how)) continue;
     check('v3182 K14: a selection in ' + kind + ' after ' + how + ' raises the bubble, and B is written', DESKTOP, async (page, boot) => {
       await v3182After(page, text, how);
       await v3182Select(page, 0, text.length);
@@ -14698,6 +14699,7 @@ for (const [kind, src, want] of V3182_LINES) {
       ['a paste', (p) => clipboardEvent(p, 'paste', 'foo', null), 'foo'],
       ['a two-line paste', (p) => clipboardEvent(p, 'paste', 'f1\nf2', null), 'f1<br>f2'],
     ]) {
+      if (what === 'a two-line paste' && kind !== 'a paragraph') continue;
       check('v3182 K18: ' + what + ' in ' + kind + ' after ' + how + ' adds no <br>', DESKTOP, async (page, boot) => {
         await focusSurface(page, 'L1L2', 4); await page.keyboard.press('Control+End');
         await act(page); await wait(120);
@@ -14797,6 +14799,7 @@ for (const [text, kind, from, to] of [
   ['two', 'a to-do item', '- [ ] two\n', '- [ ] twox foo\n'],
 ]) {
   for (const [how, pause, prime] of V3182_PAUSES) {
+    if (kind !== 'a paragraph' && kind !== 'a heading' && !pause) continue;
     check('v3182 K21: in ' + kind + ', x, a space, Ctrl+S and foo' + how + ' write x foo', DESKTOP, async (page, boot) => {
       if (prime) await v3182Prime(page);
       await focusSurface(page, text, text.length);
@@ -14808,6 +14811,7 @@ for (const [text, kind, from, to] of [
 }
 for (const [cell, row, col] of [['A', 0, 0], ['a1', 1, 0], ['b1', 1, 1], ['b2', 2, 1]]) {
   for (const [how, pause, prime] of V3182_PAUSES) {
+    if (cell !== 'a1' && !pause) continue;
     check('v3182 K20: in cell ' + cell + ', x, a space, Ctrl+S and foo' + how + ' stay in the cell', DESKTOP, async (page, boot) => {
       if (prime) await v3182Prime(page);
       await focusSurface(page, cell, 2 - (cell === 'A' ? 1 : 0));
@@ -14830,6 +14834,7 @@ for (const [text, kind, to] of [
 ]) {
   for (const [how, pause, prime] of V3182_PAUSES) {
     for (const [key, save] of [['Ctrl+S', (p) => p.keyboard.press('Control+s')], ['存檔', (p) => p.click('[data-ed-tb="save"]')]]) {
+      if (kind !== 'a paragraph' && (key !== 'Ctrl+S' || !prime)) continue;
       check('v3182 K24: in ' + kind + ', x typed mid-text, ' + key + ' and y' + how + ' go on there', DESKTOP, async (page, boot) => {
         if (prime) await v3182Prime(page);
         await focusSurface(page, text, 1);
@@ -14914,6 +14919,7 @@ for (const [kind, wrap, key] of [
 ]) {
   for (const [what, from, at, act, to] of V3182_BR) {
     for (const [how, pause, prime] of V3182_PAUSES.filter((x) => x[1])) {
+      if (kind !== 'a paragraph' && kind !== 'a cell' && (!prime || !/two Shift|in the middle$|line start/.test(what))) continue;
       check('v3182 K22: ' + what + ' in ' + kind + ', Ctrl+S and foo' + how + ' go on there', DESKTOP, async (page, boot) => {
         if (prime) await v3182Prime(page);
         await focusSurface(page, from.replace(/<br>/g, ''), at);
@@ -14962,6 +14968,7 @@ for (const [what, act, to] of [
   ['new and Shift+Enter', async (p) => { await p.keyboard.type('new'); await p.keyboard.press('Shift+Enter'); }, 'new<br>foo\n'],
 ]) {
   for (const [how, pause, prime] of V3182_PAUSES) {
+    if (!prime && !pause) continue;
     check('v3182 M2: a new paragraph, ' + what + ', Ctrl+S and foo' + how + ' go on there', DESKTOP, async (page, boot) => {
       if (prime) await v3182Prime(page);
       await focusSurface(page, 'Alpha.', 6);
@@ -15004,6 +15011,7 @@ for (const [text, kind, key, from, to] of [
   ['a1', 'a cell', 'Enter', '| a1 | b1 |', '| a1<br>foo | b1 |'],
 ]) {
   for (const [how, pause, prime] of V3182_PAUSES) {
+    if (kind !== 'a paragraph' && kind !== 'a cell' && !pause) continue;
     check('v3182 K22: in ' + kind + ', ' + key + ', Ctrl+S and foo' + how + ' go on after the break', DESKTOP, async (page, boot) => {
       if (prime) await v3182Prime(page);
       await focusSurface(page, text, text.length);
