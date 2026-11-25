@@ -14864,6 +14864,35 @@ check('v3182 K24: the status is clean after a mid-text save and one Ctrl+Z still
   await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
   assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD);
 }, { md: V3181_MD });
+// K25: a second Ctrl+S in the moment between the first one's render and the replay
+// of the keys held during it ended the burst the replay needed; what was typed
+// stayed on screen, "saved", and was never written. The press is made from inside
+// the render's own task, where that moment is.
+for (const [text, kind, to] of [['Alpha.', 'a paragraph', ['Alpha.\n', 'Axylpha.\n']], ['one', 'a list item', ['- one\n', '- oxyne\n']], ['a1', 'a cell', ['| a1 | b1 |', '| axy1 | b1 |']]]) {
+  for (const prime of [false, true]) {
+    check('v3182 K25: in ' + kind + ', a second Ctrl+S right as the first one lands loses no held key' + (prime ? ' (a later render)' : ''), DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
+      await delayRender(page, 400);
+      await focusSurface(page, text, 1);
+      await page.keyboard.type('x'); await page.keyboard.press('Control+s'); await wait(100);
+      await page.evaluate(() => {
+        window.__k25 = 0;
+        const mo = new MutationObserver(async () => {
+          mo.disconnect();
+          for (let i = 0; i < 400; i++) await null;
+          window.__k25++;
+          document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true, cancelable: true }));
+        });
+        mo.observe(document.querySelector('.content'), { childList: true });
+      });
+      await page.keyboard.type('y');
+      await renderIdle(page); await wait(800); await renderIdle(page);
+      assert.strictEqual(await page.evaluate(() => window.__k25), 1, 'guard: the second press was made');
+      assert.ok(/xy/.test(await page.evaluate(() => document.activeElement.textContent)), 'guard: y is on screen');
+      assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace(to[0], to[1]), 'the bytes on disk');
+    }, { md: V3181_MD });
+  }
+}
 check('v3182 K21: a space typed at a heading\'s start and Ctrl+S keep the caret at the start', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Sub', 3);
   await page.keyboard.press('Home'); await page.keyboard.type(' '); await page.keyboard.press('Control+s'); await wait(900);
