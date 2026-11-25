@@ -14641,7 +14641,7 @@ for (const [what, act] of [
   ['a second Escape', (p) => p.keyboard.press('Escape')],
   ['Ctrl+S', async (p) => { await p.keyboard.press('Control+s'); await renderIdle(p); await wait(250); }],
   ['a click in the same block', (p) => clickChar(p, 'Alpha.', 2)],
-  ['a click outside every block', async (p) => { await p.evaluate(() => document.activeElement.blur()); await wait(200); }],
+  ['leaving the block (blur)', async (p) => { await p.evaluate(() => document.activeElement.blur()); await wait(200); }],
   ['a typed Y and its Ctrl+Z', async (p) => { await p.keyboard.type('Y'); await wait(500); await p.keyboard.press('Control+z'); await wait(100); }],
 ]) {
   check('v3182 K14: Ctrl+Z after Escape and ' + what + ' still brings the discarded typing back', DESKTOP, async (page, boot) => {
@@ -14893,6 +14893,114 @@ for (const [text, kind, to] of [['Alpha.', 'a paragraph', ['Alpha.\n', 'Axylpha.
     }, { md: V3181_MD });
   }
 }
+// Final review I2 / I3: the caret beside a <br> counts the breaks in front of it.
+// `act` starts with the caret at `at` characters into the block's text.
+const V3182_BR = [
+  ['two Shift+Enter at the end', 'Alpha', 5, async (p, k) => { await p.keyboard.press(k); await p.keyboard.press(k); }, 'Alpha<br><br>foo'],
+  ['three Shift+Enter at the end', 'Alpha', 5, async (p, k) => { for (let i = 0; i < 3; i++) await p.keyboard.press(k); }, 'Alpha<br><br><br>foo'],
+  ['Shift+Enter in the middle', 'Alpha', 2, async (p, k) => { await p.keyboard.press(k); }, 'Al<br>foopha'],
+  ['Shift+Enter at the start and ArrowUp', 'Alpha', 0, async (p, k) => { await p.keyboard.press(k); await p.keyboard.press('ArrowUp'); }, 'foo<br>Alpha'],
+  ['a character deleted at a line start', 'L1<br>xL2', 3, async (p) => { await p.keyboard.press('Backspace'); }, 'L1<br>fooL2'],
+  ['an empty line made in the middle', 'L1<br>L3', 2, async (p, k) => { await p.keyboard.press(k); }, 'L1<br>foo<br>L3'],
+  ['the last line deleted', 'L1<br>L2', 4, async (p) => { await p.keyboard.press('Backspace'); await p.keyboard.press('Backspace'); }, 'L1<br>foo'],
+  ['the end of the first line', 'L1<br>L2', 2, async (p) => { await p.keyboard.type('x'); }, 'L1xfoo<br>L2'],
+];
+for (const [kind, wrap, key] of [
+  ['a paragraph', (b) => b + '\n\nOmega.\n', 'Shift+Enter'],
+  ['a heading', (b) => '## ' + b + '\n\nOmega.\n', 'Shift+Enter'],
+  ['a list item', (b) => '- ' + b + '\n- two\n\nOmega.\n', 'Shift+Enter'],
+  ['a loose list item', (b) => '- ' + b + '\n\n- two\n\nOmega.\n', 'Shift+Enter'],
+  ['a cell', (b) => '| A | B |\n| --- | --- |\n| ' + b + ' | x |\n\nOmega.\n', 'Enter'],
+]) {
+  for (const [what, from, at, act, to] of V3182_BR) {
+    for (const [how, pause, prime] of V3182_PAUSES.filter((x) => x[1])) {
+      check('v3182 K22: ' + what + ' in ' + kind + ', Ctrl+S and foo' + how + ' go on there', DESKTOP, async (page, boot) => {
+        if (prime) await v3182Prime(page);
+        await focusSurface(page, from.replace(/<br>/g, ''), at);
+        // The caret is put at a text offset: after a break it must be on the second line.
+        if (/line start/.test(what)) assert.strictEqual(await page.evaluate(() => getSelection().focusNode.data.slice(0, 1)), 'x', 'guard: on the second line');
+        await act(page, key); await wait(80);
+        await page.keyboard.press('Control+s'); await wait(pause);
+        await page.keyboard.type('foo'); await renderIdle(page); await wait(100);
+        const disk = (await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.');
+        if (kind === 'a cell') assert.deepStrictEqual(mdTable(disk)[1], [to, 'x']);
+        else assert.strictEqual(disk, '# Doc\n\n' + wrap(to), 'the bytes on disk');
+      }, { md: '# Doc\n\n' + wrap(from) });
+    }
+  }
+}
+// Final review I1: Escape's revert is seen by the status before the burst opens again.
+for (const [text, kind] of [['Sub', 'a heading'], ['Alpha.', 'a paragraph'], ['one', 'a list item']]) {
+  check('v3182 K14: after X and Escape in ' + kind + ' the status is clean, and stays so after leaving', DESKTOP, async (page) => {
+    await focusSurface(page, text, text.length);
+    await page.keyboard.type('X'); await wait(100);
+    const st = () => page.evaluate(() => [document.querySelector('.ed-toolbar-status').getAttribute('data-state'), /●/.test(document.title)]);
+    assert.deepStrictEqual(await st(), ['dirty', true], 'guard: dirty while X is there');
+    await page.keyboard.press('Escape'); await wait(600);
+    assert.deepStrictEqual(await st(), ['clean', false], 'after Escape');
+    await page.evaluate(() => document.activeElement.blur()); await wait(300);
+    assert.deepStrictEqual(await st(), ['clean', false], 'after leaving');
+  }, { md: V3181_MD });
+}
+// Final review I4: from the second commit of a page on, a save that wrote
+// something left the bar with no block: every block and mark button grey.
+for (const [text, kind, from, to] of [['Sub', 'a heading', '## Sub\n', '## **Su**bxy\n'], ['Alpha.', 'a paragraph', 'Alpha.\n', '**Al**pha.xy\n'], ['one', 'a list item', '- one\n', '- **on**exy\n']]) {
+  check('v3182 K27: after two saves with typing in ' + kind + ' the toolbar works on it, and B is written', DESKTOP, async (page, boot) => {
+    await focusSurface(page, text, text.length);
+    for (const c of ['x', 'y']) { await page.keyboard.type(c); await page.keyboard.press('Control+s'); await wait(900); }
+    assert.deepStrictEqual(await tbOn(page, ['table', 'insert-after']), [true, true], 'the block buttons are on');
+    await v3182Select(page, 0, 2);
+    assert.deepStrictEqual(await v3182Bubble(page), { bubble: true, bold: true });
+    await page.click('[data-ed-tb="bold"]'); await wait(100);
+    assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace(from, to), 'the bytes on disk');
+  }, { md: V3181_MD });
+}
+// Final review M1: what was typed renders as something else (math, superscript).
+for (const [src, typed, to] of [
+  ['Alpha.', ' $x^2$', 'Alpha. $x^2$foo\n'],
+  ['Alpha.', 'x^2^', 'Alpha.x^2^foo\n'],
+]) {
+  for (const [how, pause, prime] of V3182_PAUSES) {
+    check('v3182 M1: ' + typed.trim() + ' typed, Ctrl+S and foo' + how + ' keep foo after it', DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
+      await focusSurface(page, src, src.length);
+      await page.keyboard.type(typed); await page.keyboard.press('Control+s'); await wait(pause);
+      await page.keyboard.type('foo'); await renderIdle(page); await wait(100);
+      const disk = (await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.');
+      assert.strictEqual(disk.replace('^2foo^', '^2^foo').replace('$foo$', '$$foo'), V3181_MD.replace('Alpha.\n', to), 'the bytes on disk');
+    }, { md: V3181_MD });
+  }
+}
+check('v3182 M1: the caret after a math span typed before it goes on where it was', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha tail', 6);
+  await page.keyboard.type('$x^2$ mid'); await page.keyboard.press('Control+s'); await wait(900);
+  await page.keyboard.type('foo');
+  assert.strictEqual(await commitAndRead(page, boot), '# Doc\n\nAlpha $x^2$ midfootail\n');
+}, { md: '# Doc\n\nAlpha tail\n' });
+// Final review M2: a new paragraph has no block id until it is written.
+for (const [what, act, to] of [
+  ['new, a space', async (p) => { await p.keyboard.type('new '); }, 'new foo\n'],
+  ['new and the caret moved back', async (p) => { await p.keyboard.type('new'); await p.keyboard.press('ArrowLeft'); await p.keyboard.press('ArrowLeft'); }, 'nfooew\n'],
+  ['new and Shift+Enter', async (p) => { await p.keyboard.type('new'); await p.keyboard.press('Shift+Enter'); }, 'new<br>foo\n'],
+]) {
+  for (const [how, pause, prime] of V3182_PAUSES) {
+    check('v3182 M2: a new paragraph, ' + what + ', Ctrl+S and foo' + how + ' go on there', DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
+      await focusSurface(page, 'Alpha.', 6);
+      await page.keyboard.press('Enter'); await renderIdle(page);
+      await act(page); await wait(80);
+      await page.keyboard.press('Control+s'); await wait(pause);
+      await page.keyboard.type('foo'); await renderIdle(page); await wait(100);
+      assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace('Alpha.\n', 'Alpha.\n\n' + to), 'the bytes on disk');
+    }, { md: V3181_MD });
+  }
+}
+// Final review M3.
+check('v3182 K21: two spaces typed at a heading\'s end before Ctrl+S are both there after it', DESKTOP, async (page) => {
+  await focusSurface(page, 'Sub', 3);
+  await page.keyboard.type('x  '); await page.keyboard.press('Control+s'); await wait(900);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent.replace(/ /g, ' ')), 'Subx  ');
+}, { md: V3181_MD });
 check('v3182 K21: a space typed at a heading\'s start and Ctrl+S keep the caret at the start', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Sub', 3);
   await page.keyboard.press('Home'); await page.keyboard.type(' '); await page.keyboard.press('Control+s'); await wait(900);
