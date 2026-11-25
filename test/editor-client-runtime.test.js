@@ -6380,10 +6380,18 @@ async function gutterGeometry(page, sel) {
       );
 
       await page.keyboard.press('Escape');
+      // v3.18.2 K14 (migrated): Escape keeps the caret in the surface and the
+      // burst opens again there, so the listener count is the session's one —
+      // the old one removed, exactly one attached, never two — and it goes to 0
+      // once the surface is left.
       assert.strictEqual(
-        await page.evaluate(() => window.__selCount), 0,
-        'the new session\'s own cancel() must remove its listener too'
+        await page.evaluate(() => window.__selCount), 1,
+        'after Escape the surface has exactly one listener: the old session\'s was removed, the reopened one attached'
       );
+      assert.strictEqual(await page.evaluate(() => !!document.querySelector('.ed-seltb')), false,
+        'Escape takes the bubble down');
+      await page.evaluate(() => document.activeElement.blur());
+      await page.waitForFunction(() => window.__selCount === 0, { timeout: 5000 });
 
       await page.close();
       console.log('sel-toolbar regression: rerenderAll() resets toolbar state, no leaked listener — OK');

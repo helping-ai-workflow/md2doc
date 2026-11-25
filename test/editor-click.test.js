@@ -14781,6 +14781,14 @@ check('v3182 K19: one Ctrl+Z takes a paste after a space back, the space stays',
 // was gone (`Subxfoo`) or, for a leading one, the place was one character off
 // (`Sfooub`); after Shift+Enter it went before the break (`Alpha.foo<br>`).
 // Measured on c51b0e4, both engines.
+// The first render of a page replaces the whole content, a later one only the
+// blocks that changed: `prime` commits an edit elsewhere first.
+async function v3182Prime(page) {
+  await focusSurface(page, 'Omega.', 6);
+  await page.keyboard.type('Z');
+  await page.evaluate(() => document.activeElement.blur()); await renderIdle(page); await wait(200);
+}
+const V3182_PAUSES = [['', 900, false], [' at once', 0, false], [' (a later render)', 900, true], [' at once (a later render)', 0, true]];
 for (const [text, kind, from, to] of [
   ['Sub', 'a heading', '## Sub\n', '## Subx foo\n'],
   ['Alpha.', 'a paragraph', 'Alpha.\n', 'Alpha.x foo\n'],
@@ -14788,27 +14796,74 @@ for (const [text, kind, from, to] of [
   ['P', 'a continuation paragraph', '  P\n', '  Px foo\n'],
   ['two', 'a to-do item', '- [ ] two\n', '- [ ] twox foo\n'],
 ]) {
-  for (const [how, pause] of [['', 900], [' at once', 0]]) {
+  for (const [how, pause, prime] of V3182_PAUSES) {
     check('v3182 K21: in ' + kind + ', x, a space, Ctrl+S and foo' + how + ' write x foo', DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
       await focusSurface(page, text, text.length);
       await page.keyboard.type('x '); await page.keyboard.press('Control+s'); await wait(pause);
       await page.keyboard.type('foo'); await renderIdle(page);
-      assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace(from, to), 'the bytes on disk');
+      assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace(from, to), 'the bytes on disk');
     }, { md: V3181_MD });
   }
 }
 for (const [cell, row, col] of [['A', 0, 0], ['a1', 1, 0], ['b1', 1, 1], ['b2', 2, 1]]) {
-  for (const [how, pause] of [['', 900], [' at once', 0]]) {
+  for (const [how, pause, prime] of V3182_PAUSES) {
     check('v3182 K20: in cell ' + cell + ', x, a space, Ctrl+S and foo' + how + ' stay in the cell', DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
       await focusSurface(page, cell, 2 - (cell === 'A' ? 1 : 0));
       await page.keyboard.type('x '); await page.keyboard.press('Control+s'); await wait(pause);
       await page.keyboard.type('foo'); await renderIdle(page);
       const want = [['A', 'B'], ['a1', 'b1'], ['a2', 'b2']];
       want[row][col] = cell + 'x foo';
-      assert.deepStrictEqual(mdTable(await commitAndRead(page, boot)), want);
+      assert.deepStrictEqual(mdTable((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.')), want);
     }, { md: V3181_MD });
   }
 }
+// K24: from the second commit of a page on, a save put the caret at the block's
+// end: the next character went there. A cell keeps its place (guard).
+for (const [text, kind, to] of [
+  ['Sub', 'a heading', ['## Sub\n', '## Sxyub\n']],
+  ['Alpha.', 'a paragraph', ['Alpha.\n', 'Axylpha.\n']],
+  ['one', 'a list item', ['- one\n', '- oxyne\n']],
+  ['two', 'a to-do item', ['- [ ] two\n', '- [ ] txywo\n']],
+  ['a1', 'a cell', ['| a1 | b1 |', '| axy1 | b1 |']],
+]) {
+  for (const [how, pause, prime] of V3182_PAUSES) {
+    for (const [key, save] of [['Ctrl+S', (p) => p.keyboard.press('Control+s')], ['存檔', (p) => p.click('[data-ed-tb="save"]')]]) {
+      check('v3182 K24: in ' + kind + ', x typed mid-text, ' + key + ' and y' + how + ' go on there', DESKTOP, async (page, boot) => {
+        if (prime) await v3182Prime(page);
+        await focusSurface(page, text, 1);
+        await page.keyboard.type('x'); await save(page); await wait(pause);
+        await page.keyboard.type('y'); await renderIdle(page); await wait(100);
+        assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace(to[0], to[1]), 'the bytes on disk');
+      }, { md: V3181_MD });
+    }
+  }
+}
+check('v3182 K24: three saves in a row mid-text keep the caret', DESKTOP, async (page, boot) => {
+  await focusSurface(page, 'Alpha.', 1);
+  for (const c of ['x', 'y', 'z']) { await page.keyboard.type(c); await page.keyboard.press('Control+s'); await wait(900); }
+  await page.keyboard.type('!');
+  assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace('Alpha.\n', 'Axyz!lpha.\n'));
+}, { md: V3181_MD });
+// Guard: a click into the same block while the save renders wins.
+check('v3182 K24 guard: a click elsewhere in the block while the save renders keeps the click', DESKTOP, async (page, boot) => {
+  await v3182Prime(page);
+  await delayRender(page, 800);
+  await focusSurface(page, 'Alpha.', 1);
+  await page.keyboard.type('x'); await page.keyboard.press('Control+s'); await wait(150);
+  await clickChar(page, 'Axlpha.', 5); await page.keyboard.type('y');
+  await renderIdle(page); await wait(300);
+  assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace('Alpha.\n', 'Axlphya.\n'));
+}, { md: V3181_MD });
+check('v3182 K24: the status is clean after a mid-text save and one Ctrl+Z still undoes the edit', DESKTOP, async (page, boot) => {
+  await v3182Prime(page);
+  await focusSurface(page, 'Alpha.', 1);
+  await page.keyboard.type('x'); await page.keyboard.press('Control+s'); await wait(900);
+  assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-toolbar-status').getAttribute('data-state')), 'clean');
+  await page.keyboard.press('Control+z'); await renderIdle(page); await wait(300);
+  assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD);
+}, { md: V3181_MD });
 check('v3182 K21: a space typed at a heading\'s start and Ctrl+S keep the caret at the start', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Sub', 3);
   await page.keyboard.press('Home'); await page.keyboard.type(' '); await page.keyboard.press('Control+s'); await wait(900);
@@ -14816,13 +14871,16 @@ check('v3182 K21: a space typed at a heading\'s start and Ctrl+S keep the caret 
   assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace('## Sub\n', '## fooSub\n'));
 }, { md: V3181_MD });
 // Nothing is written for the space the restore puts back.
-check('v3182 K21: x, a space, Ctrl+S in a heading, then leaving, writes nothing more and is not dirty', DESKTOP, async (page, boot) => {
+for (const [how, prime] of [['', false], [' (a later render)', true]]) {
+  check('v3182 K21: x, a space, Ctrl+S in a heading, then leaving, writes nothing more and is not dirty' + how, DESKTOP, async (page, boot) => {
+  if (prime) await v3182Prime(page);
   await focusSurface(page, 'Sub', 3);
   await page.keyboard.type('x '); await page.keyboard.press('Control+s'); await wait(900);
   const saved = fs.readFileSync(boot.mdPath, 'utf8');
   assert.strictEqual(await page.evaluate(() => document.querySelector('.ed-toolbar-status').getAttribute('data-state')), 'clean', 'clean');
   assert.strictEqual(await commitAndRead(page, boot), saved, 'the bytes on disk');
 }, { md: V3181_MD });
+}
 for (const [text, kind, key, from, to] of [
   ['Sub', 'a heading', 'Shift+Enter', '## Sub\n', '## Sub<br>foo\n'],
   ['Alpha.', 'a paragraph', 'Shift+Enter', 'Alpha.\n', 'Alpha.<br>foo\n'],
@@ -14830,13 +14888,39 @@ for (const [text, kind, key, from, to] of [
   ['P', 'a continuation paragraph', 'Shift+Enter', '  P\n', '  P<br>foo\n'],
   ['a1', 'a cell', 'Enter', '| a1 | b1 |', '| a1<br>foo | b1 |'],
 ]) {
-  check('v3182 K22: in ' + kind + ', ' + key + ', Ctrl+S and foo go on after the break', DESKTOP, async (page, boot) => {
-    await focusSurface(page, text, text.length);
-    await page.keyboard.press(key); await page.keyboard.press('Control+s'); await wait(900);
-    await page.keyboard.type('foo'); await wait(100);
-    assert.strictEqual(await commitAndRead(page, boot), V3181_MD.replace(from, to), 'the bytes on disk');
-  }, { md: V3181_MD });
+  for (const [how, pause, prime] of V3182_PAUSES) {
+    check('v3182 K22: in ' + kind + ', ' + key + ', Ctrl+S and foo' + how + ' go on after the break', DESKTOP, async (page, boot) => {
+      if (prime) await v3182Prime(page);
+      await focusSurface(page, text, text.length);
+      await page.keyboard.press(key); await page.keyboard.press('Control+s'); await wait(pause);
+      await page.keyboard.type('foo'); await renderIdle(page); await wait(100);
+      assert.strictEqual((await commitAndRead(page, boot)).replace('Omega.Z', 'Omega.'), V3181_MD.replace(from, to), 'the bytes on disk');
+    }, { md: V3181_MD });
+  }
 }
+// The put-back is the save's alone: the toolbar's undo and redo use the same
+// capture / restore around a text that did change.
+check('v3182 K21: the toolbar undo of a typed space leaves no space on screen', DESKTOP, async (page) => {
+  await focusSurface(page, 'Alpha.', 6);
+  await page.keyboard.type(' ');
+  await page.evaluate(() => document.activeElement.blur()); await renderIdle(page); await wait(150);
+  await page.evaluate(() => { const s = [...document.querySelectorAll('.ed-wys-armed')].find((e) => /^Alpha\./.test(e.textContent)); s.focus(); getSelection().selectAllChildren(s); getSelection().collapseToEnd(); });
+  await wait(150);
+  assert.strictEqual(await page.evaluate(() => document.activeElement.textContent), 'Alpha. ', 'guard: the typed space is in the file and on screen');
+  await tb(page, 'undo'); await wait(250);
+  assert.strictEqual(await page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].find((e) => /^Alpha\./.test(e.textContent)).textContent), 'Alpha.');
+}, { md: V3181_MD });
+check('v3182 K22: the toolbar undo of a Shift+Enter leaves no extra line', DESKTOP, async (page) => {
+  await focusSurface(page, 'L1', 2);
+  await page.keyboard.press('Control+End'); await page.keyboard.press('Shift+Enter');
+  await page.evaluate(() => document.activeElement.blur()); await renderIdle(page); await wait(150);
+  await focusSurface(page, 'L1', 2); await page.keyboard.press('Control+End'); await wait(100);
+  const brs = () => page.evaluate(() => [...document.querySelectorAll('.ed-wys-armed')].find((e) => /^L1/.test(e.textContent)).querySelectorAll('br').length);
+  const was = await brs();
+  await tb(page, 'undo'); await wait(250);
+  assert.ok(was >= 2, 'guard: the break was written, got ' + was);
+  assert.strictEqual(await brs(), 1);
+}, { md: '# Doc\n\nL1<br>\n\nOmega.\n' });
 // Guard: the caret at the end of the text before a trailing break stays there.
 check('v3182 K22 guard: text typed before a trailing break goes on before it after Ctrl+S', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'L1', 2);
