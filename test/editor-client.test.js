@@ -1108,7 +1108,7 @@ for (const [re, msg] of shortcutOrderChecks) {
 // v3.17.13 R2 (K2): commitThenSave() resolves first and saves second (Finding
 // 1), and puts the caret back between the two — before the save is sent, so a
 // key typed during the round trip lands in the block.
-assert.ok(/async function commitThenSave\(\) \{\s*markBurstForSave\(\);\s*const caret = captureCaretForSave\(\);\s*const ok = await switchAwayFrom\(\);\s*restoreCaretForSave\(caret\);\s*if \(ok\) return save\(\);\s*\}/.test(src),
+assert.ok(/async function commitThenSave\(\) \{\s*markBurstForSave\(\);\s*const caret = captureCaretForSave\(\);\s*const ok = await switchAwayFrom\(\);\s*restoreCaretForSave\(caret\);\s*reopenBurstAtFocus\(\);[^\n]*\s*if \(ok\) return save\(\);\s*\}/.test(src),
   'commitThenSave() must capture the caret, resolve, restore the caret, then save only when the resolution held');
 // v3.17.0 T9a (M-f): leaveByKey() runs the leave it is handed, only a leave
 // that resolved (true) hands the caret on, and a throw is reported

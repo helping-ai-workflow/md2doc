@@ -14664,6 +14664,7 @@ check('v3182 K14: Enter at the start, X, Escape: Ctrl+Z brings X back before it 
 check('v3182 K14: Ctrl+Z after Ctrl+S on an untouched paragraph still undoes the edit before it', DESKTOP, async (page, boot) => {
   await focusSurface(page, 'Omega.', 6);
   await page.keyboard.type('Z');
+  await page.evaluate(() => document.activeElement.blur()); await renderIdle(page); await wait(150);
   await focusSurface(page, 'Alpha.', 6); await renderIdle(page);
   await page.keyboard.press('Control+s'); await renderIdle(page); await wait(250);
   await page.keyboard.press('Control+z'); await renderIdle(page); await wait(250);
